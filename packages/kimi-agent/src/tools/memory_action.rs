@@ -12,7 +12,36 @@ use crate::tools::memory_tool::MemoryContext;
 use crate::tools::memory_write_handler;
 use crate::turn_loop::types::ExecutableToolResult;
 
-pub const ASSOCIATIVE_MEMORY_FLAG_ENV: &str = "KIMI_CODE_EXPERIMENTAL_ASSOCIATIVE_MEMORY";
+pub const ASSOCIATIVE_MEMORY_FLAG_ENV: &str =
+    crate::features::associativeMemory::flag::ASSOCIATIVE_MEMORY_FLAG_ENV;
+pub const DEFAULT_MEMORY_GUIDANCE: &str = "Never store credentials, private keys, or other secrets. When the user explicitly asks to remember something, treat it as high priority. When two memories conflict, prefer what the user stated explicitly over an inference, and newer over older. Do not surface a memory the code forbids.";
+
+pub fn associative_memory_enabled() -> bool {
+    crate::env::env_switch_default_off(ASSOCIATIVE_MEMORY_FLAG_ENV)
+}
+
+pub fn code_block(home: &Path) -> String {
+    code_block_from(home, associative_memory_enabled())
+}
+
+pub(crate) fn code_block_from(home: &Path, enabled: bool) -> String {
+    if !enabled {
+        return String::new();
+    }
+    let path = home.join("associative-memory").join("code.md");
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return DEFAULT_MEMORY_GUIDANCE.to_string();
+    };
+    let Ok(parsed) = crate::_base::text::frontmatter::parse_frontmatter(&content) else {
+        return DEFAULT_MEMORY_GUIDANCE.to_string();
+    };
+    let guidance = parsed.body.trim();
+    if guidance.is_empty() {
+        DEFAULT_MEMORY_GUIDANCE.to_string()
+    } else {
+        guidance.to_string()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryAction {
@@ -106,9 +135,7 @@ pub fn unknown_action_message(action: &str) -> String {
 }
 
 pub fn memory_tool_enabled() -> bool {
-    memory_tool_enabled_from(Some(crate::env::env_switch_default_off(
-        ASSOCIATIVE_MEMORY_FLAG_ENV,
-    )))
+    memory_tool_enabled_from(Some(associative_memory_enabled()))
 }
 
 pub fn memory_tool_enabled_from(associative_memory_enabled: Option<bool>) -> bool {
@@ -236,5 +263,40 @@ mod tests {
         let result = run(&context, &json!({ "action": "append" }), "");
         assert!(result.is_error);
         assert!(result.content.contains("append"), "{}", result.content);
+    }
+
+    #[test]
+    fn code_block_honors_the_flag_and_the_default_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(code_block_from(dir.path(), false), "");
+        assert_eq!(code_block_from(dir.path(), true), DEFAULT_MEMORY_GUIDANCE);
+        std::fs::create_dir_all(dir.path().join("associative-memory")).unwrap();
+        std::fs::write(
+            dir.path().join("associative-memory/code.md"),
+            "---\nrules: []\n---\n\n",
+        )
+        .unwrap();
+        assert_eq!(code_block_from(dir.path(), true), DEFAULT_MEMORY_GUIDANCE);
+    }
+
+    #[test]
+    fn code_block_uses_the_frontmatter_body() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("associative-memory")).unwrap();
+        std::fs::write(
+            dir.path().join("associative-memory/code.md"),
+            "---\nrules: []\n---\nPrefer explicit memories.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            code_block_from(dir.path(), true),
+            "Prefer explicit memories."
+        );
+        std::fs::write(
+            dir.path().join("associative-memory/code.md"),
+            "---\n[broken",
+        )
+        .unwrap();
+        assert_eq!(code_block_from(dir.path(), true), DEFAULT_MEMORY_GUIDANCE);
     }
 }

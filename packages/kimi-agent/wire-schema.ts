@@ -31,6 +31,7 @@ export const llmChatRequestSchema = z.object({
   ),
   tools: z.array(toolDef),
   request_id: z.string().optional(),
+  max_output_tokens: z.number().int().positive().optional(),
 });
 
 export const toolExecuteRequestSchema = z.object({

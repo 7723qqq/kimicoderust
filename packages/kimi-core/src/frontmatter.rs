@@ -1,4 +1,3 @@
-
 use serde_json::{Map, Value};
 
 const FENCE: &str = "---";

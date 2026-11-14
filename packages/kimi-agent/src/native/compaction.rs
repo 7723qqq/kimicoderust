@@ -1,23 +1,9 @@
-//! napi projections of the compaction window algorithm.
-//!
-//! The algorithm itself lives in [`crate::compaction::window`]; this module
-//! only defines the objects that cross the napi boundary and forwards to it.
-//! The TS side builds `CompactionMessageMeta[]` from `Message[]` (one pass,
-//! using the cached `estimateTokensForMessage`) and passes it across the
-//! boundary; Rust only sees the lightweight projection.
-
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
 use crate::compaction::CompactionConfig;
 use crate::compaction::window::{self, CompactMessage, UserMessageSelection};
 
-/// Lightweight projection of a `Message` for the compaction algorithm.
-///
-/// Only the fields the windowing logic actually inspects cross the
-/// boundary: `role` (for split-safety checks), `tool_calls_count` (to
-/// detect pending tool exchanges), and `tokens` (pre-computed by TS via
-/// the cached `estimateTokensForMessage`).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct CompactionMessageMeta {
@@ -26,12 +12,6 @@ pub struct CompactionMessageMeta {
     pub tokens: u32,
 }
 
-/// Knobs for the compaction algorithm.
-///
-/// `max_recent_user_messages` uses `u32::MAX` as a stand-in for TS
-/// `Infinity` (the `DEFAULT_COMPACTION_CONFIG` default). The threshold
-/// `recent_user_messages >= max_recent_user_messages` then never fires
-/// for realistic message counts, matching the TS behavior.
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct CompactionConfigMeta {
@@ -72,10 +52,6 @@ impl From<CompactionConfigMeta> for CompactionConfig {
     }
 }
 
-/// A user message projected for handoff selection. Mirrors the TS
-/// `MessageLike` subset the handoff algorithm inspects. TS extracts text
-/// from `content` (skipping non-text parts) and pre-estimates tokens;
-/// Rust only needs the projection.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct HandoffMessageMeta {
@@ -102,8 +78,6 @@ impl CompactMessage for HandoffMessageMeta {
     }
 }
 
-/// Result of `select_compaction_user_messages`. Indices reference the input
-/// `Vec<HandoffMessageMeta>` (user messages only, in original order).
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct CompactionUserSelection {
@@ -128,10 +102,6 @@ impl From<UserMessageSelection> for CompactionUserSelection {
     }
 }
 
-/// Decide how many leading messages to compact.
-///
-/// Returns N where `messages[0..N]` is compacted and `messages[N..]` is
-/// preserved. 0 means no compaction possible (no valid split point).
 pub(crate) fn compute_compact_count(
     messages: &[CompactionMessageMeta],
     config: &CompactionConfigMeta,
@@ -140,7 +110,6 @@ pub(crate) fn compute_compact_count(
     window::compute_compact_count(messages, &CompactionConfig::from(*config), is_manual)
 }
 
-/// Find a split point when the LLM throws a context overflow error.
 pub(crate) fn reduce_compact_on_overflow(
     messages: &[CompactionMessageMeta],
     config: &CompactionConfigMeta,
@@ -152,13 +121,10 @@ pub(crate) fn reduce_compact_on_overflow(
     )
 }
 
-/// Whether a compaction split is safe to place immediately after
-/// `messages[index]`.
 pub(crate) fn can_split_after(messages: &[CompactionMessageMeta], index: usize) -> bool {
     window::can_split_after(messages, index)
 }
 
-/// Select user messages compaction keeps verbatim, with head/tail split.
 pub(crate) fn select_compaction_user_messages(
     messages: &[HandoffMessageMeta],
     max_tokens: u32,
@@ -184,7 +150,6 @@ mod tests {
         }
     }
 
-    // Mirror of testCompactionStrategy() in strategy.test.ts.
     fn default_config(max_size: u32) -> CompactionConfigMeta {
         CompactionConfigMeta {
             max_size,
@@ -195,17 +160,14 @@ mod tests {
         }
     }
 
-    // ---- compute_compact_count: auto path ----
-
     #[test]
     fn keeps_oversized_trailing_user_as_recent() {
-        // user, assistant, user(oversized)
         let messages = vec![
             msg("user", 10, 0),
             msg("assistant", 10, 0),
             msg("user", 1_200, 0),
         ];
-        // Split after assistant (index 1) → compact first 2.
+
         assert_eq!(
             compute_compact_count(&messages, &default_config(1_000), false),
             2
@@ -228,7 +190,6 @@ mod tests {
 
     #[test]
     fn compacts_prefix_when_trailing_exchange_is_oversized() {
-        // user, assistant, user, assistant(oversized)
         let messages = vec![
             msg("user", 10, 0),
             msg("assistant", 10, 0),
@@ -258,7 +219,6 @@ mod tests {
 
     #[test]
     fn returns_zero_when_last_message_is_unsplittable() {
-        // user, assistant with pending tool call
         let messages = vec![msg("user", 10, 0), msg("assistant", 10, 1)];
         assert_eq!(
             compute_compact_count(&messages, &default_config(1_000), false),
@@ -268,7 +228,6 @@ mod tests {
 
     #[test]
     fn does_not_split_inside_parallel_tool_exchange() {
-        // user, assistant, user, assistant(2 calls), tool_a, tool_b, user
         let messages = vec![
             msg("user", 10, 0),
             msg("assistant", 10, 0),
@@ -278,8 +237,7 @@ mod tests {
             msg("tool", 10, 0),
             msg("user", 10, 0),
         ];
-        // Valid split: after the first "old assistant" (index 1) → compact 2.
-        // Splitting after tool_a (index 4) would orphan tool_b.
+
         assert_eq!(
             compute_compact_count(&messages, &default_config(1_000), false),
             2
@@ -288,7 +246,6 @@ mod tests {
 
     #[test]
     fn shrinks_auto_compaction_to_fit_window() {
-        // 30 assistant messages, each 100 tokens (oversized for max_size=1000).
         let messages: Vec<_> = (0..30).map(|_| msg("assistant", 100, 0)).collect();
         let count = compute_compact_count(&messages, &default_config(1_000), false);
         assert!(count > 0, "expected positive count, got {count}");
@@ -301,8 +258,6 @@ mod tests {
             .sum();
         assert!(next_total > 1_000, "could have compacted one more");
     }
-
-    // ---- compute_compact_count: manual path ----
 
     #[test]
     fn shrinks_manual_compaction_to_fit_window() {
@@ -319,12 +274,8 @@ mod tests {
         assert!(next_total > 1_000, "could have compacted one more");
     }
 
-    // ---- reduce_compact_on_overflow ----
-
     #[test]
     fn reduce_compact_finds_overflow_split() {
-        // 5 messages, each 100 tokens. max_size=1000, ratio=0.05 → min_reduced=50.
-        // Walking backward from i=3: reduced_size=messages[4].tokens=100 >= 50 → return i+1=4.
         let messages: Vec<_> = (0..5).map(|_| msg("assistant", 100, 0)).collect();
         let count = reduce_compact_on_overflow(&messages, &default_config(1_000));
         assert_eq!(count, 4);
@@ -332,7 +283,6 @@ mod tests {
 
     #[test]
     fn reduce_compact_returns_full_length_when_no_split() {
-        // All user messages → no valid split → return n.
         let messages = vec![
             msg("user", 100, 0),
             msg("user", 100, 0),
@@ -352,8 +302,6 @@ mod tests {
         assert_eq!(reduce_compact_on_overflow(&two, &default_config(1_000)), 2);
     }
 
-    // ---- canSplitAfter rejection cases ----
-
     #[test]
     fn can_split_after_rejects_user_message() {
         let messages = vec![msg("user", 10, 0), msg("assistant", 10, 0)];
@@ -368,7 +316,6 @@ mod tests {
 
     #[test]
     fn can_split_after_rejects_trailing_tool_result() {
-        // assistant (no tool calls), then tool result — splitting would orphan the tool.
         let messages = vec![
             msg("assistant", 10, 0),
             msg("tool", 10, 0),
@@ -379,9 +326,6 @@ mod tests {
 
     #[test]
     fn can_split_after_rejects_open_tool_exchange_in_prefix() {
-        // assistant(2 calls), tool_a, [split here], tool_b
-        // Splitting after tool_a would leave tool_b orphaned in the tail
-        // because the prefix ends with an open exchange (1 result < 2 calls).
         let messages = vec![
             msg("assistant", 10, 2),
             msg("tool", 10, 0),
@@ -392,7 +336,6 @@ mod tests {
 
     #[test]
     fn can_split_after_accepts_safe_split() {
-        // assistant (no tool calls), then user — safe to split.
         let messages = vec![msg("assistant", 10, 0), msg("user", 10, 0)];
         assert!(can_split_after(&messages, 0));
     }
@@ -403,18 +346,14 @@ mod tests {
         assert!(!can_split_after(&messages, 5));
     }
 
-    // ---- prefix_ends_with_open_tool_exchange ----
-
     #[test]
     fn open_exchange_detected_when_results_fewer_than_calls() {
-        // assistant(2 calls), tool_a — 1 result < 2 calls → open.
         let messages = vec![msg("assistant", 10, 2), msg("tool", 10, 0)];
         assert!(prefix_ends_with_open_tool_exchange(&messages, 1));
     }
 
     #[test]
     fn open_exchange_not_detected_when_results_match_calls() {
-        // assistant(1 call), tool_a — 1 result == 1 call → resolved.
         let messages = vec![msg("assistant", 10, 1), msg("tool", 10, 0)];
         assert!(!prefix_ends_with_open_tool_exchange(&messages, 1));
     }
@@ -425,8 +364,6 @@ mod tests {
         assert!(!prefix_ends_with_open_tool_exchange(&messages, 1));
     }
 
-    // ── Helpers for handoff tests ────────────────────────────────────────
-
     fn handoff_msg(role: &str, text: &str, tokens: u32) -> HandoffMessageMeta {
         HandoffMessageMeta {
             role: role.to_string(),
@@ -434,8 +371,6 @@ mod tests {
             tokens,
         }
     }
-
-    // ---- select_compaction_user_messages --------------------------------
 
     #[test]
     fn handoff_all_fit_in_budget() {
@@ -452,9 +387,6 @@ mod tests {
 
     #[test]
     fn handoff_splits_head_tail() {
-        // 3 messages, 30 tokens each (90 total). max=12, head=4.
-        // tail_budget=8 fits 0 whole; head_budget=4 fits 0 whole.
-        // Middle message (index 1) is fully dropped → omitted_tokens > 0.
         let messages = vec![
             handoff_msg("user", &"a".repeat(120), 30),
             handoff_msg("user", &"b".repeat(120), 30),
@@ -463,7 +395,7 @@ mod tests {
         let result = select_compaction_user_messages(&messages, 12, 4);
         assert!(result.elided);
         assert!(result.omitted_tokens > 0);
-        // Newest in tail, oldest in head.
+
         assert!(result.tail_indices.contains(&2));
         assert!(result.head_indices.contains(&0));
     }
@@ -485,18 +417,6 @@ mod tests {
 
     #[test]
     fn handoff_head_tail_overlap_at_boundary() {
-        // A single boundary message truncated in the tail (its END kept)
-        // whose dropped BEGINNING is also kept by the head pass. The same
-        // index then appears in BOTH head_indices and tail_indices — the
-        // kept-token accounting must not double-count it.
-        //
-        // msg0: 10 tokens, msg1: 100 tokens. max=60, head=20.
-        //   head_budget = 20, tail_budget = 40.
-        //   Tail: msg1 (100) > 40 -> truncate keeping END -> head_end=1.
-        //   boundary_begin = 1 (dropped BEGINNING of msg1 is a head candidate).
-        //   Head: msg0 (10) fits, then msg1 (100) > 10 -> truncate keeping
-        //         BEGINNING -> head_indices = [0, 1].
-        //   tail_indices = [1]. Overlap at index 1.
         let messages = vec![
             handoff_msg("user", &"y".repeat(40), 10),
             handoff_msg("user", &"x".repeat(400), 100),
@@ -507,7 +427,7 @@ mod tests {
         assert!(result.tail_indices.contains(&1));
         assert!(result.head_truncate_chars.is_some());
         assert!(result.tail_truncate_chars.is_some());
-        // The overlapping index is counted once in kept_tokens.
+
         assert!(result.omitted_tokens <= 100);
     }
 }

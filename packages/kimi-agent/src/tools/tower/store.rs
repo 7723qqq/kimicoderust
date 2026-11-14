@@ -79,6 +79,8 @@ struct MissionUpdateOptions {
     validate_only: bool,
     completion_prepared: bool,
     prepared_inbox: Option<(serde_json::Value, Vec<TowerInboxItem>)>,
+    completion_tip: Option<String>,
+    completion_key_artifacts: Option<Vec<String>>,
 }
 
 struct ReviewPreparation {
@@ -1011,6 +1013,8 @@ impl TowerStore {
                 notes: Vec::new(),
                 blockers: Vec::new(),
                 owner: None,
+                completion_tip: None,
+                key_artifacts: None,
             });
         }
 
@@ -1393,6 +1397,20 @@ impl TowerStore {
             }
         }
 
+        if mission.kind == TowerMissionKind::Artifact
+            && patch.status == Some(TowerMissionStatus::Completed)
+            && patch.blocker.is_none()
+        {
+            if let Some(completion_tip) = options.completion_tip.clone() {
+                mission.completion_tip = Some(completion_tip);
+                mission.key_artifacts =
+                    Some(options.completion_key_artifacts.clone().unwrap_or_default());
+            } else if current_status != TowerMissionStatus::Completed {
+                mission.completion_tip = None;
+                mission.key_artifacts = None;
+            }
+        }
+
         let updated = mission.clone();
         if options.validate_only {
             return Ok(updated);
@@ -1458,8 +1476,13 @@ impl TowerStore {
             return Ok(());
         }
         if !branch_exists(&self.repo_root, &mission.branch).await? {
+            let kind_rule = if mission.kind == TowerMissionKind::Artifact {
+                "an artifact mission must produce committed deliverables on its branch"
+            } else {
+                "a build mission must produce a diff on its branch"
+            };
             return Err(format!(
-                "mission {} cannot transition to completed — its branch \"{}\" is not available (missing, or git cannot resolve it), so no work has landed; a build mission must produce a diff on its branch: spawn a worker to do the work, or have the tower abandon the mission (status=abandoned) if it is no longer needed",
+                "mission {} cannot transition to completed — its branch \"{}\" is not available (missing, or git cannot resolve it), so no work has landed; {kind_rule}: spawn a worker to do the work, or have the tower abandon the mission (status=abandoned) if it is no longer needed",
                 mission.id, mission.branch,
             ));
         }
@@ -1467,8 +1490,13 @@ impl TowerStore {
         let base = self.diff_base(base, mission).await?;
         let changed = diff_name_only(&self.repo_root, &base, &mission.branch).await?;
         if changed.is_empty() {
+            let kind_rule = if mission.kind == TowerMissionKind::Artifact {
+                "an artifact mission must produce a committed diff on its branch: commit the deliverables there first"
+            } else {
+                "a build mission must produce a diff on its branch: commit the work there first"
+            };
             return Err(format!(
-                "mission {} cannot transition to completed — branch \"{}\" has no changes vs \"{base}\"; a build mission must produce a diff on its branch: commit the work there first, or if the work turned out unnecessary, have the tower abandon the mission (status=abandoned) instead",
+                "mission {} cannot transition to completed — branch \"{}\" has no changes vs \"{base}\"; {kind_rule}, or if the work turned out unnecessary, have the tower abandon the mission (status=abandoned) instead",
                 mission.id, mission.branch,
             ));
         }
@@ -1986,6 +2014,47 @@ impl TowerStore {
         let reviewed_commit = preparation.reviewed_commit.clone();
         let body = Self::review_document_body(input);
 
+        let artifact_acceptance_mission =
+            if caller_name == TOWER_NAME && input.status == "clean" && input.merge == "merge" {
+                preparation
+                    .review_mission
+                    .as_deref()
+                    .and_then(|id| state.missions.iter().find(|mission| mission.id == id))
+                    .filter(|mission| mission.kind == TowerMissionKind::Artifact)
+            } else {
+                None
+            };
+        if let Some(mission) = artifact_acceptance_mission {
+            let Some(completion_tip) = mission.completion_tip.clone() else {
+                return Err(format!(
+                    "artifact mission {} has no completion tip recorded — its acceptance-request cannot be bound to an exact branch tip. Ask the worker to run TowerComplete at the current tip with key_artifacts, present those key artifacts and the whole-tip approval scope for explicit human approval, then record TowerReview again.",
+                    mission.id
+                ));
+            };
+            let Some(acceptance_tip) = input.acceptance_tip.clone() else {
+                return Err(format!(
+                    "artifact mission {} requires acceptance_tip from the TowerComplete acceptance-request the human approved — present the latest request and pass its completion tip explicitly",
+                    mission.id
+                ));
+            };
+            if acceptance_tip != completion_tip {
+                return Err(format!(
+                    "artifact acceptance references {}, but the latest acceptance-request for mission {} covers {} — the approval is tied to a different presentation; present the latest request and pass its acceptance_tip",
+                    &acceptance_tip[..acceptance_tip.len().min(7)],
+                    mission.id,
+                    &completion_tip[..completion_tip.len().min(7)]
+                ));
+            }
+            if reviewed_commit != completion_tip {
+                return Err(format!(
+                    "branch \"{}\" advanced after the artifact acceptance-request (completion {}, current {}) — the user has not approved the delivery at the current tip. Ask the worker to run TowerComplete at the current tip with key_artifacts, present those key artifacts and the whole-tip approval scope for fresh explicit human approval, then record TowerReview again.",
+                    input.target,
+                    &completion_tip[..completion_tip.len().min(7)],
+                    &reviewed_commit[..reviewed_commit.len().min(7)]
+                ));
+            }
+        }
+
         let recovered = self
             .find_review_recovery(&state, caller_name, input, &reviewed_commit, &body)
             .await?;
@@ -2065,6 +2134,7 @@ impl TowerStore {
             (review, written)
         };
 
+        let mut activity_log_errors: Vec<String> = Vec::new();
         if input.status != "clean" {
             let caller = self.find_agent(&state, caller_name);
             let reviewed_branch = &input.target;
@@ -2113,17 +2183,30 @@ impl TowerStore {
                         mission_file_name(&mission.id, &mission.slug)
                     )),
                 )
-                .await?;
+                .await
+                .map_err(|error| {
+                    activity_log_errors.push(format!(
+                        "mission {} was marked active, but appending mission.rework activity log failed: {error}",
+                        mission.id
+                    ));
+                })
+                .ok();
             }
         }
 
         let (notifications, notification_errors) =
             self.notify_review_result_locked(caller_name, &review).await;
+        activity_log_errors.extend(
+            notifications
+                .iter()
+                .filter_map(|notification| notification.activity_log_error.clone()),
+        );
         Ok(crate::tools::tower::types::TowerReviewResult {
             file: written,
             review,
             notifications,
             notification_errors,
+            activity_log_errors,
         })
     }
 
@@ -3022,6 +3105,80 @@ async fn read_git_dir(cwd: &Path) -> Option<String> {
     let raw = fs::read_to_string(cwd.join(".git")).await.ok()?;
     let line = raw.lines().find(|l| l.starts_with("gitdir:"))?;
     Some(line["gitdir:".len()..].trim().to_string())
+}
+
+fn normalize_artifact_paths(paths: &[String]) -> Result<Vec<String>, String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for path in paths {
+        let trimmed = path.trim();
+        let replaced = trimmed.replace('\\', "/");
+        let mut parts: Vec<&str> = Vec::new();
+        let mut escapes = false;
+        for segment in replaced.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    if parts.pop().is_none() {
+                        escapes = true;
+                    }
+                }
+                other => parts.push(other),
+            }
+        }
+        let candidate = parts.join("/");
+        if trimmed.is_empty()
+            || trimmed.contains(['\0', '\r', '\n'])
+            || escapes
+            || candidate.is_empty()
+            || replaced.starts_with('/')
+        {
+            return Err(format!(
+                "TowerComplete key_artifacts entries must be non-empty relative file paths inside the repository; received \"{path}\""
+            ));
+        }
+        normalized.push(candidate);
+    }
+    let mut seen = HashSet::new();
+    normalized.retain(|path| seen.insert(path.clone()));
+    Ok(normalized)
+}
+
+fn same_artifact_paths(left: Option<&Vec<String>>, right: &[String]) -> bool {
+    match left {
+        Some(left) => {
+            left.len() == right.len() && left.iter().zip(right.iter()).all(|(a, b)| a == b)
+        }
+        None => false,
+    }
+}
+
+fn artifact_acceptance_report(
+    report: &str,
+    key_artifacts: &[String],
+    changed: &[String],
+    completion_tip: &str,
+) -> String {
+    let key: HashSet<&str> = key_artifacts.iter().map(String::as_str).collect();
+    let additional = changed
+        .iter()
+        .filter(|path| !key.contains(path.as_str()))
+        .count();
+    [
+        "Key artifacts for human acceptance:".to_string(),
+        key_artifacts
+            .iter()
+            .map(|path| format!("- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        String::new(),
+        format!("Completion tip: {completion_tip}"),
+        "Approval authorizes the entire current mission tip presented for acceptance, not only these key artifacts.".to_string(),
+        format!("Additional committed files included in this approval: {additional}."),
+        "Optional full manifest: inspect the current mission branch diff on request; reading every path is not required.".to_string(),
+        String::new(),
+        report.to_string(),
+    ]
+    .join("\n")
 }
 
 #[cfg(test)]

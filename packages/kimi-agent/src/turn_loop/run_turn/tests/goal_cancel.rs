@@ -2,12 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-// ── Goal budget tests ───────────────────────────────────────────────
-
-/// v2 binds a turn only to a goal that was active when the turn started: a
-/// paused or blocked goal is ordinary chat, with no per-step budget gate and
-/// no goal steering. (The goal reminder injection still tells the model the
-/// goal exists and is not being pursued.)
 #[tokio::test]
 async fn test_inactive_goal_runs_the_turn_as_ordinary_chat() {
     for (status, turn_id) in [
@@ -35,6 +29,7 @@ async fn test_inactive_goal_runs_the_turn_as_ordinary_chat() {
             terminal_reason: None,
         };
         let input = RunTurnInput {
+            llm_request_byte_budget: u64::MAX,
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
             previous_turn_aborted: false,
             turn_id: turn_id.into(),
@@ -69,8 +64,6 @@ async fn test_inactive_goal_runs_the_turn_as_ordinary_chat() {
     }
 }
 
-/// A goal whose token budget is already exhausted (tokens_used >= budget)
-/// must stop with `BudgetLimited` before running any step.
 #[tokio::test]
 async fn test_goal_token_budget_exhausted() {
     let llm = PredictTestLlm {
@@ -89,7 +82,7 @@ async fn test_goal_token_budget_exhausted() {
         status: GoalStatus::Active,
         token_budget: Some(100),
         turn_budget: None,
-        // Already used 100 tokens — at the budget limit.
+
         tokens_used: 100,
         turns_used: 0,
         wall_clock_budget_ms: None,
@@ -99,6 +92,7 @@ async fn test_goal_token_budget_exhausted() {
     };
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-budget-tokens".into(),
@@ -140,8 +134,6 @@ async fn test_goal_token_budget_exhausted() {
     );
 }
 
-/// A goal whose turn budget is already exhausted must stop with
-/// `BudgetLimited`.
 #[tokio::test]
 async fn test_goal_turn_budget_exhausted() {
     let llm = PredictTestLlm {
@@ -160,7 +152,7 @@ async fn test_goal_turn_budget_exhausted() {
         token_budget: None,
         turn_budget: Some(3),
         tokens_used: 0,
-        // Already used 3 turns — at the limit.
+
         turns_used: 3,
         wall_clock_budget_ms: None,
         wall_clock_ms: 0,
@@ -169,6 +161,7 @@ async fn test_goal_turn_budget_exhausted() {
     };
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-budget-turns".into(),
@@ -202,8 +195,6 @@ async fn test_goal_turn_budget_exhausted() {
     assert_eq!(result.steps, 0);
 }
 
-/// An active goal with remaining budget should let the turn proceed
-/// normally and complete with `EndTurn`.
 #[tokio::test]
 async fn test_goal_active_with_budget_completes() {
     let llm = PredictTestLlm {
@@ -230,6 +221,7 @@ async fn test_goal_active_with_budget_completes() {
     };
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-active-goal".into(),
@@ -260,8 +252,6 @@ async fn test_goal_active_with_budget_completes() {
     assert_eq!(result.steps, 1);
 }
 
-/// When a goal has a small wall-clock budget and the step takes longer,
-/// the active deadline timer must fire and cancel the turn with `BudgetLimited`.
 #[tokio::test]
 async fn test_goal_wall_clock_deadline_triggers_budget_limit() {
     struct SlowLlm;
@@ -325,13 +315,14 @@ async fn test_goal_wall_clock_deadline_triggers_budget_limit() {
         turn_budget: None,
         tokens_used: 0,
         turns_used: 0,
-        wall_clock_budget_ms: Some(50), // 50ms budget vs 1000ms LLM
+        wall_clock_budget_ms: Some(50),
         wall_clock_ms: 0,
         updated_at: 0,
         terminal_reason: None,
     };
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-deadline-turn".into(),
@@ -368,10 +359,6 @@ async fn test_goal_wall_clock_deadline_triggers_budget_limit() {
     assert!(result.is_ok());
 }
 
-// ── Cancellation tests ──────────────────────────────────────────────
-
-/// When the cancellation flag is set before the turn starts, the loop
-/// must abort immediately with `Aborted` and 0 steps.
 #[tokio::test]
 async fn test_cancellation_set_before_turn_aborts() {
     let llm = PredictTestLlm {
@@ -386,6 +373,7 @@ async fn test_cancellation_set_before_turn_aborts() {
     let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-cancel-before".into(),
@@ -416,8 +404,6 @@ async fn test_cancellation_set_before_turn_aborts() {
     assert_eq!(result.steps, 0);
 }
 
-/// HostCallbacks decorator that raises the cancellation flag as a tool
-/// call runs, so the scheduler observes the cancel inside a batch.
 struct CancelDuringToolCallbacks {
     inner: Arc<dyn HostCallbacks>,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
@@ -454,8 +440,6 @@ impl HostCallbacks for CancelDuringToolCallbacks {
     }
 }
 
-/// A cancel landing while tools execute ends the turn as `Aborted`: the
-/// host asked to stop, so the turn must not surface a hard error.
 #[tokio::test]
 async fn test_cancellation_during_tool_execution_aborts() {
     let llm = PredictTestLlm {
@@ -492,6 +476,7 @@ async fn test_cancellation_during_tool_execution_aborts() {
     });
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-cancel-during-tools".into(),
@@ -524,15 +509,6 @@ async fn test_cancellation_during_tool_execution_aborts() {
     assert_eq!(result.steps, 1);
 }
 
-/// The grace's whole point, exercised through the **real turn loop**: the
-/// tool above answers instantly, so it now wins the abort race and keeps its
-/// result. That test's assertions did not change, so it cannot tell the two
-/// behaviours apart — this one can, by giving the tool a delay that lands
-/// inside the 2 s window and then checking what the model actually reads.
-///
-/// Before the grace, a cancel discarded the future the instant the flag was
-/// seen, so this result was replaced by `abortedToolOutput` and the model
-/// was told the user had interrupted a tool that had in fact succeeded.
 #[tokio::test]
 async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
     let llm = PredictTestLlm {
@@ -551,7 +527,6 @@ async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
     let server = Arc::new(RpcServer::new());
     RpcServer::register_arc(&server, types::methods::HOST_EXECUTE_TOOL, |_params| {
         Box::pin(async move {
-            // Lands comfortably inside the 2 s grace window.
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             let resp = ToolExecuteResponse {
                 delivery: None,
@@ -571,6 +546,7 @@ async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
     });
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-grace-keeps-result".into(),
@@ -601,8 +577,6 @@ async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
         .await
         .expect("a cancel inside the grace must not fail the turn");
 
-    // The turn is still cancelled — the user did press Ctrl-C — but the
-    // call that finished inside the window keeps its answer.
     assert!(matches!(result.stop_reason, LoopTurnStopReason::Aborted));
     let tool_text = result
         .messages
@@ -626,11 +600,6 @@ async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
     );
 }
 
-/// A tool result carrying `stop_turn: true` ends the turn as `EndTurn`
-/// (v2 `completed`, loopService.ts:2117-2119 via engineOverride.ts:58):
-/// no continuation step runs even though the scripted LLM would keep
-/// issuing tool calls. Without the stop-turn check this turn would burn
-/// all 5 max_steps; the `steps == 1` assertion is the discriminator.
 #[tokio::test]
 async fn test_tool_result_stop_turn_ends_turn_completed() {
     let llm = PredictTestLlm {
@@ -663,6 +632,7 @@ async fn test_tool_result_stop_turn_ends_turn_completed() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-stop-turn".into(),
@@ -695,7 +665,6 @@ async fn test_tool_result_stop_turn_ends_turn_completed() {
     assert_eq!(result.steps, 1);
 }
 
-/// When the cancellation flag is cleared, the turn runs normally.
 #[tokio::test]
 async fn test_cancellation_cleared_runs_normally() {
     let llm = PredictTestLlm {
@@ -710,6 +679,7 @@ async fn test_cancellation_cleared_runs_normally() {
     let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-cancel-clear".into(),

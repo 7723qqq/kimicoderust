@@ -1596,10 +1596,10 @@ async fn background_task_events_attribute_to_the_runtime_session() {
     // the subagent identity.
     let first = events.lock().unwrap()[0].clone();
     assert_eq!(first.0.as_deref(), Some("sess-runtime"));
-    assert_eq!(first.1["type"], "event.task.created");
-    assert_eq!(first.1["task"]["id"], id);
-    assert_eq!(first.1["task"]["kind"], "subagent");
-    assert_eq!(first.1["task"]["session_id"], "sess-runtime");
+    assert_eq!(first.1["type"], "task.started");
+    assert_eq!(first.1["info"]["taskId"], id);
+    assert_eq!(first.1["info"]["kind"], "agent");
+    assert_eq!(first.1["info"]["agentId"], id);
 
     assert!(matches!(
         runner.wait(&id, 2000).await,

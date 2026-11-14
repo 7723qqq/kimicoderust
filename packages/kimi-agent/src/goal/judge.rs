@@ -110,7 +110,7 @@ pub fn build_judge_user_prompt(objective: &str, completion_criterion: Option<&st
     lines.join("\n")
 }
 
-fn build_retry_user_prompt(goal: &GoalSnapshot) -> String {
+pub fn build_retry_user_prompt(goal: &GoalSnapshot) -> String {
     let mut text = format!("The goal objective is: {}\n", goal.objective);
     if let Some(criterion) = &goal.completion_criterion {
         text.push_str(&format!("Completion criterion: {criterion}\n"));
@@ -225,6 +225,9 @@ async fn request_verdict(
     system_prompt: &str,
     user_prompt: String,
     cancel: Option<CancellationToken>,
+    agent_id: &str,
+    emit: Option<&(dyn Fn(serde_json::Value) + Send + Sync)>,
+    max_output_tokens: u32,
 ) -> Result<String, String> {
     let mut messages = Vec::with_capacity(transcript.len() + 2);
     messages.push(LLMMessage::system(system_prompt));
@@ -236,7 +239,22 @@ async fn request_verdict(
         cancel: cancel.clone(),
         used_context_tokens: None,
         max_context_tokens: None,
+        max_output_tokens: Some(max_output_tokens),
+        max_output_size: None,
     };
+    if let Some(emit) = emit {
+        emit(crate::session::agent_records::llm_request_record(
+            llm,
+            &params,
+            crate::session::agent_records::LlmRequestSpec {
+                agent_id,
+                kind: "loop",
+                turn_step: None,
+                tool_select: false,
+                dropped_count: None,
+            },
+        ));
+    }
     let response = match cancel {
         Some(token) => tokio::select! {
             biased;
@@ -256,6 +274,25 @@ pub async fn evaluate_transcript(
     goal: &GoalSnapshot,
     cancel: Option<CancellationToken>,
 ) -> JudgeVerdict {
+    evaluate_transcript_with_events(
+        llm,
+        transcript,
+        goal,
+        cancel,
+        crate::callbacks::MAIN_AGENT_ID,
+        None,
+    )
+    .await
+}
+
+pub async fn evaluate_transcript_with_events(
+    llm: &dyn LLM,
+    transcript: &[LLMMessage],
+    goal: &GoalSnapshot,
+    cancel: Option<CancellationToken>,
+    agent_id: &str,
+    emit: Option<&(dyn Fn(serde_json::Value) + Send + Sync)>,
+) -> JudgeVerdict {
     let judge_user = build_judge_user_prompt(&goal.objective, goal.completion_criterion.as_deref());
     let response = match request_verdict(
         llm,
@@ -263,6 +300,9 @@ pub async fn evaluate_transcript(
         JUDGE_SYSTEM_PROMPT,
         judge_user,
         cancel.clone(),
+        agent_id,
+        emit,
+        4096,
     )
     .await
     {
@@ -277,8 +317,17 @@ pub async fn evaluate_transcript(
         return verdict;
     }
     let retry_prompt = build_retry_user_prompt(goal);
-    if let Ok(retry) =
-        request_verdict(llm, transcript, RETRY_SYSTEM_PROMPT, retry_prompt, cancel).await
+    if let Ok(retry) = request_verdict(
+        llm,
+        transcript,
+        RETRY_SYSTEM_PROMPT,
+        retry_prompt,
+        cancel,
+        agent_id,
+        emit,
+        512,
+    )
+    .await
     {
         if let Some(verdict) = parse_verdict(&retry) {
             return verdict;
@@ -465,5 +514,41 @@ mod tests {
         let verdict = evaluate_transcript(&llm, &[], &goal(), None).await;
         assert!(verdict.ok);
         assert!(verdict.reason.contains("could not be parsed after retry"));
+    }
+
+    #[tokio::test]
+    async fn the_judge_request_is_emitted_with_the_v2_fields() {
+        let llm = ScriptedLlm::new(vec![Ok("{\"ok\":true,\"reason\":\"done\"}".into())]);
+        let events = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let emit = {
+            let events = events.clone();
+            move |event: serde_json::Value| events.lock().unwrap().push(event)
+        };
+        let verdict = evaluate_transcript_with_events(
+            &llm,
+            &[LLMMessage::user("hi")],
+            &goal(),
+            None,
+            "agent-2",
+            Some(&emit),
+        )
+        .await;
+        assert!(verdict.ok);
+        let events = events.lock().unwrap();
+        let request = events
+            .iter()
+            .find(|event| event["type"] == "llm.request")
+            .expect("the judge request must be recorded");
+        assert_eq!(request["kind"], "loop");
+        assert_eq!(request["agent_id"], "agent-2");
+        assert_eq!(request["toolSelect"], false);
+        assert_eq!(request["messageCount"], 2);
+        assert_eq!(request["systemPrompt"], JUDGE_SYSTEM_PROMPT);
+        assert_eq!(
+            request["systemPromptHash"],
+            crate::session::agent_records::sha256_hex(JUDGE_SYSTEM_PROMPT)
+        );
+        assert!(request.get("turnStep").is_none());
+        assert_eq!(request["maxOutputTokens"], 4096);
     }
 }

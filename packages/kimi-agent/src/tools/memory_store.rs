@@ -139,6 +139,18 @@ pub fn list_entries_for(base: &Path, project_id: &str, path_prefix: &str) -> Vec
     entries
 }
 
+pub fn list_all_entries(base: &Path) -> Vec<MemoryEntry> {
+    let mut scopes = vec![(MemoryScope::Global, String::new())];
+    scopes.extend(child_scope_ids(base, MemoryScope::Project));
+    scopes.extend(child_scope_ids(base, MemoryScope::Session));
+    let mut entries = Vec::new();
+    for (scope, scope_id) in scopes {
+        collect_entries(base, &scope_dir(base, scope, &scope_id), &mut entries);
+    }
+    entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    entries
+}
+
 pub fn render_listing(entries: &[MemoryEntry]) -> String {
     let mut out = String::from("<memory_listing>\n");
     if entries.is_empty() {

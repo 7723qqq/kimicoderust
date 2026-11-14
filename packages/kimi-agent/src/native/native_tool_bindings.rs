@@ -1,7 +1,3 @@
-/// NAPI bindings — exposes all native tools to Node.js.
-///
-/// This module defines the `#[napi]` functions that TypeScript calls.
-/// Each function wraps the corresponding Rust implementation.
 use crate::native::bash::{DEFAULT_TIMEOUT_S, MAX_TIMEOUT_S};
 use crate::native::bash_spawn;
 use crate::native::compaction::{self, CompactionConfigMeta, CompactionMessageMeta};
@@ -23,21 +19,6 @@ use napi_derive::napi;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// ============================================================================
-// i18n — the engine's embedded catalog
-// ============================================================================
-
-/// Name the engine's embedded-catalog locale, `locale` (`"en"` or `"zh"`).
-///
-/// This is what the `translate` binding below resolves against, and therefore
-/// what the host's own `t()` calls depend on. It is also what a
-/// `LocalizedText` resolves against, so the engine's own user-facing text —
-/// permission reasons, tool-result notes, ACP approval labels — follows the
-/// same locale and can never disagree with the host's strings.
-///
-/// The catalog is compiled into the binary, so this carries a locale name
-/// rather than the message trees the host used to push. An unrecognised name
-/// leaves the current locale in place.
 #[napi]
 pub fn set_engine_locale(locale: String) {
     if let Some(locale) = crate::i18n::Locale::from_name(&locale) {
@@ -45,9 +26,6 @@ pub fn set_engine_locale(locale: String) {
     }
 }
 
-/// Translate `key` against the engine's embedded catalog, interpolating `params`.
-///
-/// Returns `key` itself when the key is in neither embedded locale.
 #[napi]
 pub fn translate(key: String, params: Option<HashMap<String, String>>) -> String {
     let i18n = crate::i18n::engine_i18n();
@@ -55,34 +33,16 @@ pub fn translate(key: String, params: Option<HashMap<String, String>>) -> String
         .unwrap_or(key)
 }
 
-// ============================================================================
-// Read tool
-// ============================================================================
-
-/// Read a text file with line numbers.
-///
-/// @param path - Path to the file to read.
-/// @param line_offset - Line number to start from (1-indexed). Negative = tail from end.
-/// @param n_lines - Number of lines to read. Capped at 1000.
-/// @returns ReadResult with content (line-numbered), lineCount, and optional
-///          error plus errorKind (`not_found` / `not_a_file` / `media` /
-///          `binary` / `invalid_utf8` / `too_large` / `io` / `panic`) — every
-///          verdict is final; UTF-16/GBK/lenient transcoding runs natively.
 #[napi]
 pub async fn native_read(
     path: String,
     line_offset: Option<i64>,
     n_lines: Option<u32>,
 ) -> ReadResult {
-    // Any read request is cacheable — the cache is keyed by (path, offset,
-    // n_lines) and invalidated by file metadata, so full-file and partial
-    // reads alike can be served from cache (see file_cache.rs).
     if let Some(cached) = crate::native::file_cache::FILE_CACHE.get(&path, line_offset, n_lines) {
         return cached;
     }
 
-    // Snapshot the invalidation metadata BEFORE the read so put() can detect
-    // a concurrent modification (TOCTOU guard, see file_cache.rs).
     let pre_read = crate::native::file_cache::snapshot(&path);
 
     let path_clone = path.clone();
@@ -100,13 +60,10 @@ pub async fn native_read(
         content: String::new(),
         line_count: 0,
         error: Some(format!("read panicked: {e}")),
-        // A panic is a native bug — surface it instead of letting the JS
-        // caller silently mask it with its TypeScript fallback.
+
         error_kind: Some("panic".to_string()),
     });
 
-    // Cache successful reads (put() re-checks the metadata snapshot and skips
-    // caching when the file changed during the read).
     if result.error.is_none()
         && let Some(pre) = pre_read
     {
@@ -116,23 +73,6 @@ pub async fn native_read(
     result
 }
 
-// ============================================================================
-// Write tool
-// ============================================================================
-
-/// Write content to a file.
-///
-/// Creates parent directories automatically. Overwrite uses an atomic
-/// temp-file-and-rename by default (`atomic = true`), so a crash cannot leave
-/// a truncated destination; symlink targets are still written through in-place
-/// to preserve the link. Append remains an `O_APPEND` pass.
-///
-/// @param path - Path to the file to create or overwrite.
-/// @param content - Raw content to write.
-/// @param mode - "overwrite" or "append". Defaults to "overwrite".
-/// @param atomic - When true and mode is overwrite, use atomic rename. Defaults to true.
-/// @returns WriteResult with bytesWritten and optional error plus errorKind
-///          (`io` / `parent_not_dir` / `panic`) — every verdict is final.
 #[napi]
 pub async fn native_write(
     path: String,
@@ -153,8 +93,7 @@ pub async fn native_write(
     .unwrap_or_else(|e| WriteResult {
         bytes_written: 0,
         error: Some(format!("write panicked: {e}")),
-        // A panic is a native bug — surface it instead of letting the JS
-        // caller silently mask it with its TypeScript fallback.
+
         error_kind: Some("panic".to_string()),
     });
 
@@ -164,17 +103,6 @@ pub async fn native_write(
     result
 }
 
-// ============================================================================
-// Edit tool
-// ============================================================================
-
-/// Edit a file by replacing exact string occurrences.
-///
-/// @param path - Path to the file to edit.
-/// @param old_string - Exact content to replace. Must be non-empty.
-/// @param new_string - Replacement text.
-/// @param replace_all - If true, replace all occurrences. Default false.
-/// @returns EditResult with success, error, and replacements count.
 #[napi]
 pub async fn native_edit(
     path: String,
@@ -203,31 +131,6 @@ pub async fn native_edit(
     result
 }
 
-// ============================================================================
-// Grep tool
-// ============================================================================
-
-/// Search for a pattern in files.
-///
-/// Async: runs the directory walk on tokio's blocking thread pool so the
-/// Node event loop stays responsive during large searches.
-///
-/// @param pattern - Regular expression to search for.
-/// @param path - File or directory to search. Defaults to current directory.
-/// @param glob - Optional glob filter.
-/// @param file_type - Optional file type filter ("ts", "py", "rust", ...).
-/// @param output_mode - "content", "files_with_matches", or "count_matches". Default "files_with_matches".
-/// @param case_insensitive - Case-insensitive search. Default false.
-/// @param line_numbers - Show line numbers in content mode. Default true.
-/// @param after_context - Lines after match. Default 0.
-/// @param before_context - Lines before match. Default 0.
-/// @param context - Lines before and after match. Overrides after/before.
-/// @param head_limit - Max output lines. Default 250. 0 = unlimited.
-/// @param offset - Skip first N entries. Default 0.
-/// @param multiline - Enable multiline matching. Default false.
-/// @param include_ignored - Also search files excluded by .gitignore. Default false.
-/// @param timeout_ms - Wall-clock timeout in milliseconds. Default 20000. 0 = unlimited.
-/// @returns GrepResult with content, error, matchCount, fileCount, filteredSensitive, timedOut.
 #[napi]
 #[allow(clippy::too_many_arguments)]
 pub async fn native_grep(
@@ -287,52 +190,27 @@ pub async fn native_grep(
         .map_err(|e| napi::Error::from_reason(format!("grep task failed: {}", e)))
 }
 
-// ============================================================================
-// Glob tool
-// ============================================================================
-/// Check if a path matches any of the given glob patterns.
-///
-/// Uses `globset::GlobSet` to batch-compile all patterns and test the path
-/// in a single `is_match` call. Matching is case-sensitive (consistent with
-/// `globToRegExp` in the TS fallback).
-///
-/// @param globs - Array of glob patterns.
-/// @param path - Relative path to test.
-/// @returns True if the path matches at least one pattern.
 #[napi]
 pub fn native_glob_matches_any(globs: Vec<String>, path: String) -> bool {
     glob::glob_matches_any(&globs, &path)
 }
 
-// ============================================================================
-// Bash tool
-// ============================================================================
-
-// ============================================================================
-// Managed bash processes — spawn / wait / kill / dispose
-// ============================================================================
-
-/// Configuration for `native_bash_spawn`. `argv` is the full command line:
-/// `argv[0]` is the program (typically the shell) and the rest are its
-/// arguments — no shell detection happens on the native side.
 #[napi(object)]
 pub struct NativeBashSpawnConfig {
     pub argv: Vec<String>,
     pub cwd: Option<String>,
-    /// Wall-clock timeout in milliseconds; `null` means no timeout.
+
     pub timeout_ms: Option<i64>,
-    /// Environment overrides as `[key, value]` pairs (inherited env is kept).
+
     pub env: Option<Vec<Vec<String>>>,
 }
 
-/// Handle of a spawned managed process.
 #[napi(object)]
 pub struct NativeBashSpawnResult {
     pub id: u32,
     pub pid: u32,
 }
 
-/// Lifecycle / output event forwarded to the JS callback.
 #[napi(object)]
 pub struct NativeBashEvent {
     pub id: u32,
@@ -342,7 +220,6 @@ pub struct NativeBashEvent {
     pub error: Option<String>,
 }
 
-/// Final exit verdict, resolved by `native_bash_wait`.
 #[napi(object)]
 pub struct NativeBashExitResult {
     pub exit_code: i32,
@@ -350,14 +227,6 @@ pub struct NativeBashExitResult {
     pub error: Option<String>,
 }
 
-/// Spawn a managed process and stream its output to `on_event`.
-///
-/// Returns immediately with the handle. Events arrive via the JS callback as
-/// `(err, event)` — `err` is `null` on success; `event` is
-/// `{ id, kind: 'stdout'|'stderr'|'exit'|'error', data?, exitCode?, error? }`.
-/// A spawn failure throws synchronously so the host can fall back to its own
-/// spawn path. Stdin is closed at spawn. When `timeoutMs` elapses the whole
-/// process tree is killed and the exit event still fires.
 #[napi]
 pub fn native_bash_spawn(
     config: NativeBashSpawnConfig,
@@ -427,8 +296,6 @@ pub fn native_bash_spawn(
     Ok(NativeBashSpawnResult { id, pid })
 }
 
-/// Resolve with the cached exit result of a managed bash process. Resolves
-/// `null` when the handle is unknown or was disposed before exiting.
 #[napi]
 pub async fn native_bash_wait(id: u32) -> Option<NativeBashExitResult> {
     loop {
@@ -446,60 +313,37 @@ pub async fn native_bash_wait(id: u32) -> Option<NativeBashExitResult> {
     }
 }
 
-/// Kill a managed bash process tree. Returns false when the handle is unknown.
 #[napi]
 pub fn native_bash_kill(id: u32) -> bool {
     bash_spawn::kill_managed(id)
 }
 
-/// Drop a managed bash process handle, killing the tree first if it is still
-/// running. Returns false when the handle is unknown.
 #[napi]
 pub fn native_bash_dispose(id: u32) -> bool {
     bash_spawn::dispose_managed(id)
 }
 
-// ============================================================================
-// Constants (exported to JS)
-// ============================================================================
-
-/// Maximum lines for read operations.
 #[napi]
 pub const READ_MAX_LINES: u32 = MAX_LINES as u32;
 
-/// Maximum line length before truncation.
 #[napi]
 pub const READ_MAX_LINE_LENGTH: u32 = MAX_LINE_LENGTH as u32;
 
-/// Maximum output bytes for read operations.
 #[napi]
 pub const READ_MAX_BYTES: u32 = MAX_BYTES as u32;
 
-/// Maximum matches for glob operations.
 #[napi]
 pub const GLOB_MAX_MATCHES: u32 = MAX_MATCHES as u32;
 
-/// Default head limit for grep operations.
 #[napi]
 pub const GREP_DEFAULT_HEAD_LIMIT: u32 = DEFAULT_HEAD_LIMIT as u32;
 
-/// Default timeout for bash commands (seconds).
 #[napi]
 pub const BASH_DEFAULT_TIMEOUT: u32 = DEFAULT_TIMEOUT_S as u32;
 
-/// Maximum timeout for bash commands (seconds).
 #[napi]
 pub const BASH_MAX_TIMEOUT: u32 = MAX_TIMEOUT_S as u32;
 
-// ============================================================================
-// List Directory tool
-// ============================================================================
-
-/// Generate a compact 2-level directory tree listing.
-///
-/// @param path - Directory to list. Defaults to current directory.
-/// @param collapse_hidden_dirs - If true, skip listing children of hidden directories.
-/// @returns ListDirectoryResult with output string and optional error.
 #[allow(dead_code)]
 #[napi]
 pub fn native_list_directory(
@@ -512,53 +356,29 @@ pub fn native_list_directory(
     })
 }
 
-// ============================================================================
-// File Type tool
-// ============================================================================
-
 use crate::native::file_type::{self, ImageDimensions};
 
-/// Best-effort pixel-dimension reader for common raster formats.
-///
-/// @param data - Raw file bytes (at least the first few hundred bytes).
-/// @returns ImageDimensions { width: number, height: number } or null if unknown.
 #[napi]
 pub fn native_sniff_image_dimensions(data: Uint8Array) -> Option<ImageDimensions> {
     file_type::sniff_image_dimensions(&data)
 }
 
-/// Check if a path points to a credentials-bearing file.
-///
-/// Case-insensitive matching: `.env.local` is flagged but `.env.example`
-/// is exempted, `id_rsa.bak` is flagged while `id_rsafoo` is not.
 #[napi]
 pub fn native_is_sensitive_file(path: String) -> bool {
     file_type::is_sensitive_file(&path)
 }
 
-/// Same as `native_is_sensitive_file` but accepts a `Uint8Array` produced
-/// by `Buffer.from(path, 'latin1')` in JS. This avoids the UTF-16→UTF-8
-/// string conversion that napi's `String` parameter triggers (~170ns for
-/// typical paths). `Buffer.from(path, 'latin1')` is a V8 C++ intrinsic
-/// (~31ns) that copies each UTF-16 code unit's low byte directly; for ASCII
-/// paths the result is identical to UTF-8.
 #[napi]
 pub fn native_is_sensitive_file_bytes(path: Uint8Array) -> bool {
     file_type::is_sensitive_file_bytes(&path)
 }
 
-/// Result of `native_detect_file_type`.
 #[napi(object)]
 pub struct FileTypeResult {
     pub kind: String,
     pub mime_type: String,
 }
 
-/// Detect file type from path and header bytes.
-///
-/// Uses file extension first, then falls back to magic-byte sniffing.
-/// @param path - File path (used for extension-based detection).
-/// @param header - First bytes of the file content (up to 512 bytes).
 #[napi]
 pub fn native_detect_file_type(path: String, header: Uint8Array) -> FileTypeResult {
     let kind = file_type::detect_file_type(std::path::Path::new(&path), &header);
@@ -575,25 +395,8 @@ pub fn native_detect_file_type(path: String, header: Uint8Array) -> FileTypeResu
     }
 }
 
-// ============================================================================
-// Token estimation
-// ============================================================================
-
 use crate::native::tokens;
 
-// ============================================================================
-// Compaction strategy
-// ============================================================================
-
-/// Decide how many leading messages to compact.
-///
-/// Returns N where `messages[0..N]` is compacted and `messages[N..]` is
-/// preserved. 0 means no compaction possible (no valid split point).
-///
-/// @param messages - Lightweight message metadata (role, tool_calls_count, tokens).
-/// @param config - Compaction algorithm knobs.
-/// @param is_manual - Whether this is a manual (user-requested) compaction.
-/// @returns Number of messages to compact (0 = no compaction possible).
 #[napi]
 pub fn native_compute_compact_count(
     messages: Vec<CompactionMessageMeta>,
@@ -603,15 +406,6 @@ pub fn native_compute_compact_count(
     compaction::compute_compact_count(&messages, &config, is_manual)
 }
 
-/// Find a split point when the LLM throws a context overflow error.
-///
-/// Walks backward from the tail accumulating tokens until the reduced
-/// size reaches `min_overflow_reduction_ratio * max_size`, returning the
-/// first valid split point that satisfies the threshold.
-///
-/// @param messages - Lightweight message metadata.
-/// @param config - Compaction algorithm knobs.
-/// @returns Split index (number of messages to keep in the tail).
 #[napi]
 pub fn native_reduce_compact_on_overflow(
     messages: Vec<CompactionMessageMeta>,
@@ -620,16 +414,11 @@ pub fn native_reduce_compact_on_overflow(
     compaction::reduce_compact_on_overflow(&messages, &config)
 }
 
-/// Check whether a compaction split is safe after `messages[index]`.
 #[napi]
 pub fn native_can_split_after(messages: Vec<CompactionMessageMeta>, index: u32) -> bool {
     compaction::can_split_after(&messages, index as usize)
 }
 
-/// Select user messages compaction keeps verbatim, with head/tail split.
-///
-/// Input: lightweight projection of user messages (role + text + tokens).
-/// Output: indices into the input + truncation info for TS to rebuild.
 #[napi]
 pub fn native_select_compaction_user_messages(
     messages: Vec<compaction::HandoffMessageMeta>,
@@ -639,55 +428,22 @@ pub fn native_select_compaction_user_messages(
     compaction::select_compaction_user_messages(&messages, max_tokens, head_tokens)
 }
 
-/// Estimate token count from text using a character-based heuristic.
-///
-/// ASCII: ~4 chars per token. Non-ASCII (CJK, emoji): ~1 char per token.
-/// Matches the TS `estimateTokens` in the retired fork-only kosong module
-/// `packages/agent-core-v2/src/kosong/contract/tokens.ts`.
-///
-/// Uses byte-level UTF-8 scanning — counts start bytes of multi-byte
-/// sequences instead of decoding code points, giving identical results
-/// with SIMD-friendly byte comparisons.
 #[napi]
 pub fn native_estimate_tokens(text: String) -> u32 {
     tokens::estimate_tokens(&text) as u32
 }
 
-/// Batch token estimation — sums token counts across multiple strings
-/// in a single napi call. Equivalent to calling `native_estimate_tokens`
-/// per string and summing, but with one boundary crossing instead of N.
-///
-/// Use this when estimating tokens for a full message (role + content
-/// parts + tool calls) or a set of tools (names + descriptions + schemas).
 #[napi]
 pub fn native_estimate_tokens_batch(texts: Vec<String>) -> u32 {
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
     tokens::estimate_tokens_batch(&refs) as u32
 }
 
-/// Truncate text to fit within a token budget, keeping the END.
-///
-/// Walks bytes backward, skipping UTF-8 continuation bytes to consume
-/// multi-byte sequences whole. Mirrors `truncateTextToTokensFromEnd`
-/// in `packages/agent-core-v2/src/agent/contextMemory/compactionHandoff.ts`.
 #[napi]
 pub fn native_truncate_text_to_tokens_from_end(text: String, max_tokens: u32) -> String {
     tokens::truncate_text_to_tokens_from_end(&text, max_tokens as usize)
 }
 
-// ============================================================================
-// Tool access conflict detection
-// ============================================================================
-
-/// Check whether any access in `left` conflicts with any access in `right`.
-///
-/// Two accesses conflict when they touch overlapping file paths and at
-/// least one side writes. Read-only accesses (read, search) never conflict
-/// with each other. `kind: "all"` conflicts with everything.
-///
-/// @param left - Array of tool access metadata.
-/// @param right - Array of tool access metadata.
-/// @returns True if any pair conflicts.
 #[napi]
 pub fn native_tool_accesses_conflict(
     left: Vec<ToolAccessMeta>,
@@ -696,29 +452,17 @@ pub fn native_tool_accesses_conflict(
     tool_access::conflict(&left, &right)
 }
 
-// ============================================================================
-// Image compression & cropping
-// ============================================================================
-
-/// Configuration for `native_compress_image`. All fields are required because
-/// the caller (TS wrapper) owns the fast-path checks and passes the resolved
-/// budgets here.
 #[napi(object)]
 pub struct NativeCompressImageConfig {
-    /// Longest-edge ceiling in pixels.
     pub max_edge: u32,
-    /// Raw-byte budget for the encoded result.
+
     pub byte_budget: u32,
-    /// Longest-edge step-downs tried when the budget cannot be met at the
-    /// fitted size (e.g. [2000, 1000]).
+
     pub fallback_edges: Vec<u32>,
-    /// JPEG quality steps tried in descending order (e.g. [80, 60, 40, 20]).
+
     pub jpeg_quality_steps: Vec<u32>,
 }
 
-/// Result of `native_compress_image`. When `changed` is false the caller
-/// should send the original bytes; when true, `data` holds the re-encoded
-/// image. `None` (the outer `Option`) means decode/encode failed entirely.
 #[napi(object)]
 pub struct NativeCompressImageResult {
     pub data: Uint8Array,
@@ -732,28 +476,22 @@ pub struct NativeCompressImageResult {
     pub final_byte_length: u32,
 }
 
-/// Configuration for `native_crop_image`.
 #[napi(object)]
 pub struct NativeCropImageConfig {
     pub max_edge: u32,
     pub byte_budget: u32,
-    /// Keep the crop at native resolution (no edge-fit downscale). The byte
-    /// budget still applies.
+
     pub skip_resize: bool,
     pub fallback_edges: Vec<u32>,
     pub jpeg_quality_steps: Vec<u32>,
 }
 
-/// Outcome of `native_crop_image`. A single struct (rather than a Result) so
-/// the napi boundary never throws — `ok` discriminates success vs. failure,
-/// matching the TS `CropImageOutcome` union.
 #[napi(object)]
 pub struct NativeCropImageOutcome {
     pub ok: bool,
-    /// Error message when `ok` is false; empty string on success.
+
     pub error: String,
-    /// Stable error kind for telemetry (e.g. "out_of_bounds", "budget",
-    /// "decode_failed"). Empty string on success. Matches TS `CropErrorKind`.
+
     pub error_kind: String,
     pub data: Uint8Array,
     pub mime_type: String,
@@ -770,15 +508,6 @@ pub struct NativeCropImageOutcome {
     pub final_byte_length: u32,
 }
 
-/// Compress (resize + re-encode) `data` to fit the pixel + byte budget.
-///
-/// Async: decode/resize/encode runs on tokio's blocking thread pool so the
-/// Node event loop stays responsive during large image work.
-///
-/// Returns `null` when the format is unsupported or decode/encode fails
-/// (caller passes through the original bytes). Returns a result with
-/// `changed: false` when the re-encode didn't help (caller still sends the
-/// original). Returns `changed: true` when the result is smaller — use `data`.
 #[napi]
 pub async fn native_compress_image(
     data: Uint8Array,
@@ -814,11 +543,6 @@ pub async fn native_compress_image(
     }))
 }
 
-/// Crop `region` out of `data` and encode it for the model.
-///
-/// Async: runs on tokio's blocking thread pool. Returns an outcome struct
-/// (never throws): `ok: false` carries an `error` message safe to surface
-/// to the model; `ok: true` carries the encoded crop.
 #[napi]
 pub async fn native_crop_image(
     data: Uint8Array,
@@ -898,37 +622,17 @@ pub async fn native_crop_image(
     })
 }
 
-// ============================================================================
-// Tool output truncation (ToolResultBuilder.write)
-// ============================================================================
-
-/// Result of `native_write_tool_output_chunk`. The caller appends `output`
-/// to its JS buffer, updates its `nChars` to `newNchars`, and sets
-/// `truncated` to the returned flag.
 #[napi(object)]
 pub struct NativeWriteChunkResult {
-    /// Processed text (truncated lines + optional marker) to append to the
-    /// caller's buffer.
     pub output: String,
-    /// UTF-16 code units written this call.
+
     pub chars_written: u32,
-    /// Updated total UTF-16 code units.
+
     pub new_nchars: u32,
-    /// Whether truncation has occurred (cumulative).
+
     pub truncated: bool,
 }
 
-/// Process one chunk of streaming tool output, applying line-length and
-/// total-character budgets. Mirrors `ToolResultBuilder.write()` in
-/// `result-builder.ts`. The TS caller holds the running state and calls
-/// this function for each incoming text chunk.
-///
-/// @param text - The raw text chunk to process.
-/// @param currentNchars - Total UTF-16 code units already in the buffer.
-/// @param maxChars - Maximum total UTF-16 code units allowed.
-/// @param maxLineLength - Per-line maximum, or `null` for no per-line limit.
-///   Caller guarantees > 14 (marker length) when non-null.
-/// @param alreadyTruncated - Whether truncation already occurred previously.
 #[napi]
 pub fn native_write_tool_output_chunk(
     text: String,
@@ -952,74 +656,42 @@ pub fn native_write_tool_output_chunk(
     }
 }
 
-// ============================================================================
-// XML/HTML escaping
-// ============================================================================
-
-/// Escape all XML-significant characters: & < > "
 #[napi]
 pub fn native_escape_xml(text: String) -> String {
     escape::escape_xml(&text)
 }
 
-/// Escape XML attribute boundary characters only: & "
 #[napi]
 pub fn native_escape_xml_attr(text: String) -> String {
     escape::escape_xml_attr(&text)
 }
 
-/// Escape tag delimiters only: < > (Markdown-safe)
 #[napi]
 pub fn native_escape_xml_tags(text: String) -> String {
     escape::escape_xml_tags(&text)
 }
 
-// ============================================================================
-// MCP tool name sanitization
-// ============================================================================
-
-/// Sanitize a string for use as part of an MCP tool name.
-/// Replaces non-safe characters with `_` and collapses runs of `_`.
 #[napi]
 pub fn native_sanitize_mcp_name_part(part: String) -> String {
     tool_naming::sanitize_mcp_name_part(&part)
 }
 
-/// Check if a tool name starts with the MCP prefix (`mcp__`).
 #[napi]
 pub fn native_is_mcp_tool_name(name: String) -> bool {
     tool_naming::is_mcp_tool_name(&name)
 }
 
-/// Produce the qualified MCP tool name: `mcp__<server>__<tool>`.
-/// Truncates with a deterministic 8-char FNV-1a hash suffix if > 64 chars.
 #[napi]
 pub fn native_qualify_mcp_tool_name(server_name: String, tool_name: String) -> String {
     tool_naming::qualify_mcp_tool_name(&server_name, &tool_name)
 }
 
-// ============================================================================
-// Engine state store
-// ============================================================================
-
-/// Read one engine state domain for a workspace, as the JSON the store holds,
-/// or `null` when the domain has no stored state.
-///
-/// The store lives under `<home>/.kimi-code/engine-state/<key>/state/`, where
-/// `<key>` is a digest of the canonicalized workspace path. The host cannot
-/// reproduce that layout without duplicating the derivation, so it asks here
-/// instead of guessing a path — the previous host-side guess read
-/// `<sessionDir>/todo.json`, which nothing ever writes.
 #[napi]
 pub fn native_read_engine_state(
     workspace_root: String,
     domain: String,
     session_id: Option<String>,
 ) -> Option<String> {
-    // The napi export keeps its `Option<String>` shape (the host reads `null`
-    // as "no state"), so a failed read is folded here, explicitly and with a
-    // log — the alternative is an unreadable domain silently looking unset on
-    // the host side.
     match crate::storage::state_store::read_scoped_state(
         std::path::Path::new(&workspace_root),
         session_id.as_deref(),
@@ -1033,13 +705,6 @@ pub fn native_read_engine_state(
     }
 }
 
-/// Pop the newest `count` state checkpoints of one session (native undo).
-///
-/// The engine pushes one snapshot per undo-anchor turn; `undoHistory` cuts the
-/// same number of turns from the transcript, so it asks the owner of the
-/// checkpoint stack to unwind them. Returns how many snapshots were consumed
-/// — an exhausted stack (a session that never checkpointed, or a fork that
-/// only copied history) is normal and simply stops early.
 #[napi]
 pub fn native_rollback_engine_state(workspace_root: String, session_id: String, count: u32) -> u32 {
     crate::storage::state_store::rollback_scoped_state(
@@ -1049,12 +714,6 @@ pub fn native_rollback_engine_state(workspace_root: String, session_id: String, 
     ) as u32
 }
 
-/// How many state checkpoints one session still holds (native undo gating).
-///
-/// The transcript cut and the state rollback are one operation, so an undo the
-/// checkpoint stack cannot cover is refused before anything moves (v2
-/// `checkpoint_lost`). The host cannot count the files itself — the layout is
-/// a digest of the canonicalized workspace path — so it asks here first.
 #[napi]
 pub fn native_engine_state_checkpoint_depth(workspace_root: String, session_id: String) -> u32 {
     crate::storage::StateStore::for_session(std::path::Path::new(&workspace_root), &session_id)
@@ -1062,14 +721,6 @@ pub fn native_engine_state_checkpoint_depth(workspace_root: String, session_id: 
         .unwrap_or(0)
 }
 
-/// The post-jitter next fire (epoch ms) for one stored cron entry, or `null`
-/// when its expression never fires again.
-///
-/// The host cannot reproduce the parser, the local timezone, or the jitter
-/// derivation, so a host listing the registry (the SDK's `getCronTasks`)
-/// asks here instead of guessing — the same reason
-/// [`native_read_engine_state`] exists. `entry_json` is the stored entry
-/// object (`id` / `cron` / `recurring` / `createdAt`).
 #[napi]
 pub fn native_cron_next_fire(entry_json: String, from_ms: i64) -> Option<i64> {
     let entry: crate::cron::scheduler::CronEntry = serde_json::from_str(&entry_json).ok()?;
@@ -1080,18 +731,12 @@ pub fn native_cron_next_fire(entry_json: String, from_ms: i64) -> Option<i64> {
     )
 }
 
-// ============================================================================
-// Workspace Index — file metadata index for tool predictions
-// ============================================================================
-
 use std::sync::Mutex;
 
 use crate::native::workspace_index;
 
-/// Global workspace index, built once at workspace load time.
 static WORKSPACE_INDEX: Mutex<Option<workspace_index::WorkspaceIndex>> = Mutex::new(None);
 
-/// Result of a prediction.
 #[napi(object)]
 pub struct NativeReadPrediction {
     pub line_count: i32,
@@ -1100,13 +745,6 @@ pub struct NativeReadPrediction {
     pub estimated_read_ms: i32,
 }
 
-/// Build the workspace index by scanning `root` recursively.
-///
-/// This is a blocking operation. For large workspaces, it may take
-/// 100ms–2s. Call once at workspace load time.
-///
-/// @param root - Absolute path to the workspace root directory.
-/// @returns Number of files indexed.
 #[napi]
 pub fn native_build_workspace_index(root: String) -> u32 {
     let index = workspace_index::WorkspaceIndex::build(&root);
@@ -1116,14 +754,6 @@ pub fn native_build_workspace_index(root: String) -> u32 {
     count as u32
 }
 
-/// Get a Read prediction from the workspace index.
-///
-/// Returns `null` if:
-///   - No index has been built (call `nativeBuildWorkspaceIndex` first)
-///   - The file is not in the index
-///
-/// @param path - Absolute path to the file.
-/// @returns Prediction or null.
 #[napi]
 pub fn native_workspace_index_predict_read(path: String) -> Option<NativeReadPrediction> {
     let guard = WORKSPACE_INDEX.lock().ok()?;
@@ -1137,13 +767,8 @@ pub fn native_workspace_index_predict_read(path: String) -> Option<NativeReadPre
     })
 }
 
-// ============================================================================
-// Path access — canonicalization and containment
-// ============================================================================
-
 use crate::native::path_access;
 
-/// Normalize a user path (Win32/Cygwin drive conversion).
 #[napi]
 pub fn native_path_normalize_user_path(path: String, path_class: String) -> String {
     let class =
@@ -1151,7 +776,6 @@ pub fn native_path_normalize_user_path(path: String, path_class: String) -> Stri
     path_access::normalize_user_path(&path, class)
 }
 
-/// Expand `~` → home directory.
 #[napi]
 pub fn native_path_expand_user_path(
     path: String,
@@ -1163,8 +787,6 @@ pub fn native_path_expand_user_path(
     path_access::expand_user_path(&path, home_dir.as_deref(), class)
 }
 
-/// Lexical canonicalization: relative → absolute → normalize.
-/// Returns "ERROR: <code>: <message>" on failure (mirrors TS PathSecurityError).
 #[napi]
 pub fn native_path_canonicalize(path: String, cwd: String, path_class: String) -> String {
     let class =
@@ -1175,7 +797,6 @@ pub fn native_path_canonicalize(path: String, cwd: String, path_class: String) -
     }
 }
 
-/// Component-boundary prefix check.
 #[napi]
 pub fn native_path_is_within_directory(
     candidate: String,
@@ -1187,7 +808,6 @@ pub fn native_path_is_within_directory(
     path_access::is_within_directory(&candidate, &base, class)
 }
 
-/// Multi-root workspace containment.
 #[napi]
 pub fn native_path_is_within_workspace(
     candidate: String,
@@ -1199,24 +819,13 @@ pub fn native_path_is_within_workspace(
     path_access::is_within_workspace(&candidate, &roots, class)
 }
 
-// ============================================================================
-// Permission — DSL pattern parsing
-// ============================================================================
-
-/// Parse a permission rule DSL pattern.
-/// Returns JSON `{"toolName":"...","argPattern":...}` or `"ERROR: ..."` on failure.
 #[napi]
 pub fn native_parse_permission_pattern(pattern: String) -> String {
     permission::native_parse_permission_pattern(pattern)
 }
 
-// ============================================================================
-// FetchUrl — HTTP fetch with SSRF protection and HTML extraction
-// ============================================================================
-
 use crate::native::fetch_url;
 
-/// Result of `native_fetch_url`.
 #[napi(object)]
 pub struct NativeFetchUrlResult {
     pub content: String,
@@ -1225,15 +834,6 @@ pub struct NativeFetchUrlResult {
     pub error: Option<String>,
 }
 
-/// Fetch a URL with SSRF protection, redirect handling, and HTML extraction.
-///
-/// Runs entirely on a blocking thread — the Node event loop stays responsive.
-///
-/// @param url - The URL to fetch.
-/// @param user_agent - Custom User-Agent header.
-/// @param max_bytes - Maximum response body size in bytes.
-/// @param allow_private - Allow fetching private/loopback addresses.
-/// @param timeout_ms - Request timeout in milliseconds.
 #[napi]
 pub async fn native_fetch_url(
     url: String,
@@ -1272,18 +872,12 @@ pub async fn native_fetch_url(
     }
 }
 
-// ============================================================================
-// LLM Stream — HTTP SSE streaming with provider-specific event decoding
-// ============================================================================
-
-/// Configuration for `native_llm_stream`.
 #[napi(object)]
 pub struct NativeLlmStreamConfig {
     pub provider: String,
     pub url: String,
     pub api_key: String,
-    /// Kept for wire compatibility with TS callers. The native stream does
-    /// not read it — the model name already rides inside `request_body`.
+
     pub model: String,
     pub request_body: String,
     pub timeout_ms: Option<u32>,
@@ -1296,7 +890,6 @@ pub struct NativeLlmStreamHeader {
     pub value: String,
 }
 
-/// A single streamed part from the LLM.
 #[napi(object)]
 #[derive(Clone)]
 pub struct NativeLlmStreamPart {
@@ -1311,17 +904,14 @@ pub struct NativeLlmStreamPart {
     pub stream_index: Option<u32>,
 }
 
-/// One callback event forwarded to JS during an incremental stream.
 #[napi(object)]
 pub struct NativeLlmStreamEvent {
-    /// `"part"` | `"done"` | `"error"`
     pub kind: String,
     pub part: Option<NativeLlmStreamPart>,
     pub metadata: Option<NativeLlmStreamMetadata>,
     pub error: Option<String>,
 }
 
-/// Metadata returned when the stream completes.
 #[napi(object)]
 pub struct NativeLlmStreamMetadata {
     pub response_id: Option<String>,
@@ -1332,9 +922,6 @@ pub struct NativeLlmStreamMetadata {
     pub trace_id: Option<String>,
 }
 
-/// Result of `native_llm_stream` — all parts + metadata in one response.
-/// For the initial implementation, we collect all events and return them
-/// at once. A future iteration will use TSFN for true streaming callbacks.
 #[napi(object)]
 pub struct NativeLlmStreamResult {
     pub parts: Vec<NativeLlmStreamPart>,
@@ -1342,12 +929,6 @@ pub struct NativeLlmStreamResult {
     pub error: Option<String>,
 }
 
-/// Execute an LLM streaming request and return all decoded parts.
-///
-/// The Rust side handles: HTTP POST, SSE parsing, provider-specific event
-/// decoding. Returns all parts collected from the stream plus metadata.
-///
-/// @param config - Stream configuration (provider, url, api_key, request_body, etc.)
 #[napi]
 pub async fn native_llm_stream(config: NativeLlmStreamConfig) -> NativeLlmStreamResult {
     let stream_config = llm_stream::LlmStreamConfig {
@@ -1424,24 +1005,6 @@ pub async fn native_llm_stream(config: NativeLlmStreamConfig) -> NativeLlmStream
     }
 }
 
-/// Streaming variant of `native_llm_stream`.
-///
-/// Runs the same Rust SSE pipeline but forwards each decoded part to the
-/// provided JS callback as it arrives, via a ThreadsafeFunction — the JS side
-/// observes parts incrementally instead of after the whole stream completes
-/// (real streaming, matching the SDK providers' chunked delivery).
-///
-/// The function returns immediately; `on_event` receives
-/// `{ kind: 'part'|'done'|'error', part?, metadata?, error? }` objects as the
-/// stream progresses. The stream runs on a process-wide lazily-created
-/// shared tokio runtime (the napi async runtime is private and the JsFunction
-/// handle cannot cross into the `#[napi] async` future). A multi-thread
-/// runtime with 2 workers is used: stream concurrency is low (typically one
-/// stream per CLI session), but a shared current-thread runtime cannot drive
-/// multiple spawned streams without a blocking caller, so multi-thread keeps
-/// semantics simple at negligible cost. The runtime and its 2 worker threads
-/// are process-resident: once created on the first streaming call, they are
-/// never torn down for the lifetime of the process.
 #[napi]
 pub fn native_llm_stream_streaming(
     config: NativeLlmStreamConfig,
@@ -1486,13 +1049,6 @@ pub fn native_llm_stream_streaming(
 
     match llm_stream_runtime() {
         Ok(rt) => {
-            // Keep the JoinHandle: a panic inside the stream task would
-            // otherwise vanish into the runtime, and because the JS consumer
-            // treats only `done`/`error` as terminal it would then wait forever.
-            // `native_web_search` already maps a JoinError into a result; this
-            // path did not.
-            // `tsfn` is moved into the worker below, so keep one clone for the
-            // reaper's failure report.
             let worker_tsfn = tsfn.clone();
             let handle = rt.spawn(async move {
                 let result = llm_stream::run_llm_stream_with(&stream_config, |event| {
@@ -1533,8 +1089,7 @@ pub fn native_llm_stream_streaming(
                             error: Some(e),
                         },
                     };
-                    // NonBlocking: just enqueue for the JS event loop; never blocks the
-                    // SSE decode loop.
+
                     worker_tsfn.call(
                         Ok(js_event),
                         napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
@@ -1597,12 +1152,6 @@ pub fn native_llm_stream_streaming(
     Ok(())
 }
 
-/// Process-wide lazily-created shared tokio runtime for LLM streaming tasks.
-///
-/// Built once per process instead of one current-thread runtime per stream
-/// call: runtime creation (thread spawn + io/time drivers) is the dominant
-/// per-call overhead. Initialization failures are not cached, so a later
-/// stream call retries the build.
 static LLM_STREAM_RUNTIME: once_cell::sync::OnceCell<tokio::runtime::Runtime> =
     once_cell::sync::OnceCell::new();
 
@@ -1610,9 +1159,6 @@ fn llm_stream_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     LLM_STREAM_RUNTIME.get_or_try_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            // Stream concurrency is low (typically one stream per CLI session);
-            // 2 workers give headroom for concurrent streams without spawning
-            // a worker per CPU.
             .worker_threads(2)
             .thread_name("kimi-llm-stream")
             .build()
@@ -1620,14 +1166,9 @@ fn llm_stream_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     })
 }
 
-// ============================================================================
-// WebSearch — DuckDuckGo HTML scraping
-// ============================================================================
-
 use crate::native::llm_stream;
 use crate::native::web_search;
 
-/// A single search result entry.
 #[napi(object)]
 pub struct NativeWebSearchEntry {
     pub title: String,
@@ -1636,20 +1177,12 @@ pub struct NativeWebSearchEntry {
     pub site_name: Option<String>,
 }
 
-/// Result of `native_web_search`.
 #[napi(object)]
 pub struct NativeWebSearchResult {
     pub results: Vec<NativeWebSearchEntry>,
     pub error: Option<String>,
 }
 
-/// Search DuckDuckGo and return structured results.
-///
-/// Runs entirely on a blocking thread — the Node event loop stays responsive.
-///
-/// @param query - The search query.
-/// @param timeout_ms - Request timeout in milliseconds.
-/// @param max_results - Maximum number of results to return.
 #[napi]
 pub async fn native_web_search(
     query: String,
@@ -1692,11 +1225,6 @@ pub async fn native_web_search(
 mod tests {
     use super::*;
 
-    /// The depth the host gates undo on is the session's own stack: a fresh
-    /// session answers zero, a pushed anchor adds one, and the rollback that
-    /// consumes it takes it back. A session that never checkpointed (a fork
-    /// copies the transcript only) therefore reports the zero that makes the
-    /// host refuse, instead of silently cutting history the state cannot follow.
     #[test]
     fn test_checkpoint_depth_export_tracks_the_sessions_stack() {
         let dir = tempfile::tempdir().unwrap();
@@ -1711,8 +1239,6 @@ mod tests {
         store.checkpoint().unwrap();
         assert_eq!(depth(), 1);
 
-        // Another session has its own stack; undo is per session, never the
-        // workspace-level one.
         let other = crate::storage::StateStore::for_session(dir.path(), "session-b").unwrap();
         other.checkpoint().unwrap();
         assert_eq!(depth(), 1);

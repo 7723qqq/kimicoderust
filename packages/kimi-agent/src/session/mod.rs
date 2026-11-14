@@ -1,15 +1,63 @@
+#[path = "agentLifecycle/mod.rs"]
+pub mod agent_lifecycle;
+pub mod agent_records;
 pub mod cache_observation;
+pub mod errors;
 pub mod idle_reclaim;
+#[path = "mcp/mod.rs"]
+pub mod mcp;
+#[path = "process/mod.rs"]
+pub mod process;
+#[path = "sessionActivity/mod.rs"]
+pub mod session_activity;
+pub use session_activity as sessionActivity;
+#[path = "sessionAgentProfileCatalog/mod.rs"]
+pub mod session_agent_profile_catalog;
+#[path = "sessionContext/mod.rs"]
+pub mod session_context;
+#[path = "sessionInstructions/mod.rs"]
+pub mod session_instructions;
+#[path = "sessionLog/mod.rs"]
+pub mod session_log_service;
+pub mod session_log;
+#[path = "sessionMetadata/mod.rs"]
+pub mod session_metadata;
+#[path = "sessionTitle/mod.rs"]
+pub mod session_title;
+#[path = "sessionToolPolicy/mod.rs"]
+pub mod session_tool_policy;
+#[path = "sessionToolPolicyGate/mod.rs"]
+pub mod session_tool_policy_gate;
+#[path = "state/mod.rs"]
+pub mod state;
+#[path = "subagent/mod.rs"]
+pub mod subagent;
+#[path = "tokenCounting/mod.rs"]
+pub mod session_token_counting;
+#[path = "usage/mod.rs"]
+pub mod session_usage;
+#[path = "workdir/mod.rs"]
+pub mod workdir;
+#[path = "workspaceContext/mod.rs"]
+pub mod workspace_context;
+#[path = "workspaceInfo/mod.rs"]
+pub mod workspace_info;
+pub use agent_lifecycle as agentLifecycle;
+pub use session_context as sessionContext;
+pub use session_metadata as sessionMetadata;
 pub mod lock;
 pub mod patch;
-pub mod session_log;
 pub mod sqlite_store;
 pub mod title;
 pub mod token_counting;
+#[path = "usage.rs"]
 pub mod usage;
 pub mod wake;
+pub mod wire_journal;
+pub(crate) mod wire_tree;
 
 pub(crate) mod goal_turn;
+pub(crate) mod origin;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -157,6 +205,8 @@ pub struct SessionConfig {
     pub max_context_tokens: Option<u32>,
 
     pub compaction_max_attempts: Option<u32>,
+    /// `[llm_requester].request_byte_budget` (v2 `resolveLlmRequestByteBudget`).
+    pub llm_request_byte_budget: u64,
 
     pub permission_mode: Option<crate::permission::PermissionMode>,
 
@@ -387,6 +437,8 @@ struct SessionContext {
     max_context_tokens: Option<u32>,
     compaction_max_attempts: Option<u32>,
 
+    llm_request_byte_budget: u64,
+
     permission_mode: Option<crate::permission::PermissionMode>,
 
     agent_cancel_slot: Option<Arc<std::sync::Mutex<Option<crate::subagent::types::ParentCancel>>>>,
@@ -497,6 +549,7 @@ impl EngineSession {
             max_attempts: config.max_attempts,
             max_context_tokens: config.max_context_tokens,
             compaction_max_attempts: config.compaction_max_attempts,
+            llm_request_byte_budget: config.llm_request_byte_budget,
             permission_mode: config.permission_mode,
             agent_cancel_slot: config.agent_cancel_slot.clone(),
             steer_slot: config.steer_slot.clone(),
@@ -1225,7 +1278,35 @@ async fn inject_change_notifier_reminders(ctx: &SessionContext, history: &mut Ve
     }
     drop(state);
     for (text, variant) in reminders {
-        history.push(crate::injection::injection_message_named(text, variant));
+        append_injected_message(
+            ctx,
+            history,
+            crate::injection::injection_message_named(text, variant),
+        );
+    }
+}
+
+fn append_injected_message(
+    ctx: &SessionContext,
+    history: &mut Vec<LLMMessage>,
+    message: LLMMessage,
+) {
+    if let Some(context_message) = crate::session::agent_records::context_message(&message) {
+        ctx.callbacks.emit_event(serde_json::json!({
+            "type": "context.append_message",
+            "agentId": crate::callbacks::MAIN_AGENT_ID,
+            "message": context_message,
+        }));
+    }
+    history.push(message);
+}
+
+fn agent_turn_outcome(reason: TurnEndReason) -> Option<&'static str> {
+    match reason {
+        TurnEndReason::Completed => Some("done"),
+        TurnEndReason::Cancelled => Some("aborted"),
+        TurnEndReason::Failed => Some("failed"),
+        TurnEndReason::Blocked => None,
     }
 }
 
@@ -1234,10 +1315,14 @@ fn inject_plugin_reminders(ctx: &SessionContext, history: &mut Vec<LLMMessage>) 
         return;
     };
     if let Some(text) = crate::injection::plugin::take_plugin_change_notices(session_id) {
-        history.push(crate::injection::injection_message_named(
-            text,
-            crate::injection::plugin::PLUGIN_CHANGE_VARIANT,
-        ));
+        append_injected_message(
+            ctx,
+            history,
+            crate::injection::injection_message_named(
+                text,
+                crate::injection::plugin::PLUGIN_CHANGE_VARIANT,
+            ),
+        );
     }
     let Some(toolset) = ctx.toolset.as_ref() else {
         return;
@@ -1249,10 +1334,14 @@ fn inject_plugin_reminders(ctx: &SessionContext, history: &mut Vec<LLMMessage>) 
     if let Some(text) =
         crate::injection::plugin::session_start_reminder(dirs, session_id, history, false)
     {
-        history.push(crate::injection::injection_message_named(
-            text,
-            crate::injection::plugin::PLUGIN_SESSION_START_VARIANT,
-        ));
+        append_injected_message(
+            ctx,
+            history,
+            crate::injection::injection_message_named(
+                text,
+                crate::injection::plugin::PLUGIN_SESSION_START_VARIANT,
+            ),
+        );
     }
 }
 
@@ -1355,12 +1444,30 @@ async fn pump(
         }
         let (display_prompt, prompt_attachments) =
             crate::turn_events::started_display(&input, &origin);
+        let user_entry = {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                "source".to_string(),
+                serde_json::json!(crate::session::agent_records::origin_source(&origin)),
+            );
+            if let Some(id) = &prompt_id {
+                meta.insert("promptId".to_string(), serde_json::json!(id));
+            }
+            if origin.is_object() {
+                meta.insert("origin".to_string(), origin.clone());
+            }
+            serde_json::json!({
+                "message": { "role": "user", "content": input.clone() },
+                "meta": meta,
+            })
+        };
         ctx.callbacks.turn_event(TurnEvent::Prompt {
             turn_id,
             prompt_id: prompt_id.clone(),
             input,
             origin: origin.clone(),
         });
+        let queue_item_id = prompt_id.clone();
         ctx.callbacks.turn_event(TurnEvent::Started {
             turn_id,
             prompt_id,
@@ -1368,6 +1475,21 @@ async fn pump(
             prompt: display_prompt,
             prompt_attachments,
         });
+        let mut turn_started = serde_json::json!({
+            "type": "agent.turn.started",
+            "agent_id": crate::callbacks::MAIN_AGENT_ID,
+            "kind": "event",
+            "turnId": turn_id,
+        });
+        if let Some(queue_item_id) = &queue_item_id {
+            turn_started["queueItemId"] = serde_json::json!(queue_item_id);
+        }
+        ctx.callbacks.emit_event(turn_started);
+        let mut appended = user_entry;
+        appended["type"] = serde_json::json!("agent.message.appended");
+        appended["agent_id"] = serde_json::json!(crate::callbacks::MAIN_AGENT_ID);
+        appended["kind"] = serde_json::json!("event");
+        ctx.callbacks.emit_event(appended);
         if let Some(ref guard) = ctx.hook_guard {
             guard
                 .notify_turn_started(turn_id, &origin, &prompt.content)
@@ -1518,6 +1640,23 @@ async fn pump(
                 trace_id: Some(format!("turn-{turn_id}")),
                 stop_reason: forced_stop_reason_of(&result.stop_reason),
             });
+            for message in result.messages.iter().skip(1 + history_len) {
+                if let Some(mut entry) = crate::session::agent_records::history_entry(message) {
+                    entry["type"] = serde_json::json!("agent.message.appended");
+                    entry["agent_id"] = serde_json::json!(crate::callbacks::MAIN_AGENT_ID);
+                    entry["kind"] = serde_json::json!("event");
+                    ctx.callbacks.emit_event(entry);
+                }
+            }
+            if let Some(agent_outcome) = agent_turn_outcome(reason) {
+                ctx.callbacks.emit_event(serde_json::json!({
+                    "type": "agent.turn.ended",
+                    "agent_id": crate::callbacks::MAIN_AGENT_ID,
+                    "kind": "event",
+                    "turnId": turn_id,
+                    "outcome": agent_outcome,
+                }));
+            }
             if let Some(ref guard) = ctx.hook_guard {
                 notify_agent_turn_end(guard, turn_id, AgentTurnEnd::Ran(result)).await;
             }
@@ -1532,6 +1671,14 @@ async fn pump(
                 trace_id: Some(format!("turn-{turn_id}")),
                 stop_reason: None,
             });
+            ctx.callbacks.emit_event(serde_json::json!({
+                "type": "agent.turn.ended",
+                "agent_id": crate::callbacks::MAIN_AGENT_ID,
+                "kind": "event",
+                "turnId": turn_id,
+                "outcome": "failed",
+                "errorMessage": e,
+            }));
             if let Some(ref guard) = ctx.hook_guard {
                 notify_agent_turn_end(guard, turn_id, AgentTurnEnd::Failed(e.as_str())).await;
             }
@@ -1905,7 +2052,7 @@ pub(crate) fn render_task_notifications(
     notifications
         .iter()
         .map(|notification| {
-            if notification.task_id == crate::tools::tower::TOWER_WAKE_TASK_ID {
+            if notification.task_id == crate::features::tower::wake::TOWER_WAKE_TASK_ID {
                 return notification.description.clone();
             }
 
@@ -2118,6 +2265,7 @@ async fn run_session_turn(
     let mut messages = history;
     messages.push(prompt);
     let input = RunTurnInput {
+        llm_request_byte_budget: ctx.llm_request_byte_budget,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted,
         max_attempts: ctx.max_attempts,
@@ -2280,7 +2428,24 @@ impl HostCallbacks for SteerQueueCallbacks {
                 *slot.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(crate::subagent::types::ParentCancel::new());
             }
-            Ok(drained)
+            if drained.is_empty() {
+                return Ok(Vec::new());
+            }
+            let prompt_id = if drained.len() == 1 {
+                drained[0].prompt_id.clone()
+            } else {
+                None
+            };
+            let mut merged = origin::merge_steer_messages(&drained);
+            merged.prompt_id = prompt_id;
+            if let Some(origin) = merged
+                .origin
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                origin.insert("inTurn".into(), serde_json::Value::Bool(true));
+            }
+            Ok(vec![merged])
         })
     }
 

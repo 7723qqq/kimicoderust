@@ -16,6 +16,35 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use crate::_base::di::lifecycle::{DisposableRef, to_disposable};
+
+/// The event set carried by one [`Hooks`] container (v2 `Hooks<TEvents>`).
+pub trait HookEvents {
+    type OnWillStartAgentTask;
+}
+
+/// The hook slots for one event set (v2 `Hooks<TEvents>`). The Rust port
+/// materializes the mapped type as a struct with one field per event.
+pub struct Hooks<T: HookEvents> {
+    pub on_will_start_agent_task: OrderedHookSlot<T::OnWillStartAgentTask>,
+}
+
+impl<T: HookEvents> Clone for Hooks<T> {
+    fn clone(&self) -> Self {
+        Self {
+            on_will_start_agent_task: self.on_will_start_agent_task.clone(),
+        }
+    }
+}
+
+impl<T: HookEvents> Default for Hooks<T> {
+    fn default() -> Self {
+        Self {
+            on_will_start_agent_task: OrderedHookSlot::new(),
+        }
+    }
+}
+
 /// The continuation every hook handler receives.
 pub type BoxHookFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
@@ -100,7 +129,7 @@ impl<T: Clone + Send + 'static> OrderedHookSlot<T> {
         options: HookRegisterOptions,
     ) -> Result<HookRegistration<T>, String> {
         if options.before.is_some() && options.after.is_some() {
-            return Err("hook registration cannot specify both before and after".into());
+            return Err("Hook registration cannot specify both before and after".into());
         }
         let mut entries = self.lock();
         entries.retain(|entry| entry.id != id);
@@ -114,7 +143,7 @@ impl<T: Clone + Send + 'static> OrderedHookSlot<T> {
                 let index = entries
                     .iter()
                     .position(|candidate| &candidate.id == target)
-                    .ok_or_else(|| format!("hook target \"{target}\" is not registered"))?;
+                    .ok_or_else(|| format!("Hook target \"{target}\" is not registered"))?;
                 let insert_at = if options.before.is_some() {
                     index
                 } else {
@@ -138,8 +167,19 @@ impl<T: Clone + Send + 'static> OrderedHookSlot<T> {
     }
 
     /// Whether `id` is registered.
-    pub fn contains(&self, id: &str) -> bool {
+    fn contains(&self, id: &str) -> bool {
         self.lock().iter().any(|entry| entry.id == id)
+    }
+
+    pub fn as_disposable(&self, id: &str) -> DisposableRef {
+        let entries = self.entries.clone();
+        let id = id.to_string();
+        to_disposable(move || {
+            entries
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .retain(|entry| entry.id != id);
+        })
     }
 
     /// Run the chain over `context`, with a no-op terminal.
@@ -174,8 +214,13 @@ impl<T: Clone + Send + 'static> OrderedHookSlot<T> {
     }
 }
 
+pub fn create_hooks<T: HookEvents>(_keys: &[&str]) -> Arc<Hooks<T>> {
+    Arc::new(Hooks::default())
+}
+
 /// The continuation handed to a handler. Consuming it runs the handler at
 /// `index` (or the terminal when the chain is exhausted).
+#[derive(Clone)]
 pub struct HookNext<T> {
     entries: Arc<Vec<Arc<HookEntry<T>>>>,
     index: usize,

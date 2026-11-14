@@ -1,41 +1,13 @@
-//! Bearer-token authentication for the native API, modelled on the rules
-//! `packages/kap-server` enforces so one client credential works against either
-//! server.
-//!
-//! Mirrored:
-//!
-//! - the credential is `Authorization: Bearer <token>` on REST, and a
-//!   `kimi-code.bearer.<token>` subprotocol on the WebSocket upgrade, because a
-//!   browser cannot set headers on a WebSocket handshake;
-//! - a token is 32 random bytes as base64url (43 chars, unpadded), the same
-//!   shape as kap-server's `server.token`, and read from / written to the same
-//!   file;
-//! - a rejected request gets `401` with the `{code: 40101, message:
-//!   "Unauthorized"}` envelope;
-//! - `OPTIONS`, the health route and the two schema documents need no
-//!   credential.
-//!
-//! Not mirrored, deliberately: kap-server's per-IP failure limiter (a separate
-//! middleware there), and its rule that non-`/api/` paths serve static web
-//! assets — this server has none, so an unknown path is a 404, not a bypass.
-
 use std::sync::Arc;
 
 use base64::prelude::*;
 
 const BEARER_PREFIX: &str = "Bearer ";
 
-/// The subprotocol a browser uses to carry the token into a WebSocket upgrade.
 pub const WS_BEARER_PREFIX: &str = "kimi-code.bearer.";
 
-/// Random bytes behind a generated token (base64url of 32 bytes is 43 chars).
 const TOKEN_BYTES: usize = 32;
 
-/// Whether a request may proceed.
-///
-/// `Missing` and `Invalid` are kept apart for the server's own use — a future
-/// failure limiter bans on `Invalid` and not on `Missing`. The client sees the
-/// same 401 envelope for both, matching kap-server's `middleware/auth.ts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Allowed,
@@ -49,21 +21,14 @@ impl Decision {
     }
 }
 
-/// The credential a running server checks against.
 #[derive(Clone)]
 pub enum ServerAuth {
-    /// A token must match. `Arc<str>` so a connection task checks without
-    /// copying the secret per request.
     Token(Arc<str>),
-    /// Auth turned off behind an explicit flag. Correct only on a loopback bind.
+
     Disabled,
 }
 
 impl ServerAuth {
-    /// Read the token from `path`, or generate one, persist it, and return it.
-    ///
-    /// Sharing kap-server's `server.token` means an existing web UI or editor
-    /// client keeps working when pointed at this server instead of kap-server.
     pub fn load_or_create(path: &std::path::Path) -> Result<Self, std::io::Error> {
         if let Ok(existing) = std::fs::read_to_string(path) {
             let token = existing.trim();
@@ -73,17 +38,11 @@ impl ServerAuth {
         }
 
         let token = generate_token()?;
-        // 0600 matters: this file is a credential, and the default mode would
-        // leave it group-readable on POSIX.
+
         write_private(path, token.as_bytes())?;
         Ok(Self::Token(Arc::from(token.as_str())))
     }
 
-    /// Where kap-server keeps its token: `<kimi home>/server.token`.
-    ///
-    /// The home resolution mirrors `resolveKimiHome` in agent-core-v2 —
-    /// `KIMI_CODE_HOME` wins, else `~/.kimi-code` — so one file serves both
-    /// servers. `config::dirs_home` is not reused: it ignores `KIMI_CODE_HOME`.
     pub fn default_token_path() -> Option<std::path::PathBuf> {
         let home = match std::env::var_os("KIMI_CODE_HOME") {
             Some(from_env) => std::path::PathBuf::from(from_env),
@@ -104,7 +63,6 @@ impl ServerAuth {
         matches!(self, Self::Disabled)
     }
 
-    /// The enforced token, if any. Used for the startup banner only.
     pub fn token(&self) -> Option<&str> {
         match self {
             Self::Token(token) => Some(token),
@@ -112,13 +70,10 @@ impl ServerAuth {
         }
     }
 
-    /// Check a REST request's `Authorization` header.
     pub fn check_bearer(&self, authorization: Option<&str>) -> Decision {
         self.check_token(bearer_value(authorization))
     }
 
-    /// Check a bare token value, as a WebSocket `client_hello` carries it in its
-    /// JSON payload where there is no `Bearer ` prefix to strip.
     pub fn check_token(&self, presented: Option<&str>) -> Decision {
         match self {
             Self::Disabled => Decision::Allowed,
@@ -130,12 +85,6 @@ impl ServerAuth {
         }
     }
 
-    /// Check a WebSocket upgrade, which may carry the token as a bearer header
-    /// (non-browser clients) or as a subprotocol (browsers).
-    ///
-    /// The second return value is the protocol the handshake must echo back:
-    /// RFC 6455 requires the server to select one of the client's offered
-    /// protocols, and a browser client fails the negotiation without it.
     pub fn check_upgrade(
         &self,
         authorization: Option<&str>,
@@ -145,8 +94,6 @@ impl ServerAuth {
             return (Decision::Allowed, selected_bearer_protocol(protocols));
         }
 
-        // A real bearer header takes precedence; no protocol is then negotiated,
-        // since the token did not arrive as one.
         if bearer_value(authorization).is_some() {
             return (self.check_bearer(authorization), None);
         }
@@ -160,14 +107,13 @@ impl ServerAuth {
                 } else {
                     Decision::Invalid
                 };
-                // Echo only what we accepted; a refusal must not negotiate.
+
                 (decision, decision.is_allowed().then_some(protocol))
             }
             (Self::Token(_), None) => (Decision::Missing, None),
         }
     }
 
-    /// Paths reachable without a credential.
     pub fn is_bypassed(method: &str, path: &str) -> bool {
         if method.eq_ignore_ascii_case("OPTIONS") {
             return true;
@@ -176,27 +122,19 @@ impl ServerAuth {
         if method != "GET" && method != "HEAD" {
             return false;
         }
-        // Non-API routes (static assets, SPA fallback, schemas) are reachable without credentials.
-        // kap-server's defaultIsBypassed uses `!path.startsWith('/api/')`; dropping the trailing
-        // slash here also bypasses the bare `/api` path.
+
         if !path.starts_with("/api") {
             return true;
         }
-        // v2 `defaultIsBypassed` exempts exactly the health probe
-        // (`kap-server/src/middleware/auth.ts:36`).
+
         matches!(path, "/api/v1/healthz")
             || path == "/openapi.json"
             || path == "/asyncapi.json"
-            // The MCP OAuth browser callback: the authorization server
-            // redirects a browser here, and a browser carries no bearer token.
-            // The single-use, high-entropy `state` minted by
-            // `auth:begin-auth-code` is the credential this route checks.
             || path == "/api/v1/mcp/auth/callback"
             || path == "/api/v2/mcp/auth/callback"
     }
 }
 
-/// Pull the token out of a `Bearer <token>` header value.
 fn bearer_value(header: Option<&str>) -> Option<&str> {
     let token = header?.trim().strip_prefix(BEARER_PREFIX)?;
     (!token.is_empty()).then_some(token)
@@ -209,14 +147,12 @@ fn protocol_entries(header: Option<&str>) -> impl Iterator<Item = &str> {
         .map(str::trim)
 }
 
-/// The first offered `kimi-code.bearer.*` protocol, verbatim, for echoing.
 fn selected_bearer_protocol(header: Option<&str>) -> Option<String> {
     protocol_entries(header)
         .find(|entry| entry.starts_with(WS_BEARER_PREFIX))
         .map(str::to_string)
 }
 
-/// As above, but only when it actually carries a token.
 fn offered_bearer_protocol(header: Option<&str>) -> Option<String> {
     protocol_entries(header)
         .filter(|entry| entry.starts_with(WS_BEARER_PREFIX))
@@ -225,10 +161,6 @@ fn offered_bearer_protocol(header: Option<&str>) -> Option<String> {
         .next()
 }
 
-/// Compare two secrets without short-circuiting on the first differing byte.
-///
-/// A length mismatch returns early; that reveals only the token length, which
-/// this server always generates at 43 chars.
 fn secret_matches(expected: &str, presented: &str) -> bool {
     let (want, got) = (expected.as_bytes(), presented.as_bytes());
     if want.len() != got.len() {
@@ -240,9 +172,6 @@ fn secret_matches(expected: &str, presented: &str) -> bool {
         == 0
 }
 
-/// Mint the bearer token from the OS CSPRNG (getrandom), not fastrand: a
-/// server token is a credential, and fastrand is a seeded non-cryptographic
-/// PRNG whose output is predictable from a few samples.
 fn generate_token() -> std::io::Result<String> {
     let mut bytes = [0_u8; TOKEN_BYTES];
     getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -262,10 +191,7 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), std::io::Er
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     #[cfg(not(unix))]
-    {
-        // No POSIX mode bits to set: the file inherits the directory's ACL,
-        // which is why a non-loopback bind still needs an explicit opt-in.
-    }
+    {}
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -291,11 +217,9 @@ mod tests {
         assert_eq!(server.check_bearer(Some("Basic tok3n")), Decision::Missing);
         assert_eq!(server.check_bearer(Some("Bearer ")), Decision::Missing);
         assert_eq!(server.check_bearer(Some("Bearer nope")), Decision::Invalid);
-        // Trailing whitespace is tolerated on the value, the way a hand-typed
-        // header deserves to be.
+
         assert!(server.check_bearer(Some("Bearer tok3n  ")).is_allowed());
 
-        // Bare check_token (used in WebSocket client_hello)
         assert_eq!(server.check_token(Some("tok3n")), Decision::Allowed);
         assert_eq!(server.check_token(None), Decision::Missing);
         assert_eq!(server.check_token(Some("nope")), Decision::Invalid);
@@ -428,7 +352,7 @@ mod tests {
             "token must be url-safe"
         );
         assert_ne!(token, "   ", "must not adopt the whitespace string");
-        // Verify token was persisted to disk replacing the blank content
+
         let persisted = std::fs::read_to_string(&path).unwrap();
         assert_eq!(persisted.trim(), token);
 

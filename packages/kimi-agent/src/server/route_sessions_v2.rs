@@ -9,15 +9,6 @@ impl HttpServer {
     ) -> HttpResponse {
         let resp = match (method, path) {
             ("GET", "/api/v2/sessions") => {
-                // The official Web bundle's `listSessionsV2` contract
-                // (upstream `routes/v2/sessions.ts` `v2SessionPageSchema`):
-                // domain-grouped items plus total/has_more/next_page_token.
-                // Page-token pagination is accepted for compatibility and
-                // answered as a single complete page (the fork's session
-                // count is small); `page_token` stays null. `view=by_workspace`
-                // groups the matching set per workspace instead
-                // (`v2SessionGroupPageSchema`), which is what the sessions
-                // sidebar loads first.
                 let sessions = self.store.list_sessions().unwrap_or_default();
                 let engine = self.engine.as_ref();
                 let query_archived = req.query_param("meta.archived").map(|v| v == "true");
@@ -71,11 +62,11 @@ impl HttpServer {
                             "has_prompt": has_prompt,
                         },
                         "activity": {
-                            // v2ActivityStatusSchema vocabulary
-                            // (running/approval/question/failed/idle):
-                            // the bundle's mapper maps `running` → busy
-                            // and `approval`/`question` → pending
-                            // interactions.
+
+
+
+
+
                             "status": if busy { "running" } else { "idle" },
                             "model": model
                         }
@@ -83,9 +74,6 @@ impl HttpServer {
                 }
                 let total = items.len();
                 if view_by_workspace {
-                    // Group every session under its workspace: each group
-                    // carries the workspace object and the first
-                    // `group.page_size` sessions of that workspace.
                     let workspaces = self.store.list_workspaces().unwrap_or_default();
                     let mut groups: Vec<Value> = workspaces
                         .iter()
@@ -107,9 +95,7 @@ impl HttpServer {
                             })
                         })
                         .collect();
-                    // Sessions whose workspace row is missing (deleted row or
-                    // ad-hoc cwd sessions) land in a synthetic group keyed by
-                    // the session's own workspace id so they stay reachable.
+
                     let orphan_workspaces: Vec<Value> = items
                         .iter()
                         .filter(|i| {
@@ -148,10 +134,7 @@ impl HttpServer {
                     }))
                 }
             }
-            // Batch archive/restore (upstream `routes/v2/sessions.ts`): the
-            // official Web bundle posts `{ ids: [...] }` and folds per-item
-            // results; a missing session folds into its own item instead of
-            // failing the whole batch.
+
             ("POST", "/api/v2/sessions:archive") | ("POST", "/api/v2/sessions:restore") => {
                 let restore = req.path.ends_with(":restore");
                 let body: Value = match serde_json::from_slice(&req.body) {
@@ -194,7 +177,7 @@ impl HttpServer {
                     "failed": results.len() - succeeded
                 }))
             }
-            // Tools endpoints
+
             _ => return HttpResponse::route_miss(),
         };
         finalize_response(req, resp)

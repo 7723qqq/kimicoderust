@@ -24,34 +24,6 @@ struct Cursor {
     frame: Option<usize>,
 }
 
-/// Projection layer: `EngineEvent` → `Vec<TranscriptOperation>`, the wire the
-/// REST/WS clients render (`/api/v1/transcript/*`, `transcript.ops`).
-///
-/// ## Relationship to the entry projector (deliberate divergence, audited
-/// 2026-11-04)
-///
-/// `events/project.rs` consumes the same events into `EntryOp` for the Rust
-/// TUI. Two consumers, two output contracts — merging them is wrong; the
-/// *interpretation* of a shared event must not diverge, and the twelve shared
-/// events were audited pairwise (the full notes live on the entry
-/// projector's header). Summary of this side's postures:
-///
-/// - **`llm.delta`**: not handled here, and that is a decision — the WS
-///   clients render the typed deltas (`assistant.delta` / `stream.segment`);
-///   the raw transport part reaches only the entry projector.
-/// - **`tool.call.started` / `completed` catch-up**: this fold *invents* a
-///   frame when a completion arrives with no started frame (a snapshot
-///   catch-up can legitimately see the completion first); the entry fold
-///   drops the same shape as an ordering bug. Different carriers, different
-///   failure posture.
-/// - **`tool.native` / `tool.call.completed`**: the result is kept
-///   structurally (`frame.output` is the JSON value) rather than flattened to
-///   display text — the WS clients render the card; text extraction is the
-///   entry projection's job.
-///
-/// The shared classifications (`Projection::of`) and the raw-delta part
-/// vocabulary (`classify_delta_part`) live in `kimi_ui_core`; coverage is
-/// gated by `bun run check:event-coverage`.
 pub struct TranscriptProjector {
     turns: Vec<TranscriptTurn>,
     turn_indices: HashMap<String, usize>,
@@ -61,25 +33,18 @@ pub struct TranscriptProjector {
     attachments: Vec<TranscriptAttachment>,
     meta: TranscriptMeta,
     cursor: Option<Cursor>,
-    /// Steers folded before their step was open (v2 `pendingSteers`,
-    /// coreEventMap.ts:1438): drained at the next `llm.step.begin`.
+
     pending_steers: Vec<PendingSteer>,
-    /// agent_id → the turn that was running when its spawn folded (upstream
-    /// #3970): the lost-member decision keys off the spawning turn, not the
-    /// parent's current idleness.
+
     spawning_turns: HashMap<String, String>,
 }
 
-/// A buffered steer awaiting the step it lands in (v2 `pendingSteers`,
-/// coreEventMap.ts:1438-1443). Text and prompt ids only: the fork's steer
-/// payload carries no attachments on this path (ROADMAP item 34).
 #[derive(Debug, Clone)]
 struct PendingSteer {
     text: String,
     prompt_ids: Option<Vec<String>>,
 }
 
-/// v2 `isTerminalPromptStatus` (coreEventMap.ts:1562).
 fn is_terminal_prompt_status(status: TranscriptPromptStatus) -> bool {
     matches!(
         status,
@@ -106,16 +71,10 @@ impl TranscriptProjector {
         }
     }
 
-    /// Fold one live event: no journal timestamp is available, so any turn
-    /// the fold opens stamps `now` (v2 `onTurnStarted` semantics).
     pub fn apply_event(&mut self, event: &EngineEvent) -> Vec<TranscriptOperation> {
         self.apply_event_at(event, None)
     }
 
-    /// [`Self::apply_event`] with the journal record's timestamp (`created_at`
-    /// epoch millis, upstream `recordTimeIso`): a cold replay passes it so the
-    /// rebuilt turns recover their real `startedAt` (upstream #4280); the live
-    /// path passes `None` and falls back to `now`.
     pub fn apply_event_at(
         &mut self,
         event: &EngineEvent,
@@ -126,9 +85,7 @@ impl TranscriptProjector {
                 turn_id, prompt, ..
             } => {
                 let key = turn_key(turn_id);
-                // Close the previous running turn as wedged before the new one
-                // opens (upstream #4280, `ops/apply.ts`): its loop never wrote
-                // a terminal event, so it renders `failed` with the flag.
+
                 let mut ops = Vec::new();
                 if let Some(prev_idx) = self
                     .turns
@@ -174,9 +131,7 @@ impl TranscriptProjector {
                     turn_id: self.turns[turn_idx].turn_id.clone(),
                     step: step_header(&self.turns[turn_idx].steps[step_idx]),
                 }];
-                // v2 drains `pendingSteers` when a step starts
-                // (coreEventMap.ts:568-571); the freshly ensured step is
-                // empty, so the user frames land at its head.
+
                 ops.extend(self.flush_pending_steers());
                 ops
             }
@@ -379,9 +334,7 @@ impl TranscriptProjector {
                             input_cache_creation: i64::from(usage.input_cache_creation),
                         });
                     }
-                    // Upstream #3938: the request timing rides the step-end
-                    // event into the step (v2's `turn.step.completed` carries
-                    // the same fields into the context-memory fold).
+
                     if let Some(timing) = timing {
                         step.timing = Some(StepTiming {
                             llm_first_token_latency_ms: timing.first_token_latency_ms,
@@ -421,41 +374,13 @@ impl TranscriptProjector {
             EngineEvent::TurnEnded {
                 turn_id, reason, ..
             } => {
-                // Scoped by the event's own turn id, the way v2 records a single
-                // `lastEnded` for one turn (turnOps.ts) — never a broadcast
-                // over every running turn. The reason vocabulary is v2's
-                // `turnEndReasonSchema`: completed / cancelled / failed /
-                // blocked. `blocked` folds into `failed` — v2's
-                // `mapTurnEndState` (coreEventMap.ts:1608) has no `blocked`
-                // turn state to map onto (`transcript` contract schema.ts:63,
-                // `packages/transcript` — present only in the upstream
-                // checkout — is queued/running/completed/failed/cancelled), and
-                // the client validates that enum.
                 let turn_idx = self.ensure_turn(&turn_key(turn_id), at);
                 let state = match reason.as_str() {
                     "cancelled" => TurnState::Cancelled,
                     "failed" | "blocked" => TurnState::Failed,
                     _ => TurnState::Completed,
                 };
-                // Settling the steps matters as much as the turn: the client
-                // only stamps a thinking block with its `durationMs` once the
-                // step it belongs to has stopped running, and a block with no
-                // duration is not rendered as a finished reasoning section.
-                //
-                // v2 reaches `completed` on the normal path — `onStepCompleted`
-                // (coreEventMap.ts:598) sets it when `turn.step.completed`
-                // arrives, which is what `finalizeTurn`
-                // (agentProjector.ts:733 — the v3-era projector added in
-                // `64505e36e3`, reverted upstream by `2502d2157` and deleted
-                // here in `86f30ecc2c`; kept only as the reference for what
-                // `finalizeTurn` leaves alone) and `onTurnEnded`
-                // (coreEventMap.ts:452) then leave alone. The fork's turn loop
-                // publishes `llm.step.end` with the turn/step ids after every
-                // step (run_turn.rs), so a step that ran to completion is
-                // already `Completed` here; only a step still running when the
-                // turn ends — an interrupted mid-step turn — takes its state
-                // from the reason, and `finalizeTurn` maps that
-                // `failed` / `blocked` → `failed`, otherwise `interrupted`.
+
                 let step_state = match reason.as_str() {
                     "cancelled" => StepState::Interrupted,
                     "failed" | "blocked" => StepState::Failed,
@@ -482,9 +407,6 @@ impl TranscriptProjector {
                 ops
             }
             EngineEvent::SubagentSpawned { subagent_id, .. } => {
-                // The fold reads the journal in order, so the turn running at
-                // this moment IS the turn that spawned the member (upstream
-                // #3970 keys the lost decision on it).
                 if let Some(turn) = self
                     .turns
                     .iter()
@@ -514,33 +436,36 @@ impl TranscriptProjector {
                 Some(error.clone()),
                 None,
             ),
-            // The engine publishes this as a typed event, so it never reaches
-            // the string-keyed `Custom` arm below. v2 opens the turn with
-            // `meta.merge { activity: 'turn' }` (coreEventMap.ts:437) and
-            // settles it to `idle` when the turn ends (:504), and the client
-            // reads that field to decide whether to keep working — matching
-            // only the JSON spelling left it at `idle` forever, so a finished
-            // turn still rendered as busy.
+
             EngineEvent::SessionWorkChanged { busy, .. } => self.merge_activity(*busy),
             EngineEvent::Custom(value) => match value.get("type").and_then(|t| t.as_str()) {
                 Some("event.session.work_changed") => {
                     let busy = value.get("busy").and_then(|v| v.as_bool()).unwrap_or(false);
                     self.merge_activity(busy)
                 }
-                Some("event.task.created") | Some("event.task.completed") => {
-                    match task_from_event(value) {
-                        Some(task) => {
-                            let task = self.merge_task(task);
-                            vec![TranscriptOperation::TaskUpsert { task }]
-                        }
-                        None => Vec::new(),
+                Some("task.started")
+                | Some("task.terminated")
+                | Some("event.task.created")
+                | Some("event.task.completed") => match task_from_event(value) {
+                    Some(task) => {
+                        let task = self.merge_task(task);
+                        vec![TranscriptOperation::TaskUpsert { task }]
                     }
-                }
-                Some("event.task.progress") => {
-                    let Some(task_id) = value.get("task_id").and_then(|v| v.as_str()) else {
+                    None => Vec::new(),
+                },
+                Some("task.output") | Some("event.task.progress") => {
+                    let Some(task_id) = value
+                        .get("taskId")
+                        .or_else(|| value.get("task_id"))
+                        .and_then(|v| v.as_str())
+                    else {
                         return Vec::new();
                     };
-                    let Some(chunk) = value.get("output_chunk").and_then(|v| v.as_str()) else {
+                    let Some(chunk) = value
+                        .get("chunk")
+                        .or_else(|| value.get("output_chunk"))
+                        .and_then(|v| v.as_str())
+                    else {
                         return Vec::new();
                     };
                     let Some(idx) = self.tasks.iter().position(|task| task.task_id == task_id)
@@ -566,10 +491,7 @@ impl TranscriptProjector {
                     };
                     self.push_delta(turn_idx, delta, false)
                 }
-                // v2 keeps the reasoning stream on its own event name
-                // (`thinking.delta`, events-zod.ts) rather than a flag on the
-                // answer stream — the kind is data, not a boolean a consumer
-                // must interpret.
+
                 Some("event.thinking.delta") => {
                     let Some(delta) = value.get("delta").and_then(|v| v.as_str()) else {
                         return Vec::new();
@@ -669,10 +591,7 @@ impl TranscriptProjector {
                         status: TranscriptPromptStatus::Running,
                         user_message_id: Some(announcement_id.clone()),
                         content: message.get("content").cloned(),
-                        // The submission may have already created this
-                        // prompt with its client metadata (#3764); the
-                        // announcement must not drop it (v2
-                        // `onPromptStarted`, coreEventMap.ts:1342).
+
                         client_metadata: prev.and_then(|prev| prev.client_metadata.clone()),
                         created_at,
                         finished_at: None,
@@ -687,12 +606,7 @@ impl TranscriptProjector {
                             }
                         }
                     }
-                    // v2's cold fold puts the opening prompt's attachments on
-                    // the turn (`foldTurnOpeningInput` → `turn.attachmentIds`):
-                    // the link a client needs to resolve a referenced file's
-                    // saved path. The message id names the turn
-                    // (`msg-u{turn}`), the same key the deltas address, so the
-                    // turn is opened here when no delta has yet.
+
                     if !attachment_ids.is_empty()
                         && let Some(turn_number) = id
                             .strip_prefix("msg-u")
@@ -704,11 +618,7 @@ impl TranscriptProjector {
                     ops
                 }
                 Some("agent.status.updated") => self.merge_agent_meta(value),
-                // The prompt submission (v2 #3764): the item the route
-                // admitted, with the client metadata it carried. The
-                // announcement (`event.message.created`) upserts the same
-                // prompt when the turn starts and carries the metadata
-                // over, so a client sees one prompt entity, not two.
+
                 Some("prompt.submitted") => {
                     let Some(prompt_id) = value.get("promptId").and_then(|v| v.as_str()) else {
                         return Vec::new();
@@ -721,8 +631,7 @@ impl TranscriptProjector {
                         Some("aborted") => TranscriptPromptStatus::Aborted,
                         _ => TranscriptPromptStatus::Running,
                     };
-                    // The contract's `clientMetadata` is an array of
-                    // records; the submission carries one object.
+
                     let client_metadata = value
                         .get("metadata")
                         .filter(|metadata| metadata.is_object())
@@ -736,11 +645,7 @@ impl TranscriptProjector {
                         .and_then(|v| v.as_str())
                         .map(str::to_string);
                     let content = value.get("content").cloned();
-                    // v2 `onPromptSubmitted` (coreEventMap.ts:1328): a
-                    // terminal prompt keeps its terminal status — a
-                    // duplicate submission must not resurrect it — while
-                    // createdAt / finishedAt / steeredAt prefer the
-                    // entity's own values.
+
                     vec![self.upsert_prompt(prompt_id, |prev| {
                         TranscriptPrompt {
                             prompt_id: prompt_id.to_string(),
@@ -761,25 +666,14 @@ impl TranscriptProjector {
                         }
                     })]
                 }
-                Some("llm.step.begin") => {
-                    // An *unscoped* step boundary. The turn loop's own
-                    // (`run_turn`) names the turn and takes the typed arm
-                    // above, which creates the step and drains `pendingSteers`;
-                    // only a malformed copy can land here, and with no cursor
-                    // yet the pending steers wait for the next one.
-                    self.flush_pending_steers()
-                }
+                Some("llm.step.begin") => self.flush_pending_steers(),
                 Some("turn.steer") => self.fold_turn_steer(value),
                 Some("prompt.steered") => self.fold_prompt_steered(value),
                 Some("prompt.queued") => self.fold_prompt_queued(value),
                 Some("prompt.started") => self.fold_prompt_started(value),
                 Some("prompt.completed") => self.fold_prompt_completed(value),
                 Some("prompt.aborted") => self.fold_prompt_aborted(value),
-                // Prompt lifecycle arms fold prompt entities only: v2 keeps
-                // the two entities on separate schedules (`onPromptCompleted`,
-                // coreEventMap.ts:1356, emits a `prompt.upsert` and nothing
-                // else). The typed `turn.ended` arm above is what ends the
-                // turn.
+
                 Some("hook.result") => vec![TranscriptOperation::MarkerUpsert {
                     item: TranscriptMarker {
                         marker_id: format!("hook-{:016x}", fastrand::u64(..)),
@@ -790,6 +684,7 @@ impl TranscriptProjector {
                     before_turn: None,
                 }],
                 Some("context.compaction")
+                | Some("context.apply_compaction")
                 | Some("compaction.started")
                 | Some("compaction.completed") => vec![TranscriptOperation::MarkerUpsert {
                     item: TranscriptMarker {
@@ -824,12 +719,6 @@ impl TranscriptProjector {
         }
     }
 
-    /// The task list as of a COLD rebuild (upstream #3970's lost-member
-    /// rule): every loop is dead after a restart, so a member left `running`
-    /// survives only while the turn that spawned it is itself still running
-    /// in the rebuild — anything else settles to `lost`. The live path keeps
-    /// using `snapshot()`: a background member there can legitimately outlive
-    /// its spawning turn and terminalises on its own completion event.
     pub fn cold_snapshot_tasks(&self) -> Vec<TranscriptTask> {
         self.tasks
             .iter()
@@ -855,15 +744,6 @@ impl TranscriptProjector {
             .collect()
     }
 
-    /// Finalize a COLD rebuild (upstream #4280 `foldWireRecordFacts`' wedged
-    /// pass): a turn whose loop died before writing a terminal event is left
-    /// `running` by the replay. Every non-tail `running` turn is wedged — a
-    /// later turn prompt exists in the wire, so its loop is provably dead.
-    /// The tail turn is wedged too unless it is the live active one
-    /// (`active_wire_turn_id`, the engine's running wire turn number; `None`
-    /// after a restart, when nothing is live and the tail is dead as well).
-    /// The live path needs no call: a new `TurnStarted` closes the previous
-    /// running turn the same way.
     pub fn mark_wedged_turns(&mut self, active_wire_turn_id: Option<i64>) {
         let Some(tail) = self.turns.iter().map(|turn| turn.ordinal).max() else {
             return;
@@ -914,9 +794,6 @@ impl TranscriptProjector {
         })
     }
 
-    /// Insert or replace a prompt, letting the caller see the previous entity
-    /// first — v2's `upsertPrompt(build)` shape (coreEventMap.ts:1505), so a
-    /// terminal prompt keeps the fields a later event does not carry.
     fn upsert_prompt(
         &mut self,
         prompt_id: &str,
@@ -936,11 +813,6 @@ impl TranscriptProjector {
         TranscriptOperation::PromptUpsert { prompt }
     }
 
-    /// Drain buffered steers as user frames in the step under the cursor
-    /// (v2's `onStepStarted` flush, coreEventMap.ts:568). The gate keeps a
-    /// closed turn from collecting frames that belong to no step: with no
-    /// cursor, or a cursor whose turn is not running, the pending list
-    /// survives to the next step begin (ROADMAP item 34).
     fn flush_pending_steers(&mut self) -> Vec<TranscriptOperation> {
         if self.pending_steers.is_empty() {
             return Vec::new();
@@ -954,8 +826,7 @@ impl TranscriptProjector {
         let turn_idx = cursor.turn;
         let turn_id = self.turns[turn_idx].turn_id.clone();
         let mut ops = Vec::new();
-        // `turn.started` parks the cursor at step 0 before any step exists;
-        // a frame needs a step to live in, so open the first one and report it.
+
         let step_idx = if cursor.step < self.turns[turn_idx].steps.len() {
             cursor.step
         } else {
@@ -990,8 +861,7 @@ impl TranscriptProjector {
                 step_id: step_id.clone(),
                 frame,
             });
-            // Subsequent deltas see a user frame under the cursor, so they
-            // open a new assistant frame rather than appending to it.
+
             self.cursor = Some(Cursor {
                 turn: turn_idx,
                 step: step_idx,
@@ -1001,10 +871,6 @@ impl TranscriptProjector {
         ops
     }
 
-    /// v2 `onTurnSteered` (coreEventMap.ts:1413): a user or skill-activation
-    /// steer with an array input becomes a user frame. The fork buffers
-    /// unconditionally — the frame lands at the next step begin — where v2
-    /// lands it in a running step immediately (ROADMAP item 34).
     fn fold_turn_steer(&mut self, value: &Value) -> Vec<TranscriptOperation> {
         let Some(origin) = value.get("origin") else {
             return Vec::new();
@@ -1039,9 +905,6 @@ impl TranscriptProjector {
         Vec::new()
     }
 
-    /// v2 `onPromptSteered` (coreEventMap.ts:1384): the active prompt stays
-    /// open under the steer, each steered prompt id settles as completed at
-    /// the steer's timestamp.
     fn fold_prompt_steered(&mut self, value: &Value) -> Vec<TranscriptOperation> {
         let Some(steered_at) = value.get("steeredAt").and_then(|v| v.as_str()) else {
             return Vec::new();
@@ -1062,8 +925,7 @@ impl TranscriptProjector {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         let mut ops = Vec::new();
-        // An empty `activePromptId` (the route's `unwrap_or_default`) names
-        // no prompt: skip the active upsert but still settle the steered ids.
+
         if !active_prompt_id.is_empty() {
             let active_owned = active_prompt_id.to_string();
             let active_steered_at = steered_at.clone();
@@ -1106,8 +968,6 @@ impl TranscriptProjector {
         ops
     }
 
-    /// v2 `onPromptCompleted` (coreEventMap.ts:1356): reason maps to status,
-    /// finishedAt settles the entity, createdAt falls back to the finish.
     fn fold_prompt_completed(&mut self, value: &Value) -> Vec<TranscriptOperation> {
         let Some(prompt_id) = value.get("promptId").and_then(|v| v.as_str()) else {
             return Vec::new();
@@ -1138,8 +998,6 @@ impl TranscriptProjector {
         })]
     }
 
-    /// v2 `onPromptAborted` (coreEventMap.ts:1371): abortedAt is both the
-    /// finish and the created-at fallback for an unknown entity.
     fn fold_prompt_aborted(&mut self, value: &Value) -> Vec<TranscriptOperation> {
         let Some(prompt_id) = value.get("promptId").and_then(|v| v.as_str()) else {
             return Vec::new();
@@ -1165,9 +1023,6 @@ impl TranscriptProjector {
         })]
     }
 
-    /// v2 `onPromptQueued` (coreEventMap.ts:1391): the queued announcement
-    /// carries the content for a prompt whose `prompt.submitted` the fold may
-    /// not have seen (a resumed client replaying only the queue event).
     fn fold_prompt_queued(&mut self, value: &Value) -> Vec<TranscriptOperation> {
         let Some(prompt_id) = value.get("promptId").and_then(|v| v.as_str()) else {
             return Vec::new();
@@ -1191,8 +1046,6 @@ impl TranscriptProjector {
         })]
     }
 
-    /// v2 `onPromptStarted` (coreEventMap.ts:1418): the queued prompt became
-    /// the active turn, so the client moves it from `queued` to `running`.
     fn fold_prompt_started(&mut self, value: &Value) -> Vec<TranscriptOperation> {
         let Some(prompt_id) = value.get("promptId").and_then(|v| v.as_str()) else {
             return Vec::new();
@@ -1288,8 +1141,6 @@ impl TranscriptProjector {
         }]
     }
 
-    /// The `AgentStatusUpdated.usage` payload as transcript meta (v2
-    /// `UsageStatus`: per-model buckets, their total, and the current turn).
     fn parse_agent_usage(value: &Value) -> Option<AgentUsageMeta> {
         let by_model = value.get("byModel").cloned().and_then(|by_model| {
             serde_json::from_value::<HashMap<String, StepUsage>>(by_model).ok()
@@ -1312,11 +1163,6 @@ impl TranscriptProjector {
         })
     }
 
-    /// The turn a custom delta addresses. The delta names its own turn (v2's
-    /// `AssistantDeltaPayload` / `ThinkingDeltaPayload` carry `turnId`), so
-    /// the projector needs no cursor established by an earlier lifecycle
-    /// event — the server path emits no typed `TurnStarted`. A payload
-    /// without a turn id still falls back to the cursor for older producers.
     fn custom_delta_turn(&mut self, value: &Value, at: Option<i64>) -> Option<usize> {
         match value.get("turn_id").and_then(|v| v.as_u64()) {
             Some(turn_id) => Some(self.ensure_turn(&turn_key_u64(turn_id), at)),
@@ -1372,19 +1218,6 @@ impl TranscriptProjector {
         vec![TranscriptOperation::TaskUpsert { task }]
     }
 
-    /// Open (or find) the turn a `t<N>` key names. The ordinal is the key's own
-    /// number, not the registry position: v2 builds the turn from the event
-    /// (`onTurnStarted`, coreEventMap.ts:415, `ordinal: n`, `turnId: t${n}`)
-    /// and the cold rebuild numbers by insertion order
-    /// (`transcript/src/history/groupTurns.ts`), so both agree on a fresh
-    /// session. A positional ordinal drifts from `turnId` as soon as a
-    /// projector starts mid-session — this one is created per subscriber — and
-    /// the client keys the user bubble's `daemonTurnId` off it. The fallback
-    /// for an unparseable key therefore claims `max(ordinals in use) + 1`
-    /// instead of the positional slot: deterministic within a replay, and it
-    /// cannot collide with an earlier claim (a wire id arriving *after* a
-    /// fallback claimed its number keeps its own ordinal, matching upstream's
-    /// tolerance for unmatched positional turns).
     fn ensure_turn(&mut self, key: &str, at: Option<i64>) -> usize {
         if let Some(&idx) = self.turn_indices.get(key) {
             return idx;
@@ -1556,16 +1389,7 @@ impl TranscriptProjector {
             });
             idx
         };
-        // The append offset counts **UTF-16 code units**, the unit JS counts:
-        // the client splices with `text.slice(offset)` and rejects any offset
-        // past `text.length`. A byte offset looks like a gap for every
-        // non-ASCII chunk — the first append of a Chinese answer reports 83
-        // characters as 243, the client refuses it as a hole, falls back to
-        // re-fetching the whole transcript over REST, and the text lands in
-        // one block instead of streaming. `chars().count()` is not enough
-        // either: an astral character (emoji, CJK ext) is one char but two
-        // code units, so a char count still slices mid-surrogate-pair. The
-        // task path below counts the same unit.
+
         let offset = match &self.turns[turn_idx].steps[step_idx].frames[frame_idx] {
             TranscriptFrame::Text(frame) => frame.text.encode_utf16().count() as u64,
             TranscriptFrame::Thinking(frame) => frame.text.encode_utf16().count() as u64,
@@ -1633,20 +1457,13 @@ impl TranscriptProjector {
     }
 
     fn merge_task(&mut self, incoming: TranscriptTask) -> TranscriptTask {
-        // v2 #3970 (foldFacts): a spawn published before its task was
-        // registered (the Tower worker path) leaves a placeholder keyed by
-        // the agent id; the later registration must ADOPT it — one task under
-        // the registered id — or the duplicate would stay `running` forever
-        // (no terminal event ever reaches it). The lookup matches on the
-        // agent id as well so terminal subagent records still land on the
-        // adopted task.
         let position = self.tasks.iter().position(|task| {
             task.task_id == incoming.task_id
                 || (incoming.agent_id.is_some() && task.agent_id == incoming.agent_id)
         });
         if let Some(position) = position {
             let existing = &mut self.tasks[position];
-            // The registered id wins over the agent-keyed placeholder id.
+
             if existing.task_id != incoming.task_id
                 && incoming.agent_id.as_deref() == Some(existing.task_id.as_str())
             {
@@ -1660,22 +1477,10 @@ impl TranscriptProjector {
     }
 }
 
-/// Field-level merge of an incoming task record into an existing one:
-/// terminal state and any populated fields move over, the retained fields
-/// (output tail, placeholders) survive an empty incoming record.
-///
-/// The state is monotonic in one direction only: a task that already reached a
-/// terminal state does not go back to `running`. The journal's writers can
-/// interleave — `TaskRunner` spawns the subagent future before it publishes the
-/// registration, so `subagent.completed` may be persisted ahead of
-/// `event.task.created(status = "running")` — and a plain last-writer-wins
-/// merge turned that ordering into a task that reports `running` forever.
 fn apply_task_fields(existing: &mut TranscriptTask, incoming: &TranscriptTask) {
     if !is_terminal_task_state(existing.state) {
         existing.state = incoming.state;
     } else if !is_terminal_task_state(incoming.state) && incoming.state != existing.state {
-        // A terminal task keeps its outcome; the losing event may still
-        // contribute the fields it carries (below), just not a new state.
         tracing::debug!(
             task_id = %existing.task_id,
             kept = ?existing.state,
@@ -1721,8 +1526,6 @@ fn apply_task_fields(existing: &mut TranscriptTask, incoming: &TranscriptTask) {
     }
 }
 
-/// Whether a task state is final. `running` and `queued` are not: a task in
-/// either can still settle.
 fn is_terminal_task_state(state: TaskState) -> bool {
     matches!(
         state,
@@ -1730,8 +1533,6 @@ fn is_terminal_task_state(state: TaskState) -> bool {
     )
 }
 
-/// The rpc-layer usage shape as the transcript's step usage (four counters,
-/// v2 `grandTotal` vocabulary).
 fn rpc_usage_as_step_usage(usage: crate::rpc::types::TokenUsage) -> StepUsage {
     StepUsage {
         input_other: i64::from(usage.input_tokens),
@@ -1784,11 +1585,6 @@ pub(crate) fn step_header(step: &TranscriptStep) -> StepHeader {
     }
 }
 
-/// Normalize a producer's turn id to the canonical `t<number>` key. v2's
-/// turn ids are numbers (`turnId: z.number()`); the fork's typed events
-/// still carry them as strings in both `turn-1` and `t1` shapes, and a
-/// projection that keyed those differently would split one turn in two.
-/// An unparseable id is kept verbatim rather than silently remapped.
 fn turn_key(raw: &str) -> String {
     let digits = raw
         .rsplit_once(|c: char| !c.is_ascii_digit())
@@ -1807,9 +1603,6 @@ fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// The journal record's own timestamp as ISO-8601 (upstream
-/// `recordTimeIso`): epoch milliseconds on the wire record, so a cold rebuild
-/// restores a turn's real `startedAt` instead of stamping the rebuild time.
 fn epoch_ms_iso(epoch_ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(epoch_ms)
         .map(|instant| instant.to_rfc3339())
@@ -1854,43 +1647,48 @@ fn progress_from_update(update: &Value) -> ToolFrameProgress {
 }
 
 fn task_from_event(value: &Value) -> Option<TranscriptTask> {
+    let info = value.get("info").cloned().unwrap_or(Value::Null);
     let task = value.get("task").cloned().unwrap_or(Value::Null);
-    let task_id = str_field(&task, &["id", "taskId", "task_id"])
-        .or_else(|| str_field(value, &["task_id", "taskId", "id"]))?;
+    let field = |keys: &[&str]| {
+        str_field(&info, keys)
+            .or_else(|| str_field(&task, keys))
+            .or_else(|| str_field(value, keys))
+    };
+    let time = |keys: &[&str]| {
+        time_field(&info, keys)
+            .or_else(|| time_field(&task, keys))
+            .or_else(|| time_field(value, keys))
+    };
+    let task_id = field(&["taskId", "id", "task_id"])?;
     Some(TranscriptTask {
         task_id,
-        kind: task_kind(str_field(&task, &["kind"]).as_deref()),
-        state: task_state(
-            str_field(&task, &["state", "status"])
-                .or_else(|| str_field(value, &["status", "state"]))
-                .as_deref(),
-        ),
-        detached: false,
-        description: str_field(&task, &["description"])
-            .or_else(|| str_field(value, &["description"])),
-        agent_id: str_field(&task, &["agent_id", "agentId"]),
-        output_tail: str_field(&task, &["output_tail", "outputTail", "output"])
-            .or_else(|| str_field(value, &["output_preview", "outputPreview", "output_tail"]))
+        kind: task_kind(field(&["kind"]).as_deref()),
+        state: task_state(field(&["state", "status"]).as_deref()),
+        detached: info
+            .get("detached")
+            .or_else(|| task.get("detached"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        description: field(&["description"]),
+        agent_id: field(&["agentId", "agent_id"]),
+        output_tail: field(&["outputTail", "output_tail", "output"])
+            .or_else(|| field(&["output_preview", "outputPreview"]))
             .unwrap_or_default(),
-        started_at: str_field(&task, &["started_at", "startedAt"])
-            .or_else(|| str_field(value, &["started_at", "startedAt"])),
-        ended_at: str_field(&task, &["ended_at", "endedAt"])
-            .or_else(|| str_field(value, &["ended_at", "endedAt", "finished_at"])),
-        result_summary: str_field(&task, &["result_summary", "resultSummary"])
-            .or_else(|| str_field(value, &["result_summary", "resultSummary"])),
-        error: str_field(&task, &["error"]).or_else(|| str_field(value, &["error"])),
-        state_reason: str_field(&task, &["state_reason", "stateReason", "stop_reason"])
-            .or_else(|| str_field(value, &["state_reason", "stateReason"])),
+        started_at: time(&["startedAt", "started_at"]),
+        ended_at: time(&["endedAt", "ended_at", "finished_at"]),
+        result_summary: field(&["result_summary", "resultSummary"]),
+        error: field(&["error"]),
+        state_reason: field(&["stopReason", "state_reason", "stateReason"]),
         usage: None,
-        model: str_field(&task, &["model"]),
-        thinking_effort: str_field(&task, &["thinking_effort", "thinkingEffort"]),
+        model: field(&["model"]),
+        thinking_effort: field(&["thinking_effort", "thinkingEffort"]),
     })
 }
 
 fn task_kind(raw: Option<&str>) -> TaskKind {
     match raw {
-        Some("shell") => TaskKind::Shell,
-        Some("subagent") => TaskKind::Subagent,
+        Some("shell") | Some("process") => TaskKind::Shell,
+        Some("subagent") | Some("agent") => TaskKind::Subagent,
         Some("tool") => TaskKind::Tool,
         _ => TaskKind::Other,
     }
@@ -1913,9 +1711,14 @@ fn str_field(value: &Value, keys: &[&str]) -> Option<String> {
         .find_map(|key| value.get(*key).and_then(|v| v.as_str()).map(str::to_string))
 }
 
-/// Best-effort attachment for a media content block in a user message. The id
-/// is a stable hash of the block, so a re-emitted message upserts the same
-/// attachment instead of piling up duplicates.
+fn time_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| match value.get(*key) {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Number(number)) => number.as_i64().map(epoch_ms_iso),
+        _ => None,
+    })
+}
+
 fn attachment_from_block(block: &Value) -> Option<TranscriptAttachment> {
     let kind = block.get("type").and_then(|v| v.as_str())?;
     let url_source = || {
@@ -1926,10 +1729,7 @@ fn attachment_from_block(block: &Value) -> Option<TranscriptAttachment> {
                 url: url.to_string(),
             })
     };
-    // A daemon reference (`kimi-file://<id>`) is a file identity, not a URL
-    // a client could fetch: the transcript contract's `file` source carries
-    // the id, which is what lets a client resolve the saved path through the
-    // daemon's file API (v2 `displayPaths` reaching the protocol surface).
+
     let daemon_file_source = || {
         block
             .get("url")
@@ -1940,8 +1740,6 @@ fn attachment_from_block(block: &Value) -> Option<TranscriptAttachment> {
             })
     };
     let (media_type, source) = match kind {
-        // A stored reference is the session-owned canonical copy: the
-        // contract's `session_media` source names its file id.
         "media_ref" => {
             let file_id = block.get("file_id").and_then(|v| v.as_str())?;
             (
@@ -1983,8 +1781,6 @@ fn attachment_from_block(block: &Value) -> Option<TranscriptAttachment> {
     })
 }
 
-/// The media family label a `MediaRef` block's `kind` names (the block
-/// serializes the engine's `MediaKind`).
 fn media_kind_label(kind: Option<&str>) -> String {
     match kind {
         Some("video") => "video".to_string(),

@@ -45,13 +45,16 @@ struct FoundSkill {
     argument_names: Vec<String>,
 }
 
+static WARNED_MISSING_SESSION_START_SKILLS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
 /// Render the session-start blocks for every enabled plugin that declares one.
 ///
 /// `dirs` is the session's plugin skill roots (in plugin-id order, one entry
 /// per declared root). A plugin with several roots contributes one block; a
-/// plugin whose declared skill cannot be found is skipped with a warning
-/// (v2 `warnedSkills` — the fork warns on every turn instead of remembering,
-/// because the scan is per turn and the log is the only consumer).
+/// plugin whose declared skill cannot be found is skipped with a warning that
+/// fires once per `pluginId:skillName` (v2 `warnedSkills`).
 pub fn render_session_start(dirs: &[PluginSkillDir], session_id: &str) -> Option<String> {
     let mut blocks = Vec::new();
     let mut rendered_plugins: Vec<&str> = Vec::new();
@@ -64,6 +67,13 @@ pub fn render_session_start(dirs: &[PluginSkillDir], session_id: &str) -> Option
         };
         rendered_plugins.push(dir.plugin_id.as_str());
         let Some(skill) = find_plugin_skill(dirs, &dir.plugin_id, requested) else {
+            let key = format!("{}:{}", dir.plugin_id, requested);
+            let mut warned = WARNED_MISSING_SESSION_START_SKILLS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !warned.insert(key) {
+                continue;
+            }
             tracing::warn!(
                 plugin_id = %dir.plugin_id,
                 skill = requested,
@@ -507,12 +517,38 @@ mod tests {
         );
     }
 
+    #[cfg(test)]
+    fn warned_missing_session_start_skills(
+    ) -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+        WARNED_MISSING_SESSION_START_SKILLS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn test_missing_session_start_skill_is_skipped() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("plugin").join("skills");
         std::fs::create_dir_all(&root).unwrap();
         assert!(render_session_start(&[skill_dir(&root, "brandpack", "onboard")], "").is_none());
+    }
+
+    #[test]
+    fn a_missing_session_start_skill_is_warned_once_per_plugin_and_skill() {
+        warned_missing_session_start_skills().clear();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("plugin").join("skills");
+        std::fs::create_dir_all(&root).unwrap();
+        let dirs = [skill_dir(&root, "brandpack", "onboard")];
+        let _ = render_session_start(&dirs, "");
+        let _ = render_session_start(&dirs, "");
+        let warned = warned_missing_session_start_skills();
+        assert_eq!(
+            warned.len(),
+            1,
+            "the same missing skill warns once: {warned:?}"
+        );
+        assert!(warned.contains("brandpack:onboard"));
     }
 
     #[test]

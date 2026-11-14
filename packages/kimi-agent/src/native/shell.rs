@@ -1,17 +1,7 @@
-//! Local shell resolution (POSIX bash / Windows `[shell] preference`).
-//!
-//! Ported from the retired `kimi-native-tools/src/bash.rs` detection after the
-//! `[shell] preference` config landed: on Windows the order is
-//! `KIMI_SHELL_PATH` env override → the configured preference → `pwsh` →
-//! `powershell` → Git Bash → `cmd`; on POSIX `/bin/bash` → `/usr/bin/bash` →
-//! `/usr/local/bin/bash`, else `/bin/sh` (v2 `probeHostEnvironment`'s POSIX arm).
-//! `[shell].preference` stays Windows-only: it has no v2 counterpart, so honoring
-//! it on POSIX would be new behavior rather than a port.
-//!
-//! PowerShell runs with `-NoProfile -NonInteractive` and cmd with `/c`, so the
-//! Bash tool's exec prefix is flavor-dependent rather than a fixed `-c`.
+use super::environment_probe::{
+    HostEnvironmentProbeDeps, ProbeShellNotFound, exec_file_text, locate_windows_git_bash,
+};
 
-/// The command-interpreter family a resolved shell belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellFlavor {
     Bash,
@@ -21,7 +11,6 @@ pub enum ShellFlavor {
 }
 
 impl ShellFlavor {
-    /// Parse a `[shell].preference` value; `None` for `auto` / unknown.
     pub fn from_preference(preference: &str) -> Option<Self> {
         match preference.trim().to_ascii_lowercase().as_str() {
             "bash" => Some(Self::Bash),
@@ -32,7 +21,6 @@ impl ShellFlavor {
         }
     }
 
-    /// Classify a shell executable by its basename.
     pub fn from_path(path: &str) -> Self {
         let base = path
             .rsplit(['\\', '/'])
@@ -47,7 +35,6 @@ impl ShellFlavor {
         }
     }
 
-    /// The argument prefix a shell needs before the command text.
     pub fn args_prefix(self) -> Vec<String> {
         match self {
             Self::Pwsh | Self::PowerShell => {
@@ -63,7 +50,6 @@ impl ShellFlavor {
     }
 }
 
-/// A shell executable plus its flavor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedShell {
     pub program: String,
@@ -77,22 +63,11 @@ impl ResolvedShell {
         Self { program, flavor }
     }
 
-    /// The argument prefix before the command text.
     pub fn args_prefix(&self) -> Vec<String> {
         self.flavor.args_prefix()
     }
 }
 
-/// The POSIX candidate chain, as a pure function of "does this path exist".
-///
-/// Mirrors v2 `probeHostEnvironment`'s POSIX arm (`_base/execEnv/environmentProbe.ts`):
-/// `/bin/bash` → `/usr/bin/bash` → `/usr/local/bin/bash`, else `/bin/sh`. v2's own
-/// `isFile` is an `access(F_OK)` existence check (`:261-268`), hence `exists` rather
-/// than `is_file`. `/bin/sh` is classified `Bash` on purpose: it takes the same `-c`
-/// prefix, and nothing downstream branches on the difference.
-///
-/// Public rather than `#[cfg(not(windows))]`-private so the chain stays testable on
-/// every platform, including the Windows hosts where the POSIX arm is compiled out.
 pub fn posix_shell(exists: &dyn Fn(&str) -> bool) -> ResolvedShell {
     const CANDIDATES: &[&str] = &["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"];
     let program = CANDIDATES
@@ -106,96 +81,92 @@ pub fn posix_shell(exists: &dyn Fn(&str) -> bool) -> ResolvedShell {
     }
 }
 
-/// Resolve the shell for local command execution.
-///
-/// `preference` is the `[shell].preference` value; `None` / `auto` means
-/// auto-detect. `KIMI_SHELL_PATH` still wins over the config on Windows.
-pub fn resolve_shell(preference: Option<&str>) -> ResolvedShell {
+pub fn resolve_shell(preference: Option<&str>) -> Result<ResolvedShell, ProbeShellNotFound> {
     #[cfg(not(windows))]
     {
         let _ = preference;
-        posix_shell(&|candidate| std::path::Path::new(candidate).exists())
+        Ok(posix_shell(&|candidate| {
+            std::path::Path::new(candidate).exists()
+        }))
     }
     #[cfg(windows)]
     {
-        if let Some(path) = std::env::var("KIMI_SHELL_PATH")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            return ResolvedShell::new(path);
-        }
-
-        if let Some(flavor) = preference.and_then(ShellFlavor::from_preference)
-            && let Some(program) = program_for(flavor)
-        {
-            return ResolvedShell { program, flavor };
-        }
-
-        if let Some(program) = which("pwsh.exe") {
-            return ResolvedShell {
-                program,
-                flavor: ShellFlavor::Pwsh,
-            };
-        }
-        if let Some(program) = which("powershell.exe") {
-            return ResolvedShell {
-                program,
-                flavor: ShellFlavor::PowerShell,
-            };
-        }
-        if let Some(program) = git_bash() {
-            return ResolvedShell {
-                program,
-                flavor: ShellFlavor::Bash,
-            };
-        }
-        ResolvedShell {
-            program: "cmd.exe".to_string(),
-            flavor: ShellFlavor::Cmd,
-        }
+        let env = |name: &str| std::env::var(name).ok();
+        let home_dir = crate::default_workspace::user_home_dir().unwrap_or_default();
+        let deps = HostEnvironmentProbeDeps {
+            platform: "win32",
+            arch: std::env::consts::ARCH,
+            release: std::env::consts::OS,
+            home_dir: &home_dir,
+            env: &env,
+            is_file: &|path| path.is_file(),
+            exec_file_text: &exec_file_text,
+        };
+        resolve_windows_shell(preference, &deps)
     }
 }
 
 #[cfg(windows)]
-fn program_for(flavor: ShellFlavor) -> Option<String> {
+fn resolve_windows_shell(
+    preference: Option<&str>,
+    deps: &HostEnvironmentProbeDeps<'_>,
+) -> Result<ResolvedShell, ProbeShellNotFound> {
+    if let Some(path) = (deps.env)("KIMI_SHELL_PATH")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        && (deps.is_file)(std::path::Path::new(&path))
+    {
+        return Ok(ResolvedShell::new(path));
+    }
+
+    if let Some(flavor) = preference
+        .and_then(ShellFlavor::from_preference)
+        .filter(|flavor| *flavor != ShellFlavor::Bash)
+        && let Some(program) = program_for(flavor, deps)
+    {
+        return Ok(ResolvedShell { program, flavor });
+    }
+
+    if let Some(program) = which(deps, "pwsh.exe") {
+        return Ok(ResolvedShell {
+            program,
+            flavor: ShellFlavor::Pwsh,
+        });
+    }
+    if let Some(program) = which(deps, "powershell.exe") {
+        return Ok(ResolvedShell {
+            program,
+            flavor: ShellFlavor::PowerShell,
+        });
+    }
+    let program = locate_windows_git_bash(deps)?;
+    Ok(ResolvedShell {
+        program,
+        flavor: ShellFlavor::Bash,
+    })
+}
+
+#[cfg(windows)]
+fn program_for(flavor: ShellFlavor, deps: &HostEnvironmentProbeDeps<'_>) -> Option<String> {
     match flavor {
-        ShellFlavor::Pwsh => which("pwsh.exe").or_else(|| Some("pwsh".to_string())),
+        ShellFlavor::Pwsh => which(deps, "pwsh.exe").or_else(|| Some("pwsh".to_string())),
         ShellFlavor::PowerShell => {
-            which("powershell.exe").or_else(|| Some("powershell".to_string()))
+            which(deps, "powershell.exe").or_else(|| Some("powershell".to_string()))
         }
         ShellFlavor::Cmd => Some("cmd.exe".to_string()),
-        ShellFlavor::Bash => git_bash().or_else(|| Some("bash".to_string())),
+        ShellFlavor::Bash => None,
     }
 }
 
 #[cfg(windows)]
-fn which(name: &str) -> Option<String> {
-    let output = std::process::Command::new("where")
-        .arg(name)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
+fn which(deps: &HostEnvironmentProbeDeps<'_>, name: &str) -> Option<String> {
+    const WHICH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2_000);
+    let output = (deps.exec_file_text)("where", &[name], WHICH_TIMEOUT)?;
+    output
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(str::to_string)
-}
-
-#[cfg(windows)]
-fn git_bash() -> Option<String> {
-    const CANDIDATES: &[&str] = &[
-        "C:\\msys64\\usr\\bin\\bash.exe",
-        "C:\\Program Files\\Git\\bin\\bash.exe",
-        "C:\\Program Files\\Git\\usr\\bin\\bash.exe",
-    ];
-    CANDIDATES
-        .iter()
-        .find(|path| std::path::Path::new(path).exists())
-        .map(|path| (*path).to_string())
 }
 
 #[cfg(test)]
@@ -265,7 +236,7 @@ mod tests {
             posix_shell(&|candidate| candidate == "/usr/local/bin/bash").program,
             "/usr/local/bin/bash"
         );
-        // The FIRST existing candidate wins, even when a later one also exists.
+
         assert_eq!(
             posix_shell(&|candidate| candidate == "/bin/bash" || candidate == "/usr/local/bin/bash")
                 .program,
@@ -275,8 +246,6 @@ mod tests {
 
     #[test]
     fn posix_chain_falls_back_to_sh_when_no_bash_exists() {
-        // A host with no bash at all (Alpine, slim containers) must still get a
-        // usable shell: the old hardcoded `/bin/bash` made the Bash tool unrunnable.
         let resolved = posix_shell(&|_| false);
         assert_eq!(resolved.program, "/bin/sh");
         assert_eq!(resolved.args_prefix(), vec!["-c"]);
@@ -284,10 +253,6 @@ mod tests {
 
     #[test]
     fn the_posix_arm_predicate_typechecks_and_probes_the_filesystem() {
-        // The POSIX arm calls `posix_shell` with exactly this closure. Compiling and
-        // running it here means a type error in that arm cannot hide behind
-        // `#[cfg(not(windows))]` on a Windows host, which is the only host this crate
-        // can currently be compiled on (no POSIX target is installed).
         let probe = |candidate: &str| std::path::Path::new(candidate).exists();
         let resolved = posix_shell(&probe);
         assert!(
@@ -305,7 +270,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn resolve_shell_picks_a_real_posix_candidate() {
-        let resolved = resolve_shell(None);
+        let resolved = resolve_shell(None).expect("a posix host always resolves");
         assert!(
             [
                 "/bin/bash",
@@ -320,10 +285,68 @@ mod tests {
 
     #[test]
     fn explicit_path_wins_over_preference() {
-        // On POSIX the shim ignores both; on Windows the env var wins over the
-        // preference. Either way the return is a usable shell.
-        let resolved = resolve_shell(Some("cmd"));
+        let resolved = resolve_shell(Some("cmd")).expect("the explicit flavor resolves");
         assert!(!resolved.program.is_empty());
         assert_eq!(resolved.args_prefix(), resolved.flavor.args_prefix());
+    }
+
+    #[cfg(windows)]
+    fn windows_deps<'a>(
+        env: &'a dyn Fn(&str) -> Option<String>,
+        is_file: &'a dyn Fn(&std::path::Path) -> bool,
+        exec: &'a dyn Fn(&str, &[&str], std::time::Duration) -> Option<String>,
+    ) -> HostEnvironmentProbeDeps<'a> {
+        HostEnvironmentProbeDeps {
+            platform: "win32",
+            arch: "x64",
+            release: "10.0.22631",
+            home_dir: std::path::Path::new("C:\\Users\\tester"),
+            env,
+            is_file,
+            exec_file_text: exec,
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn auto_resolution_uses_the_provisioned_git_bash() {
+        let env = |name: &str| (name == "KIMI_CODE_HOME").then(|| "D:\\kimi-home".to_string());
+        let provisioned = crate::native::shell_payload::shell_payload_exe_path(
+            std::path::Path::new("D:\\kimi-home"),
+            crate::native::shell_payload::shell_payload_pin_of(
+                crate::native::shell_payload::ShellPayloadKind::Bash,
+            ),
+        );
+        let is_file = |path: &std::path::Path| path == provisioned;
+        let no_exec = |_: &str, _: &[&str], _: std::time::Duration| None;
+        let resolved = resolve_windows_shell(None, &windows_deps(&env, &is_file, &no_exec))
+            .expect("the provisioned bash resolves");
+        assert_eq!(resolved.program, provisioned.display().to_string());
+        assert_eq!(resolved.flavor, ShellFlavor::Bash);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn auto_resolution_returns_the_checked_error_instead_of_cmd() {
+        let no_env = |_: &str| None;
+        let no_file = |_: &std::path::Path| false;
+        let no_exec = |_: &str, _: &[&str], _: std::time::Duration| None;
+        let error = resolve_windows_shell(None, &windows_deps(&no_env, &no_file, &no_exec))
+            .expect_err("auto resolution must not fall back to cmd");
+        assert_eq!(error.code(), "shell.git_bash_not_found");
+        assert!(!error.checked.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_cmd_preference_does_not_require_git_bash() {
+        let no_env = |_: &str| None;
+        let no_file = |_: &std::path::Path| false;
+        let no_exec = |_: &str, _: &[&str], _: std::time::Duration| None;
+        let resolved =
+            resolve_windows_shell(Some("cmd"), &windows_deps(&no_env, &no_file, &no_exec))
+                .expect("the explicit cmd preference remains supported");
+        assert_eq!(resolved.program, "cmd.exe");
+        assert_eq!(resolved.flavor, ShellFlavor::Cmd);
     }
 }

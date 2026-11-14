@@ -224,6 +224,14 @@
       ],
       "why": "图片读取预算与缩放上限由引擎的媒体层执行。"
     },
+    "llmRequester": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (llm_requester) → pipeline/mod.rs + llm/media_budget.rs",
+      "napiFields": [
+        "request_byte_budget"
+      ],
+      "why": "整个请求的 UTF-8 字节预算，投影前驱逐超预算媒体。"
+    },
     "experimental": {
       "parsedBy": "both",
       "rustConsumer": "config/mod.rs (experimental) → env.rs",
@@ -256,6 +264,13 @@
       "rustConsumer": "config/mod.rs (cron) → cron/scheduler.rs",
       "napiFields": [],
       "why": "调度器与停机窗口逻辑只在引擎侧。",
+      "engineOnly": true
+    },
+    "operationLog": {
+      "parsedBy": "engine",
+      "rustConsumer": "config/mod.rs (operation_log) → tools/operation_log_service.rs",
+      "napiFields": [],
+      "why": "操作日志保留策略与三个环境变量只在引擎侧解析；本批不改 node-sdk 配置契约。",
       "engineOnly": true
     },
     "raw": {

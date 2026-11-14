@@ -1,41 +1,662 @@
-# 逐文件对齐台账（v2 → Rust 引擎）
 
-## 元信息
+### features/** 逐文件行为等价续审（2026-11-15）
 
-| 项 | 值 |
-| --- | --- |
-| 目标仓库 | `g:\kimirust`，`packages/kimi-agent/src` |
-| 参考实现 | `D:\kimi\kimi-code` 工作区 `packages/agent-core-v2/src`（HEAD `d4c849b2da`） |
-| 口径 | 以 v2 目录为起点逐文件读源码，找 Rust 落点；判定「等价 / 部分 / 缺失 / NA」，只补引擎内可闭合项 |
-| 约束 | 不改 `packages/protocol`、`packages/node-sdk`、`apps/kimi-code`；台账仅按行登记，不跑 `--update` |
-| 起始日期 | 2026-11-09 |
+续自 `tower/tools/mission/missionTool.ts`，按 v2 目录顺序核对剩余 32 个文件。只修改当前项的独立 Rust 文件；不改旧容器、不接线、不提交，不运行编译、测试、格式化或门禁。
 
-判定口径：**等价**＝可观察行为一致（含换位实现）；**部分**＝主路径一致但字段/分支缺失；**缺失**＝v2 有、Rust 无；**NA**＝引擎无对应职责或 v2 本身无该行为（写理由）。
+#### 已审文件
 
----
+| v2 文件 | Rust 落点 | 核对结果 |
+| --- | --- | --- |
+| `tower/tools/plan/plan.md` | `features/tower/tools/plan/plan.md` | 文本逐行一致，无源码修改 |
+| `tower/tools/plan/plan.ts` | `features/tower/tools/plan/plan.rs` | strict 输入、必填字段、missions/scope 非空、可选字段拒 null、kind 枚举及 schema 描述均一致，无源码修改 |
+| `tower/tools/rebase/rebase.md` | `features/tower/tools/rebase/rebase.md` | 文本逐行一致，无源码修改 |
+| `tower/tools/rebase/rebase.ts` | `features/tower/tools/rebase/rebase.rs` | mission 必填、strict 输入与 schema 一致，无源码修改 |
 
-## 第一批：`agent/loop/`（14 文件）
+| `tower/tools/review/review.md` | `features/tower/tools/review/review.md` | 文本逐行一致，无源码修改 |
+| `tower/tools/review/review.ts` | `features/tower/tools/review/review.rs` | 输入校验一致；将 `acceptance_tip` 的 schema 描述改为 v2 原文，其他 schema 不变 |
+| `tower/tools/send/send.md` | `features/tower/tools/send/send.md` | 文本逐行一致，无源码修改 |
+| `tower/tools/send/send.ts` | `features/tower/tools/send/send.rs` | 必填字段、strict 输入、可选字段拒 null 与 schema 描述均一致，无源码修改 |
+| `tower/tools/spawn/spawn.md` | `features/tower/tools/spawn/spawn.md` | 文本逐行一致，无源码修改 |
+| `tower/tools/spawn/spawn.ts` | `features/tower/tools/spawn/spawn.rs` | strict 输入、kind 枚举、可选字段拒 null、worker/reviewer 条件必填与 trim 校验及 schema 描述均一致，无源码修改 |
+| `tower/tools/status/status.md` | `features/tower/tools/status/status.md` | 文本逐行一致，无源码修改 |
+| `tower/tools/status/status.ts` | `features/tower/tools/status/status.rs` | strict 输入、limit 可省略但拒 null、正整数校验及 schema 描述均一致，无源码修改 |
+| `tower/tools/teardown/teardown.md` | `features/tower/tools/teardown/teardown.md` | 文本逐行一致，无源码修改 |
+| `tower/tools/teardown/teardown.ts` | `features/tower/tools/teardown/teardown.rs` | strict 输入、三个可选字段拒 null 及 schema 描述均一致，无源码修改 |
+| `tower/tower-worker-overlay.md` | `features/tower/tower-worker-overlay.md` | 文本逐行一致，无源码修改 |
+| `tower/tower.ts` | `features/tower/tower.rs` | 工具名及顺序、worker profile、flag/service id、permission pin、enter failure/result、exit reason 与失败文案均一致，无源码修改 |
+| `tower/towerRateLimit.ts` | `features/tower/towerRateLimit.rs` | snapshot 的 budget/inflight/blockedUntil 映射与 service id 一致，无源码修改；接口实现行为在下一文件核对 |
+| `tower/towerRateLimitService.ts` | `features/tower/towerRateLimitService.rs` | 四个常量、governor 的缩容/恢复/重置、pause/success、budget/acquire/release/snapshot/reset 语义及错误文案均一致，无源码修改 |
+| `tower/workerProfile.ts` | `features/tower/worker_profile.rs` | 工具名及顺序、profile 描述、whenToUse、CODER_ROLE 与 overlay 拼接均一致，无源码修改 |
+| `usage/usageFeature.ts` | `features/usage/usageFeature.rs` | 将 agent model 标识改为 v2 定义的 `usage`，新增 `sessionUsageService` id，并在本文件组装 agent-model 与 session service 两项 Feature 贡献；未注册或接线 |
 
-| v2 文件 | Rust 落点 | 判定 | 说明 |
-| --- | --- | --- | --- |
-| `configSection.ts` | `config/mod.rs` `[loop_control]` | 等价 | 6 个键、3 个 env、legacy 别名与弃用映射均一致（`resolve_max_attempts_per_step` / `resolve_max_steps_per_turn`） |
-| `errors.ts` | `session/mod.rs` `turn_end_error_payload`；`agent_busy` 无落点 | 部分 | `loop.max_steps_exceeded` 文案逐字一致；`turn.agent_busy` 属 v2 程序化 skill 服务，Rust 引擎无该服务 → NA |
-| `loop.ts` | `turn_loop/types.rs`、`session/mod.rs`、`server/mod.rs` | 等价 | `TurnResult`/`LoopSnapshot`/prompt 状态均有等价面；`registerLoopErrorHandler` 唯一消费者是 fullCompaction，溢出恢复已直接实现 → NA |
-| `loopService.ts` | `turn_loop/run_turn.rs`、`session/mod.rs` | 部分 | B1 已对 62 条判定；本批补 `turn.ended` 的 `interruptReason`/`traceId`。剩余：`prompt.queued`/`prompt.started`（协议无事件，跨层）、`stopReason`（协议无字段，跨层） |
-| `promptChannel.ts` | `session/mod.rs` 的 `Admission` 四种准入 + `server/prompt_queue.rs` | 等价 | `ActiveOrNewTurn`/`ActiveTurnOnly` 覆盖 steer 判定；prompt metadata 由 `server/engine.rs::apply_prompt_metadata` 写回 |
-| `turnEvents.ts` | `turn_events.rs` + `events/types.rs` | 部分→已补 | 本批补齐 `turn.ended.interruptReason`/`traceId`；修正 bundled skill 显示文本派生（v2 `annotateBundledSkillParts` 语义） |
-| `turnOps.ts` | `turn_events.rs`、`storage/state_store.rs::fold_turn_event` | 等价 | `TurnPrompt`/`TurnSteer`/`TurnCancel`/`TurnEnded` 载荷与 `turnKey` 折叠（nextTurnId / cancelledTurnIds / anchorTurnIds / lastEnded）逐项一致 |
-| `machine/engine.ts` | `turn_loop/run_turn.rs` + `turn_step.rs` + `tool_scheduler.rs` | 等价 | 状态机行为已直接实现（B1 已判）；事件词表用 `llm.step.*` 而非 `turn.step.*`，信息面等价 |
-| `machine/history.ts` | 无独立落点 | NA | v2 human 机器的 HistoryMessage 元数据层；Rust 直接维护 `LLMMessage` 历史 |
-| `machine/index.ts` | `session/mod.rs::TurnRequest` | 等价 | `createUserEntry` 对应 `TurnRequest::user` |
-| `machine/requester.ts` | `turn_step.rs` + `llm/**` | 等价 | gate 失败/取消 → 失败且不可重试；`llm.sent`、retrying、usage/finish/message_id 均有对应事件 |
-| `machine/storeJournal.ts` | `native/event_store/` + `session/sqlite_store.rs` | NA | Rust 用 SQLite 行日志，不采用 v2 的 human store journal 适配层 |
-| `machine/tools.ts` | `turn_loop/tool_scheduler.rs` | 等价（除下述） | 工具机器适配已由调度器直接实现；`stopBatchAfterThis` 见「已识别未补」 |
+#### 边界未合（待搬运）
 
-## 第一批：`agent/toolExecutor/`（6 文件）
+| v2 出处 | 独立 Rust 文件与旧容器 | 旧实现偏差 |
+| --- | --- | --- |
+| `tower/tools/plan/planTool.ts:17-67` | `features/tower/tools/plan/planTool.rs`；`tools/tower/mod.rs:338-390` | 独立文件只有定义和旧入口委托。旧入口没有 v2 的 `Planning N tower mission(s)` 执行描述、`approvalRule`、`sideEffect=read` 和 tower active 守卫；直接解析旧 `PlanArgs`，未复用独立文件的 optional-null 与数组非空校验；成功尾文案仍为 `plus reviewers for the branches`，缺少 build/artifact 分流及 artifact 人类验收说明 |
+| `tower/tools/rebase/rebaseTool.ts:14-91` | `features/tower/tools/rebase/rebaseTool.rs`；`tools/tower/mod.rs:1040-1112` | 独立文件只有定义和旧入口委托。旧入口没有执行描述、`approvalRule`、`sideEffect=write`；查找 mission 未 trim，unknown-mission、up-to-date、conflict、rebased 文案均不同，conflict 额外返回 isError，成功文案仍称记录 clean-rebase review waiver，且缺少 artifact 重新 TowerComplete/人类验收与 build 新评审指引 |
 
-| v2 文件 | Rust 落点 | 判定 | 说明 |
-| --- | --- | --- | --- |
+| `tower/tools/review/reviewTool.ts:17-143` | `features/tower/tools/review/reviewTool.rs`；`tools/tower/mod.rs:1623-1773` | 独立文件只有定义和旧入口委托；本次已让定义使用对齐后的独立 schema。旧入口没有 `Submitting tower review for …` 执行描述、`approvalRule`、`sideEffect=read`；直接反序列化旧 `TowerReviewInput`，未执行 status 正则、merge 枚举和 optional-null 校验；输出未追加 v2 `deliverTowerMessage` 的 delivery 文本 |
+| `tower/tools/send/sendTool.ts:15-76` | `features/tower/tools/send/sendTool.rs`；`tools/tower/mod.rs:1352-1424` | 独立文件只有定义和旧入口委托。旧入口没有发送执行描述、`approvalRule`、`sideEffect=read`，直接解析旧 `TowerSendInput` 而接受 optional null；未走 v2 `deliverTowerMessage`，改为在部分 tower 发送场景追加 `Agent(resume=…)` 提示，投递结果文案与覆盖分支不同 |
+| `tower/tools/spawn/spawnTool.ts:83-636` | `features/tower/tools/spawn/spawnTool.rs`；`tools/tower/mod.rs:451-1018` | 独立文件只有定义和旧入口委托。旧入口没有 `Spawning tower …` 执行描述、`approvalRule`、`sideEffect=read` 和 tower active 守卫；旧 `SpawnArgs` 接受 optional null 且未做条件字段 trim 非空校验，并多出 user-stop、reviewer 分支存在/终态及 paused-mission 守卫；worktree 普通错误直接失败而非告警继续；提示词未读完整 mission 文件，缺少 worker/reviewer 历史、完整 checklist 与 diffBase，仍要求手动发送 review-result；成功结果的 task_id 取 agent_id，尾部进度与复活指引也不同 |
+| `tower/tools/status/statusTool.ts:30-308` | `features/tower/tools/status/statusTool.rs`；`tools/tower/mod.rs:1892-1933`、`tools/tower/status_reader.rs:141-615` | 独立文件只有定义和旧入口委托。旧入口没有 `Reading tower status` 执行描述、`approvalRule`、`sideEffect=read`、`repoMutation=none`；旧 `StatusArgs` 接受 limit null 和 0，并把 0 截为 1，而 v2 拒绝非正数；状态读取与渲染沿用旧模块，inbox 没有 v2 的 1000 条读取上限，空 block details 时输出标点不同，user-stop 还额外接受多组取消原因 |
+| `tower/tools/teardown/teardownTool.ts:18-83` | `features/tower/tools/teardown/teardownTool.rs`；`tools/tower/mod.rs:1213-1333` | 独立文件只有定义和旧入口委托。旧入口没有 dry-run/force 执行描述、`approvalRule`、`sideEffect=write`；旧 `TeardownArgs` 接受 optional null；state load 失败会直接报错，而 v2 只把 priorOwner 视为 undefined 并继续；非 dry-run 成功后额外清 wake、release session、发送 `tower_mode.exit` 与 telemetry，和 v2 保持 tower mode active 的行为冲突 |
+
+#### 登记不改
+
+| v2 出处 | Rust 现状 | 阻塞接口与偏差 |
+| --- | --- | --- |
+| `tower/tools/status/statusReader.ts:73-221` | `features/tower/tools/status/statusReader.rs` 仅再导出 `tools/tower/status_reader.rs:127-227,540-615` | v2 `readTowerStatus` 接收 active/cwd/agentId/tasks/concurrency 回调，保留传入 active，inbox 最多读 1000 条并返回裁剪后的 state；Rust 公开函数接收 store/caller/active_agent_ids/max_running_tasks，自行决定 active、返回完整 TowerState 且 unread 计数无该上限。v2 `readTowerStatusSummary` 是简短文本摘要，Rust 再导出的 `render_tower_status_summary` 却是完整工具 dashboard；对齐需改公开函数/结构签名及旧模块其他调用方，故本文件不单独改 |
+| `tower/tools/support.ts:11-36` | `features/tower/tools/support.rs` | store、caller 与两条常量一致；但 v2 `runTowerTool` 只把 TowerProtocolError/GitError 转为 isError，其他异常继续抛出，Rust 的公开签名只返回 `Result<_, String>` 并把任意 Err 都转为 isError。表达该区分需引入跨模块错误类型并改公开函数签名，故本文件不单独改 |
+| `tower/towerFeature.ts:62-96` | `features/tower/towerFeature.rs` | 13 项工具贡献顺序、domain、app/onDemand 限流服务和 enabled 时贡献 profile 一致；但 v2 assembled 判定以 flag service 为键，在构造成功后加入 WeakSet、Dispose 时删除，并有独立测试覆盖值。Rust `TowerFeature::new(enabled)` 后 `is_tower_feature_assembled(&self)` 永远只返回 enabled，未表达构造/Dispose 生命周期和测试覆盖。对齐需接入 flag service 身份与 Dispose 生命周期并改公开接口，故本文件不单独改 |
+| `tower/towerOps.ts:8-68` | `features/tower/towerOps.rs` | enter/exit/inbox 类型与字段、tower/owner fold 一致；但 v2 enter/exit 均 durable 且 fold 时另发 `AgentStatusUpdated(towerMode)`，inbox-sent 为 observable，两个 state 还有 replayable schema。Rust 只有类型常量和本地 bool/owner 状态修改，没有这些事件元数据与状态更新事件。补齐需接入事件上下文、AgentStatusUpdated 和 state 定义接口并改 fold 公开签名，故本文件不单独改 |
+| `tower/towerService.ts:77-950` | `features/tower/towerService.rs:1-32` | `TOWER_MODE_TOOLS`、flag veto 清单及 wake variant 一致；独立文件其余仅再导出旧 init/teardown/resume/wake 入口，没有 v2 AgentTowerService 的 enter/exit/isActive、branch lease、restore/reconcile、roster death、工具 veto、worker write/bash guard 和 inbox wake 的 batch/cancel/requeue/digest 编排。补齐需接入 DI 生命周期、事件/任务/profile/config 等多个服务并改公开服务接口和调用方，故本文件不单独改 |
+
+### 移植进度：goal 缺失资产与 features 文件复核（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。本轮逐目录对照 v2 `features/**` 与 Rust 现有落点，包含位于 `agent/`、`tools/`、`injection/`、`skills/` 的既有实现；未改变任何注册或运行路径。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/goal/injection/goal-budget-limited-reminder.md` | `features/goal/injection/goal-budget-limited-reminder.md` | 按 v2 原文补上缺失资产；未把 `GoalStatus::BudgetLimited` 或 reminder 选择逻辑改接到该文件 |
+| `features/gitMemory/tools/repo-map.md` | `tools/git_memory.rs::REPO_MAP_DESCRIPTION` | 原文已内联，保持既有实现，不重复复制 Markdown |
+| `features/associativeMemory/tools/memoryGraphTool.ts` | `tools/memory_graph_tool.rs` | 已有完整输入、schema、action 分发与执行实现；feature 目录其余文件均已存在，不新增重复委托 |
+| `features/helloWorld/agent/injection/helloWorldInjection.ts` | `injection/hello_world_mode.rs` | 既有落点，保持不动 |
+| `features/codeRuntime/tools/run_code/run_code.md` | `tools/run_code_tool.md` | 既有资产，保持不动 |
+| `features/swarm/{agent,tools}/**/*.md` | `injection/swarm_mode.rs`、`swarm/*.md` 与本轮前已有 `features/swarm/tools/agentSwarm/agent-swarm-fork.md` | 既有文本或落点，保持不动 |
+| `features/skill/catalog/builtin/**/*.md` | `skills/builtin/**` | 既有内建资产，保持不动 |
+
+其余已逐文件核对组为 `attachment`、`astron`、`btw`、`codeRuntime`、`cron`、`dateChange`、`debugEvents`、`externalHooks`、`feature*.ts`、`fileHistory`、`goal`、`helloWorld`、`lsp`、`notify`、`operationLog`、`plan`、`promptOptimizer`、`reminder`、`sessionInit`、`sessionQuery`、`skill`、`snapshot`、`spec`、`swarm`、`todo`、`tokenCounting`、`usage`、`gitMemory` 与 `associativeMemory`；本轮未见其他未映射文件。该结论只覆盖文件落点，不覆盖行为、接线或测试等价。
+
+本组新增资产后 `cargo check --lib` 出口码 0（既有 unused-import 警告仍在）。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：tower 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `tools/tower/**`、mode-mutex 与工具注册保持不动；本组新增 v2 同名目录、模型和委托，不接 feature、flag、profile、reminder 或 DI 服务注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/tower/tower.ts` | `features/tower/tower.rs` | 新增工具名、worker profile、flag/service id、进入失败/结果、退出原因与失败文案 |
+| `features/tower/towerFeature.ts` | `features/tower/towerFeature.rs` | 新增 13 个工具贡献、app/onDemand 限流服务、worker profile 与 Feature 元数据组装，不注册 recipe |
+| `features/tower/flag.ts` | `features/tower/flag.rs` | 新增 `KIMI_CODE_EXPERIMENTAL_TOWER` flag 元数据、assembled 暴露判定与既有 enabled 委托 |
+| `features/tower/towerOps.ts` | `features/tower/towerOps.rs` | 新增 enter/exit/inbox-sent 事件模型及 tower/owner 状态 fold |
+| `features/tower/towerService.ts` | `features/tower/towerService.rs` | 再导出既有 init/teardown/resume/wake 入口，新增 mode/veto 工具清单；未新建或注册 Agent DI service |
+| `features/tower/towerRateLimit.ts` | `features/tower/towerRateLimit.rs` | 再导出既有 snapshot，新增 service id |
+| `features/tower/towerRateLimitService.ts` | `features/tower/towerRateLimitService.rs` | 再导出既有 `TowerRateLimit` 及 shrink/recovery/pause/default 常量，governor 逻辑保持在原实现 |
+| `features/tower/bashGuard.ts` | `features/tower/bashGuard.rs` | 再导出既有 guard/parser，新增 parse 限制与 store ownership 查询 |
+| `features/tower/workerProfile.ts` | `features/tower/workerProfile.rs` | 新增 worker 工具清单、role 组合与 AgentProfile 构造 |
+| `features/tower/tower-worker-overlay.md` | `features/tower/tower-worker-overlay.md` | 按 v2 原文复制 |
+| `features/tower/injection/towerModeInjection.ts` | `features/tower/injection/towerModeInjection.rs` | 新增 full/sparse/exit reminder 选择、cadence 与披露状态模型，不接 injector |
+| `features/tower/injection/*.md` | `features/tower/injection/` 同名 `.md` | 按 v2 原文复制 3 份 reminder |
+| `features/tower/protocol/index.ts` | `features/tower/protocol/mod.rs` | 声明并再导出协议映射模块 |
+| `features/tower/protocol/{baseWip,concurrency,frontmatter,git,missionGate,paths,repoRoot,store,types}.ts` | `features/tower/protocol/` 同名 `.rs` | 再导出 `tools/tower/{git,concurrency,frontmatter,mission_gate,paths,store,types}.rs` 既有实现 |
+| `features/tower/tools/{support,delivery}.ts` | `features/tower/tools/{support,delivery}.rs` | 新增 store/caller/error-result 辅助，再导出既有 send/wake 交付路径 |
+| `features/tower/tools/*/*.ts` | `features/tower/tools/` 各同名目录的 `.rs` | 补 13 个工具的输入模型、service id、既有 schema、ToolInfo 与执行器委托；`statusReader.ts` 再导出既有状态读取 |
+| `features/tower/tools/*/*.md` | `tools/tower/descriptions/*.md` | 已有 13 份工具描述，新增 Tool 文件直接 `include_str!` 引用，不复制资产 |
+
+新增各级 `mod.rs` 并在 `features/mod.rs` 声明 `tower`。新文件无源码注释；`cargo check --lib` 出口码 0（既有 unused-import 警告仍在）。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：skill 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `skills/mod.rs`、`tools/skill.rs`、`prompt/skills_renderer.rs` 与 `skills/builtin/**` 保持不动；本组新增 v2 同名目录和映射，不重复扫描、合并、加载或注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/skill/skill.ts` | `features/skill/skill.rs` | 新增 activation/prompt 输入输出模型与服务 id |
+| `features/skill/skillService.ts` | `features/skill/skillService.rs` | 再导出既有目录实现并映射 AgentSkillService |
+| `features/skill/skillFeature.ts` | `features/skill/skillFeature.rs` | 新增 feature 名称、agent/onDemand、工具元数据 |
+| `features/skill/skillOps.ts` | `features/skill/skillOps.rs` | 新增 skill.activated payload/event 与 trigger 模型 |
+| `features/skill/prompt.ts` | `features/skill/prompt.rs` | 再导出既有 listing renderer，新增 user/model loaded-block 渲染 |
+| `features/skill/tools/skill.ts` | `features/skill/tools/skill.rs` | 新增工具输入模型、服务 id、深度错误与既有 schema |
+| `features/skill/tools/skillTool.ts` | `features/skill/tools/skillTool.rs` | 新增到既有 execute_skill/execute_skill_with_depth 和定义的委托 |
+| `features/skill/tools/skill.md` | `features/skill/tools/skill.md` | 按 v2 原文复制 |
+| `features/skill/catalog/{registry,skillRoots,fileSkillDiscovery,inMemorySkillDiscovery,skillDiscovery,skillSource,types}.ts` | `features/skill/catalog/` 同名 `.rs` | 再导出既有 scan roots、descriptor、discovery 与类型 |
+| `features/skill/catalog/parser.ts` | `features/skill/catalog/parser.rs` | 再导出既有 frontmatter parser |
+| `features/skill/catalog/{builtinSkillSource,userFileSkillSource}.ts` | `features/skill/catalog/` 同名 `.rs` | 再导出既有内建/文件发现 |
+| `features/skill/catalog/configSection.ts` | `features/skill/catalog/configSection.rs` | 新增 3 个 section、env 与 builtin enabled 委托 |
+| `features/skill/catalog/errors.ts` | `features/skill/catalog/errors.rs` | 再导出 kimi-core 既有 skill error domain 与 5 个错误码 |
+| `features/skill/catalog/builtin/{builtin,registry,sub-skill}.ts` | `features/skill/catalog/builtin/{builtin,registry,subSkill}.rs` | 再导出既有内建定义与 sub-skill 根名 |
+| `features/skill/catalog/builtin/{check-kimi-code-docs,custom-theme,import-from-cc-codex,mcp-config,update-config,write-goal}.ts` | `features/skill/catalog/builtin/` 对应 camelCase `.rs` | 内嵌既有同名 Markdown，不复制资产 |
+| `features/skill/session/{skillCatalog,skillCatalogData,skillCatalogService}.ts` | `features/skill/session/` 同名 `.rs` | 再导出既有目录、descriptor、scope 与 service 映射 |
+| `features/skill/workspace/{explicitFileSkillSource,extraFileSkillSource,configuredSkillRootWatcher,environmentSkillDiscovery,workspaceSkillCatalogService,rootFileSkillSource,pluginSkillSource,workspaceSkillCatalog}.ts` | `features/skill/workspace/` 同名 `.rs` | 再导出既有 workspace/plugin 目录实现与 service 映射 |
+| `features/skill/catalog/builtin/**/*.md` | `skills/builtin/**/*.md` | 已有内建及 sub-skill 资产，保持不动 |
+
+新增各级 `mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：todo 缺失文件补齐（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 todo item/service/ops/reminder 与执行器保持不动；本组只补 feature 和工具目录，不重复注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/todo/todoFeature.ts` | `features/todo/todoFeature.rs` | 新增 feature 名称、agent scope、工具名/domain 元数据 |
+| `features/todo/tools/todo-list/todo-list.ts` | `features/todo/tools/todoList/todoList.rs` | 新增可选字段输入模型、到 TodoItem 的规范化、服务 id 与既有 schema |
+| `features/todo/tools/todo-list/todoListTool.ts` | `features/todo/tools/todoList/todoListTool.rs` | 新增到既有定义和执行的委托及 next-step hint |
+| `features/todo/tools/todo-list/todo-list.md` | `features/todo/tools/todoList/todo-list.md` | 按 v2 原文复制工具描述 |
+
+`features/todo/mod.rs` 增加上述模块声明。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未写「终态」。
+
+### 移植进度：reminder 缺失文件补齐（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 reminder service/types 保持不动，本组只补 feature 和 system-reminder 映射，不重复注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/reminder/reminderFeature.ts` | `features/reminder/reminderFeature.rs` | 新增 feature 名称与 agent scope 元数据 |
+| `features/reminder/systemReminder.ts` | `features/reminder/systemReminder.rs` | 再导出 prefix/suffix，新增 wrap 委托与 content 解包 |
+
+`features/reminder/mod.rs` 增加上述模块声明。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未写「终态」。
+
+### 移植进度：goal 缺失文件补齐（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 goal 状态、scheduler、injection 与四个执行入口保持不动；本组补 goal、errors、feature、deadline service 映射、共享序列化/prompt 和四个工具目录，不重复注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/goal/goal.ts` | `features/goal/goal.rs` | 再导出 GoalReasonInput/ResumeGoalInput |
+| `features/goal/errors.ts` | `features/goal/errors.rs` | 再导出 kimi-core 既有 goal error domain 与 8 个错误码 |
+| `features/goal/goalFeature.ts` | `features/goal/goalFeature.rs` | 新增 feature 名称、app/onDemand deadline 与四个工具元数据 |
+| `features/goal/goalDeadlineSchedulerService.ts` | `features/goal/goalDeadlineSchedulerService.rs` | 再导出既有 monotonic scheduler、handle 与 trait |
+| `features/goal/tools/serialize.ts` | `features/goal/tools/serialize.rs` | 新增去 goalId 的 model 序列化 |
+| `features/goal/tools/outcome-prompts.ts` | `features/goal/tools/outcomePrompts.rs` | 新增完成/受阻 prompt 及 turns/elapsed/tokens 格式化 |
+| `features/goal/tools/create-goal/{create-goal.ts,createGoalTool.ts}` | `features/goal/tools/createGoal/{createGoal.rs,createGoalTool.rs}` | 新增输入/schema 与既有 create 定义执行委托 |
+| `features/goal/tools/get-goal/{get-goal.ts,getGoalTool.ts}` | `features/goal/tools/getGoal/{getGoal.rs,getGoalTool.rs}` | 新增服务 id/schema 与既有 get 定义执行委托 |
+| `features/goal/tools/set-goal-budget/{set-goal-budget.ts,setGoalBudgetTool.ts}` | `features/goal/tools/setGoalBudget/{setGoalBudget.rs,setGoalBudgetTool.rs}` | 新增预算输入/schema 与既有 set 定义执行委托 |
+| `features/goal/tools/update-goal/{update-goal.ts,updateGoalTool.ts}` | `features/goal/tools/updateGoal/{updateGoal.rs,updateGoalTool.rs}` | 新增状态输入/schema 与既有 update 定义执行委托 |
+| `features/goal/tools/*/*.md` | 上述 4 个工具目录的对应 `.md` | 按 v2 原文复制 4 份工具描述 |
+
+`features/goal/mod.rs` 增加上述模块声明。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未写「终态」。
+
+### 移植进度：notify 缺失文件补齐（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 availability、nudge、flag 与工具定义保持不动；本组补 session notify、feature 和工具文件，不重复注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/notify/sessionNotify.ts` | `features/notify/sessionNotify.rs` | 新增持久化 enabled、initial 开启和最近 profile prompt 回退判定 |
+| `features/notify/notifyFeature.ts` | `features/notify/notifyFeature.rs` | 新增 feature 名称、agent scope、工具 domain 与 enabled 条件 |
+| `features/notify/tools/notify-user/notify-user.ts` | `features/notify/tools/notifyUser/notifyUser.rs` | 再导出既有工具名和输入模型，新增服务 id |
+| `features/notify/tools/notify-user/notifyUserTool.ts` | `features/notify/tools/notifyUser/notifyUserTool.rs` | 新增输入校验、displayed/suppressed 输出与既有工具定义委托 |
+| `features/notify/tools/notify-user/notifyOutput.ts` | `features/notify/tools/notifyUser/notifyOutput.rs` | 新增 delivered/suppressed 文案 |
+| `features/notify/tools/notify-user/notify-user.md` | `features/notify/tools/notifyUser/notify-user.md` | 按 v2 原文复制 |
+
+`features/notify/mod.rs` 增加上述模块声明。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未写「终态」。
+
+### 移植进度：snapshot 缺失文件补齐（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 snapshot store/service/list 保持不动，本组只补 feature 与描述资产，不重复注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/snapshot/snapshotFeature.ts` | `features/snapshot/snapshotFeature.rs` | 新增 feature 名称、agent scope、工具名/domain 元数据 |
+| `features/snapshot/snapshot-list.md` | `features/snapshot/snapshot-list.md` | 按 v2 原文复制工具描述 |
+
+`features/snapshot/mod.rs` 增加 feature 模块声明。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未写「终态」。
+
+### 移植进度：dateChange 缺失文件补齐（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `dateChangeService.rs` 保持不动，本组只补 3 个映射文件，不重复注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/dateChange/dateChange.ts` | `features/dateChange/dateChange.rs` | 再导出既有 DateDisclosure/DateInjectionDisclosure |
+| `features/dateChange/disclosureBaseline.ts` | `features/dateChange/disclosureBaseline.rs` | 再导出既有 renderGeneration baseline 选择 |
+| `features/dateChange/dateChangeFeature.ts` | `features/dateChange/dateChangeFeature.rs` | 新增 feature 名称与 agent scope 元数据 |
+
+`features/dateChange/mod.rs` 增加上述模块声明。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未写「终态」。
+
+### 移植进度：cron 缺失文件补齐（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 cron 调度、表达式、state、config 与 `tools/cron_tools.rs` 保持不动；本组只补缺失的 feature/errors 和三个工具的同名文件，不重复注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/cron/errors.ts` | `features/cron/errors.rs` | 新增 cron.expression_invalid 常量 |
+| `features/cron/cronFeature.ts` | `features/cron/cronFeature.rs` | 新增 feature 名称、agent scope、工具 domain/name 元数据 |
+| `features/cron/tools/cron-create/cron-create.ts` | `features/cron/tools/cronCreate/cronCreate.rs` | 新增输入/输出模型、服务 id、50/8KiB 上限与既有 schema |
+| `features/cron/tools/cron-create/cronCreateTool.ts` | `features/cron/tools/cronCreate/cronCreateTool.rs` | 新增到既有 create 定义和执行的委托及 one-shot 上限 |
+| `features/cron/tools/cron-delete/cron-delete.ts` | `features/cron/tools/cronDelete/cronDelete.rs` | 新增输入模型、服务 id 与既有 schema |
+| `features/cron/tools/cron-delete/cronDeleteTool.ts` | `features/cron/tools/cronDelete/cronDeleteTool.rs` | 新增到既有 delete 定义和执行的委托 |
+| `features/cron/tools/cron-list/cron-list.ts` | `features/cron/tools/cronList/cronList.rs` | 新增服务 id 与既有空输入 schema |
+| `features/cron/tools/cron-list/cronListTool.ts` | `features/cron/tools/cronList/cronListTool.rs` | 新增到既有 list 定义和执行的委托及 200-byte preview |
+| `features/cron/tools/cron-{create,delete,list}/cron-{create,delete,list}.md` | `features/cron/tools/cron{Create,Delete,List}/` 对应 `.md` | 按 v2 原文复制 3 份短描述 |
+
+`features/cron/mod.rs` 增加上述模块声明。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：helloWorld 缺失文件补齐（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定，也不改此前已完成的 helloWorld 真实接线。本组只补缺失的 feature 文件。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/helloWorld/helloWorldFeature.ts` | `features/helloWorld/helloWorldFeature.rs` | 新增 feature 名称、agent scope 与 onScopeCreated 元数据，不重复注册 |
+
+`agent/helloWorld.ts`、`agent/helloWorldService.ts`、`helloWorldOps.ts`、enter/exit 与 7 个 stage 资产均已有落点；`agent/injection/helloWorldInjection.ts` 对应既有 `injection/hello_world_mode.rs`，均保持不动。`features/helloWorld/mod.rs` 只增加上述模块声明。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未写「终态」。
+
+### 移植进度：feature 框架文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。本组补 feature 根目录的 4 个框架文件，不把现有特性自动注册进去。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/feature.ts` | `features/feature.rs` | 新增 contribution 模型、model/config/service/tool/command/profile 贡献入口、handle 与 dispose |
+| `features/featureRegistry.ts` | `features/featureRegistry.rs` | 新增全局 recipe 注册、读取与测试清理 |
+| `features/featureAssembly.ts` | `features/featureAssembly.rs` | 新增 assembly 服务 id 与接口 |
+| `features/featureAssemblyService.ts` | `features/featureAssemblyService.rs` | 新增 app/onScopeCreated 元数据和从 recipes 构造 feature 的 assembly，不接 featureManager |
+
+在 `features/mod.rs` 声明上述模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：swarm 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `swarm/**`、`injection/swarm_mode.rs`、`tools/swarm_tool.rs` 与 `config/mod.rs` 保持不动；本组新增同名特性目录并复用实现，不改调度、模式 veto、工具或配置注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/swarm/configSection.ts` | `features/swarm/configSection.rs` | 再导出 SwarmConfig，新增 section、2h 默认值、env 与 timeout 解析入口 |
+| `features/swarm/swarmFeature.ts` | `features/swarm/swarmFeature.rs` | 新增 feature 名称、agent/session scope、onScopeCreated 与工具元数据，不注册 |
+| `features/swarm/swarmOps.ts` | `features/swarm/swarmOps.rs` | 再导出既有 mode 事件，新增 state/event 类型常量 |
+| `features/swarm/agent/swarm.ts` | `features/swarm/agent/swarm.rs` | 再导出 SwarmModeTrigger，新增 agent 服务 id |
+| `features/swarm/agent/swarmService.ts` | `features/swarm/agent/swarmService.rs` | 再导出既有 mode registry、turn-end、veto 与事件写入 |
+| `features/swarm/agent/injection/swarmInjection.ts` | `features/swarm/agent/injection/swarmInjection.rs` | 再导出既有 enter/exit reminder、注册与 baseline 扫描 |
+| `features/swarm/agent/enter-reminder.md` | `injection/swarm_mode.rs::SWARM_MODE_ENTER_REMINDER` | 已有内嵌文本，保持不动 |
+| `features/swarm/agent/exit-reminder.md` | `swarm/exit-reminder.md` | 已有，保持不动 |
+| `features/swarm/session/agentRunBatch.ts` | `features/swarm/session/agentRunBatch.rs` | 再导出既有完整 batch scheduler |
+| `features/swarm/session/sessionSwarm.ts` | `features/swarm/session/sessionSwarm.rs` | 新增 task/result 别名、run args 与服务 id |
+| `features/swarm/session/sessionSwarmService.ts` | `features/swarm/session/sessionSwarmService.rs` | 再导出既有 registry/run/launcher/lifecycle |
+| `features/swarm/tools/agent-swarm/agent-swarm.ts` | `features/swarm/tools/agentSwarm/agentSwarm.rs` | 新增公开输入模型、服务 id 与既有 schema 入口 |
+| `features/swarm/tools/agent-swarm/agentSwarmTool.ts` | `features/swarm/tools/agentSwarm/agentSwarmTool.rs` | 新增工具元数据、pool-aware 定义与既有执行委托 |
+| `features/swarm/tools/agent-swarm/agent-swarm.md` | `swarm/agent-swarm.md` | 已有，保持不动 |
+| `features/swarm/tools/agent-swarm/agent-swarm-fork.md` | `features/swarm/tools/agentSwarm/agent-swarm-fork.md` | 按 v2 原文复制 |
+
+新增各级 `mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；首次 `cargo check --lib` 发现 `agent_swarm_tool_def` 需要 pool 参数，修正定义委托后复跑出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：plan 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `tools/plan_mode.rs`、`tools/exit_plan_mode.rs`、`injection/goal_plan.rs` 与 `prompt/profiles.rs` 保持不动；本组新增独立特性目录、plan 文件服务、Todo 转换、审批纯函数与同名资产，不改现有模式切换或注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/plan/plan.ts` | `features/plan/plan.rs` | 新增 PlanData、PlanFileTarget、文件操作与服务 id |
+| `features/plan/planOps.ts` | `features/plan/planOps.rs` | 新增 state、enter/cancel/exit/revision 事件模型与 main-only fold |
+| `features/plan/planService.ts` | `features/plan/planService.rs` | 新增 plan path、status/clear、revision 构造、resolveFile 与写拒绝文案 |
+| `features/plan/parsePlanToTodos.ts` | `features/plan/parsePlanToTodos.rs` | 新增二/三级 heading milestone 与列表 leaf/status 解析 |
+| `features/plan/planToTodoConverter.ts` | `features/plan/planToTodoConverter.rs` | 新增 empty/no-structure/existing/no-agent 跳过及 converted items 结果 |
+| `features/plan/exitPlanModeReview.ts` | `features/plan/exitPlanModeReview.rs` | 新增选项选择、approved 输出、non-interactive 文案及拒绝结果 |
+| `features/plan/configSection.ts` | `features/plan/configSection.rs` | 新增 defaultPlanMode section 与 false 默认值 |
+| `features/plan/profile/plan.ts` | `features/plan/profile/plan.rs` | 新增 plan profile、工具列表、只读元数据与角色文本，复用既有 role 常量 |
+| `features/plan/injection/planModeInjection.ts` | `features/plan/injection/planModeInjection.rs` | 新增 7 个 reminder 内嵌、cadence、wasActive 与 full/sparse/reentry 选择 |
+| `features/plan/planFeature.ts` | `features/plan/planFeature.rs` | 新增 feature 名称、agent scope、工具 domain/name 元数据，不注册 |
+| `features/plan/tools/exit-plan-mode/exit-plan-mode.ts` | `features/plan/tools/exitPlanMode/exitPlanMode.rs` | 新增输入模型、plan source、label 校验与服务 id |
+| `features/plan/tools/exit-plan-mode/exitPlanModeTool.ts` | `features/plan/tools/exitPlanMode/exitPlanModeTool.rs` | 新增到既有 exit 执行的委托、review display 与 empty-plan 文案 |
+| `features/plan/tools/exit-plan-mode/exit-plan-mode.md` | `features/plan/tools/exitPlanMode/exit-plan-mode.md` | 按 v2 原文复制 |
+| `features/plan/injection/plan-mode-{full,sparse,reentry,exit}-reminder.md`、`plan-mode-inline-{full,sparse,reentry}-reminder.md` | `features/plan/injection/` 同名 7 个 `.md` | 按 v2 原文复制 |
+
+新增各级 `mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：spec 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `tools/spec_mode.rs`、`injection/spec_mode.rs` 与 4 个 reminder 资产保持不动；本组新增独立特性目录、状态/文档/审批纯函数与同名工具委托，不改模式互斥、写守卫或注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/spec/spec.ts` | `features/spec/spec.rs` | 新增 spec 文件/stage/data 模型与服务 id，再导出既有目录与 required files |
+| `features/spec/specOps.ts` | `features/spec/specOps.rs` | 新增 state、enter/cancel/exit/revision 事件模型与 fold |
+| `features/spec/specService.ts` | `features/spec/specService.rs` | 新增 active dir、status/documentData、clear、revision 构造与 SHA-256 |
+| `features/spec/exitSpecModeReview.ts` | `features/spec/exitSpecModeReview.rs` | 新增选项选择、approved 输出及 dismissed/rejected/revise 结果和遥测 outcome |
+| `features/spec/errors.ts` | `features/spec/errors.rs` | 再导出既有 mode_invalid/incomplete，新增 write_denied 常量 |
+| `features/spec/injection/specModeInjection.ts` | `features/spec/injection/specModeInjection.rs` | 再导出既有 injection 与 reminder，新增 wasActive key、cadence 常量和 footer |
+| `features/spec/specFeature.ts` | `features/spec/specFeature.rs` | 新增 feature 名称、agent scope、工具 domain/name 元数据，不注册 |
+| `features/spec/tools/enter-spec-mode/enter-spec-mode.ts` | `features/spec/tools/enterSpecMode/enterSpecMode.rs` | 新增空对象严格 schema 与服务 id |
+| `features/spec/tools/enter-spec-mode/enterSpecModeTool.ts` | `features/spec/tools/enterSpecMode/enterSpecModeTool.rs` | 新增到既有 enter 执行的委托与 entered 文案 |
+| `features/spec/tools/exit-spec-mode/exit-spec-mode.ts` | `features/spec/tools/exitSpecMode/exitSpecMode.rs` | 新增输入模型、label 长度/唯一/保留名校验与服务 id |
+| `features/spec/tools/exit-spec-mode/exitSpecModeTool.ts` | `features/spec/tools/exitSpecMode/exitSpecModeTool.rs` | 新增到既有 exit 执行的委托、review display、incomplete/auto-approved 文案 |
+| `features/spec/tools/enter-spec-mode/enter-spec-mode.md` | `features/spec/tools/enterSpecMode/enter-spec-mode.md` | 按 v2 原文复制 |
+| `features/spec/tools/exit-spec-mode/exit-spec-mode.md` | `features/spec/tools/exitSpecMode/exit-spec-mode.md` | 按 v2 原文复制 |
+| `features/spec/injection/spec-mode-{full,reentry,sparse,exit}-reminder.md` | `injection/spec-mode-*.md` | 已有，保持不动 |
+
+新增各级 `mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：sessionQuery 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `tools/session_query.rs` 保持不动；本组新增 v2 同名特性目录、纯查询模型/过滤/搜索/展示与既有入口委托，不重复注册 app service 或 main-only 工具。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/sessionQuery/types.ts` | `features/sessionQuery/types.rs` | 新增 session/filter/range/lineage 模型 |
+| `features/sessionQuery/events.ts` | `features/sessionQuery/events.rs` | 新增 event/filter/document/hit/page/request 模型 |
+| `features/sessionQuery/cursor.ts` | `features/sessionQuery/cursor.rs` | 新增 offset cursor |
+| `features/sessionQuery/errors.ts` | `features/sessionQuery/errors.rs` | 再导出 kimi-core 既有 session query error domain 与 3 个错误码 |
+| `features/sessionQuery/filters.ts` | `features/sessionQuery/filters.rs` | 新增 session 结果过滤、materialize 与 range 校验 |
+| `features/sessionQuery/lineage.ts` | `features/sessionQuery/lineage.rs` | 新增 ancestor、root/unresolved parent 与递归 descendants |
+| `features/sessionQuery/eventText.ts` | `features/sessionQuery/eventText.rs` | 新增 wire 文本字段和 content part 提取 |
+| `features/sessionQuery/eventIndex.ts` | `features/sessionQuery/eventIndex.rs` | 新增 per-session revision 缓存、wire scope 与失效入口 |
+| `features/sessionQuery/search.ts` | `features/sessionQuery/search.rs` | 新增 event filters、文本 regex、排序分页、query 校验与 snippet |
+| `features/sessionQuery/toolContract.ts` | `features/sessionQuery/toolContract.rs` | 新增 operation/input/schema/service id 与校验文案入口 |
+| `features/sessionQuery/toolInput.ts` | `features/sessionQuery/toolInput.rs` | 新增严格输入模型、session/event filter 构造、ISO 时间与 query 校验 |
+| `features/sessionQuery/toolPresentation.ts` | `features/sessionQuery/toolPresentation.rs` | 新增 session/event/trace 文本展示与 cap 提示 |
+| `features/sessionQuery/sessionQueryService.ts` | `features/sessionQuery/sessionQueryService.rs` | 新增服务 id 与到既有 execute_session_query/trace_lineage 的委托 |
+| `features/sessionQuery/sessionQueryTool.ts` | `features/sessionQuery/sessionQueryTool.rs` | 新增工具元数据与到 service 的执行委托，不重复 main guard |
+| `features/sessionQuery/sessionQueryFeature.ts` | `features/sessionQuery/sessionQueryFeature.rs` | 新增 feature 名称、app scope、工具 domain 与 main-only 元数据 |
+| `features/sessionQuery/session-query.md` | `features/sessionQuery/session-query.md` | 按 v2 原文复制工具描述 |
+
+新增 `features/sessionQuery/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：sessionInit 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `prompt/init.rs` 与 `/init` HTTP 路径保持不动；本组新增独立特性目录、取消令牌与 runner 委托，不改主 agent/subagent 装配。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/sessionInit/sessionInit.ts` | `features/sessionInit/sessionInit.rs` | 新增 session 服务 id 与 generate/cancel 接口 |
+| `features/sessionInit/sessionInitService.ts` | `features/sessionInit/sessionInitService.rs` | 新增 init 常量、runner 委托、CancellationToken 取消与 run-id 清理 |
+| `features/sessionInit/sessionInitFeature.ts` | `features/sessionInit/sessionInitFeature.rs` | 新增 feature 名称与 session scope 元数据，不注册 |
+| `features/sessionInit/profile/init.ts` | `features/sessionInit/profile/init.rs` | 新增 init.md 内嵌并再导出既有 completion reminder |
+| `features/sessionInit/profile/init.md` | `features/sessionInit/profile/init.md` | 按 v2 原文复制 init prompt |
+
+新增各级 `mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：usage 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `session/usage.rs` 与 `agent/usage/**` 保持不动，不重复注册 agent model 或 session service。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/usage/usageFeature.ts` | `features/usage/usageFeature.rs` | 新增 feature 名称、session scope 与 UsageAgentModelDefinition 元数据 |
+
+新增 `features/usage/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：tokenCounting 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `session/token_counting.rs` 与 `agent/token_counting/**` 保持不动，不重复注册 agent model 或 session service。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/tokenCounting/tokenCountingFeature.ts` | `features/tokenCounting/tokenCountingFeature.rs` | 新增 feature 名称、session scope 与 TokenCountingAgentModelDefinition 元数据 |
+
+新增 `features/tokenCounting/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：lsp 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `native/lsp.rs`、`tools/lsp_tool.rs` 与其实例注册表保持不动；本组新增 v2 同名特性目录，补协议/配置/provider registry 和纯函数，执行入口委托既有工具，不重复注册 provider、feature、flag 或 config。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/lsp/lsp.ts` | `features/lsp/lsp.rs` | 新增 operation/query/result 模型与 provider/service 接口 |
+| `features/lsp/lspService.ts` | `features/lsp/lspService.rs` | 新增 provider/extension 冲突检查、disposable 注销、extension 路由与 finalExtension |
+| `features/lsp/lspInstance.ts` | `features/lsp/lspInstance.rs` | 再导出既有 LspClientSession，新增 4 个生命周期默认超时；实例行为仍走既有执行路径 |
+| `features/lsp/lspConnection.ts` | `features/lsp/lspConnection.rs` | 再导出既有连接会话，新增 transport/abort/server error 类型 |
+| `features/lsp/lspStdioProvider.ts` | `features/lsp/lspStdioProvider.rs` | 再导出既有 stdio manager/session，新增服务 id、workspace key 与 recoverable 判定 |
+| `features/lsp/framing.ts` | `features/lsp/framing.rs` | 新增 raw frame 编码、增量 MessageDecoder、16 MiB 上限与 framing error |
+| `features/lsp/protocol.ts` | `features/lsp/protocol.rs` | 新增 position/range/location/hover/document/initialize/JSON-RPC 模型 |
+| `features/lsp/translate.ts` | `features/lsp/translate.rs` | 新增 location/locationLink/hover normalize、URI/path 转换 |
+| `features/lsp/configSection.ts` | `features/lsp/configSection.rs` | 新增 LspConfig/LspServerConfig 完整字段与 section 名 |
+| `features/lsp/errors.ts` | `features/lsp/errors.rs` | 再导出 kimi-core 既有 LSP error domain 与 6 个错误码 |
+| `features/lsp/flag.ts` | `features/lsp/flag.rs` | 新增完整 flag 定义并再导出既有 enabled 判定，不注册 |
+| `features/lsp/lspFeature.ts` | `features/lsp/lspFeature.rs` | 新增 flag 条件、session scope、工具名/domain 元数据，不注册 |
+| `features/lsp/tools/lsp/lsp.ts` | `features/lsp/tools/lsp/lsp.rs` | 新增工具输入模型、服务 id 与严格 schema |
+| `features/lsp/tools/lsp/lspTool.ts` | `features/lsp/tools/lsp/lspTool.rs` | 新增到既有 execute_lsp_tool 的委托及 location/hover 渲染与 100/16000 上限 |
+| `features/lsp/tools/lsp/lsp.md` | `features/lsp/tools/lsp/lsp.md` | 按 v2 原文复制工具描述 |
+
+新增各级 `mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：gitMemory 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。`agent/features/git_memory` 已有 v2 逐文件落点，本组不新建重复的 `features/gitMemory`，仅补 flag 定义；既有 `tools/git_memory.rs`、`tools/memory_repo.rs` 与工具注册保持不动。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/gitMemory/cache.ts` | `agent/features/git_memory/cache.rs` → `tools/git_memory.rs` | 已有 cache path、读写、legacy 清理与索引构造，保持不动 |
+| `features/gitMemory/gitMemoryEntries.ts` | `agent/features/git_memory/git_memory_entries.rs` → `tools/git_memory.rs` | 已有 memory entries 收集与渲染去重，保持不动 |
+| `features/gitMemory/gitMemoryIndexLoader.ts` | `agent/features/git_memory/git_memory_index_loader.rs` → `tools/git_memory.rs` | 已有 HEAD/index 加载与刷新，保持不动 |
+| `features/gitMemory/gitMemoryRenderState.ts` | `agent/features/git_memory/git_memory_render_state.rs` → `tools/git_memory.rs` | 已有 512 上限 render state，保持不动 |
+| `features/gitMemory/gitMemoryService.ts` | `agent/features/git_memory/git_memory_service.rs` → `tools/git_memory.rs` | 已有 repo/signal/file/repoMap 服务，保持不动 |
+| `features/gitMemory/gitReader.ts` | `agent/features/git_memory/git_reader.rs` → `tools/git_memory.rs` | 已有 git history/head/tree 读取，保持不动 |
+| `features/gitMemory/projection.ts` | `agent/features/git_memory/projection.rs` → `tools/git_memory.rs` | 已有 commit/repo/tree/file/dir/signal 投影，保持不动 |
+| `features/gitMemory/types.ts` | `agent/features/git_memory/types.rs` → `tools/memory_repo.rs`、`tools/git_memory.rs` | 已有 commit 与 index 模型，保持不动 |
+| `features/gitMemory/flag.ts` | `agent/features/git_memory/flag.rs` | 在既有 enabled 再导出旁补 id/env/title/description/default=false/surface=both，不注册 |
+| `features/gitMemory/tools/repo-map.ts` | `agent/features/git_memory/tools/repo_map.rs` → `tools/git_memory.rs` | 已有工具名、schema 与 service id 对应实现，保持不动 |
+| `features/gitMemory/tools/repoMapTool.ts` | `agent/features/git_memory/tools/repo_map_tool.rs` → `tools/git_memory.rs` | 已有 RepoMap 工具定义、空输出与执行入口，保持不动 |
+| `features/gitMemory/tools/repo-map.md` | `tools/git_memory.rs::REPO_MAP_DESCRIPTION` | 已有内嵌描述，保持不动，不另建重复资产 |
+
+本组仅编辑既有 `agent/features/git_memory/flag.rs`，无新增源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：operationLog 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `tools/operation_log*.rs` 与 `config/mod.rs` 保持不动；本组新增 v2 同名特性目录，通过再导出复用实现，不重复注册 feature、flag、config 或工具捕获。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/operationLog/operationLog.ts` | `features/operationLog/operationLog.rs` | 再导出既有 view/head/record/error/retention 模型与比较逻辑 |
+| `features/operationLog/operationLogStore.ts` | `features/operationLog/operationLogStore.rs` | 再导出既有内容寻址 store、锁、retention 与恢复实现 |
+| `features/operationLog/repositoryViewService.ts` | `features/operationLog/repositoryViewService.rs` | 再导出既有仓库视图、capture/restore、refs/blob 与缓存实现 |
+| `features/operationLog/operationService.ts` | `features/operationLog/operationService.rs` | 再导出既有 OperationService 为 AgentOperationService，并新增服务 id |
+| `features/operationLog/operationSnapshotStore.ts` | `features/operationLog/operationSnapshotStore.rs` | 再导出既有只读 snapshot/file-history 投影 |
+| `features/operationLog/configSection.ts` | `features/operationLog/configSection.rs` | 再导出既有配置结构、3 个 env 常量与 retention 解析，新增 section/binding 元数据 |
+| `features/operationLog/flag.ts` | `features/operationLog/flag.rs` | 再导出 flag id/env，新增完整 flag 定义，不注册 |
+| `features/operationLog/operationFeature.ts` | `features/operationLog/operationFeature.rs` | 新增 feature 名称、agent scope 与 onScopeCreated 元数据，不注册 |
+
+新增 `features/operationLog/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+**2026-11-15 收口更新**：本节“再导出复用、旧文件保持不动”的记录已过期；`tools/operation_log*.rs` 五个旧文件已删除，核心类型搬入 `features/operationLog/operationLog.rs`，不再有 re-export 层。落点与迁移见下文「收口：operationLog 旧容器删除与逻辑归属」。
+
+### 移植进度：btw 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `subagent/btw.rs` 保持不动；本组只补 v2 同名特性文件并委托既有实现，不重复注册 scope 监听或工具 veto。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/btw/btw.ts` | `features/btw/btw.rs` | 再导出既有只读工具、拒绝文案与 reminder，新增 agent label、服务 id 和接口 |
+| `features/btw/btwService.ts` | `features/btw/btwService.rs` | 新增 `SessionBtwService` 包装，启动与工具拒绝均委托 `subagent/btw.rs` |
+| `features/btw/btwFeature.ts` | `features/btw/btwFeature.rs` | 新增 feature 名称与 session scope 元数据，不注册 |
+
+新增 `features/btw/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：astron 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。本组只补 flag 定义，不注册、不改 provider 设置或登录流程。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/astron/flag.ts` | `features/astron/flag.rs` | 新增 flag id/env/title/description/default=true/surface=both 完整定义 |
+
+新增 `features/astron/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：attachment 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `kimi-core/src/primitives/errors/domains.rs` 的 attachment error domain 保持不动，不重复注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/attachment/errors.ts` | `features/attachment/errors.rs` | 再导出既有 domain 与 5 个错误码，新增保留 `AttachmentError` 名称的 Error2 构造 |
+
+新增 `features/attachment/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：fileHistory 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `session/sqlite_store.rs`、`features/snapshot/**`、`tools/operation_log_snapshot.rs` 及 file-history HTTP 路由保持不动；本组新增独立特性目录，服务通过后端接口和可选 operation store 工作，不接 turn、tool executor、checkpoint、undo 或 HTTP 注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/fileHistory/fileHistory.ts` | `features/fileHistory/fileHistory.rs` | 新增 backup/checkpoint/state/change/content 模型、服务 id、blob prefix 与既有 SQLite 结果转换 |
+| `features/fileHistory/fileHistoryOps.ts` | `features/fileHistory/fileHistoryOps.rs` | 新增 tracked/checkpoint 事件模型、phase fallback、5-turn displacement 与 state fold |
+| `features/fileHistory/fileHistoryRetention.ts` | `features/fileHistory/fileHistoryRetention.rs` | 新增 workspace 串行队列、30-session retention、失败保留、drop 与 fork 后非空 blob 检测 |
+| `features/fileHistory/fileHistoryService.ts` | `features/fileHistory/fileHistoryService.rs` | 新增本地文件/blob 后端、串行 capture/end、3 次读取、4 MiB 上限、path key、content/changes/turnRecorded、orphan/evict 清理、LCS diff 与 operation store 分支 |
+| `features/fileHistory/fileHistoryFeature.ts` | `features/fileHistory/fileHistoryFeature.rs` | 新增 feature 名称与 agent scope 元数据，不注册 |
+
+新增 `features/fileHistory/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+**2026-11-15 收口更新**：原 `tools/operation_log_snapshot.rs` 的 `file_history_*` 逻辑已迁入 `features/fileHistory/file_history_service.rs`，旧 snapshot 文件已删除；HTTP 路由与 `AgentFileHistoryService` 已改接。
+
+### 移植进度：externalHooks 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `tools/external_hooks.rs` 与 `permission::HookDef` 保持不动；本组新增 v2 同名特性目录、独立数据模型和纯函数，agent/session service 再导出既有 `HookGuard`，不重复接事件监听、配置或 feature 注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/externalHooks/configSection.ts` | `features/externalHooks/configSection.rs` | 新增 hooks section、既有 HookDef 再导出与 TOML 转换入口 |
+| `features/externalHooks/externalHooksFeature.ts` | `features/externalHooks/externalHooksFeature.rs` | 新增 feature 名称和 app/session/agent scope 元数据，不注册 |
+| `features/externalHooks/internal/types.ts` | `features/externalHooks/internal/types.rs` | 新增事件类型再导出、HookResult/action/block/matcher 模型 |
+| `features/externalHooks/internal/matchHooks.ts` | `features/externalHooks/internal/matchHooks.rs` | 新增事件索引、regex 匹配、cwd+command 去重、并发执行、camelCase→snake_case、回调与 block 判定 |
+| `features/externalHooks/internal/runHook.ts` | `features/externalHooks/internal/runHook.rs` | 新增 shell spawn 选项、stdin JSON、超时/取消、stdout/stderr 上限、exit 2 与结构化 deny 解析 |
+| `features/externalHooks/internal/userPrompt.ts` | `features/externalHooks/internal/userPrompt.rs` | 新增 prompt hook 文本/part 渲染、block fallback 与失败过滤 |
+| `features/externalHooks/app/externalHooksRunner.ts` | `features/externalHooks/app/externalHooksRunner.rs` | 新增 runner 参数、错误事件和服务接口 |
+| `features/externalHooks/app/externalHooksRunnerService.ts` | `features/externalHooks/app/externalHooksRunnerService.rs` | 新增索引加载/reload、summary、trigger/triggerBlock/fireAndForget、reload/error 订阅 |
+| `features/externalHooks/agent/agentExternalHooks.ts` | `features/externalHooks/agent/agentExternalHooks.rs` | 新增 agent 服务 id 与接口 |
+| `features/externalHooks/agent/agentExternalHooksService.ts` | `features/externalHooks/agent/agentExternalHooksService.rs` | 再导出既有 `HookGuard`，新增 hook.result payload/event 与 continuation state key；事件监听仍由既有路径承担 |
+| `features/externalHooks/session/sessionExternalHooks.ts` | `features/externalHooks/session/sessionExternalHooks.rs` | 新增 session 服务 id 与接口 |
+| `features/externalHooks/session/sessionExternalHooksService.ts` | `features/externalHooks/session/sessionExternalHooksService.rs` | 再导出既有 `HookGuard`，新增 heartbeat 间隔和 uptime 模型；生命周期监听不在本组重复接线 |
+
+新增各级 `mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；`cargo check --lib` 出口码 0，随后移除本组一个未使用导入。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：codeRuntime 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `workflow/code_runtime.rs`、`workflow/run_code_prelude.js`、`tools/run_code.rs` 与 `tools/run_code_tool.md` 保持不动；本组新增 v2 同名特性目录及对应文件，通过再导出和委托复用既有执行器与工具，不改工具注册或 sandbox 接线。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/codeRuntime/codeRuntime.ts` | `features/codeRuntime/codeRuntime.rs` | 新增输入模型、服务 id 与既有执行结果/限制类型再导出 |
+| `features/codeRuntime/codeExecutor.ts` | `features/codeRuntime/codeExecutor.rs` | 新增运行选项、退出分类和到既有 `execute_code` 的异步委托 |
+| `features/codeRuntime/codeShimSource.ts` | `features/codeRuntime/codeShimSource.rs` | 新增 subcommand 常量并内嵌既有 `workflow/run_code_prelude.js`，不复制 shim |
+| `features/codeRuntime/memoryGuard.ts` | `features/codeRuntime/memoryGuard.rs` | 新增既有内存上限再导出、错误类型、guard 接口与 Linux RSS 解析；实际限制仍由既有 QuickJS runtime 执行 |
+| `features/codeRuntime/runCodeTool.ts` | `features/codeRuntime/runCodeTool.rs` | 新增工具元数据与到既有 `tools/run_code.rs` 的定义/执行委托，不重复执行实现 |
+| `features/codeRuntime/codeRuntimeFeature.ts` | `features/codeRuntime/codeRuntimeFeature.rs` | 新增 feature 名称、工具名和 domain 元数据，不注册 |
+| `features/codeRuntime/tools/run_code/run_code.md` | `tools/run_code_tool.md` | 已有，保持不动 |
+
+新增 `features/codeRuntime/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；首次 `cargo check --lib` 发现 shim 相对路径多一级，修正后复跑出口码 0。未运行测试，未进行端到端验证，未写「终态」。
+
+### 移植进度：session/subagent/backend 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。已有 backend、process 与父目录 `backend_compat.rs` 保持不动；本组只补 4 个缺失落点及模块声明，不接配置、flag 或 DI 注册。
+
+| v2 文件 | Rust 落点 | 状态与动作 |
+| --- | --- | --- |
+| `session/subagent/backend/acpBackend.ts` | `subagent/backend/acp_backend.rs` | 已有，保持不动 |
+| `session/subagent/backend/claudeCodeBackend.ts` | `subagent/backend/claude_code_backend.rs` | 已有，保持不动 |
+| `session/subagent/backend/codexBackend.ts` | `subagent/backend/codex_backend.rs` | 已有，保持不动 |
+| `session/subagent/backend/codexWire.ts` | `subagent/backend/codex_wire.rs` | 已有，保持不动 |
+| `session/subagent/backend/subagentBackend.ts` | `subagent/backend/subagent_backend.rs` | 已有，保持不动 |
+| `session/subagent/backend/subagentBackendService.ts` | `subagent/backend/subagent_backend_service.rs` | 新增既有 service 再导出与 session/onScopeCreated 元数据；实现仍在 `subagent_backend.rs` |
+| `session/subagent/backend/configSection.ts` | `subagent/backend/config_section.rs` | 新增 4 个配置结构、schema 描述与 flag 布尔映射；既有 description/strip 帮助函数再导出 |
+| `session/subagent/backend/backendCompat.ts` | `subagent/backend/backend_compat.rs` | 新增父目录既有 `backend_compat.rs` 再导出，不复制实现 |
+| `session/subagent/backend/flag.ts` | `subagent/backend/flag.rs` | 新增 flag 字段定义，不注册 |
+
+`subagent/backend/mod.rs` 仅增加上述模块声明。新文件无源码注释；具名 `rustfmt --check` 0，`cargo check --lib` 0。按行新增 9 条硬编码对应记录，`scan:hardcoded:rust` 为 recorded/found 4025/4025、new/stale 0，未运行 `--update`。未进行端到端验证，未写「终态」。
+
+### 移植进度：debugEvents 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `server/debug.rs` 保持不动；本组新增独立特性目录和模块声明，不接 DI、HTTP 或 feature 注册。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/debugEvents/debugEvents.ts` | `features/debugEvents/debugEvents.rs` | 新增 subscription、bus snapshot、聚合结果、entry kind 与服务接口 |
+| `features/debugEvents/debugEventsService.ts` | `features/debugEvents/debugEventsService.rs` | 新增 scope container/unit/bus 快照模型，以及去重、递归收集和 `on:` / `disposable:EventSubscription` 标签筛选 |
+| `features/debugEvents/debugEventsFeature.ts` | `features/debugEvents/debugEventsFeature.rs` | 新增 feature 名称、app scope 与 on-demand 元数据，不注册服务 |
+
+新增 `features/debugEvents/mod.rs` 并在 `features/mod.rs` 声明模块。新文件无源码注释；具名 `rustfmt --check` 0，`cargo check --lib` 0，`scan:hardcoded:rust` 仍为 recorded/found 4016/4016、new/stale 0。未进行端到端验证，未写「终态」。
+
+### 移植进度：promptOptimizer 文件落点（2026-11-13）
+
+按逐文件移植范围记录，不作批次闭合或「等价」判定。既有 `promptOptimizer.rs`、`promptOptimizerService.rs` 与 `prompt/profiles.rs` 保持不动；本组只补缺失文件和模块声明，不接配置、flag、session action 或 feature 注册，也不修既有实现的缺陷与注释。
+
+| v2 文件 | Rust 落点 | 本组动作 |
+| --- | --- | --- |
+| `features/promptOptimizer/promptOptimizer.ts` | `features/promptOptimizer/promptOptimizer.rs` | 已有，保持不动 |
+| `features/promptOptimizer/promptOptimizerService.ts` | `features/promptOptimizer/promptOptimizerService.rs` | 已有，保持不动 |
+| `features/promptOptimizer/configSection.ts` | `features/promptOptimizer/configSection.rs` | 新增配置结构、正整数 timeout 与既有诊断函数再导出 |
+| `features/promptOptimizer/errors.ts` | `features/promptOptimizer/errors.rs` | 新增 kimi-core 既有 error domain 再导出 |
+| `features/promptOptimizer/flag.ts` | `features/promptOptimizer/flag.rs` | 新增 flag 字段定义，不注册 |
+| `features/promptOptimizer/optimizerProfile.ts` | `features/promptOptimizer/optimizerProfile.rs` | 新增 `AgentProfile` 构造函数，不改既有 catalog |
+| `features/promptOptimizer/promptOptimizerFeature.ts` | `features/promptOptimizer/promptOptimizerFeature.rs` | 新增 feature 名称、session scope 与条件贡献状态，不做服务装配 |
+
+`features/promptOptimizer/mod.rs` 仅增加上述 5 个模块声明。新文件无源码注释；具名 `rustfmt --check` 0，`cargo check --lib` 0。按行新增 4 条硬编码对应记录，`scan:hardcoded:rust` 为 recorded/found 4016/4016、new/stale 0，未运行 `--update`。未进行端到端验证，未写「终态」。
+
+### 批次：helloWorld 全量复核与真实接线（2026-11-13，终态）
+
+本节取代此前「零痕迹」「需要宿主入口、暂未动手」的中间判定。工作区已有纯模型与 registry 不等于特性完成；本批对照 v2 特性目录及直接消费方补齐 turn injection、工具证据、HTTP 入口、状态载荷、双向 mode-mutex 和退出清理，并修正 durable event 与 telemetry 的字段混用。
+
+| v2 依据 | 引擎落点与终态 | 判定 |
+| --- | --- | --- |
+| `features/helloWorld/agent/helloWorld.ts` | `features/helloWorld/agent/helloWorld.rs`：七阶段、run items、advance/waive、路径与命令 evidence 规则；只接受成功执行的 Write/Edit/Bash 信号 | 等价 |
+| `agent/helloWorldService.ts` | `agent/helloWorldService.rs` + `callbacks.rs`：native/host 两个真实工具结果出口均观察证据；run updated、status、stage telemetry 与 v2 一致，telemetry 使用 `event` 而非 durable event 的 `type` | 等价 |
+| `helloWorldOps.ts` | `helloWorldOps.rs`：per-agent 当前状态 registry，`hello_world_mode.enter` / `.exit`、`hello_world_run.updated` 三类 durable event 及 `agent.status.updated` 形状一致 | 等价（Rust 状态通道） |
+| `agent/injection/helloWorldInjection.ts` | `injection/hello_world_mode.rs` + `turn_loop/run_turn.rs`：按 `origin.kind === "injection"`、`origin.variant === "hello_world_mode"` 扫描 disclosure；stage 变化重注、tool trigger 静默、退出一次性提醒和 trailing removal 均已接线 | 等价 |
+| `enter-reminder.md`、`exit-reminder.md`、`agent/stages/*.md` | 同名资产由 `include_str!` 加载；7 个 stage 与 enter/exit 共 9 个文件均与 v2 逐字节相同 | 等价 |
+| `helloWorldFeature.ts` | feature 模块注册、turn 生产注册、工具执行 hook 和 HTTP 模式入口共同承担 v2 的 scope 创建装配，不再是孤立纯函数 | 等价（装配方式映射） |
+| `agent/modeMutex/modeMutexService.ts` | helloWorld 进入退出 spec/swarm/tower、保留 plan；spec/swarm/tower 进入反向退出 helloWorld；tower 对应路径释放 session ownership，不自造 teardown | 等价 |
+| `agent/usage/usageEvents.ts`、`app/sessionLegacy/sessionProtocol.ts` | `server/engine.rs` 状态载荷加入 `helloWorldMode` / `helloWorldStage`；prompt 的 `hello_world_mode` 与 profile 的 `agent_config.hello_world_mode` 均接通 enter/exit、事件和配置持久化 | 等价 |
+
+**真实接线与边界**：
+
+1. 生产回合在 swarm injection 旁注册 helloWorld provider；恢复历史只依据结构化 origin，不用 Markdown 内容猜测模式状态。退出时仅移除末尾对应该 variant 的 reminder。
+2. `NativeToolCallbacks` 的真实 Write 测试写入 `specs/demo/requirements.md` 后，run 从 requirements 推进到 design；错误工具结果不产生证据。host 工具结果走同一服务入口。
+3. HTTP enter/exit 复用同一事件构造，避免无引擎 fallback 重复 telemetry；实际 `POST /api/v1/sessions/{id}:profile` 两轮切换后，enter/exit durable event 各 2 条，配置和 registry 同步变化。
+4. 未修改 `packages/protocol`、`packages/node-sdk`、`apps/**`，未扩 napi 参数；仅使用现有 HTTP 布尔字段，trigger 为 v2 mode-mutex 入口对应的 `manual`。helloWorld 新增/修改 Rust 模块无源码注释，依据记录在本节。
+
+**验证（真实出口码）**：
+
+- `cargo test --lib -- helloWorld` → **21 passed / 0 failed**；`cargo test --lib -- hello_world` → **8 passed / 0 failed**；完整 injection 过滤复跑 **7/7**，扩展后的真实 HTTP/profile 用例单跑 **1/1**。
+- 关联回归：turn-loop **123/123**、tower **136/136**（不是先前误过滤的 0 tests）、callbacks **57/57**、prompt 路由 **18/18**、swarm **15/15**、spec **13/13**，均为 0 failed。
+- `cargo check --lib` 0；`cargo clippy --lib` 0，本批留下的 `changed` 未使用告警已修正并复跑消失；本批具名文件 `rustfmt --check` 0、`git diff --check` 0。未运行全量 `cargo test --lib`，按分层验证执行上述定向回归。
+- 绿灯门禁：`check:parity` 0、`check:event-coverage` 0（23 events）、`check:engine-i18n` 0（256/241）、`check:no-comments` 0（27 files）、`check:rust-module-deps` 0（recorded/found **423/423**，stale 0）、`scan:hardcoded:rust` 0（recorded/found **4012/4012**，new/stale 0）。
+- 按行新增 `callbacks -> features`、`features -> swarm`、`server -> features`、`swarm -> features` 4 条依赖；按行删除 2 条已由 Markdown 资产取代的 stale，并将本批 5 条 `UNREVIEWED` 记录归类为 model-input/diagnostic。未运行任何 `--update`。
+- `check:architecture` 仍因全工作区 `kimi-agent` fingerprint stale 为出口码 1，并有既有 i18n-runtime 软依赖 warning；按约束未刷新指纹，不把该全局门禁写成绿色。
+
+**终态判定**：helloWorld 特性目录及其直接消费链已实现、接线并经真实工具与 HTTP 路径验证；本批无“随后”项、无半截状态、未提交 commit。其他并行工作区改动与 architecture 基线保持原状。
+
+### 批次：operationLog 全量复核与真实接线（2026-11-13，终态）
+
+本节取代早先“模型与磁盘存储”“git 视图服务”两节的中间判定。复核发现此前标为“等价”的实现仍有差异，且 service/snapshot 只有模块注册、没有消费方；本批已逐文件补齐并接通，不再保留“随后”“未接线”事项。
+
+| v2 依据 | 引擎落点与终态 | 判定 |
+| --- | --- | --- |
+| `features/operationLog/operationLog.ts` | `tools/operation_log.rs`：视图、record/head/origin、retention、11 个错误码与 details；`refs` 排序比较与 v2 一致 | 等价 |
+| `operationLogStore.ts` | `tools/operation_log_store.rs`：内容寻址、DAG/head 迁移、三级保留、不可变/原子写与锁。修正为 UUID nonce、仅小写 sha256 id、可选字段拒 `null`、缺失视图不再按 0 字节计算，锁重建使用 `create_new` | 等价 |
+| `repositoryViewService.ts` | `tools/operation_log_repository.rs`：完整 capture/restore、`readFile(s)`/`readBlob(s)`、refs/packed-refs、缓存与锁。修正 8 层 symref、30s 锁超时、git 默认非零退出报错、unborn HEAD symbolic-ref、回滚失败保留 recovery 标记及目录身份判断 | 等价 |
+| `operationService.ts` | `tools/operation_log_service.rs`：公开入口 flag 门、执行锁、外部变更导入、undo/redo/restore/restoreBeforeTurn、失败时反向恢复；恢复失败按 v2 传播反向恢复错误 | 等价 |
+| `operationSnapshotStore.ts` | `tools/operation_log_snapshot.rs`：只读 snapshot 投影、path 防逃逸、agents/operations/views/files/blobs/changedFiles，写入口统一拒绝；after 缺失时仍写 `afterHash=""`、`afterSize=0` | 等价 |
+| `flag.ts` | `operation_log` 默认关闭；专用 env → `[experimental]` → master env 的优先级与 v2 一致，并接入工具捕获、checkpoint、file-history、undo 与 shell 后台行为 | 等价 |
+| `configSection.ts` | `config/mod.rs` 的 `[operationLog]` 与三个 `KIMI_CODE_OPERATION_LOG_*` 环境变量；正整数/非负整数及 JS safe-integer 边界逐项解析，配置登记到 `scripts/config-registry.json` | 等价 |
+| `operationFeature.ts` | `NativeToolset` 持有共享 `OperationService`/repository 缓存，执行链按 v2 `repoMutation === "none"` 名单跳过；RAII 释放 shadow index，对应 feature 生命周期 | 等价（Rust 生命周期映射） |
+
+**真实接线**：
+
+1. `NativeToolset::execute_tool_streaming` 在实际工具执行前后捕获视图，origin 带 session/agent/turn/toolCall/toolName；无变化不记录，外部变更先导入。`execute_mutating` 统一走同一出口。
+2. flag 开启时停用旧 checkpoint 与 SQLite 文件历史写入；`/file-history/changes`、`/file-history/content` 改读 operation 视图/blob，LCS 与二进制/缺失处理按 v2 `fileHistoryService`。`/undo` 在删历史前调用 `restoreBeforeTurn`，不再走另一套文件回滚。
+3. Bash/PowerShell 在该 flag 下拒绝显式后台执行、禁止超时自动转后台，工具描述同步去掉后台指引；未开启时保持原路径。
+4. `readFiles`/`readBlobs` 不再是留待后补的孤立方法：已用于真实 file-history HTTP 出口。
+
+**验证（真实出口码）**：
+
+- `cargo test --lib -- operation_log` → **29 passed / 0 failed**：26 条模型/存储/视图/service/snapshot 测试 + 配置边界 + NativeToolset Write→capture→undo + file-history/undo HTTP 全链路。
+- `cargo test --lib tools::` → **1294 passed / 0 failed**；既有 undo 路由 **7/7**、file-history 路由 **5/5** 通过。Windows 下恢复文本按 Git `core.autocrlf` 的实际检出行为核对。
+- `cargo check --lib` 0；`cargo clippy --lib` 0，且本批无告警；本批文件 `rustfmt --check` 0、`git diff --check` 0；5 个 operationLog 新模块无任何源码注释。
+- 绿灯门禁：`check:config-registry`（37 sections）、`check:parity`、`check:engine-i18n`（256/241）、`check:locale-orphans`（680/680）、`check:no-comments`（27 files）。
+- 本批手工逐行新增 37 条硬编码记录、删除 1 条 stale，未运行 `--update`。最终扫描为 recorded 3947 / found 4013、**stale 0**，剩余 66 条全部位于 helloWorld、promptOptimizer、spec/subagent 等其他在途文件。
+- 全局基线未伪称全绿：`check:rust-module-deps` 为 recorded 415 / found 419，剩余 4 条全部来自其他在途特性；`scan:hardcoded:rust` 因上述其他批次 66 条仍为出口码 1。operationLog 自身无新增模块依赖、无未登记字面量、无 stale。
+
+**终态判定**：operationLog 特性目录 8 个文件及其直接消费链均已实现、接线并经真实路径验证；本批无“随后”项、无半截状态、未提交 commit。其他批次的基线失败单独保留，不用扩大本批改动或刷新基线的方式掩盖。
+
+### 收口：operationLog 旧容器删除与逻辑归属（2026-11-15）
+
+本节记录 operationLog 四文件 + 核心文件的清扫批次，不改写上方 2026-11-13 终态记录；旧容器删除后以本节为准。
+
+| 项 | 结果 | 去向 / 备注 |
+| --- | --- | --- |
+| `tools/operation_log_store.rs` | 已删除 | 实现已在 `features/operationLog/operationLogStore.rs`；引用改接后删除 |
+| `tools/operation_log_snapshot.rs` | 已删除 | 只读 snapshot 投影在 `features/operationLog/operationSnapshotStore.rs`；`file_history_*` 迁出 |
+| `tools/operation_log_repository.rs` | 已删除 | 实现已在 `features/operationLog/repositoryViewService.rs` |
+| `tools/operation_log_service.rs` | 已删除 | 实现已在 `features/operationLog/operationService.rs`；`operation_log_captures_tool` 移出 |
+| `tools/operation_log.rs` | 已删除 | 核心类型/常量/错误/4 个内联测试搬入 `features/operationLog/operationLog.rs`；移除 re-export 层 |
+
+**迁出逻辑**：
+
+- `file_history_changes` / `file_history_all_changes` / `file_history_content` → `features/fileHistory/file_history_service.rs` 的 `operation_file_history_changes` / `operation_file_history_all_changes` / `operation_file_history_content`；HTTP 路由与 `AgentFileHistoryService` 已改接。
+- `operation_log_captures_tool` → `tools/dispatch.rs`，名单与归一化逻辑原样保留；`CaptureContext.repo_mutation` 暂统一 `None`。
+- `AgentOperationService` 三处适配：`repository_views` 使用 `Arc<StdMutex<HashMap<...>>>`、`#[derive(Clone)]`、`pub(crate) with_identity`；待 `ToolSet` 拆分为 per-agent 后回归 v2 形状。
+
+**验证**：`cargo check -p kimi-agent` 仍为 exit 101，198 条错误均来自其他在途批次；operationLog/fileHistory/dispatch/toolset/route 相关文件无报错；被改文件 `rustfmt --edition 2024` 解析通过。被删 22 个内联测试与待接线项见 `porting-backlog.md` 的「待收口项」。
+
+ --- | --- | --- | --- |
 | `toolExecutor.ts` | `turn_loop/tool_scheduler.rs`、`tools/dispatch.rs` | 等价 | 执行入口与结果形状对应 |
 | `toolExecutorService.ts` | `turn_loop/tool_scheduler.rs`、`tools/dispatch.rs`、`tools/file_ops.rs` | 部分 | abort grace 2s、skipped 文案、aborted 输出、preflight/resolution/veto/synthetic 判定均已实现；`stopBatchAfterThis` 未实现（见下） |
 | `toolExecutorEvents.ts` | `events/types.rs`、`turn_loop/run_turn.rs`、`napi_bindings/mcp.rs` | 部分→已补 | `tool.call.started`（含 description/display）、`tool.progress`、`tool.call.delta` 已有；本批补发 `tool.list.updated`（协议已声明，引擎此前从不发） |
@@ -439,7 +1060,7 @@
 | `permissionPolicy/types.ts` | `permission/mod.rs` | 等价 | PermissionMode / PolicyDecision 同形 |
 | `permissionPolicy/policies/*.ts`（15 个具名策略） | `permission/mod.rs` 同名分支 | 等价 | guardian 复核在 callbacks 中对 `YoloModeApprove` 前置；`environment-lease` NA（沙箱代替） |
 | `guardian/guardianService.ts` | `permission/guardian.rs` | 等价 | 60s 超时为本 fork 已文档化差异 |
-| `permissionMode/permissionMode.ts` / `permissionModeOps.ts` / `configSection.ts` / `permissionModeService.ts` | `permission/mod.rs` + `napi_bindings/session.rs::session_set_permission_mode` + 宿主 | 等价 | 模式持久化/状态事件由宿主发布（`session-set-permission` 测试），引擎负责即时生效与子代理广播；`defaultPermissionMode` 归宿主 |
+| `permissionMode/permissionMode.ts` / `permissionModeOps.ts` / `configSection.ts` / `permissionModeService.ts` | `permission/mod.rs` + `agent/permission_mode/*` + `session/sqlite_store.rs` + `session/wire_journal.rs` + `server/engine.rs` + `napi_bindings/session.rs::session_set_permission_mode` + 宿主 | 等价 | 模式持久化/状态事件此前由宿主发布，2026-11-12 起引擎也写 durable `permission.set_mode`：`record_mode`/`recorded_mode` 走 sqlite wire_events，journal 列为 durable 记录，`resolve_permission_mode` 以记录优先，napi 切换经 SessionEntry 的 store 复用同一条链；`defaultPermissionMode` 归宿主 |
 | `permissionMode/injection/permissionModeInjection.ts` | `injection/permission_mode.rs` | 等价 | enter/exit 文案与 Auto 例外（ExitPlanMode 仍等审阅）已按 v2 原文；env 开关默认开 |
 
 ### modeMutex / prompt / 注入类（14 文件）
@@ -1037,4 +1658,322 @@ TDD：四条测试位于 `session/tests.rs:2981,3059,3140,3224`。实现前分�
 **零注释**：`tool_result_truncation.rs` 删除 103 个注释块、`tool_select_history.rs` 删除 8 个，合计 **111**；`file_ops.rs`、`mcp/manager/tests.rs`、`tools/tests.rs`、`tool_select_state.rs` 词法扫描本已为 0。最终 6 个 Rust 触碰文件词法扫描均 0；`tools/tests.rs` 原始 Grep 的 5 个 `/*` 命中均为 glob 模式字符串，不是注释。未新增任何源文件或目录。
 
 **检查点状态**：指定验收全部通过，停止开发。后续 `changeNotifier` durable/allowlist/beliefs 与 `environmentBinding` / `interaction` 均等待用户放行，不自动继续。
+
+### 批次：tower artifact 任务类型（2026-11-13）
+
+用户指令「优先把代码搬过来，其次再是接线」，据此选定 v2 tower 的 **artifact 任务类型**：引擎此前只有 `build` / `survey` 两种 kind，artifact 整块缺失（类型、complete 的 key_artifacts 校验与验收报告、review 的 acceptance_tip 绑定、merge gate 的验收绑定、rebase 冲突文案、worker/reviewer 简报）。参考实现为 `D:\kimi\kimi-code` 工作区 `packages/agent-core-v2/src/features/tower/`。
+
+| v2 依据 | Rust 落点 | 判定 |
+| --- | --- | --- |
+| `protocol/types.ts:34`（`TowerMissionKind` 第三态）、`:56-57`（`completionTip` / `keyArtifacts`） | `tools/tower/types.rs` 新增 `TowerMissionKind::Artifact`（`as_str` → `artifact`）与 `TowerMission.completion_tip` / `key_artifacts`（camelCase，skip_serializing_if） | 等价 |
+| `protocol/store.ts:1513-1524`（completed 时记录/清除 completion tip 与 key artifacts） | `store.rs::update_mission_in_state` 在同分支写入；`MissionUpdateOptions` 增 `completion_tip` / `completion_key_artifacts` | 等价 |
+| `protocol/store.ts:1579-1590`（artifact 的缺分支/零差异文案） | `store.rs::assert_completable` 按 kind 选择 `an artifact mission must produce committed deliverables / a committed diff` 措辞 | 等价 |
+| `protocol/store.ts:1688-1835`（`complete` 的 key_artifacts 归一、三条校验、tip 计算、验收报告、sameCompletion） | `store/complete.rs`：`normalize_artifact_paths`（`posix.normalize` 语义 + 绝对/逃逸/空拒绝 + 保序去重）、`branch_exists` → `branch_tip` → `diff_base` → `diff_name_only`、`cat-file -t` 逐路径验 blobs、`artifact_acceptance_report`、`same_artifact_paths` 门控通知复用 | 等价 |
+| `protocol/store.ts:1905-1913`（状态丢失时 key artifacts 前缀） | `recovered_completion_input(report, key_artifacts)` 拼 `Key artifacts:\n- …\n\n{report}` | 等价 |
+| `protocol/store.ts:2227-2251`（review 的 artifact 验收四守卫） | `store.rs::submit_review_prepared_locked`：无 completion tip / 缺 acceptance_tip / acceptance_tip 不等于记录 tip / reviewed_commit 不等于记录 tip，逐条逐字拒绝 | 等价 |
+| `protocol/missionGate.ts:183-247`（artifact 的 stale-base / no-review / reviewer=tower / hold / not-clean / not-approved / tip-moved / completion-tip-mismatch） | `mission_gate.rs` 增 `REASON_COMPLETION_TIP_MISMATCH`，八个分支按 `is_artifact` 切分文案 | 等价（文案按本引擎既有「merge blocked:」缩写风格，与 build/survey 一致） |
+| `protocol/store.ts:3069-3070`（artifact rebase 冲突 blocker 文案） | `store/rebase.rs` 按 kind 切分冲突 blocker | 等价 |
+| `tools/plan/plan.ts`（kind 枚举与 scope 措辞）、`tools/complete/complete.ts`、`tools/review/review.ts` 的 schema 描述 | `tools/tower/mod.rs` 的 `TowerComplete` / `TowerReview` / `TowerPlan` 三个 input_schema 同步 | 等价 |
+| `tools/spawn/spawnTool.ts:460-620`（worker 的 artifact 交付步骤与 reviewer 的 advisory 说明） | `build_worker_prompt` / `build_reviewer_prompt` 按 kind 切分（「what to deliver」、commit-every-artifact、key_artifacts 参数、acceptance 绑定最后一 tip、review advisory） | 等价（沿用本引擎既有缩略简报风格） |
+| `tools/{complete,review,plan,merge,rebase}/*.md` 的 artifact 段落 | `tools/tower/descriptions/*.md` 同步六处描述 | 等价 |
+
+**原生替代登记**：
+
+- v2 的 `posix.normalize` → 自实现分段归一（`""`/`"."` 折叠、`..` 弹栈并标记逃逸、前导 `/` 拒绝），因为引擎不引 posix crate；语义与 v2 的 reject 条件逐条对齐（空、含 `\0\r\n`、绝对、`..` 逃逸）。
+- v2 的 `picomatch.isMatch` 作用域匹配 → 复用本引擎既有的 `globset::Glob` + `trim_end_matches('*')` 前缀回退（与 `mission_gate.rs` / `store.rs` 的 out-of-scope 判定同一实现）。
+- v2 的 `tryGit(...) === 'blob'` → `git(cat-file -t tip:path)` 失败按空串处理（`unwrap_or_default`），与 `tryGit` 返回 `null` 同义。
+
+**验证**：
+
+- 新增 8 条用例（`store/tests.rs`）：路径归一/去重/七种拒绝、验收报告逐字、tip 记录与通知去重、三条 key_artifacts 校验、净差异外路径、review 四守卫中的三条、merge gate 的两条 artifact 阻断与 tip 漂移。`cargo test --lib artifact_` → **8 passed / 0 failed**。
+- `cargo test --lib tower::` → **130 passed / 0 failed**（格式化后复跑同样 130/0）。
+- `cargo clippy --lib` 与 `rustfmt --edition 2024 --config skip_children=true --check` 对 11 个触碰文件均 0 命中。
+- 门禁：`check:parity` 0（tools 86）、`check:rust-module-deps` 415/415、`check:engine-i18n` 256/243、`scan:hardcoded:rust` 3856/3856（`-- --update` 前 45 new / 4 stale，更新后 0/0；差异仅落在本批 5 个 tower 文件 +45/-4，无越界）。
+- `check:architecture` 与 `check:normify` 仍红，均为**在途批次既有状态**：architecture 仅 kimi-agent 指纹 stale（stored=`556ae7f833644f98`、current=`0212f9ca8c06ba68`），normify 仅 `engine.napi.bindings` / `engine.napi` 指纹漂移；本批未新增模块、未改 napi，故未执行 update。
+
+**本批未宣称完成的部分**：
+
+- `tools/spawn/spawnTool.ts` 的四条文案/守卫差异中，artifact 简报已搬，但既有 build/survey 的缩略差异不在本批。
+- `tools/review/reviewTool.ts` 的 notified 名单与 next 指引仍未移植（manifest 记为 partial）。
+- `features/tower/tower.ts` 的 enter/exit 失败分类与文案、`towerOps.ts` 的 durable 事件仍未接线（接线类，按用户指令后续再做）。
+- artifact 的 `cat-file` 逐路径校验在正常流程中不可达（净差异内的路径必为 blob），仅作防御保留，未单测。
+
+### 批次：tower review 结果面（notified / next / 自动运行守卫）（2026-11-13）
+
+续 artifact 批次，补 v2 `TowerReview` 工具的结果面。此前 Rust 只输出 `review submitted: <file>` 与通知计数，v2 的收件人名单、`next:` 指引与自动运行守卫缺失。
+
+| v2 依据 | Rust 落点 | 判定 |
+| --- | --- | --- |
+| `tools/review/reviewTool.ts:39-53`（artifact 验收在 auto/非交互下拒绝记录） | `tools/tower/mod.rs::execute_tower_review` 新增 `non_interactive` / `permission_mode` 两个入参（由 `tools/dispatch.rs` 从 toolset 既有字段传入），`caller == tower && artifact && clean && merge && (non_interactive \|\| Auto)` 时返回 isError | 等价 |
+| `tools/review/reviewTool.ts:86-92`（`notified:` 收件人名单） | 由 `result.notifications` 的 `item.to` 拼接，空集为 `(none)` | 等价 |
+| `tools/review/reviewTool.ts:93-101`（artifact 的四个 `next:` 分支） | 按 `status`/`merge`/`caller`/`review.mission` 逐分支还原；评审员提交 clean+merge 走「still waiting for mission-matching explicit human acceptance」 | 等价 |
+| `tools/review/reviewTool.ts:102-131`（build 的三个 `next:` 分支 + hold/fix-then-merge 文案） | 同上逐字还原 | 等价 |
+| `protocol/store.ts:180-186`（`TowerReviewResult.notificationError` / `activityLogError`） | `TowerReviewResult` 增 `activity_log_errors`；`submit_review_prepared_locked` 收集 `mission.rework` 日志失败与各通知的 `activity_log_error`，按 ` \| ` 连接输出 | 等价 |
+| `protocol/store.ts:2388-2400`（isError 由两个 error 字段决定） | `has_error = !notification_errors.is_empty() \|\| !activity_log_errors.is_empty()` | 等价 |
+
+**原生替代登记**：v2 的 `bootstrap.args.nonInteractive` + `permissionMode.mode` → 引擎 toolset 既有的 `non_interactive` 与 `permission_mode` 字段（`exit_plan_mode` / `spec_mode` 已在用同一来源），未新增跨层通道。
+
+**验证**：
+
+- 新增 3 条用例（`tools/tower/mod.rs` 测试模块）：`review_output_lists_recipients_and_next_guidance` 覆盖 build 的 merge-ready / hold / fix-then-merge / not-merge-ready 四条 `next:` 与 `notified: tower`；`artifact_acceptance_is_refused_in_an_automatic_run` 覆盖 non_interactive 与 Auto 两种信号；`artifact_review_next_distinguishes_the_tower_from_a_reviewer` 覆盖评审员与 tower 两条 artifact `next:` 及 `notified:` 差异。`cargo test --lib tools::tower::tests::` → **13 passed / 0 failed**。
+- `cargo test --lib tower::` → **133 passed / 0 failed**（含上一批 130 条）。
+- `rustfmt --check` 0；`cargo clippy --lib` 对 tower 无新告警（仅既有 `on_tower_mode_enter` dead-code）。
+- 门禁：`check:parity` 0（tools 86）、`scan:hardcoded:rust` 3870/3870（`--update` 前 15 new / 1 stale，更新后 0/0；差异仅 `tower/mod.rs` +14、`tower/store.rs` +1、删除旧输出字面量 1 条）。
+- `check:architecture` / `check:normify` 仍为在途批次既有红（未新增模块、未改 napi）。
+
+**本批未宣称完成的部分**：`reviewTool.ts` 的 `delivery` 追加段（v2 把 `deliverTowerMessage` 的投递回执拼在末尾）在引擎由 wake runtime 承担，未逐字还原；`review.ts` 的 notified 名单去重顺序依赖 v2 的收件人解析，引擎已有等价实现。
+
+### 批次：cron 上限校验顺序（2026-11-13）
+
+续 tower 批次期间的用户指令「优先把代码搬过来，其次再是接线」。本刀只含一处引擎内行为差异。
+
+| v2 依据 | Rust 落点 | 判定 |
+| --- | --- | --- |
+| `tools/cron-create/cronCreateTool.ts:62-67`（cap 检查在 prompt 字节数之前），`:120-127`（execute 阶段再查一次） | `tools/cron_tools.rs`：`validate_create` 增 `scheduled` 入参，把 cap 检查插到 `has_fire_within_years` 之后、`validate_prompt_bytes` 之前；`execute_cron_create` 把 `state_read`（计数）提前到 `validate_create` 之前，写前的一次 cap 复查保留 | 等价 |
+
+**验证**：
+
+- 新增 `test_validate_create_reports_the_session_cap_before_the_prompt_size`：在到达上限且 prompt 超 8 KiB 时，返回值是 cap 文案而不是字节数文案。`cargo test --lib tools::cron_tools` → **28 passed / 0 failed**。
+- `rustfmt --check` 0；`cargo clippy --lib` 对 `cron_tools` 无告警。
+- 门禁：`scan:hardcoded:rust` 3870/3870（无新增/失效条目，被移动的 `CRON_JOB_CAP_MESSAGE` 是同文件内既有常量）、`check:parity` 0。
+- `check:architecture` / `check:normify` 仍为在途批次既有红。
+
+**顺带核实的两条过时 manifest 判定**（本批读码得出，未改 manifest，因为它们是机器行、会被再生成覆盖）：
+
+- `features/cron/configSection.ts` 记「生效配置只接了 3/7 个键」——实际 7 个键在 `src/features/cron/cronService.rs` 全部有消费点（`debug`/`clock` → `resolve_clock_sources`，`no_jitter` → jitter，`no_stale` → stale 判定，`disabled` → tick 与 `is_disabled`，`manual_tick` → 轮询分支，`poll_interval_ms` → 定时器间隔）。
+- `features/lsp/lspConnection.ts` 记「服务端→客户端请求的应答未移植」——实际 `src/tools/lsp_tool.rs::answer_server_request` 已按 `workspace/applyEdit`（-32601）、`workspace/configuration`（null 数组）、其余（result null）分别应答，比 v2 的默认 null 处理器更完整；仅 AbortSignal 取消由超时替代。
+
+**本批未宣称完成的部分**：cron 工具侧的 `cron_scheduled` / `cron_deleted` 遥测仍未发——`emit_scheduled` / `emit_deleted` 存在于 `features/cron/cronService.rs` 但无工具侧调用方，接它需要把 cron actor 服务穿进 toolset，属接线类，按用户指令留后。
+
+### 缺口核查：在途重构树、过时判定与真正的特性级缺口（2026-11-13）
+
+用户指令「优先移植功能、其次接线」下做的一次系统核查。方法：对 manifest 的每条红项回到引擎源码验证，而不是采信机器判定。结论分三类。
+
+**一、在途重构树（状态记录，非缺陷）**
+
+| 项 | 证据 |
+| --- | --- |
+| `src/agent/**`、`src/app/**`、`src/features/**`、`src/human/**`、`src/os/**`、`src/persistence/**`、`src/tool/**` | 这些目录在 `git ls-files` 里几乎全未追踪（`src/agent/` 仅 4 个文件是 `AM`），`src/lib.rs` 的工作区改动新增了 `mod agent` / `pub mod app` / `pub mod features` / `pub mod human` / `pub mod os` / `pub mod persistence` / `pub mod tool`。这是在途批次正在把 v2 的目录布局（`agent/tool_*`、`tool/`、`features/git_memory` 等）搬进引擎，与既有的扁平模块（`src/tools/*`、`src/goal/*`）并存。 |
+
+因此**不能**把这些文件判为「仓库死代码」：它们是未提交的重构在途件。就 `src/features/` 内部而言，目前只有 `associativeMemory` 被既有代码引用（`src/tools/dispatch.rs`、`memory_graph_tool.rs` 等 10 处），`cron` / `dateChange` / `goal` / `notify` / `reminder` / `snapshot` / `todo` 尚未被任何既有代码引用——这是迁移中途的正常状态，但值得记录，以免被误判为「实现了没接」。
+
+其中一条对后续接线有用的事实：`src/features/goal/goalService.rs` 已经实现了 v2 的两条陈旧守卫 `is_goal_tool_target` / `is_objective_edited_since_turn_start`（含 `goal_turn_targets` / `turn_objective_revisions` / `objective_revision` 状态），但既有工具 `src/tools/goal_tools.rs::execute_update_goal` 没有调用它们——这正是 manifest 里 `features/goal/tools/update-goal/updateGoalTool.ts` 那两条「服务侧守卫未移植」的真正落点。
+
+**二、判定已过时的 manifest 红项（读码核实，未改 manifest——它们是机器行，再生成会覆盖）**
+
+| manifest 行 | 原判定 | 实际 |
+| --- | --- | --- |
+| `features/cron/configSection.ts` | 只接了 3/7 个键 | 7 个键在 `cronService.rs` 全有消费点（debug/clock→`resolve_clock_sources`、no_jitter→jitter、no_stale→stale 判定、disabled→tick 与 `is_disabled`、manual_tick→轮询分支、poll_interval_ms→定时器） |
+| `features/lsp/lspConnection.ts` | 服务端→客户端请求应答未移植 | `src/tools/lsp_tool.rs::answer_server_request` 已按 `workspace/applyEdit`(-32601)、`workspace/configuration`(null 数组)、默认(null) 分别应答，比 v2 的默认 null 处理器更完整；仅 AbortSignal 取消由超时替代 |
+| `features/btw/btwService.ts` | 名未移植 | `src/subagent/btw.rs` 已含 `TOOL_CALL_DISABLED_MESSAGE` / `SIDE_QUESTION_SYSTEM_REMINDER` / `check_btw_tool_denial`，`main.rs` 有 `session/start_btw` / `btw_prompt` / `btw_cancel` |
+| `injection/renderedLines.ts` | NA（本 fork 无该特性） | `src/agent/injection/rendered_lines.rs` 已逐行移植（sha256 前 16 字符指纹、1024 行 / 32 会话上限、全局 `LazyLock`），`associativeMemory/service.rs` 在用 |
+| `features/codeRuntime/memoryGuard.ts` | 守护抽象与 Windows 分支未移植 | 架构不同而非缺失：`src/workflow/code_runtime.rs` 用 rquickjs 进程内沙箱 + `set_memory_limit`（512 MiB 同值），v2 是子进程 + 作业对象/`/proc`/`ps`；引擎没有子进程可守护，该抽象无对应物 |
+| `features/gitMemory/gitMemoryEntries.ts` | 缺 alreadyRendered 会话去重 | 提示词每会话构建一次（`server/engine.rs::session_spec` 只在 skills 路径被调用，回合复用缓存的 `PipelineSpec.system_prompt`），不存在逐回合重复注入；`RenderState` 服务于 repo_map 工具自身的渲染去重 |
+| `features/skill/session/skillCatalogService.ts` | 缺增量 remerge | 引擎全量重扫，结果等价，仅耗时不同 |
+
+**三、真正的特性级缺口（整块未移植，均需先定方案）**
+
+| 特性 | v2 规模 | 引擎现状 | 缺口性质 |
+| --- | --- | --- | --- |
+| `features/helloWorld` | 446 行（service 255 / ops 121 / types 51 / feature 19）| 零痕迹 | 新状态域 + 新 durable 事件 + injection + 模式互斥 + telemetry；v2 的事件在 `helloWorldOps.ts` 有对应物，属移植非发明，但要动 `STATE_DOMAINS`（现 7 个） |
+| `features/operationLog` | 8 文件（含 snapshotStore / repositoryViewService）| 零痕迹 | 整块操作日志与仓库视图 |
+| `features/promptOptimizer` | 7 文件 | 零痕迹 | 整块提示词优化 |
+| `features/debugEvents` | 162 行 | 零痕迹 | v2 ledger  introspection 的开发面，价值低 |
+| `session/subagent/backend` | 9 文件 | 只有拒绝桩（`agent_tool/execute.rs::BACKENDS_UNAVAILABLE`）| ACP / Claude Code / Codex 子代理后端，整块 |
+
+**下一步建议**：以上都不是单刀能收口的规模。建议按用户优先级先做一个：`helloWorld`（上游完整特性、边界清楚）或 `operationLog`。动手前需要一份方案（新增状态域、durable 事件登记到 `scripts/upstream-v2-delta-allowlist.json`、injection 文案、模式互斥交互），并按仓库规则取得授权。死模块的处置同样等裁定。
+
+### 批次：移除两处 fork 自增（TodoList `updates` / Workflow `list`）（2026-11-13）
+
+承上一节的核查。manifest 里仅剩两条「fork 有、v2 无」的行为差异，均无出处标注，按仓库政策属缺陷。用户裁定「移除以对齐 v2」。
+
+| v2 依据 | 引擎改动 | 判定 |
+| --- | --- | --- |
+| `features/todo/tools/todo-list/todo-list.ts:39-56`（输入只有 `todos?`） | `src/tools/todo_list.rs`：删掉 `has_updates` 分支、`update_todo_list`、`read_current_items`（合计 117 行）、schema 的 `updates` 属性（42 行）、描述里的「Keep updates cheap」段与两条 `updates` 用法、4 条 `updates` 测试（105 行） | 等价 |
+| `features/todo/tools/todo-list/todo-list.md:22-24`（只有 `todos` 三种用法） | 描述的「How to use」改为 v2 原文的三条 | 等价（描述其余段落是引擎既有的额外指引，不在本次裁定范围） |
+| `app/workflow/tools/workflow.ts:21`（`WorkflowOperationSchema` 只有 run/status/wait/cancel） | `src/tools/workflow.rs`：enum 去掉 `list`、删 `handle_list`、删 `list_includes_the_builtins` 测试；`src/tools/tests.rs` 的 `workflow_tool_lists_without_a_subagent_runtime` 改为 `workflow_tool_run_requires_a_subagent_runtime`（只保留「无 subagent runtime 时 run 被拒」） | 等价 |
+
+**原生替代登记**：无新增。`WorkflowService::list_builtins` / `registry::list_builtins` 保留为 `pub` API（`pub fn` 不产生 dead-code 告警，且属服务库表面，不是模型可见面）。
+
+**验证**：
+
+- `cargo test --lib --offline -- tools::todo_list tools::workflow` → **16 passed / 0 failed**；`cargo test --lib tools::` → **1262 passed / 0 failed**（唯一失败 `workflow_tool_lists_without_a_subagent_runtime` 已按 v2 行为改写）。
+- `rustfmt --check` 0；`cargo clippy --lib` 对两个文件无告警（不再使用 `arg_error` / `arg_error_text` 后已从未用导入中移除）。
+- 门禁：`check:parity` 0（tools 86）、`check:engine-i18n` 256/241、`check:locale-orphans` 680/680、`check:locale-keys`、`check:config-registry`、`check:event-coverage`、`check:rust-module-deps` 415/415 全绿；`scan:hardcoded:rust` 3852/3852（`--update` 前 18 条 stale，全部位于本批两个文件，更新后 0/0）。
+- `check:architecture` / `check:normify` 仍为在途批次既有红。
+
+**未宣称完成**：`features/sessionQuery/toolInput.ts`（校验文案为引擎自撰）与 `features/tower/tools/send/sendTool.ts`（多一条 fork 投递提示）两条 manifest 记为「引擎自撰/多一条」但未标为缺陷——它们是文案差异而非 schema 差异，本次未动。
+
+### 批次：TowerSpawn 的名称与任务守卫（2026-11-13）
+
+承上一节对 tower 剩余 partial 的逐条复核。多数判定已过时（`initTool.ts` 的「缺占用保护」实际由 `store.rs::adopt_foreign_roster` 的会话锁守卫覆盖，且比 v2 的「注册表层」判定更强；`plan.ts`、`complete.ts`、`review.ts` 的 artifact 相关缺口已在前面批次闭合）。本批补最后四条真实差异。
+
+| v2 依据 | 引擎改动 | 判定 |
+| --- | --- | --- |
+| `tools/spawn/spawnTool.ts:150-162`（名称非空且无首尾空白；保留名 `tower` / `all`） | `tools/tower/mod.rs::execute_tower_spawn` 在既有代理存在性检查之前插入两条守卫，文案逐字 | 等价 |
+| `tools/spawn/spawnTool.ts:186`（`unknown mission "…" — known missions: …`，空集为 `(none planned yet)`） | worker 分支的未知任务文案改为带已知列表（与 `TowerMission` 工具既有写法一致） | 等价 |
+| `tools/spawn/spawnTool.ts:192`（`mission … is … — terminal missions cannot spawn workers; no worktree or agent was created`） | worker 分支的终态任务文案逐字对齐；reviewer 分支的自有守卫改为同构措辞（v2 无此守卫，属引擎既有新增） | 等价 |
+
+**验证**：
+
+- 新增 `spawn_refuses_blank_reserved_and_unknown_mission_names`：覆盖空/带空白名、两个保留名、未知任务带已知列表；并给既有 `spawn_refuses_a_terminal_mission_before_requesting_runtime` 补 `terminal missions cannot spawn workers` 断言。`cargo test --lib tools::tower::tests` → **14 passed / 0 failed**；`cargo test --lib tower::` → **134 passed / 0 failed**。
+- `rustfmt --check` 0；`cargo clippy --lib` 对 `tower/mod.rs` 无告警。
+- 门禁：`scan:hardcoded:rust` 3854/3854（`--update` 前 +5 new / −3 stale，全部位于 `tower/mod.rs`，更新后 0/0）、`check:parity` 0（tools 86）。
+- `check:architecture` / `check:normify` 仍为在途批次既有红（见下一节）。
+
+### 批次：TowerTeardown 的占用守卫与输出文案（2026-11-13）
+
+| v2 依据 | 引擎改动 | 判定 |
+| --- | --- | --- |
+| `tools/teardown/teardownTool.ts:48-56`（工作区被其它活跃会话拥有时拒绝拆除） | `tools/tower/mod.rs::execute_tower_teardown` 在状态锁之后、live agent 采集之前插入守卫：读 `state.session_id`，若不属于当前会话且该会话在 `SESSION_LOCKS` 中被持有（本进程或另一进程），返回 v2 文案 | 等价（锁判定比 v2 的注册表判定多覆盖跨进程情形） |
+| `tools/teardown/teardownTool.ts:72-73`（dry-run 标题） | 输出首行改为 `tower teardown (dry run — nothing was changed):` / `tower teardown:` 二选一 | 等价 |
+| `tools/teardown/teardownTool.ts:78-80`（收尾说明） | 末行改为 v2 原文（含 `/tower off` 与「remove it by hand only if you are sure」） | 等价 |
+
+**验证**：
+
+- 新增 `teardown_refuses_a_workspace_owned_by_a_live_session`（用 `SESSION_LOCKS.hold_guard` 占住前会话，断言拒绝文案）。`cargo test --lib tools::tower::tests` → **15 passed / 0 failed**；`cargo test --lib tower::` → **135 passed / 0 failed**。
+- `rustfmt --check` 0；`cargo clippy --lib` 对 `tower/mod.rs` 无告警。
+- 门禁：`scan:hardcoded:rust` 3856/3856（`--update` 前 +3 new / −1 stale，全部位于 `tower/mod.rs`）、`check:parity` 0、`check:engine-i18n` 256/241。
+- 描述资产 `descriptions/teardown.md` 与 v2 逐字相同，无需改动。
+- `check:architecture` / `check:normify` 仍为在途批次既有红。
+
+**未宣称完成**：dry-run 输出只做了代码改动，未单测——`store/tests.rs::teardown_supports_dry_run_live_agent_and_exclude` 覆盖 dry-run 的磁盘/状态语义，而工具层输出是纯字符串拼接；工具层 dry-run 端到端需要先 `add_worktree` 造出真实 worktree（本次尝试后因 git 前置条件成本超出断言价值而撤回该测试）。
+
+### 批次：cron 工具遥测接线（cron_scheduled / cron_deleted）（2026-11-13）
+
+用户指令的「其次接线」部分。前一批已确认 `emit_scheduled` / `emit_deleted` 只存在于在途的 `src/features/cron/cronService.rs`、无工具侧调用方。复核发现接线不需要该 actor 服务：`HostCallbacks` 自带 `telemetry(&self, event)` 宿主遥测出口（`callbacks.rs:270`），既有 `compaction_finished` 等事件就走它。
+
+| v2 依据 | 引擎改动 | 判定 |
+| --- | --- | --- |
+| `features/cron/cronService.ts:629-635`（`emitScheduled(task, agentId)`，属性 `{recurring, agent_id}`） | `execute_cron_create` 增 `agent_id` 入参（由 dispatch 传 `effective_caller_agent_id()`），在 `state_write` 成功后发 `{"event":"cron_scheduled","recurring":…,"agent_id":…}` | 等价 |
+| `features/cron/cronService.ts:637-641`（`emitDeleted(taskId, agentId)`，属性 `{task_id, agent_id}`） | `execute_cron_delete` 同样增参，成功后发 `cron_deleted`；状态存储在任务不存在时已返回 `No cron job with id …`（-32604），与 v2 的 `removed.length === 0` 分支同义，故只在成功时发 | 等价 |
+
+**验证**：
+
+- `ScriptedCallbacks` 增 `telemetry_received` 捕获（不改 `scripted()` 三元组签名，新增 `telemetry_events()` 读方法），13 处工具调用点补 `"main"` 入参。
+- 断言：create 成功发 1 条 `cron_scheduled`（recurring/agent_id 正确）；delete 成功发 1 条 `cron_deleted`（task_id/agent_id 正确）；达上限被拒时不发。`cargo test --lib -- tools::cron_tools` → **28 passed / 0 failed**；`cargo test --lib tools::` → **1264 passed / 0 failed**。
+- `rustfmt --check` 0；`cargo clippy --lib` 对两个文件无告警。
+- 门禁：`check:parity` 0（tools 86）、`check:engine-i18n` 256/241、`scan:hardcoded:rust` 3856/3856（新字面量位于 `serde_json::json!` 宏内，扫描器按既有行为不计入，与 `compaction_finished` 一致）。
+- `check:architecture` / `check:normify` 仍为在途批次既有红。
+
+**未宣称完成**：`cron_fired` / `cron_missed` 的触发路径在引擎里另有出处（回合驱动与 stale 清理），本批只接工具侧的 scheduled/deleted 两条；`emitScheduled` 在 v2 还带 `task.id`，引擎只发 `recurring`（v2 的 `CronScheduledEvent` 只有这两个属性，一致）。
+
+### 补记：`toShellPath` 方向经核实为无消费方（2026-11-13）
+
+复核 `_base/execEnv/shellPathBridge.ts` 的「native→shell 方向未移植」判定时确认：v2 唯一的消费方是 `agent/tools/os/bash/bashTool.ts:155`——它把 `effectiveCwd` 转成 MSYS 形式后拼进 `cd ${shellQuote(shellCwd)} && ${command}`，同时仍用原生 cwd spawn。引擎的 `tools/bash_exec.rs` 不注入 `cd`，直接用 `Command::current_dir(&work_dir)`（`bash_exec.rs:95,293`），由操作系统解析原生路径，Git Bash 启动后 PWD 即 MSYS 形式。因此 `toShellPath`（`toMsysPath`）在引擎里**没有消费方**，移植它会得到死代码。
+
+> 这是一条判定为「部分」但实际应归「NA（架构不同）」的条目：引擎保留了 bridge 的 `to_native_path`（shell→native，`tools/file_ops.rs:88` 在用），只裁掉了反向。若将来引擎改为注入 `cd`，再补 `to_msys_path` 及其单测。
+
+### 补记：`todo.updated` 事件为架构差异（2026-11-13）
+
+`features/todo/todoService.ts` 的 `publish` 在 v2 会发 `todo.updated`（`{agentId, todos, rev}`，observable），SDK 侧有 `todo-updated-event.test.ts`。本仓的 TUI 不靠该事件：`apps/kimi-code/src/tui/controllers/session-event-handler.ts:547` 读 `host.state.todoPanel.getTodos()`、`:923` 读工具调用参数，宿主状态由 `state_write` 域驱动。引擎、`packages/protocol`、`packages/node-sdk` 三处都没有 `todo.updated`。manifest 记的「publish 死代码」与此一致——不是缺失，是通道不同。
+
+### 补记：helloWorld 是「需要宿主入口」的特性，不是单刀（2026-11-13）
+
+动手前把 v2 的入口链读了一遍，结论：**helloWorld 在 v2 里没有独立的宿主开关**——目录下没有 `flag.ts`（manifest 那一行是过时机器行，参考检出里根本没有该文件），也没有任何 `switchTo('hello-world')` 或 `enter('manual')` 的调用方在 `features/helloWorld/` 之外。唯一的进入方式是 `modeMutexService.ts` 的 `switchTo` → `enter('hello-world')` → `helloWorld.enter('manual')`，而 `switchTo` 由宿主（TUI 的模式切换）驱动。
+
+因此完整移植 helloWorld 需要同时动三处：引擎（2 个状态域 + 3 个 durable 事件 + 7 个 stage 脚本 + injection provider + 模式互斥）、`apps/kimi-code` 的宿主入口（一个切模式的命令/开关）、以及可能的 `packages/protocol`。这是**跨层特性**，按仓库规则需要先出方案并取得授权，不是「搬代码」能单刀收口的规模。
+
+规模估计（读码得出）：`helloWorld.ts` 类型 51 行、`helloWorldService.ts` 255 行（7 条 evidence 规则 + 状态机）、`helloWorldOps.ts` 121 行、injection 约 100 行 + 7 个 stage 脚本、模式互斥 5 条冲突边、telemetry 2 条、测试若干。
+
+**其它未移植特性同样需要先定方案**：`operationLog`（8 文件，自带 snapshotStore / repositoryViewService，无宿主入口依赖，可能是下一个最自包含的）、`promptOptimizer`（7 文件）、`debugEvents`（162 行，开发面）、`session/subagent/backend`（9 文件，引擎只有拒绝桩）。
+
+补一条同类判定：`promptOptimizer` 也是**宿主面特性**——`optimize()` 的唯一调用方是 `kap-server/src/routes/sessions.ts:1097`（session API），flag 描述明写「reaching it from the TUI shortcut and the session API」。引擎侧的对应落点是 `server/route_sessions.rs`，但 `PROMPT_OPTIMIZER_AGENT_ORIGIN`（`session/subagent/runAgentTurn.ts:30`）也在子代理回合路径上，所以同样是跨层。`operationLog` 的 8 个文件里没有 flag、没有宿主入口调用（只有 DI feature + service），是这几个里唯一可能纯引擎闭合的，但 2232 行的量级（`repositoryViewService.ts` 868、`operationLogStore.ts` 600）本身就是多刀工程。
+
+### 补记：tower 模式的生命周期事件与 takeover（2026-11-13）
+
+`features/tower/towerService.ts` 的「生命周期编排未接线」拆开后是三件事，性质各不相同：
+
+| v2 行为 | 依据 | 引擎现状 |
+| --- | --- | --- |
+| `tower_mode.enter` / `tower_mode.exit` 两个 durable 事件 | `towerService.ts:420-426,519-526` 经 `TowerModeEnter` / `TowerModeExit` | **完全没有**——引擎的 tower 进入（`execute_tower_init`）与退出（`execute_tower_teardown`）都不发模式事件（`grep '"type": "tower'` 在 tools/server 下零命中） |
+| `tower_mode_enter` / `tower_mode_exit` 两条 telemetry（含 `outcome`/`reason`） | 同上，`track2(...)` | 没有 |
+| 跨会话 takeover：新会话调 owner 会话的 `tower.exit('takeover')` 释放工作区 | `towerService.ts:443-447` | 引擎的 takeover 是**会话锁**层面的（`session/lock.rs:241` + `POST /api/v1/sessions/{id}/takeover`），不触碰 tower 工作区；`store.rs::adopt_foreign_roster` 只在 owner 未持锁时静态收养名册 |
+
+前两条与既有的 `swarm_mode.enter/exit`、`spec_mode.exit` 同构，属于可闭合的接线（但 v2 的 owner 侧退出发生在**另一个会话**的事件总线上，引擎里没有跨会话事件通道，只能由 REST takeover 路由写 owner 的 tower 域——这层需要设计）。第三条同理。
+
+> 这条与 `plan_mode.*` 的补记合起来看：引擎的模式事件是**逐模式补齐**的（swarm 全、spec 半、tower/plan 无），不是统一缺失。补的时候要逐模式定「谁在哪个会话上发」，不能一律在工具侧发。
+
+### 批次：tower 模式事件与遥测（本会话侧）（2026-11-13）
+
+按上一节的分解，先落地**本会话内**的两条（跨会话 takeover 与状态载荷里的 `towerMode` 见「未宣称完成」）。
+
+| v2 依据 | 引擎改动 | 判定 |
+| --- | --- | --- |
+| `towerOps.ts:9-19`（`TowerModeEnter` durable，`{agentId, sessionId?}`）+ `towerService.ts:420-426`（`tower_mode_enter` telemetry `{outcome:'entered'}`） | `execute_tower_init` 增 `callbacks` 入参（dispatch 传 `self.callbacks`），成功后发 `tower_mode.enter {agentId, sessionId}` 与 `tower_mode_enter {outcome:"entered"}` | 等价 |
+| `towerOps.ts:21-30`（`TowerModeExit` durable，`{agentId}`）+ `towerService.ts:519-526`（`tower_mode_exit` telemetry `{reason}`） | `execute_tower_teardown` 同样增参，**非 dry-run** 成功后发 `tower_mode.exit {agentId}` 与 `tower_mode_exit {reason:"user"}` | 等价 |
+
+**验证**：
+
+- 新增 `tower_init_and_teardown_emit_mode_events_and_telemetry`：`EventCapture` 实现 `HostCallbacks`（覆写 `emit_event` / `telemetry`），真实 git 仓库上跑 init → 断言 enter 事件含 agentId/sessionId 与 enter telemetry，再跑 teardown → 断言 exit 事件与 `reason:"user"` telemetry。`cargo test --lib tools::tower::tests` → **16 passed / 0 failed**；`cargo test --lib tower::` → **136 passed / 0 failed**；`cargo test --lib tools::` → **1265 passed / 0 failed**。
+- `rustfmt --check` 0；`cargo clippy --lib` 无告警。
+- 门禁：`check:parity` 0、`check:engine-i18n` 256/241、`scan:hardcoded:rust` 3856/3856。
+
+**未宣称完成**：
+
+1. **跨会话 takeover**：v2 会调 owner 会话的 `tower.exit('takeover')`（在 owner 的事件总线上发事件）；引擎没有跨会话事件通道，只能由 REST takeover 路由写 owner 的 tower 域——这层需要设计。
+2. **状态载荷里的 `towerMode`**：v2 由 `towerKey` 事件折叠得出；引擎的 `server/engine.rs::status_payload` 目前没有 `towerMode`（只有 `planMode`/`swarmMode`），而 `route_sessions.rs:153` 的列表字段取的是 flag 而非 tower 工作区状态。语义（「模式开着」还是「工作区存在」）需要先定。
+3. `tower_mode_exit` 的 `reason` 在引擎里恒为 `"user"`——`force` / `exclude` 走的是同一个出口，v2 也没有更细的取值，但 mode-mutex 触发的退出（若将来接）需要别的 reason。
+
+### 批次：operationLog 模型与磁盘存储（2026-11-13）
+
+用户在选择题里选了 operationLog。本批落地前两层，`repositoryViewService`（868 行）与 `operationService`（335 行）随后。
+
+| v2 依据 | 引擎落点 | 判定 |
+| --- | --- | --- |
+| `features/operationLog/operationLog.ts`（127 行：常量、OperationGitHead/OperationView 及结构等价、OperationKind/Origin/Record/Head/Retention、11 个错误码与 details） | `tools/operation_log.rs` 1:1 移植；`refs` 用 `BTreeMap`（v2 的 `operationRefsEqual` 本就按排序比较）；`OperationLogError` 带 `code`/`message`/`details`，实现 `Display` + `Error` | 等价 |
+| `operationLogStore.ts:32-108`（sha256 内容寻址、`encoded = JSON + "\n"`、三个形状校验器） | `operation_log_store.rs` 的 `sha256` / `encode` / `is_operation_head` / `is_stored_operation_view` / `parse_operation` | 等价 |
+| `operationLogStore.ts:111-260`（构造与 retention 校验、capture/undo/redo/restore/restoreBefore） | `OperationLogStore::new` / `capture` / `undo` / `redo` / `restore` / `restore_before`；head 迁移逐分支对齐（undo 的 `undoTargetId` 取 `target.parents[0]`，redo 出栈，restore 清空 redo 栈） | 等价 |
+| `operationLogStore.ts:300-390`（`append`：视图 id、beforeView 与父视图一致性、nonce、id=sha256(content)、先校验保留再写） | `append` 同序；**操作文件存 `{id, ...content}`**（v2 的 `withId`），id 为 content 的 sha256 | 等价 |
+| `operationLogStore.ts:390-470`（三级保留：条数/年龄/字节，字节含全部视图文件） | `assert_retention` 同三级，错误 details 带 `limit`/`maximum` | 等价 |
+| `operationLogStore.ts:495-600`（不可变写：同内容复用、异内容 corrupt；原子写：temp + rename；进程内 Map 锁 + 文件锁，30s stale 回收、10s 心跳） | `write_immutable` / `write_atomic` / `with_lock`（全局 `LOCAL_LOCKS` 按 root 复用 Arc<Mutex>）/ `with_file_lock`（`create_new` 抢锁、stale 回收、心跳 spawn_blocking 触 mtime） | 等价 |
+
+**验证**：
+
+- 新增 10 条测试（4 模型 + 6 存储）：结构等价、保留默认值、错误码词表；capture 后 list 沿 parents、head 迁移、undo/redo/restore 的栈变化、不可变对象复用与 corrupt 检出、保留上限、空日志与首操作不可 undo、beforeView 与 head 不一致。`cargo test --lib -- tools::operation_log` → **10 passed / 0 failed**；`cargo test --lib tools::` → **1275 passed / 0 failed**。
+- `rustfmt --check` 0；`cargo clippy --lib` 对新模块无告警。
+- 门禁：`check:rust-module-deps` 415/415、`check:parity` 0、`check:engine-i18n` 256/241、`check:locale-orphans` 680/680 全绿；`scan:hardcoded:rust` 3888/3888（`--update` 前 +32 new，全部位于 `operation_log_store.rs`）。
+
+**过程中修掉的两个真 bug**（都是移植时写错、由测试暴露）：
+
+1. 操作对象只写了 content，漏了 v2 的 `id` 字段——`parse_operation` 回读时 `record.id != id` 直接报 corrupt。改为存 `encode(&record)`。
+2. `OperationView` 漏了 `#[serde(rename_all = "camelCase")]`，`indexTree` 序列化成 `index_tree`——既与 v2 的词表不符，又让 `is_stored_operation_view` 误判 corrupt。
+
+**历史中间态**：本节记录的是当时的分层落地情况，其中“等价”判断已被后续复核推翻；service/repository/snapshot 的实现、接线与最终证据以文件顶部「operationLog 全量复核与真实接线（2026-11-13，终态）」为准。
+
+### 批次：operationLog 的 git 视图服务（2026-11-13）
+
+补上让前两层活起来的第一块：`src/tools/operation_log_repository.rs`，按 v2 `repositoryViewService.ts` 的**核心**移植（不含 `readFiles`/`readBlobs`——那是给操作详情显示文件内容用的，留到接 `operationService` 时一起）。
+
+| v2 依据 | 引擎落点 | 判定 |
+| --- | --- | --- |
+| `repositoryViewService.ts:156-192`（`open`：rev-parse 取 root/gitDir/objects，storageRoot 默认 `<gitDir>/kimi-operation-log`，`refsFromFiles` 探测） | `RepositoryViewService::open` 同参；shadow index 用每次 open 的随机目录，`dispose()` 删除 | 等价 |
+| `:200-207,529-549`（`captureView`：先查 recovery 标记，再在 capture 锁内 `read-tree` → `add -A -- .` → `write-tree`，并行取 refs / 实际 index tree / 未完成任务） | `capture_view` / `capture_current_view`；shadow index 与 shadow object dir（`GIT_OBJECT_DIRECTORY` + `GIT_ALTERNATE_OBJECT_DIRECTORIES`） | 等价 |
+| `:399-446`（`changedFiles` = `git diff --name-only -z`；`restoreView`：恢复前校验 → 写 recovery 标记 → `applyView` → 失败回滚 → 清标记） | `changed_files` / `restore_view`；回滚失败报 `recovery-required`，标记删除失败同样报 | 等价 |
+| `:446-470`（`assertRestorable`：recovery 标记、未完成的 merge/rebase、实际 index 脏、目标视图含暂存改动） | `assert_restorable` 同四道，details 带 `operation` | 等价 |
+| `:550-600`（`applyView`：`read-tree` + `read-tree --reset -u`、HEAD 的 detached/symbolic 分支迁移、refs 更新、index tree 回写） | `apply_view` / `update_refs`（`update-ref --stdin` 批量增删改） | 等价 |
+| `:600-700`（HEAD 与 refs 的文件解析：symref 链、packed-refs、松散 refs、非法即回退 git） | `read_head_file` / `resolve_ref_file`（迭代化，避免 async 递归）/ `read_refs_from_files` / `read_packed_refs`；任一路径不可用则回退 git | 等价 |
+| `:700-800`（`readActualIndexTree` / `actualIndexIsClean` / `treeForHead` / `emptyTree` / `readUnfinishedOperation`） | 同名方法；未合并条目时 index tree 返回空串（v2 同语义） | 等价 |
+| `:472-528`（capture 锁：进程内 Map + 文件锁，30s stale、10s 心跳、5s 超时） | `with_capture_lock` / `with_capture_file_lock` | 等价 |
+
+**验证**：
+
+- 新增 5 条端到端测试（真实 git 仓库）：capture 记录 head/refs/tree/indexTree；`changed_files` 列出两视图差异；`restore_view` 回放目标树并清除 recovery 标记；暂存改动与未清除的 recovery 标记各自被拒；`unfinishedOperation` 的视图被拒且 details 正确。`cargo test --lib -- tools::operation_log` → **15 passed / 0 failed**（4 模型 + 6 存储 + 5 视图）。
+- `cargo test --lib tools::` 第一次出现 1 条失败，**复跑 1280 passed / 0 failed**——按仓库记录判为负载抖动。
+- `rustfmt --check` 0；`cargo clippy --lib` 对新模块无告警。
+- 门禁：`check:rust-module-deps` 415/415、`check:parity` 0、`check:engine-i18n` 256/241 全绿；`scan:hardcoded:rust` 3910/3910（`--update` 前 +22 new，全部位于 `operation_log_repository.rs`）。
+
+**历史中间态**：本节记录时的 service、readFiles/readBlobs 与生命周期缺口已在后续批次补齐；最终行为、真实接线和验证结果以文件顶部「operationLog 全量复核与真实接线（2026-11-13，终态）」为准。
+
+### session/workspace 逐文件对齐续批（2026-11-14）
+
+本批只修改当前逐项核对的独立 Rust 文件；不修改旧厚容器，不做服务接线或公开接口调整，不运行编译、测试、格式化及门禁。
+
+| v2 文件 | 独立 Rust 文件 | 文件内对齐 | 仅登记的接线/公开接口差异 |
+| --- | --- | --- | --- |
+| `session/sessionActivity/sessionActivity.ts` | `session/sessionActivity/sessionActivity.rs` | 枚举、状态、事件字段及 serde 词表一致，无源码修改 | v2 `ISessionActivityView` 服务标识未对应；`lastActiveAt(): number` 与 Rust `i64` 的公开数值域差异保留 |
+| `workspace/workspaceInstance/workspaceInstanceManagerService.ts` | `workspace/workspaceInstance/workspaceInstanceManagerService.rs` | `acquire` 的 workspace 后续 materialize/retain 改为独立任务，不再依赖调用方 poll；`onDidChange` 使用 `IndexMap` 保持注册顺序，退订使用 `shift_remove`，逐监听器经 `safely_call_listener` 隔离 panic；dispose 完成后清空监听并使后续订阅无操作 | v2 App/OnScopeCreated 注册未接；共享 future 的 `SharedManagerError` 仍把原始错误擦成字符串，保留任意原始错误对象需调整共享错误公开边界 |
+| `workspace/workspaceInstance/workspaceInstanceManager.ts` | `workspace/workspaceInstance/workspaceInstanceManager.rs` | ref/change/snapshot 字段及 manager 方法集合一致，无源码修改 | v2 服务标识未对应；`WorkspaceInstanceLease.dispose(): void` 与 Rust 消耗 `self` 的 `FnOnce` 公开调用边界不同，保留 |
+| `workspace/workspaceInstance/workspaceInstance.ts` | `workspace/workspaceInstance/workspaceInstance.rs` | live context 动态 metadata、activate 状态迁移、snapshot 及 dispose 的 closing/disposed 和错误传播一致，无源码修改 | 无 |
+| `workspace/workspaceContext/workspaceContext.ts` | `workspace/workspaceContext/workspaceContext.rs` | context 字段集合及默认 `remoteCwd=None` 一致，无源码修改 | v2 服务标识与平坦 seed 接线未对应；`kind` 的 `'managed' / 'implicit'` 在 Rust 为任意 `String`，两个时间字段为 `i64`，均属保留的公开类型差异 |
 

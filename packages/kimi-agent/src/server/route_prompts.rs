@@ -23,29 +23,12 @@ impl HttpServer {
                 let use_default =
                     body.get("default_workspace").and_then(|v| v.as_bool()) == Some(true);
 
-                // Upstream #4224 (`kap-server/src/routes/sessions.ts:213-231` @
-                // `e5e56bc5fe`): `default_workspace: true` is exclusive with
-                // workspace_id and metadata, and it replaces the
-                // workspace-or-cwd requirement rather than joining it.
-                // Upstream #4224 makes `default_workspace` exclusive with
-                // workspace_id/metadata, and *requires* one of the latter
-                // (`sessions.ts:216-231` @ `e5e56bc5fe`). The exclusivity half
-                // is kept; the requirement half is deliberately NOT — this
-                // fork's create route has always accepted a bare `{title}`
-                // body and creates the session in the process cwd (seven
-                // server tests and the TUI's own call depend on it). Recorded
-                // in ROADMAP §54.2 as a fork deviation.
                 if use_default && (workspace_id.is_some() || body.get("metadata").is_some()) {
                     return HttpResponse::bad_request(
                         "default_workspace cannot be combined with workspace_id or metadata",
                     );
                 }
 
-                // `default_workspace` arm: resolve, mkdir on first use, reuse
-                // afterwards, and register the workspace under the resolved
-                // root (upstream `IDefaultWorkspace.ensure` +
-                // `registry.createOrTouch`). A failure answers the classified
-                // reason and never relocates silently (#4277's rule).
                 let default_root = if use_default {
                     let config = self.config().await;
                     match crate::default_workspace::ensure(
@@ -87,10 +70,7 @@ impl HttpServer {
                                 .unwrap();
                             let _ = self.store.set_session_workspace(&session_id, &ws.id);
                         }
-                        // v2 `createSession`: the environment binding is fixed
-                        // while the session is created, so a later config edit
-                        // cannot move it. A failure here is reported with its
-                        // code instead of leaving an unfrozen session behind.
+
                         if let Some(engine) = self.engine.as_deref()
                             && let Err(error) = engine.freeze_session_environment(&session_id).await
                         {
@@ -122,12 +102,6 @@ impl HttpServer {
                             .bus_for(&session_id)
                             .publish(&crate::events::EngineEvent::Custom(event));
 
-                        // v2 `sessionExternalHooksService.triggerSessionStart`:
-                        // SessionStart hooks fire on creation (source
-                        // `startup`; the fork route never triggers one
-                        // upstream). Observational only. Session-level hooks
-                        // run in the session's workspace (v2 #4242's session
-                        // cwd, which session hooks always had upstream).
                         let session_cwd = workspace_id
                             .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
                             .map(|w| w.root);
@@ -146,11 +120,6 @@ impl HttpServer {
                             )
                             .await;
 
-                        // v2 answers the created session as the bare
-                        // `sessionSchema` with no `statusCode` override
-                        // (kap-server/src/routes/sessions.ts:181-184), so this is
-                        // HTTP 200 and the document itself — not 201, and not a
-                        // `{sessionId}` stub.
                         HttpResponse::ok(&session_val)
                     }
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
@@ -181,8 +150,7 @@ impl HttpServer {
                     Ok(value) => value,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
                 };
-                // Contract shape: `{ prompt_ids: [...] }`. A legacy `{ prompt }`
-                // string steers one fresh message without a queued record.
+
                 let ids: Vec<String> = body
                     .get("prompt_ids")
                     .and_then(|value| value.as_array())
@@ -246,9 +214,6 @@ impl HttpServer {
                 for (item, prompt, blocks, origin) in
                     self.prompt_queue.take_queued(session_id, &ids)
                 {
-                    // v2 #3906: the steered message reuses the queued prompt's
-                    // id (`children[0].waiter.id`), so the projection keeps it
-                    // inside the host turn and undo targets the host prompt.
                     let prompt_id = item["prompt_id"].as_str().map(str::to_string);
                     let message = crate::turn_loop::types::LLMMessage {
                         role: "user".to_string(),
@@ -258,16 +223,9 @@ impl HttpServer {
                         tool_call_id: None,
                         prompt_id,
                         origin: None,
+                        tools: Vec::new(),
                     };
                     if engine.enqueue_steer(session_id, message) {
-                        // v2 `turnSteerSchema` (turnOps.ts:51): the fold
-                        // pairs the steer to its turn and prompt ids; the
-                        // payload keeps the envelope fields the Rust hub
-                        // adds, which the interface does not declare.
-                        // `agentId` is the literal `main` because a steer
-                        // targets the session's main turn by definition — see
-                        // the note in `prompt_queue.rs` on why this is not the
-                        // subagent identity plumbing.
                         let steer_prompt_id =
                             item["prompt_id"].as_str().unwrap_or_default().to_string();
                         let mut steer = json!({
@@ -301,8 +259,7 @@ impl HttpServer {
                         .iter()
                         .map(|item| item["prompt_id"].as_str().unwrap_or_default().to_string())
                         .collect();
-                    // Each item's `content` is itself a part array; flat-map
-                    // so the steered event carries one flat part list.
+
                     let content: Vec<Value> = steered_items
                         .iter()
                         .flat_map(|item| {
@@ -326,8 +283,7 @@ impl HttpServer {
                         }),
                     );
                 }
-                // A steer that found no running turn must not drop the prompt:
-                // run it (or queue behind whatever is actually active).
+
                 for (item, prompt, blocks, origin) in unsteered {
                     self.run_or_queue_prompt(engine, session_id, item, prompt, blocks, origin);
                 }
@@ -381,10 +337,9 @@ impl HttpServer {
 
                         prompt_id: Some(prompt_id.clone()),
                         origin: None,
+                        tools: Vec::new(),
                     };
                     if engine.enqueue_steer(session_id, message) {
-                        // v2 `turnSteerSchema` (turnOps.ts:51); see the
-                        // `prompt_ids` route's emission above.
                         let mut steer = json!({
                             "type": "turn.steer",
                             "agentId": "main",
@@ -438,17 +393,7 @@ impl HttpServer {
                     return HttpResponse::not_found();
                 }
                 let prompt_id = segments[6].trim_end_matches(":abort");
-                // v2's `cancelWaiter` (loopService.ts:735-750): a queued prompt
-                // is removed from the queue so the driver never promotes it,
-                // and the active prompt's turn is cancelled. Either way the
-                // item is settled exactly once — the `prompt.aborted` below is
-                // its only terminal event, so the driver publishes no
-                // `prompt.completed` on top of it.
-                //
-                // The web UI's abort button sends the live
-                // `event.message.created` id (`msg-u{turn}`), which names the
-                // turn's user message rather than the prompt; resolving it
-                // here is what keeps the button working (ROADMAP §7.6).
+
                 let Some((prompt_id, outcome)) = self
                     .prompt_queue
                     .cancel(session_id, prompt_id)
@@ -458,9 +403,6 @@ impl HttpServer {
                             .cancel_by_user_message_id(session_id, prompt_id)
                     })
                 else {
-                    // An unknown / already-settled prompt is not in the queue,
-                    // so the abort has no target: report it as a missing
-                    // prompt rather than a false success.
                     return HttpResponse::json(
                         404,
                         &json!({
@@ -511,8 +453,6 @@ impl HttpServer {
                 }
                 let session_id = segments[4];
 
-                // Same gate as the protocol route: a turn must not start after
-                // the shutdown drain has begun.
                 if self.is_shutting_down() {
                     return HttpResponse::json(
                         503,
@@ -530,9 +470,6 @@ impl HttpServer {
                 };
 
                 let Some(engine) = self.engine.as_ref() else {
-                    // No engine attached. Refusing is the honest answer: this
-                    // route used to reply `Processed: {prompt}` without running
-                    // anything, which a client cannot tell from a real turn.
                     return HttpResponse::json(
                         503,
                         &json!({ "error": "no engine configured for this server" }),
@@ -548,8 +485,6 @@ impl HttpServer {
                     return HttpResponse::not_found();
                 }
 
-                // The synchronous single-prompt route refuses to start a second
-                // concurrent turn; queued prompts go through `/prompts`.
                 if self.prompt_queue.active_item(session_id).is_some() || engine.is_busy(session_id)
                 {
                     return HttpResponse::json(
@@ -564,18 +499,6 @@ impl HttpServer {
                 let history = match self.store.load_session_history(session_id) {
                     Ok(messages) => messages,
                     Err(error) => {
-                        // v2 `session_load_failed`: a session whose stored
-                        // history cannot be read is the failure a user hits as
-                        // "my conversation is gone", and until now it left no
-                        // event behind — only a 500 in the access log. Both
-                        // sites here are the same failure mode: a turn cannot
-                        // start, so the user sees the same nothing.
-                        //
-                        // v2's `SessionLoadFailedEvent` declares exactly one
-                        // property, `reason`. `session_id` and `stage` were this
-                        // engine's own invention: a consumer written against v2
-                        // would not look for them, and a strict one would reject
-                        // them.
                         self.emit_session_telemetry(
                             "session_load_failed",
                             serde_json::json!({

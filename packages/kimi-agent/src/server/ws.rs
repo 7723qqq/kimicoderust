@@ -1,32 +1,3 @@
-//! RFC 6455 WebSocket endpoint for the native REST surface.
-//!
-//! Scope of this module is the **transport**: handshake, framing, control
-//! frames, and fragmentation. On top of it it speaks the kap-server `/api/v1/ws`
-//! **control** vocabulary —[`ws_protocol`] for the frame shapes, sent and read
-//! here: the `server_hello` greeting, the `ping` heartbeat, the `ack` that
-//! answers a `client_hello`, and the `40112` refusal of a bad credential in one.
-//! The subscription layer rides on top and lives here too: a
-//! `TranscriptSubscription` is one attached live stream, `subscribe_v2` opens
-//! it at a requested [`TranscriptGrade`], and `hub::SequencedEvent` events are
-//! projected into `transcript.ops` frames that `filter_ops_for_grade` gates
-//! before they reach the wire.
-//!
-//! Zero new crates. SHA-1 is implemented here rather than pulled in: the
-//! handshake digest is a non-secret anti-caching value fixed by RFC 6455 §1.3,
-//! its correct output is pinned by a known-answer test, and collision
-//! resistance is not part of what it protects. Base64 comes from the crate
-//! reqwest already resolves.
-//!
-//! Spec rules this implementation enforces, each because skipping it lets a
-//! peer desynchronize the parser:
-//!
-//! - client frames **must** be masked, server frames **never** are (§5.1);
-//! - RSV bits must be zero —no extension is negotiated (§5.2);
-//! - control frames must not be fragmented and must carry ≤125 bytes (§5.5);
-//! - a 64-bit length must fit the configured cap, and only after a `FIN` may a
-//!   new data frame start (§5.4);
-//! - `Close` payloads are empty or ≥2 bytes with a code sendable by a peer.
-
 use crate::server::hub::SequencedEvent;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -46,19 +17,14 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-/// One attached live transcript stream for a connection (`subscribe_v2`).
-///
-/// The projector folds every engine event for the session into transcript ops;
-/// the grade gates which ops reach the client.
 struct TranscriptSubscription {
     agent_id: String,
     grade: TranscriptGrade,
     projector: TranscriptProjector,
-    /// Monotonic batch seq for the `transcript.ops` frames on this agent.
+
     seq: u64,
 }
 
-/// The magic value RFC 6455 §1.3 concatenates with the client key before SHA-1.
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub(crate) const OP_CONTINUATION: u8 = 0x0;
@@ -68,17 +34,14 @@ pub(crate) const OP_CLOSE: u8 = 0x8;
 pub(crate) const OP_PING: u8 = 0x9;
 pub(crate) const OP_PONG: u8 = 0xA;
 
-/// Cap on a single frame payload and on an assembled message.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
-/// Why the connection is being torn down, and the close code to send back.
 #[derive(Debug)]
 pub enum WsError {
-    /// Protocol violation: code 1002 (protocol error).
     Proto(&'static str),
-    /// Unsupported data: code 1003.
+
     Unsupported(u8),
-    /// Message over the cap: code 1009.
+
     TooLarge,
     Io(io::Error),
     Serde(serde_json::Error),
@@ -97,8 +60,6 @@ impl From<serde_json::Error> for WsError {
 }
 
 impl WsError {
-    /// The close code this failure maps to, or `None` when the peer broke the
-    /// contract so early no frame can be sent.
     pub fn close_code(&self) -> Option<u16> {
         match self {
             Self::Proto(_) => Some(1002),
@@ -116,11 +77,6 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-/// True when this request asks for a WebSocket upgrade we can honour.
-///
-/// A `Content-Length` on an upgrade is rejected outright: an upgrade request
-/// carries no body, and accepting one would make us consume the first frame's
-/// bytes as body data.
 pub fn is_upgrade(request: &HttpRequest) -> bool {
     let wants_upgrade = request.headers.get("upgrade").is_some_and(|value| {
         value
@@ -145,16 +101,11 @@ pub fn is_upgrade(request: &HttpRequest) -> bool {
         && !request.headers.contains_key("content-length")
 }
 
-/// The `Sec-WebSocket-Accept` value for a client key.
 pub fn accept_value(client_key: &str) -> String {
     let digest = sha1(format!("{client_key}{WS_GUID}").as_bytes());
     BASE64_STANDARD.encode(digest)
 }
 
-/// The 101 response completing the handshake.
-///
-/// `protocol` is the subprotocol the server selects. It must be echoed when the
-/// client offered one, or a browser client aborts the negotiation.
 pub fn handshake_response(client_key: &str, protocol: Option<&str>) -> Vec<u8> {
     let selected = protocol
         .map(|name| format!("Sec-WebSocket-Protocol: {name}\r\n"))
@@ -170,7 +121,6 @@ pub fn handshake_response(client_key: &str, protocol: Option<&str>) -> Vec<u8> {
     .into_bytes()
 }
 
-/// How an upgraded connection should treat its peer.
 fn gather_replay_events(
     hub: &EventHub,
     store: Option<&crate::session::sqlite_store::SqliteSessionStore>,
@@ -214,35 +164,18 @@ fn gather_replay_events(
 
 pub struct WsOptions<'a> {
     pub hub: Arc<EventHub>,
-    /// The credential a `client_hello` payload token is checked against. The
-    /// HTTP layer already checked the bearer header or the subprotocol;
-    /// kap-server checks again at the frame layer, and a non-browser client that
-    /// only ever sends `client_hello` depends on this one.
+
     pub auth: &'a ServerAuth,
-    /// Period of the JSON `ping` heartbeat; kap-server uses
-    /// [`ws_protocol::DEFAULT_HEARTBEAT`].
+
     pub heartbeat: Duration,
     pub selected_protocol: Option<String>,
     pub store: Option<Arc<crate::session::sqlite_store::SqliteSessionStore>>,
     pub engine: Option<Arc<crate::server::engine::ServerEngine>>,
     pub terminal_manager: Option<Arc<crate::server::terminal::TerminalManager>>,
-    /// The live wire turn number per session (`active_turn_number`), threaded
-    /// to the cold transcript baseline's wedged finalization (upstream #4280):
-    /// the replay's tail turn is only wedged when it is not the live one.
+
     pub prompt_queue: Option<Arc<crate::server::prompt_queue::PromptQueue>>,
 }
 
-/// Serve the upgraded connection as an event stream until the peer closes it or
-/// the hub ends.
-///
-/// `leftover` holds bytes the HTTP reader already pulled off the socket past the
-/// handshake —a client may coalesce the handshake and its first frame into one
-/// packet, and dropping them would desynchronize the framing parser.
-///
-/// Inbound data frames are read as [`ws_protocol`] control frames. Subscription
-/// frames still go unanswered, but their bytes are *accounted* for either way,
-/// because an endless run of continuation frames is otherwise a free way to grow
-/// server memory.
 pub async fn serve_ws(
     stream: TcpStream,
     request: &HttpRequest,
@@ -266,36 +199,22 @@ pub async fn serve_ws(
     let remote_address = stream.peer_addr().ok().map(|addr| addr.to_string());
     let user_agent = request.headers.get("user-agent").cloned();
     let (read_half, mut writer) = tokio::io::split(stream);
-    // Attach before the 101 goes out: once the client sees the handshake it may
-    // legitimately expect every event from that moment on, and attaching after
-    // the write opens a window where a published event reaches nobody.
+
     let mut subscription = hub.attach_from(remote_address, user_agent);
     writer
         .write_all(&handshake_response(key, selected_protocol.as_deref()))
         .await?;
 
-    // kap-server greets a connection before it has said anything, and a client
-    // that never sees this treats the socket as dead. It is written here rather
-    // than in the loop below, so it cannot be overtaken by an event frame.
     let connection_id = format!("ws-{:016x}", fastrand::u64(..));
     let hello = ws_protocol::server_hello(&connection_id, heartbeat)?;
     write_frame(&mut writer, OP_TEXT, &hello).await?;
 
-    // Active session subscriptions. `None` means nothing has been subscribed
-    // yet, so no session events are delivered; the old wildcard default leaked
-    // every session's events to any authenticated socket before its first
-    // `client_hello`/`subscribe`.
     let mut subscriptions: Option<HashSet<String>> = None;
-    // Live transcript streams (`subscribe_v2`), keyed by session id.
+
     let mut transcripts: HashMap<String, TranscriptSubscription> = HashMap::new();
 
-    // Highest sequence number delivered per session to this connection,
-    // ensuring monotonic delivery and preventing replay/live duplicate events.
     let mut delivered_seq: HashMap<String, u64> = HashMap::new();
 
-    // Frame decoding lives in its own task so the main loop can await events and
-    // inbound frames without cancelling a half-read frame —`read_frame` is not
-    // cancel-safe, and losing its partial state would desynchronize the socket.
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<Result<Frame, WsError>>(32);
     let reader = tokio::spawn(async move {
         let mut reader = FrameReader::new(read_half, leftover);
@@ -308,13 +227,9 @@ pub async fn serve_ws(
         }
     });
 
-    // `interval_at`, not `interval`: the first tick of `interval` is immediate,
-    // and a ping landing right behind the greeting is noise kap-server does not
-    // send (its `setInterval` only starts counting after the hello).
     let mut heartbeat_tick = tokio::time::interval_at(Instant::now() + heartbeat, heartbeat);
     let mut pings_sent: u64 = 0;
 
-    // A partially received inbound message: (opcode, bytes so far).
     let mut fragment: Option<(u8, Vec<u8>)> = None;
 
     loop {
@@ -436,9 +351,9 @@ pub async fn serve_ws(
             }
 
             _ = heartbeat_tick.tick() => {
-                // kap-server's heartbeat is a JSON `ping` frame the client
-                // answers with `pong`; an RFC 6455 Ping is a separate thing this
-                // codec already answers.
+
+
+
                 pings_sent += 1;
                 let nonce = format!("{connection_id}-{pings_sent}");
                 write_frame(&mut writer, OP_TEXT, &ws_protocol::ping(&nonce)?).await?;
@@ -449,9 +364,9 @@ pub async fn serve_ws(
                     Ok(event) => {
                         let sid = &*event.session_id;
                         let should_send = match &subscriptions {
-                            // No subscription yet: deliver nothing. The old
-                            // wildcard default sent every session's events to
-                            // any authenticated socket until it subscribed.
+
+
+
                             None => false,
                             Some(set) => set.contains(sid),
                         };
@@ -462,8 +377,8 @@ pub async fn serve_ws(
                                 let payload = event.envelope();
                                 write_frame(&mut writer, OP_TEXT, &payload).await?;
                             }
-                            // Live transcript ops for a `subscribe_v2` agent:
-                            // fold the event, gate by grade, emit a batch.
+
+
                             if let Some(sub) = transcripts.get_mut(sid) {
                                 let ops = sub.projector.apply_event(&event.event);
                                 let admitted = filter_ops_for_grade(sub.grade, &ops);
@@ -482,7 +397,7 @@ pub async fn serve_ws(
                             }
                         }
                     }
-                    // The hub released us (server teardown): a plain close.
+
                     Err(HubClosed::Detached) => break,
                 }
             }
@@ -493,11 +408,6 @@ pub async fn serve_ws(
     Ok(())
 }
 
-/// Read one completed inbound message as a kap-server control frame.
-///
-/// A result of `true` means the connection must close now: the frame layer
-/// refused the credential. That is a different outcome from a transport error
-/// because the peer was told why, in an ack, first.
 #[allow(clippy::too_many_arguments)]
 async fn handle_inbound(
     opcode: u8,
@@ -513,8 +423,6 @@ async fn handle_inbound(
     transcripts: &mut HashMap<String, TranscriptSubscription>,
     delivered_seq: &mut HashMap<String, u64>,
 ) -> Result<bool, WsError> {
-    // kap-server parses every inbound message as JSON, so a binary frame that
-    // will not parse is dropped without a word.
     if opcode != OP_TEXT {
         return Ok(false);
     }
@@ -526,9 +434,6 @@ async fn handle_inbound(
             subscriptions: req_subs,
             cursors,
         } => {
-            // A `client_hello` that presents no credential is not a refusal: kap-server's
-            // `authorize()` returns early when nothing was sent, which is how a browser
-            // that already cleared the subprotocol gate gets through.
             if let Some(presented) = token
                 && !auth.check_token(Some(presented.as_str())).is_allowed()
             {
@@ -710,8 +615,6 @@ async fn handle_inbound(
                 hub.ensure_lane_cursor(&session_id);
             }
 
-            // Agents with a non-`off` grade (`*` means the main agent): attach a
-            // live transcript stream per agent and seed its grade.
             let mut agents: Vec<String> = Vec::new();
             for (agent, grade) in &transcript {
                 let grade = match grade.as_str() {
@@ -740,8 +643,6 @@ async fn handle_inbound(
             let ack = ws_protocol::ack(&id, ws_protocol::ACK_OK, "success", ack_payload)?;
             write_frame(writer, OP_TEXT, &ack).await?;
 
-            // Baseline `transcript.reset` per attached agent, reconstructed
-            // from the persisted conversation.
             if let Some(st) = &store {
                 let active_wire_turn_id = prompt_queue
                     .as_ref()
@@ -787,13 +688,6 @@ async fn handle_inbound(
             session_id,
             prompt_id: _,
         } => {
-            // kap-server's `abortAckPayloadSchema` is `{ aborted?, at_seq? }`
-            // (ws-control.ts), so the ack carries exactly `aborted`. `at_seq`
-            // stays absent: this engine has no session sequence watermark to
-            // report and the field is optional, so omitting it beats a zero
-            // that would read as "the stream was at 0". `prompt_id` is part of
-            // the inbound contract but the engine cancels by session, so it
-            // selects nothing here.
             let cancelled = engine.map(|e| e.cancel_turn(&session_id)).unwrap_or(false);
             let ack = ws_protocol::ack(
                 &id,
@@ -837,11 +731,7 @@ async fn handle_inbound(
                 .await
                 .unwrap_or_default();
             let replayed = frames.len();
-            // Label each replayed frame with its real sequence. The buffer keeps
-            // only the newest MAX_BUFFER_FRAMES frames, so the requested
-            // `since_seq` is not the sequence of the first frame returned —
-            // deriving it from `since_seq` mislabelled every replayed frame after
-            // a buffer wrap, and the client re-anchored its resume point there.
+
             let first_seq = last_seq.saturating_sub(replayed) + 1;
             for (idx, line) in frames.into_iter().enumerate() {
                 let evt_json = json!({
@@ -1062,7 +952,6 @@ pub(crate) async fn send_close(
     write_frame(writer, OP_CLOSE, &code.to_be_bytes()).await
 }
 
-/// True for codes a peer is allowed to put in a Close frame (§7.4).
 pub(crate) fn is_sendable_close(code: u16) -> bool {
     (1000..=4999).contains(&code) && !matches!(code, 1004 | 1005 | 1006 | 1015 | (1016..=2999))
 }
@@ -1134,8 +1023,7 @@ pub(crate) async fn write_frame(
     payload: &[u8],
 ) -> Result<(), WsError> {
     let len = payload.len();
-    // Build head+payload in one buffer and issue a single write: two writes per
-    // frame doubles the syscalls on the per-token broadcast path.
+
     let mut frame = Vec::with_capacity(len + 10);
     frame.push(0x80 | opcode);
     if len <= 125 {
@@ -1147,14 +1035,12 @@ pub(crate) async fn write_frame(
         frame.push(127);
         frame.extend_from_slice(&(len as u64).to_be_bytes());
     }
-    // Server-to-client frames must be unmasked: no mask bit, no mask key.
+
     frame.extend_from_slice(payload);
     writer.write_all(&frame).await?;
     Ok(())
 }
 
-/// A buffered reader over the split socket, seeded with the bytes the HTTP
-/// layer already consumed from the packet but did not use.
 pub(crate) struct FrameReader {
     reader: ReadHalf<TcpStream>,
     buffer: Vec<u8>,
@@ -1189,7 +1075,6 @@ impl FrameReader {
     }
 }
 
-/// SHA-1 (RFC 3174), used only for the WebSocket handshake digest.
 fn sha1(input: &[u8]) -> [u8; 20] {
     let mut state: [u32; 5] = [
         0x6745_2301,
@@ -1279,7 +1164,7 @@ mod tests {
             hex(&sha1(b"The quick brown fox jumps over the lazy dog")),
             "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"
         );
-        // 64 bytes exactly: the padding must spill into a second block.
+
         assert_eq!(
             hex(&sha1(
                 b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
@@ -1329,7 +1214,7 @@ mod tests {
     #[test]
     fn accepts_a_well_formed_upgrade_and_refuses_an_incomplete_one() {
         assert!(is_upgrade(&upgrade_request(&[])));
-        // case-insensitive, and a multi-token Connection header is normal
+
         assert!(is_upgrade(&upgrade_request(&[(
             "connection",
             "keep-alive, Upgrade"
@@ -1370,9 +1255,6 @@ mod tests {
         (client, handshake)
     }
 
-    /// Upgrade through the real listener, so the handshake bytes are consumed
-    /// by the HTTP layer exactly as they would be in product. Returns the client
-    /// socket, the raw 101 response, and the listener handle.
     async fn connect_upgraded(
         server: &Arc<crate::server::HttpServer>,
         key: &str,
@@ -1392,8 +1274,6 @@ mod tests {
         }
     }
 
-    /// Read one unmasked server text frame the way a client would, returning its
-    /// payload. Handles both length forms a server frame can use.
     async fn read_text_frame(client: &mut TcpStream) -> String {
         let mut head = [0_u8; 2];
         client.read_exact(&mut head).await.unwrap();
@@ -1413,7 +1293,6 @@ mod tests {
         String::from_utf8(payload).unwrap()
     }
 
-    /// Read frames until one carries `wanted` (heartbeat pings interleave).
     async fn read_until_type(client: &mut TcpStream, wanted: &str) -> serde_json::Value {
         loop {
             let raw =
@@ -1427,7 +1306,6 @@ mod tests {
         }
     }
 
-    /// Subscribe this connection to one session and consume the ack.
     async fn subscribe_to(client: &mut TcpStream, session: &str) {
         let hello = format!(
             r#"{{"type":"client_hello","id":"test-sub","payload":{{"subscriptions":["{session}"]}}}}"#
@@ -1446,7 +1324,6 @@ mod tests {
         );
     }
 
-    /// Read the greeting every connection receives before it says anything.
     async fn read_server_hello(client: &mut TcpStream) -> serde_json::Value {
         let frame: serde_json::Value =
             serde_json::from_str(&read_text_frame(client).await).unwrap();
@@ -1463,7 +1340,6 @@ mod tests {
             connect_upgraded(&server, "dGhlIHNhbXBsZSBub25jZQ==").await;
         let text = String::from_utf8_lossy(&handshake).into_owned();
 
-        // The 101 must carry the RFC's own accept value for this key.
         assert!(text.starts_with("HTTP/1.1 101"), "{text}");
         assert!(text.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="), "{text}");
         assert_eq!(
@@ -1494,7 +1370,7 @@ mod tests {
             .write_all(&masked_frame(OP_CLOSE, &1000_u16.to_be_bytes()))
             .await
             .unwrap();
-        // Give the server a turn to process the close and release the slot.
+
         for _ in 0..50 {
             if hub.subscriber_count() == 0 {
                 break;
@@ -1521,7 +1397,6 @@ mod tests {
         }
         assert_eq!(hub.subscriber_count(), 2);
 
-        // Both were greeted; what must be identical is the event that follows.
         read_server_hello(&mut first).await;
         read_server_hello(&mut second).await;
         subscribe_to(&mut first, "sess-ws").await;
@@ -1530,8 +1405,7 @@ mod tests {
 
         let mut a = read_until_type(&mut first, "llm.step.begin").await;
         let mut b = read_until_type(&mut second, "llm.step.begin").await;
-        // Each frame is stamped as it is wrapped, so the arrival time is the only
-        // field two connections may legitimately disagree on.
+
         let stamp_a = a.as_object_mut().unwrap().remove("timestamp");
         let stamp_b = b.as_object_mut().unwrap().remove("timestamp");
         assert!(stamp_a.is_some() && stamp_b.is_some(), "frame: {a}");
@@ -1547,7 +1421,6 @@ mod tests {
         let server = Arc::new(crate::server::HttpServer::in_memory().unwrap());
         let (mut client, _, handle) = connect_upgraded(&server, "abc").await;
 
-        // 0x81 with the mask bit clear —a conforming server must not read it.
         read_server_hello(&mut client).await;
         client.write_all(&[0x81, 0x00]).await.unwrap();
         let mut reply = [0_u8; 8];
@@ -1560,9 +1433,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_control_frame_coalesced_with_the_handshake_is_not_lost() {
-        // A client may put its first frame in the same packet as the upgrade
-        // request. The HTTP reader buffers those surplus bytes; if they were
-        // dropped the server would never answer the Ping.
         let server = Arc::new(crate::server::HttpServer::in_memory().unwrap());
         let handle = crate::server::http::serve("127.0.0.1:0", server)
             .await
@@ -1572,14 +1442,12 @@ mod tests {
              Connection: Upgrade\r\nSec-WebSocket-Key: key\r\n\
              Sec-WebSocket-Version: 13\r\n\r\n"
             .to_vec();
-        // A masked Ping with no payload, sent alongside the handshake.
+
         packet.extend_from_slice(&masked_frame(OP_PING, b""));
 
         let mut client = TcpStream::connect(handle.local_addr).await.unwrap();
         client.write_all(&packet).await.unwrap();
 
-        // The 101 and the Pong may arrive together or apart; keep reading until
-        // a Pong frame (opcode 0xA) shows up.
         let mut seen = Vec::new();
         let mut got_pong = false;
         for _ in 0..40 {
@@ -1646,8 +1514,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A bearer header clears the handshake gate, so the frame-layer check is
-        // the only thing left to answer the hello.
         let (mut client, _) = connect_client(
             handle.local_addr,
             "key-ok",
@@ -1668,12 +1534,9 @@ mod tests {
         assert_eq!(ack["id"], "c-1", "the ack must echo the request id");
         assert_eq!(ack["code"], 0, "{ack}");
         assert_eq!(ack["msg"], "success", "{ack}");
-        // No session authority yet, so nothing is claimed as attached.
+
         assert_eq!(ack["payload"]["accepted_subscriptions"], json!([]), "{ack}");
 
-        // Presenting a *different* credential than the handshake did is what
-        // kap-server's authorize() refuses: the ack says why, then the socket
-        // closes.
         let (mut liar, _) = connect_client(
             handle.local_addr,
             "key-liar",
@@ -1744,7 +1607,6 @@ mod tests {
         let (mut client, _, handle) = connect_upgraded(&server, "key-filter").await;
         read_server_hello(&mut client).await;
 
-        // 1. Send client_hello with subscription to sess-target
         client
             .write_all(&masked_frame(
                 OP_TEXT,
@@ -1764,11 +1626,9 @@ mod tests {
         );
         assert!(ack["payload"]["cursors"]["sess-target"].is_object());
 
-        // 2. Publish on an unrelated session and on target session
         hub.bus_for("sess-other").publish(&step_event(1));
         hub.bus_for("sess-target").publish(&step_event(2));
 
-        // 3. Client must receive only sess-target event, NOT sess-other
         let received: serde_json::Value =
             serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
         assert_eq!(received["session_id"], "sess-target");
@@ -1785,7 +1645,6 @@ mod tests {
         let (mut client, _, handle) = connect_upgraded(&server, "key-dyn").await;
         read_server_hello(&mut client).await;
 
-        // Greet with no initial subscriptions
         client
             .write_all(&masked_frame(
                 OP_TEXT,
@@ -1797,10 +1656,8 @@ mod tests {
             serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
         assert_eq!(ack_hello["code"], 0);
 
-        // Publish to sess-1 while not subscribed; client does not receive it yet
         hub.bus_for("sess-1").publish(&step_event(10));
 
-        // Subscribe to sess-1 dynamically with seq 0 (request replay)
         client
             .write_all(&masked_frame(
                 OP_TEXT,
@@ -1816,14 +1673,12 @@ mod tests {
         assert_eq!(ack_sub["code"], 0);
         assert_eq!(ack_sub["payload"]["accepted"], json!(["sess-1"]));
 
-        // Client immediately receives the replayed event from history
         let replayed: serde_json::Value =
             serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
         assert_eq!(replayed["session_id"], "sess-1");
         assert_eq!(replayed["seq"], 1);
         assert_eq!(replayed["payload"]["step"], 10);
 
-        // Now publish a live event; client receives it
         hub.bus_for("sess-1").publish(&step_event(11));
         let live: serde_json::Value =
             serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
@@ -1831,7 +1686,6 @@ mod tests {
         assert_eq!(live["seq"], 2);
         assert_eq!(live["payload"]["step"], 11);
 
-        // Unsubscribe from sess-1
         client
             .write_all(&masked_frame(
                 OP_TEXT,
@@ -1874,16 +1728,6 @@ mod tests {
         handle.shutdown();
     }
 
-    /// The `abort` frame is the one inbound frame that ends a turn, and its ack
-    /// carries kap-server's `{ aborted }` (`abortAckPayloadSchema`). The former
-    /// `prompt` / `cancel` frame names are not part of the v1 vocabulary: a
-    /// client sending them gets silence, the same as any unparseable frame.
-    ///
-    /// The silence is asserted implicitly rather than by waiting for a
-    /// non-ack frame: all three are written before anything is read, so the
-    /// first frame off the socket is the abort's ack only if the two retired
-    /// names acked nothing. Since each retired name would otherwise answer
-    /// first, the `id` assertion below is the check.
     #[tokio::test]
     async fn test_ws_abort_frame_and_retired_prompt_cancel_names() {
         let server = Arc::new(crate::server::HttpServer::in_memory().unwrap());
@@ -1904,8 +1748,6 @@ mod tests {
             client.write_all(&masked_frame(OP_TEXT, frame)).await.unwrap();
         }
 
-        // The contract's `abort` frame acks with `{ aborted: false }` when the
-        // session has no live turn — and it is the *first* ack on the wire.
         let ack_abort: serde_json::Value =
             serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
         assert_eq!(ack_abort["type"], "ack");
@@ -1932,7 +1774,6 @@ mod tests {
         let (mut client, _, handle) = connect_upgraded(&server, "key-term").await;
         read_server_hello(&mut client).await;
 
-        // Helper to read until ack
         async fn read_ack(client: &mut TcpStream) -> serde_json::Value {
             loop {
                 let frame_text = read_text_frame(client).await;
@@ -1944,7 +1785,6 @@ mod tests {
             }
         }
 
-        // 1. Attach to terminal
         let attach_req = format!(
             r#"{{"type":"terminal_attach","id":"ta-1","payload":{{"session_id":"sess-term","terminal_id":"{tid}"}}}}"#
         );
@@ -1958,7 +1798,6 @@ mod tests {
         assert_eq!(ack["code"], 0);
         assert_eq!(ack["payload"]["attached"], true);
 
-        // 2. Resize terminal
         let resize_req = format!(
             r#"{{"type":"terminal_resize","id":"tr-1","payload":{{"session_id":"sess-term","terminal_id":"{tid}","cols":100,"rows":30}}}}"#
         );
@@ -1972,7 +1811,6 @@ mod tests {
         assert_eq!(ack["code"], 0);
         assert_eq!(ack["payload"]["resized"], true);
 
-        // 3. Write input to terminal
         let input_req = format!(
             r#"{{"type":"terminal_input","id":"ti-1","payload":{{"session_id":"sess-term","terminal_id":"{tid}","data":"echo test\n"}}}}"#
         );
@@ -1986,7 +1824,6 @@ mod tests {
         assert_eq!(ack["code"], 0);
         assert_eq!(ack["payload"]["accepted"], true);
 
-        // 4. Detach terminal
         let detach_req = format!(
             r#"{{"type":"terminal_detach","id":"td-1","payload":{{"session_id":"sess-term","terminal_id":"{tid}"}}}}"#
         );
@@ -2000,7 +1837,6 @@ mod tests {
         assert_eq!(ack["code"], 0);
         assert_eq!(ack["payload"]["detached"], true);
 
-        // 5. Close terminal
         let close_req = format!(
             r#"{{"type":"terminal_close","id":"tc-1","payload":{{"session_id":"sess-term","terminal_id":"{tid}"}}}}"#
         );
@@ -2014,7 +1850,6 @@ mod tests {
         assert_eq!(ack["code"], 0);
         assert_eq!(ack["payload"]["closed"], true);
 
-        // 6. Missing terminal returns 40414 error ack
         let missing_req =
             br#"{"type":"terminal_attach","id":"ta-err","payload":{"session_id":"sess-term","terminal_id":"no-such-term"}}"#;
         client
@@ -2038,7 +1873,6 @@ mod tests {
             .create_session(sid, Some("Cold Replay"))
             .unwrap();
 
-        // Pre-populate SQLite wire_events directly (simulating persistent state before connection)
         server
             .store_arc()
             .append_wire_event(&crate::native::event_store::RawWireEvent {
@@ -2068,7 +1902,6 @@ mod tests {
         let (mut client, _, handle) = connect_upgraded(&server, "key-cold-replay").await;
         read_server_hello(&mut client).await;
 
-        // Send subscribe with seq 0 requesting full history
         let sub_frame = format!(
             r#"{{"type":"subscribe","id":"sub-cold","payload":{{"session_ids":["{sid}"],"cursors":{{"{sid}":{{"seq":0}}}}}}}}"#
         );
@@ -2084,7 +1917,6 @@ mod tests {
         assert_eq!(ack["code"], 0);
         assert_eq!(ack["payload"]["cursors"][sid]["seq"], 2);
 
-        // Client must receive the 2 replayed events from persistent wire_events
         let ev1: serde_json::Value =
             serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
         assert_eq!(ev1["session_id"], sid);
@@ -2125,7 +1957,6 @@ mod tests {
         assert_eq!(ack["type"], "ack");
         assert_eq!(ack["id"], "sv2");
 
-        // Baseline reset for the attached agent.
         let reset: serde_json::Value =
             serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
         assert_eq!(reset["type"], "transcript.reset");
@@ -2140,7 +1971,6 @@ mod tests {
                 prompt: Some("hi".into()),
             });
 
-        // The event envelope is forwarded first, then the transcript ops batch.
         let envelope: serde_json::Value =
             serde_json::from_str(&read_text_frame(&mut client).await).unwrap();
         assert_eq!(envelope["type"], "turn.started");
@@ -2159,15 +1989,12 @@ mod tests {
     #[test]
     fn close_codes_a_peer_must_not_send_are_rejected() {
         assert!(is_sendable_close(1000) && is_sendable_close(1001) && is_sendable_close(4000));
-        // 1005/1006 are status-only, 1015 is reserved, and 1016..2999 is
-        // reserved by the spec for future use.
+
         for code in [1004_u16, 1005, 1006, 1015, 1016, 2999, 999, 5000] {
             assert!(!is_sendable_close(code), "{code} must not be sendable");
         }
     }
 
-    /// Build a masked client frame (the mask key is all zeros so the payload
-    /// survives unchanged and the test stays readable).
     fn masked_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(0x80 | opcode);

@@ -33,6 +33,7 @@ pub(super) fn engine_without_a_model(
             session_id: None,
             secondary_model: None,
             image_read_byte_budget: None,
+            llm_request_byte_budget: None,
             image_max_edge_px: None,
             model_capabilities: None,
             skill_dirs: Vec::new(),
@@ -69,9 +70,6 @@ pub(super) fn catalog_request(method: &str, path: &str, body: Option<&Value>) ->
     }
 }
 
-/// A one-connection-at-a-time registry server: the response (status line
-/// and JSON body) can be swapped between requests, and every request head
-/// is captured so the auth header can be asserted.
 pub(super) struct RegistryServer {
     pub(super) url: String,
     response: Arc<std::sync::Mutex<(String, String)>>,
@@ -126,8 +124,6 @@ impl RegistryServer {
     }
 }
 
-/// A host whose `llm_chat` answers with a fixed summary, so the `:compact`
-/// route's summarizer call can be observed end to end.
 pub(super) struct SummarizingHost {
     pub(super) summary: String,
 }

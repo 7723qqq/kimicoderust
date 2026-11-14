@@ -9,7 +9,7 @@
         "repository": "https://github.com/7723qqq/kimi-code"
       }
     ],
-    "compiled_at": "2026-11-09T19:52:52.944Z",
+    "compiled_at": "2026-11-12T17:23:49.897Z",
     "stats": {
       "tree_count": 1,
       "module_count": 73,
@@ -73,8 +73,8 @@
           "path": "apps/kimi-code/src/main.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.287Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.902Z",
       "fingerprint": "14764da2b2dfe9da338d51be9485e4dc82735a72ec027e70a8ce89641c71898e",
       "aggregate": {
         "descendant_count": 12,
@@ -109,8 +109,8 @@
           "path": "apps/kimi-code/src/tui/kimi-tui.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.286Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.901Z",
       "fingerprint": "e1fb80fcc50020520a34130c3257e2c7d6f94f8e17f1e7f0fa4b57a9cf7f868e",
       "deps": [
         {
@@ -189,8 +189,8 @@
           "path": "apps/kimi-code/src/main.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.286Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.900Z",
       "fingerprint": "11307ca4b20870cb630e3cd29f6e561c8e90cac74d4d9fdfb3b7fc3b97dc1b03",
       "deps": [
         {
@@ -230,8 +230,8 @@
           "path": "apps/kimi-code/src/tui/kimi-tui.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.287Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.902Z",
       "fingerprint": "629e0c7b72ae59176795b96fdf1d066f26aa325fd9c83db4717c54c265876057",
       "deps": [
         {
@@ -280,8 +280,8 @@
           "path": "docs/.vitepress/config.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.287Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.902Z",
       "fingerprint": "cb996f2e23fee271179a965c312a112beeb224718220b0e83b476f113577b617",
       "aggregate": {
         "descendant_count": 0,
@@ -313,8 +313,8 @@
           "path": "apps/kimi-inspect/src/panels.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.287Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.902Z",
       "fingerprint": "6212f11d5605b291e9a86ba99155063bb3af8a88e54c00783e95204103a11dc2",
       "aggregate": {
         "descendant_count": 5,
@@ -343,8 +343,8 @@
           "path": "apps/kimi-inspect/src/panels.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.289Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.904Z",
       "fingerprint": "82ca8ebe5a9f477063075d1d47b94327ce232b5be7cf9caf6b9abd4a823bff14",
       "aggregate": {
         "descendant_count": 3,
@@ -379,8 +379,8 @@
           "path": "apps/kimi-inspect/src/activity/ws.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.287Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.903Z",
       "fingerprint": "7d69faf0d94d250d97f9802d78fbc5ab55f782b879395c2d7d2b52a845ea14c3",
       "aggregate": {
         "descendant_count": 0,
@@ -418,8 +418,8 @@
           "path": "apps/kimi-inspect/src/audit/truncate.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.288Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.903Z",
       "fingerprint": "b3ccc14804109024cc3d6cfd835af0b691ca2de28eaecbef8b3c5a550270a25c",
       "aggregate": {
         "descendant_count": 0,
@@ -457,8 +457,8 @@
           "path": "apps/kimi-inspect/src/channel/proxy.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.288Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.904Z",
       "fingerprint": "20840266f86aac6328d3b438479b7129d82fe142267fe5f386fbf2903c468e67",
       "aggregate": {
         "descendant_count": 0,
@@ -493,8 +493,8 @@
           "path": "apps/kimi-inspect/src/connection.tsx"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.289Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.904Z",
       "fingerprint": "df321b3d7420b674af690b4072d6af793013184a390fbacb12fe3b8626ba3dc6",
       "aggregate": {
         "descendant_count": 0,
@@ -523,8 +523,8 @@
           "path": "apps/vis/server/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.289Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.905Z",
       "fingerprint": "e92ad9f9e97ecd55451604a8ce680f4d1818a39a2ce69dc8bec28000a8fd6e1a",
       "aggregate": {
         "descendant_count": 0,
@@ -553,8 +553,8 @@
           "path": "apps/vscode/src/extension.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.289Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.905Z",
       "fingerprint": "08633cfde48f4e01b674cf3e966ea03cc3af8ddd2d974d20c79a958ce3973f84",
       "aggregate": {
         "descendant_count": 0,
@@ -586,9 +586,9 @@
           "path": "packages/kimi-agent/src/workspace_trust.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.301Z",
-      "fingerprint": "78be65ab74f9620c1ca892d2c9c8fc361330ef4a33b508ecf8fe8d7549b957dc",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.285Z",
+      "fingerprint": "033956bfbeee7967d92d667699ed1e00a010116b2b9f2351767111a6ec1f2705",
       "aggregate": {
         "descendant_count": 35,
         "own_api_count": 0,
@@ -658,9 +658,9 @@
           "path": "packages/kimi-agent/src/pipeline/mod.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.293Z",
-      "fingerprint": "9025ec9d940f7cd68e3a79780cb9c9de6c0c3df48d9c09093808d10ff9478e9b",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.279Z",
+      "fingerprint": "3e7f9a43bb0a655df87930365d9b00effb66d34a165d2d0ccb6d31555cd12dad",
       "deps": [
         {
           "kind": "call",
@@ -708,12 +708,15 @@
           "path": "packages/kimi-agent/src/compaction/mod.rs"
         },
         {
-          "path": "packages/kimi-agent/src/compaction/micro.rs"
+          "path": "packages/kimi-agent/src/agent/micro_compaction/micro_compaction.rs"
+        },
+        {
+          "path": "packages/kimi-agent/src/agent/micro_compaction/micro_compaction_service.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.290Z",
-      "fingerprint": "d30f10146be4d366e7a2be496a2deb9d1cd42705a97f1015a8cf80cb5f308d11",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.277Z",
+      "fingerprint": "04b1ad58b8cb26ec4edcce104a5868044018e51558845e889e7df0a19c230599",
       "deps": [
         {
           "kind": "call",
@@ -755,9 +758,9 @@
           "path": "packages/kimi-agent/src/injection/state.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.293Z",
-      "fingerprint": "0d5455181f26dcd3fe22148c80f09087076f1366951c128de11c4e3c9c55b2e7",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.909Z",
+      "fingerprint": "1540c819f1f82a657a60619e8237f1291f1de9cde402e797891cff7473cf9000",
       "aggregate": {
         "descendant_count": 4,
         "own_api_count": 0,
@@ -785,8 +788,8 @@
           "path": "packages/kimi-agent/src/injection/goal_plan.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.293Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.909Z",
       "fingerprint": "f70a96ef4778e73913fbd023226bcd549484a5d0dda21cf666af9f8b7c03e127",
       "aggregate": {
         "descendant_count": 0,
@@ -815,8 +818,8 @@
           "path": "packages/kimi-agent/src/injection/interruption_reminder.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.293Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.909Z",
       "fingerprint": "43372183f17d74b06979a2dcef02eed5ae83ba1fbade88ae9bac66ec93469040",
       "aggregate": {
         "descendant_count": 0,
@@ -845,8 +848,8 @@
           "path": "packages/kimi-agent/src/injection/permission_mode.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.294Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.909Z",
       "fingerprint": "5c21dea5346fc219dbd3b0c7fe67ae3b9b7d4e52fb0ae1c1e8e938181d09edb6",
       "aggregate": {
         "descendant_count": 0,
@@ -875,8 +878,8 @@
           "path": "packages/kimi-agent/src/injection/swarm_mode.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.294Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.910Z",
       "fingerprint": "74eff7f3dae377a3645f1f8c41338255e72a06d82d2e18116fad78bc6595be6f",
       "aggregate": {
         "descendant_count": 0,
@@ -911,9 +914,9 @@
           "path": "packages/kimi-agent/src/session/patch.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.295Z",
-      "fingerprint": "611c9414f3bab9bb647596e228c57b4113d255060aae90b467ba01d96e0fe849",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.280Z",
+      "fingerprint": "b2cb0245964822b8756c8a275832ab4a100693553539fec13e98950f6ab2bdd1",
       "deps": [
         {
           "kind": "dataflow",
@@ -955,9 +958,9 @@
           "path": "packages/kimi-agent/src/session/patch.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.297Z",
-      "fingerprint": "37be35564234289cd6497b6f2fe0559a3720adbd3efbec89420963433f324afc",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.281Z",
+      "fingerprint": "cd4bcda130d599794d978c04130509e6e4d288bf7bea933d6a4df935cc3da8a4",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -985,9 +988,9 @@
           "path": "packages/kimi-agent/src/session/title.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.297Z",
-      "fingerprint": "33cc5c5bb4c71fb5eb709b6ab6b563ac46018f87871c4625692ab8a8ed392e1d",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.911Z",
+      "fingerprint": "28f24c16fb8e9428cbc012caf0200024908d7a1b8c918169963c27dce2260f99",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -1021,9 +1024,9 @@
           "path": "packages/kimi-agent/src/subagent/btw.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.298Z",
-      "fingerprint": "080506c4852b636ec19707a44ba2f35f8514b1485ee32161a810b5f4dd67ca1f",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.281Z",
+      "fingerprint": "e99f070184eccc966d8a99b0ae4324955ddf44422c4ee35ac4c536ac77d274b0",
       "deps": [
         {
           "kind": "call",
@@ -1104,9 +1107,9 @@
           "path": "packages/kimi-agent/src/turn_loop/retry.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.301Z",
-      "fingerprint": "73fbf8945b90bfbe2e860df4f1cdc7be11c7256ee9638fe2b8427af0fc1afaf7",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.285Z",
+      "fingerprint": "f36cef1ec800d2b2fc274d339571b7c799af5c677a8b270bb189de160f585f6e",
       "deps": [
         {
           "kind": "call",
@@ -1160,9 +1163,9 @@
           "path": "packages/kimi-agent/src/llm/google_genai.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.303Z",
-      "fingerprint": "3e992f52e6f47d3685e1b06908550b0c01da7e6e61add1b8284b518d81ef35a2",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.919Z",
+      "fingerprint": "62ad462649c8fa95bd47705941b37717a90be453083fb04fd91ab18fbf81becb",
       "aggregate": {
         "descendant_count": 4,
         "own_api_count": 0,
@@ -1190,9 +1193,9 @@
           "path": "packages/kimi-agent/src/llm/anthropic.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.302Z",
-      "fingerprint": "98a1f929d84c6edd6ea2f4c41ed43a010d47f9c80e678cd4b3de957467172698",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.917Z",
+      "fingerprint": "62a36a8dd10538f9efbc93626867fb5d997a8f01be934e107204ac00eec315ab",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -1220,9 +1223,9 @@
           "path": "packages/kimi-agent/src/llm/google_genai.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.302Z",
-      "fingerprint": "833895b25b7a26f6db2852ba21e5c61f25304e42f85acb0757edd77fd8f5494b",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.917Z",
+      "fingerprint": "8abf2d371745ac6bbd194fcfdd933a2d7501150e6fe1adc4a8ed4c1922ef38f2",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -1262,9 +1265,9 @@
           "path": "packages/kimi-agent/src/llm/media_budget.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.303Z",
-      "fingerprint": "f9f0d9c6a59012281e4a60dfa2968b40c0859f680937eb1b968800b130db02b4",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.286Z",
+      "fingerprint": "0c1f347a23b1b9c344595e03d6589235366a92471a16b98617bd75bef6323cdb",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -1295,9 +1298,9 @@
           "path": "packages/kimi-agent/src/llm/openai.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.304Z",
-      "fingerprint": "e80a51e6340bb4f6259798a3503fc88ddffa77e38587329c632b3d6816fb306f",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.919Z",
+      "fingerprint": "2c31e9ac6256b046b34f0a274b67ec014e597beb3553921afe3b4d431aa92a68",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -1328,9 +1331,9 @@
           "path": "packages/kimi-agent/src/mcp/client.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.305Z",
-      "fingerprint": "519ca528adb5b594cf317a2d4abd5aa2023e1f5ca5bdce05c77163379514d7f0",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.921Z",
+      "fingerprint": "bbf510567cfc1ad911b1478129d5d126d7eb897e2ff3d84bc6df96d4caad7f88",
       "aggregate": {
         "descendant_count": 2,
         "own_api_count": 0,
@@ -1373,9 +1376,9 @@
           "path": "packages/kimi-agent/src/mcp/output.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.305Z",
-      "fingerprint": "15c9f6f8c6d36116cf924dfc9c5e38fd65f2f03adbd311d6f30231c5016efc1a",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.920Z",
+      "fingerprint": "7151d1b3ffd00f1f8c0c8477935163eea07469d89c57ffb6e14358ead681b787",
       "deps": [
         {
           "kind": "call",
@@ -1414,9 +1417,9 @@
           "path": "packages/kimi-agent/src/mcp/manager.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.306Z",
-      "fingerprint": "549520087b75242c5efb86e12e764f826e5c69c7835da79e18cd57c0b67bf141",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.921Z",
+      "fingerprint": "f7784e02a8308fff533be218e2dac7a86f75971c9a325bf6d763f24be78fa45b",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -1471,9 +1474,9 @@
           "path": "packages/kimi-agent/src/napi_bindings/turn.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.309Z",
-      "fingerprint": "1541fac4919af0dab58be9707485d184bcd7badbcacd9d0485775fd886aa1e03",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.289Z",
+      "fingerprint": "5516cfbfb33f1aad9b7996b3d9f1bc66431bbe1465d3c9f4b04ee42a728e39ff",
       "deps": [
         {
           "kind": "call",
@@ -1554,9 +1557,9 @@
           "path": "packages/kimi-agent/src/napi_bindings/turn.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.308Z",
-      "fingerprint": "49bb9d5db310100a2deecbb3f4f9e591bbff603087cbc557b202d3e58ae05263",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.288Z",
+      "fingerprint": "77880dee4b22a826ddacdef5df04d955878bdbb2cb6105fb18896e699ac911aa",
       "apis": [
         {
           "protocol": "rpc",
@@ -1632,9 +1635,9 @@
           "path": "packages/kimi-agent/index.native.cjs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.308Z",
-      "fingerprint": "c70433d0512dbaa0a19bce9b02cfeb4d8e20998559ea40621f922eb2a7aea073",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.288Z",
+      "fingerprint": "ea7b3d631e90adcd18882828a9f4db38271d7dabc2054fdec14eb70e51429216",
       "deps": [
         {
           "kind": "reference",
@@ -1676,9 +1679,9 @@
           "path": "packages/kimi-agent/src/server/plugin_archive.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.310Z",
-      "fingerprint": "86c4561bdd583c5972542bc185dfebc32faca78d468b8d577f6ed72bc36264c7",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.926Z",
+      "fingerprint": "dee60bd7013f26efcac7f927d60d28bc89c64dd5e224eb0a66b338fe757bc362",
       "aggregate": {
         "descendant_count": 2,
         "own_api_count": 0,
@@ -1706,9 +1709,9 @@
           "path": "packages/kimi-agent/src/server/plugin_archive.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.310Z",
-      "fingerprint": "695953746b1d97fcb76f50c81154a6117cef28e8283cabc37915f94d0814843e",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.926Z",
+      "fingerprint": "5416ee57cd864052822f867b4ac1596bd0df943bb530712a6244b95856d92bff",
       "deps": [
         {
           "kind": "call",
@@ -1747,9 +1750,9 @@
           "path": "packages/kimi-agent/src/server/plugins.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.310Z",
-      "fingerprint": "e5c6ffa4ed80bbcb092c50e67a799bc0f65949c6e2637c337f3f0c4d95f073a3",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.926Z",
+      "fingerprint": "b0cf40c2a16330d35a01e4dee5025b9e4c9f6bc3a8b97e7364807dc252536453",
       "apis": [
         {
           "protocol": "rpc",
@@ -1851,9 +1854,9 @@
           "path": "packages/kimi-agent/src/server/hub.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.316Z",
-      "fingerprint": "37a3c9c15c38bef450d2192002eee248964450c061fb79b315430e6e95136318",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.294Z",
+      "fingerprint": "60c3cc936a4a76b253b74e84da1ced3bc4e4acc7c1aa39840162fd158e2773ea",
       "deps": [
         {
           "kind": "dataflow",
@@ -1949,9 +1952,9 @@
           "path": "packages/kimi-agent/src/server/fs_routes.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.313Z",
-      "fingerprint": "55460aa68bf3f5f3b98260afe8d0068ffcc8fb94600e098ffa751ba011f0bb9f",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:20:22.292Z",
+      "fingerprint": "b000b24dfbb28bc579b2724308e855f5f426f5e597fa1e93e9b844b4f8aa46d9",
       "apis": [
         {
           "protocol": "http",
@@ -2014,9 +2017,9 @@
           "path": "packages/kimi-agent/src/server/transcript/project.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.316Z",
-      "fingerprint": "95d338412f0ecf017ed658722da79afb631a11617ada42a516421b63eb5e7cc1",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.933Z",
+      "fingerprint": "87774f66f0b57cf6ab0a4fbb7eec30aecda38756e6ccdfc0846a82f032d1edf5",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -2050,9 +2053,9 @@
           "path": "packages/kimi-agent/src/server/hub.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.317Z",
-      "fingerprint": "76c6ea97337b18c9b342c90c62027d5ee441234405d71bf304903bffa16ae07c",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.934Z",
+      "fingerprint": "74550ec898b41b74054a1ec5d0744df638addf0173544dd8ac041e0e6f0b0e81",
       "apis": [
         {
           "protocol": "ws",
@@ -2094,9 +2097,9 @@
           "path": "packages/kimi-agent/src/tools/skill.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.321Z",
-      "fingerprint": "75f3f24a49a50e3dff9db104757fa2e6831a9f9c9648eadc6de0feec15ca9a6e",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T17:23:42.159Z",
+      "fingerprint": "fd9dfe34a4aab80e51e40115ea7caccb9c311eea2e21b6236c023d45e670b64f",
       "aggregate": {
         "descendant_count": 4,
         "own_api_count": 0,
@@ -2175,9 +2178,9 @@
           "path": "packages/kimi-agent/src/tools/select_tools.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.320Z",
-      "fingerprint": "10fa958e599a637012eeda3ff077bbfc14236e6b2565af103d1054bdefc9024f",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.936Z",
+      "fingerprint": "f936ecfd129064a97cdcf604fa8fa411a6c465d1e9809a96b7ac53d51371032c",
       "apis": [
         {
           "protocol": "rpc",
@@ -2270,9 +2273,9 @@
           "path": "packages/kimi-agent/src/tools/spec_mode.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.321Z",
-      "fingerprint": "a52381a0f8359ab8d58c3cc5b061c65ad71a79be3ebf3a207c4f7612f92dded6",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T17:23:42.161Z",
+      "fingerprint": "ad0b3157fb843c5c36628416a2d12431471a7a68f24e5bdaca1a83ca0ea85c3b",
       "apis": [
         {
           "protocol": "rpc",
@@ -2374,9 +2377,9 @@
           "path": "packages/kimi-agent/src/tools/session_query.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.322Z",
-      "fingerprint": "738b3e9e791a5eea29001b0b1accda425dee662905af8f2bee30ea2509060eca",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T17:23:42.162Z",
+      "fingerprint": "eecaf2ee1d8b9c526df0f4d0ee50ba981fcb9c755f9a2737d19190e41ca21936",
       "apis": [
         {
           "protocol": "rpc",
@@ -2463,9 +2466,9 @@
           "path": "packages/kimi-agent/src/tools/read_media.rs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.323Z",
-      "fingerprint": "579fcacccafa42390f0a54c9e92c987108c76c984a7ca9b841ac80518407998e",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.941Z",
+      "fingerprint": "65643cd7967c0d8352237e6eaece4169681202b9a5757a0c28b437ac69ef0c2c",
       "apis": [
         {
           "protocol": "rpc",
@@ -2546,8 +2549,8 @@
           "path": "packages/tree-sitter-bash/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.324Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.943Z",
       "fingerprint": "40f41a77e3470da511fa49c112b169f7757596680bea9d824c4451e47498646a",
       "aggregate": {
         "descendant_count": 13,
@@ -2576,8 +2579,8 @@
           "path": "packages/tree-sitter-bash/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.323Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.941Z",
       "fingerprint": "cd85557cb6a81f3acb56ecc8343a322f3ec56eb7782afc82afc07609daf84f88",
       "aggregate": {
         "descendant_count": 0,
@@ -2606,8 +2609,8 @@
           "path": "packages/i18n-catalog/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.323Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.941Z",
       "fingerprint": "78252d1586237153cf097a025497f17d348d1fa77e29d2d7cb43c0d1fcdd9a4d",
       "deps": [
         {
@@ -2647,8 +2650,8 @@
           "path": "packages/i18n-runtime/src/i18n.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.323Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.942Z",
       "fingerprint": "5d71281ba78fc35769e7fe948f61ba070146f368cc699702506b4a47a7d9d3b2",
       "deps": [
         {
@@ -2688,8 +2691,8 @@
           "path": "packages/i18n-shared/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.323Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.942Z",
       "fingerprint": "34e33b3dfea434db214caed775080994e7f3c7cf4bdc1b97145fbad196151df8",
       "aggregate": {
         "descendant_count": 0,
@@ -2718,8 +2721,8 @@
           "path": "packages/kaos/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.324Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.943Z",
       "fingerprint": "c6800b31e7ed6275747bf8e2f34031a7137eb8fcd5d2871caf092e0977a6607e",
       "aggregate": {
         "descendant_count": 0,
@@ -2748,8 +2751,8 @@
           "path": "packages/minidb/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.324Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.943Z",
       "fingerprint": "84afb46fe5d98a081edb58c26148bd6ccb78b341c03c13cc90a0356d67c8e859",
       "aggregate": {
         "descendant_count": 0,
@@ -2789,8 +2792,8 @@
           "path": "packages/normify/src/mcp.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.325Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.945Z",
       "fingerprint": "a0c49a239c9328d787283398cd8efd93443570e6f17fb1945537de4be8e40e5b",
       "aggregate": {
         "descendant_count": 2,
@@ -2825,8 +2828,8 @@
           "path": "packages/normify/src/cli.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.325Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.944Z",
       "fingerprint": "a0c49a239c9328d787283398cd8efd93443570e6f17fb1945537de4be8e40e5b",
       "apis": [
         {
@@ -2904,8 +2907,8 @@
           "path": "packages/normify/src/engine/store.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.325Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.944Z",
       "fingerprint": "0aa3fcb8c328adfc412a2761a338fadb7a335410a9153f180414a54170da1fa0",
       "aggregate": {
         "descendant_count": 0,
@@ -2934,8 +2937,8 @@
           "path": "packages/oauth/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.326Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.945Z",
       "fingerprint": "26f1c58913e8dc172f4c88b6427f091332c4dfe60a5463fb7775d1c82fdcfc70",
       "aggregate": {
         "descendant_count": 0,
@@ -2964,8 +2967,8 @@
           "path": "packages/telemetry/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.326Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.945Z",
       "fingerprint": "7f422e4163eac4d96e2f80274ee158dbc8e73e11710be1a14e068ca55395c7c2",
       "aggregate": {
         "descendant_count": 0,
@@ -2994,8 +2997,8 @@
           "path": "packages/transcript/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.326Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.945Z",
       "fingerprint": "29781c29a8f47abc80927532980be6b67f5eeacc60cd5b7b1a9d9b336635d896",
       "aggregate": {
         "descendant_count": 0,
@@ -3024,8 +3027,8 @@
           "path": "packages/pi-tui/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.326Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.946Z",
       "fingerprint": "f3ce21f3459a0fc5a95a9f3e97506eb541f66f3e3df8e832c04679f49921c382",
       "aggregate": {
         "descendant_count": 0,
@@ -3054,8 +3057,8 @@
           "path": "packages/node-sdk/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.326Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.946Z",
       "fingerprint": "1559777ca63746a5cb4b58ef373fa157a5ca567bf521c281a5187608dddd702b",
       "aggregate": {
         "descendant_count": 5,
@@ -3084,8 +3087,8 @@
           "path": "packages/kosong/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.326Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.946Z",
       "fingerprint": "753823446f1e7446f214914433f736aabc37f4bc846b5c833580aac10412e99f",
       "aggregate": {
         "descendant_count": 0,
@@ -3117,9 +3120,9 @@
           "path": "packages/node-sdk/src/kimi-harness.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.327Z",
-      "fingerprint": "2756c54614593b35819bab0521ae048f44c9efc856e0e310f6b456295cc29e65",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.947Z",
+      "fingerprint": "ab479829d1e01f3bddb7f6ab3d82f00a1956293f62a1326cf5c44280e588ba66",
       "deps": [
         {
           "kind": "call",
@@ -3164,8 +3167,8 @@
           "path": "packages/node-sdk/src/marketplace.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.326Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.946Z",
       "fingerprint": "144eede413240e1f2efc76c6f08081045a62d2dae65eaa153732a729949aee5a",
       "deps": [
         {
@@ -3205,9 +3208,9 @@
           "path": "packages/node-sdk/src/native/sdk-rpc-client-native.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.327Z",
-      "fingerprint": "d9cb4bc4f94bc22215f6a946329349f9d699ce895bbc9e91fe22e1d2e54a87f3",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.947Z",
+      "fingerprint": "c8cc224eebd23f2ebafd04ae58699aaf3bc1901f9c8e7e0b65477d92ff380c9e",
       "apis": [
         {
           "protocol": "rpc",
@@ -3277,8 +3280,8 @@
           "path": "packages/protocol/src/index.ts"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.328Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.947Z",
       "fingerprint": "fe88149d02d475b860136443458494eebb7fb8997d9138e383570b51e5f2f68f",
       "aggregate": {
         "descendant_count": 0,
@@ -3307,8 +3310,8 @@
           "path": "scripts/check-architecture-drift.mjs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.328Z",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.948Z",
       "fingerprint": "8d214a3043aafec6ca157997d2459094d80ce20b87f97f9fb441d943c4ef0102",
       "aggregate": {
         "descendant_count": 2,
@@ -3343,9 +3346,9 @@
           "path": "package.json"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.328Z",
-      "fingerprint": "d61437b3293a59450840965a70f56c3828441c58f1d38ea78cf4d026e0e9c7c8",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-11T19:20:38.948Z",
+      "fingerprint": "0e2b0d96b93c9ea306b2fce6c0aceaec4aa7e9bd8f9d3316323247591976672e",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,
@@ -3376,9 +3379,9 @@
           "path": "scripts/scan-parity.mjs"
         }
       ],
-      "revision": "8c50a0dfdddde7e560ee7637ad3b533551547ccc",
-      "updated_at": "2026-11-09T19:52:51.328Z",
-      "fingerprint": "ca4bca8bdd169caf145d6bf9254773bafd4e2aaa75adefdbe22e0334a3217920",
+      "revision": "f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2",
+      "updated_at": "2026-11-12T10:46:05.904Z",
+      "fingerprint": "eadf44f3d9b024b7021410c40c4f11bd6f075d3717bd633807ea1756bf0d25f4",
       "aggregate": {
         "descendant_count": 0,
         "own_api_count": 0,

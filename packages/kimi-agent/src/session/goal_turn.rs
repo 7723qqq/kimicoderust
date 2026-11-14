@@ -1,14 +1,3 @@
-//! Goal settlement after one turn, ported from the v2 goal effects
-//! (`goalService.ts` `handleTurnEnded` / `settleAbnormalTurn` /
-//! `blockIfBudgetReached`).
-//!
-//! The engine owns the durable goal store, so the turn driver — the session
-//! pump and the standalone server alike — folds the finished turn, settles an
-//! abnormal stop onto a pause / block, and decides whether the goal owes the
-//! model another continuation turn. All three decisions are made from the
-//! store's post-write snapshot, never from a host-side copy that may lag the
-//! fold.
-
 use serde_json::{Value, json};
 
 use crate::callbacks::HostCallbacks;
@@ -21,23 +10,21 @@ use crate::turn_loop::types::LoopTurnStopReason;
 
 use super::TurnOutcome;
 
-/// What one finished turn leaves behind for the goal.
 #[derive(Debug, Default)]
 pub(crate) struct GoalAfterTurn {
-    /// The continuation turn the goal owes, when it is still active.
     pub continuation: Option<String>,
 }
 
-/// The goal-relevant shape of a finished turn.
 pub(crate) enum GoalTurnEnd<'a> {
-    /// The turn ran to a stop reason.
     Ran {
         stop: &'a LoopTurnStopReason,
         output_tokens: u64,
     },
-    /// The turn failed outright (the engine returned an error).
-    Failed { error: &'a str },
-    /// The turn never ran (cancelled while still queued).
+
+    Failed {
+        error: &'a str,
+    },
+
     Skipped,
 }
 
@@ -56,8 +43,6 @@ impl<'a> From<&'a Result<TurnOutcome, String>> for GoalTurnEnd<'a> {
     }
 }
 
-/// Settle one turn against the session's goal store and return what the goal
-/// owes next.
 pub(crate) async fn settle_goal_after_turn(
     callbacks: &dyn HostCallbacks,
     outcome: GoalTurnEnd<'_>,
@@ -71,8 +56,7 @@ pub(crate) async fn settle_goal_after_turn(
             json!({ "action": "record_usage", "turns": 1, "output_tokens": output_tokens }),
             Some(stop),
         ),
-        // v2 `settleAbnormalTurn`: a turn that failed outright has no usage to
-        // fold, but the goal must not stay active behind the error.
+
         GoalTurnEnd::Failed { error } => {
             let reason = goal_failure_pause_reason(super::turn_failure_code(error), Some(error));
             (
@@ -96,8 +80,7 @@ pub(crate) async fn settle_goal_after_turn(
         | LoopTurnStopReason::RepeatBreaker => GoalAfterTurn {
             continuation: Some(continuation_prompt(false)),
         },
-        // v2 `isMaxStepsTurnFailure`: the step budget ran out mid-goal, so the
-        // next turn resumes the same slice with the step-cap framing.
+
         LoopTurnStopReason::MaxSteps => GoalAfterTurn {
             continuation: Some(continuation_prompt(true)),
         },
@@ -107,8 +90,7 @@ pub(crate) async fn settle_goal_after_turn(
         LoopTurnStopReason::Aborted => {
             settle_paused(callbacks, GOAL_INTERRUPTED_PAUSE_REASON).await
         }
-        // The goal stopped being active mid-turn: the pause is already stored
-        // (the host paused it, or its budget blocked it).
+
         LoopTurnStopReason::Paused => GoalAfterTurn::default(),
         LoopTurnStopReason::BudgetLimited => {
             match snapshot
@@ -125,6 +107,7 @@ pub(crate) async fn settle_goal_after_turn(
 }
 
 async fn write_goal(callbacks: &dyn HostCallbacks, value: Value) -> Option<Value> {
+    let submitted = value.clone();
     let response = callbacks
         .state_write(StateWriteRequest {
             domain: "goal".into(),
@@ -136,11 +119,59 @@ async fn write_goal(callbacks: &dyn HostCallbacks, value: Value) -> Option<Value
         })
         .await
         .ok()?;
-    response
+    let goal = response
         .value
         .get("goal")
-        .filter(|goal| !goal.is_null())
-        .cloned()
+        .filter(|goal| goal.is_object())?
+        .clone();
+    emit_goal_fold(callbacks, &submitted, &goal);
+    Some(goal)
+}
+
+fn emit_goal_fold(callbacks: &dyn HostCallbacks, submitted: &Value, goal: &Value) {
+    let agent_id = crate::callbacks::MAIN_AGENT_ID;
+    let mut record = json!({
+        "type": "goal.update",
+        "agent_id": agent_id,
+    });
+    match submitted.get("action").and_then(Value::as_str) {
+        Some("record_usage") => {
+            let mut seen = false;
+            for key in ["turnsUsed", "tokensUsed"] {
+                if let Some(total) = goal.get(key).and_then(Value::as_u64) {
+                    record[key] = json!(total);
+                    seen = true;
+                }
+            }
+            if !seen {
+                return;
+            }
+            callbacks.emit_event(record);
+            if let Some(blocked) =
+                crate::session::agent_records::goal_blocked_record(agent_id, goal)
+            {
+                callbacks.emit_event(blocked);
+            }
+            return;
+        }
+        Some("lifecycle") => {
+            let Some(status) = submitted.get("status").and_then(Value::as_str) else {
+                return;
+            };
+            record["status"] = json!(status);
+            if let Some(reason) = submitted.get("reason").and_then(Value::as_str) {
+                record["reason"] = json!(reason);
+            }
+            if let Some(wall_clock_ms) = goal.get("wallClockMs").and_then(Value::as_u64) {
+                record["wallClockMs"] = json!(wall_clock_ms);
+            }
+            if status == "active" {
+                record["wallClockResumedAt"] = json!(chrono::Utc::now().timestamp_millis() as u64);
+            }
+        }
+        _ => return,
+    }
+    callbacks.emit_event(record);
 }
 
 async fn settle_paused(callbacks: &dyn HostCallbacks, reason: &str) -> GoalAfterTurn {

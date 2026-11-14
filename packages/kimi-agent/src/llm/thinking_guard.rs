@@ -1,45 +1,15 @@
-//! Thinking-stream repetition guard.
-//!
-//! A degenerate thinking loop is a decoding attractor, not a reasoning
-//! failure. Once a short phrase has appeared a few times the model conditions
-//! on its own recent output, the phrase becomes the most likely continuation,
-//! and the pattern reinforces itself. Nothing inside the model notices,
-//! because every step is locally the most plausible one — so the guard has to
-//! live outside it.
-//!
-//! The guard watches the tail of the thinking stream and reports when one
-//! character window has repeated often enough to be a loop rather than prose.
-//! The caller stops forwarding thinking deltas once it trips. The
-//! accumulator's own copy is deliberately left alone: an Anthropic thinking
-//! block must round-trip to the provider with its signature intact, so this is
-//! a display gate, not a content edit.
-//!
-//! Detection is on **character** windows, not words. A word-based n-gram needs
-//! a tokenizer, and any fixed-size chunking of a long unbroken run (CJK has no
-//! spaces) only lines up with the repetition when the period happens to be a
-//! multiple of the chunk size — so a Chinese loop would slip through. A
-//! character window has no such alignment requirement: a phrase repeated every
-//! `p` characters produces an identical window at every offset that is a
-//! multiple of `p`, whatever `p` is.
-
 use std::collections::HashMap;
 
-/// Tuning for [`ThinkingGuard`]. The defaults are calibrated for prose: a
-/// 16-character window repeated six times inside a 2000-character tail is a
-/// loop, while ordinary reasoning rarely repeats any 16-character run more
-/// than twice.
 #[derive(Debug, Clone, Copy)]
 pub struct ThinkingGuardConfig {
-    /// Characters of thinking kept for inspection.
     pub window_chars: usize,
-    /// Characters per compared window.
+
     pub ngram_chars: usize,
-    /// Occurrences of one window that trip the guard.
+
     pub repeat_threshold: usize,
-    /// Thinking shorter than this is never judged — too little signal.
+
     pub min_chars: usize,
-    /// Re-count only after this many new characters, so the scan cost stays
-    /// proportional to the stream rather than to the number of deltas.
+
     pub check_every_chars: usize,
 }
 
@@ -55,46 +25,31 @@ impl Default for ThinkingGuardConfig {
     }
 }
 
-/// Whether a thinking delta should reach the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingVerdict {
     Forward,
-    /// The guard has tripped: this delta is part of the loop and is dropped.
+
     Suppressed,
 }
 
-/// `KIMI_AGENT_THINKING_GUARD=0` turns the guard off process-wide.
 pub const GUARD_ENV: &str = "KIMI_AGENT_THINKING_GUARD";
 
-/// The `[experimental]` key the engine reads to drive [`set_enabled`].
 pub const GUARD_CONFIG_KEY: &str = "thinking_repeat_guard";
 
 static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// Turn the guard on or off. The engine drives this from
-/// `[experimental].thinking_repeat_guard`; the env override still wins.
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Whether the guard runs. `KIMI_AGENT_THINKING_GUARD` overrides the
-/// configured value, so a single run can be compared with and without it.
-///
-/// The env switch follows the repo-wide v2 `parseBooleanEnv` rule (see
-/// [`crate::env::env_switch_default_on`]): only an explicit falsy value
-/// disables the guard, so unset, empty, or unrecognized keeps it on. Parsed
-/// through the shared helper rather than a local list, so this switch cannot
-/// drift from the other engine switches.
 pub fn enabled() -> bool {
     match crate::env::parse_bool_env(std::env::var(GUARD_ENV).ok().as_deref()) {
         Some(from_env) => from_env,
-        // Unset / empty / unrecognized: fall back to `[experimental]`.
+
         None => ENABLED.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
-/// Watches one thinking stream. A guard is per response — a new request starts
-/// a new stream and a new guard.
 #[derive(Debug)]
 pub struct ThinkingGuard {
     config: ThinkingGuardConfig,
@@ -115,21 +70,16 @@ impl ThinkingGuard {
         }
     }
 
-    /// A guard honouring the process setting — see [`enabled`]. A disabled
-    /// guard forwards everything and never accumulates.
     pub fn from_settings() -> Self {
         let mut guard = Self::new(ThinkingGuardConfig::default());
         guard.disabled = !enabled();
         guard
     }
 
-    /// Whether the guard has tripped. Once true it stays true until
-    /// [`Self::reset`].
     pub fn tripped(&self) -> bool {
         self.tripped
     }
 
-    /// Feed one thinking delta and learn whether to forward it.
     pub fn observe(&mut self, delta: &str) -> ThinkingVerdict {
         if self.disabled {
             return ThinkingVerdict::Forward;
@@ -153,16 +103,12 @@ impl ThinkingGuard {
         ThinkingVerdict::Forward
     }
 
-    /// Start a fresh thinking block. A text delta means the previous one ended,
-    /// so a loop in it must not suppress the next block's opening.
     pub fn reset(&mut self) {
         self.tail.clear();
         self.tripped = false;
         self.chars_since_check = 0;
     }
 
-    /// Drop everything but the last `window_chars` characters, on a char
-    /// boundary.
     fn trim_tail(&mut self) {
         let limit = self.config.window_chars;
         let len = self.tail.chars().count();
@@ -179,7 +125,6 @@ impl ThinkingGuard {
         self.tail.drain(..byte);
     }
 
-    /// The highest occurrence count of any character window in the tail.
     fn most_repeated_window(&self) -> usize {
         let n = self.config.ngram_chars;
         if n == 0 {
@@ -202,11 +147,6 @@ impl ThinkingGuard {
     }
 }
 
-/// Gate one decoded delta through the guard.
-///
-/// `None` means the delta is part of a degenerate thinking loop and must not
-/// reach the host. A text delta ends the thinking block, so it resets the
-/// guard — a loop in one block must not suppress the next block's opening.
 pub fn gate_delta(
     guard: &mut ThinkingGuard,
     delta: crate::llm::wire::StreamDelta,
@@ -221,8 +161,7 @@ pub fn gate_delta(
             guard.reset();
             Some(StreamDelta::Text(text))
         }
-        // A tool-call fragment belongs to neither channel: the guard neither
-        // observes nor suppresses it.
+
         other => Some(other),
     }
 }
@@ -232,17 +171,12 @@ mod tests {
     use super::*;
     use crate::llm::wire::StreamDelta;
 
-    /// `KIMI_AGENT_THINKING_GUARD` and `ENABLED` are process-global, so any two
-    /// tests touching them would otherwise race.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn guard() -> ThinkingGuard {
         ThinkingGuard::new(ThinkingGuardConfig::default())
     }
 
-    /// Feed a whole string in small deltas, the way a stream arrives. Chunks
-    /// are cut on char boundaries — a byte split would corrupt multi-byte
-    /// characters and the guard would be judging replacement glyphs.
     fn feed(guard: &mut ThinkingGuard, text: &str) -> usize {
         let mut suppressed = 0;
         let chars: Vec<char> = text.chars().collect();
@@ -279,8 +213,7 @@ mod tests {
     #[test]
     fn a_cjk_loop_trips_the_guard() {
         let mut g = guard();
-        // No whitespace at all, and the period (17 chars) is not a multiple of
-        // any chunk size — a word- or chunk-based tokenizer would miss it.
+
         let text = "让我检查一下这个文件的内容是否正确".repeat(40);
         assert!(feed(&mut g, &text) > 0);
         assert!(g.tripped());
@@ -313,8 +246,7 @@ mod tests {
     #[test]
     fn short_thinking_is_never_judged() {
         let mut g = guard();
-        // Below `min_chars`, even a blatant repeat is forwarded: there is not
-        // enough signal to call it a loop.
+
         assert_eq!(feed(&mut g, &"Let me check. ".repeat(8)), 0);
         assert!(!g.tripped());
     }
@@ -328,25 +260,21 @@ mod tests {
 
     #[test]
     fn the_env_switch_follows_the_shared_v2_parse_boolean_env_rule() {
-        // The env var is process-global, so serialize against other env-touching
-        // tests rather than racing them.
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var(GUARD_ENV).ok();
 
-        // Explicit falsy values turn it off…
         set_enabled(true);
         for value in ["0", "false", "no", "off", " FALSE "] {
             unsafe { std::env::set_var(GUARD_ENV, value) };
             assert!(!enabled(), "{value:?} must disable the guard");
         }
-        // …explicit truthy values turn it on even when config said otherwise.
+
         set_enabled(false);
         for value in ["1", "true", "yes", "on", " ON "] {
             unsafe { std::env::set_var(GUARD_ENV, value) };
             assert!(enabled(), "{value:?} must enable the guard");
         }
-        // Unset / empty / unrecognized fall back to `[experimental]` (on here):
-        // a typo must not silently disable the guard.
+
         set_enabled(true);
         for value in ["", "banana", "2"] {
             unsafe { std::env::set_var(GUARD_ENV, value) };
@@ -363,8 +291,7 @@ mod tests {
     #[test]
     fn a_repeat_that_never_reaches_the_threshold_is_forwarded() {
         let mut g = guard();
-        // Five occurrences is one short of the threshold: a phrase the model
-        // came back to a few times is prose, not a loop.
+
         let text = format!(
             "{}and then it moved on to other work entirely.",
             "Let me check. ".repeat(5)
@@ -396,7 +323,6 @@ mod tests {
         assert!(dropped > 0, "the loop must stop reaching the host");
         assert!(forwarded > 0, "the opening of the block is still shown");
 
-        // The answer itself is never gated, and it clears the trip.
         assert!(gate_delta(&mut g, StreamDelta::Text("Here is the fix.".into())).is_some());
         assert!(!g.tripped());
         assert!(gate_delta(&mut g, StreamDelta::Think("A fresh block.".into())).is_some());

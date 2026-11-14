@@ -8,8 +8,6 @@ impl HttpServer {
         req: &HttpRequest,
     ) -> HttpResponse {
         let resp = match (method, path) {
-            // v2 exposes the model catalog at `GET /api/v1/models`
-            // (`kap-server/src/routes/modelCatalog.ts:151-164`).
             ("GET", "/api/v1/models") => {
                 let config = self.config().await;
                 HttpResponse::ok(&crate::server::model_catalog::models(&config))
@@ -151,17 +149,13 @@ impl HttpServer {
                 let catalog_id = p
                     .strip_prefix("/api/v1/catalog/providers/")
                     .unwrap_or_default();
-                // Serve the same entry the list route advertises — including the
-                // resolved `base_url` — instead of fabricating a placeholder
-                // with no endpoint and no models (v2 #3909 exposes `base_url` on
-                // both routes). An unknown id is a 404 rather than a fake entry.
+
                 match self.catalog_provider(catalog_id).await {
                     Some(item) => HttpResponse::ok(&item),
                     None => HttpResponse::not_found(),
                 }
             }
-            // v2 `importModelsDevProvider`: write the chosen catalog entry
-            // into the config's providers / models sections.
+
             ("POST", "/api/v1/providers:import_catalog") => {
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(value) => value,
@@ -169,8 +163,7 @@ impl HttpServer {
                 };
                 self.import_catalog_provider(&body).await
             }
-            // v2 `importCustomRegistry`: import a models.dev-shaped private
-            // registry as configured providers.
+
             ("POST", "/api/v1/providers:import_registry") => {
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(value) => value,

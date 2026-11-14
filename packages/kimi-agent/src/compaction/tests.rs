@@ -42,17 +42,17 @@ fn pre_shrink_keeps_the_newest_messages_that_fit_the_window() {
 
     // A generous window: everything fits, so nothing is shrunk.
     assert!(
-        pre_shrink_to_window_budget(&history, None, Some(1_000_000)).is_none(),
+        pre_shrink_to_window_budget(&history, None, "", Some(1_000_000)).is_none(),
         "a history that fits must be sent whole"
     );
     // No window known: no shrink either.
-    assert!(pre_shrink_to_window_budget(&history, None, None).is_none());
+    assert!(pre_shrink_to_window_budget(&history, None, "", None).is_none());
     // 20 000 leaves a ≈ 13 875 budget, which still takes all ten.
-    assert!(pre_shrink_to_window_budget(&history, None, Some(20_000)).is_none());
+    assert!(pre_shrink_to_window_budget(&history, None, "", Some(20_000)).is_none());
 
     // 12 000 leaves a ≈ 7 925 budget — about seven of the ten messages.
-    let shrunken =
-        pre_shrink_to_window_budget(&history, None, Some(12_000)).expect("a tight window shrinks");
+    let shrunken = pre_shrink_to_window_budget(&history, None, "", Some(12_000))
+        .expect("a tight window shrinks");
     assert!(
         !shrunken.is_empty() && shrunken.len() < history.len(),
         "expected a proper subset, got {} of {}",
@@ -83,7 +83,7 @@ fn pre_shrink_drops_leading_tool_results() {
     for index in 0..8 {
         history.insert(0, msg("user", &format!("filler{index}").repeat(2000)));
     }
-    let shrunken = pre_shrink_to_window_budget(&history, None, Some(12_000)).expect("shrinks");
+    let shrunken = pre_shrink_to_window_budget(&history, None, "", Some(12_000)).expect("shrinks");
     assert_ne!(
         shrunken.first().map(|message| message.role.as_str()),
         Some("tool"),
@@ -98,7 +98,7 @@ fn pre_shrink_drops_leading_tool_results() {
 fn pre_shrink_falls_back_to_the_full_history_when_nothing_fits() {
     let history = vec![msg("user", &"x".repeat(400_000))];
     assert!(
-        pre_shrink_to_window_budget(&history, None, Some(4_000)).is_none(),
+        pre_shrink_to_window_budget(&history, None, "", Some(4_000)).is_none(),
         "a single message larger than the budget must fall back to the whole history"
     );
 }
@@ -117,13 +117,13 @@ fn pre_shrink_gates_on_the_input_limit_not_the_safety_budget() {
     // (875 000) even with the summary scaffolding.
     let history: Vec<LLMMessage> = (0..800).map(|_| msg("user", &"x".repeat(4000))).collect();
     assert!(
-        pre_shrink_to_window_budget(&history, None, Some(window)).is_none(),
+        pre_shrink_to_window_budget(&history, None, "", Some(window)).is_none(),
         "a history that fits the input limit must be sent whole"
     );
     // 900 messages ≈ 900 000 tokens: over the input limit, so the shrink
     // runs and lands under the safety-budget target.
     let history: Vec<LLMMessage> = (0..900).map(|_| msg("user", &"x".repeat(4000))).collect();
-    let shrunken = pre_shrink_to_window_budget(&history, None, Some(window))
+    let shrunken = pre_shrink_to_window_budget(&history, None, "", Some(window))
         .expect("a history over the input limit shrinks");
     assert!(shrunken.len() < history.len());
     let tokens: u32 = shrunken.iter().map(estimate_message_tokens).sum();
@@ -135,6 +135,69 @@ fn pre_shrink_gates_on_the_input_limit_not_the_safety_budget() {
         shrunken.last().map(|message| message.content.clone()),
         history.last().map(|message| message.content.clone())
     );
+}
+
+#[test]
+fn pre_shrink_counts_the_agent_system_prompt() {
+    let history: Vec<LLMMessage> = (0..8).map(|_| msg("user", &"x".repeat(4000))).collect();
+    assert!(
+        pre_shrink_to_window_budget(&history, None, "", Some(12_000)).is_none(),
+        "the history plus scaffolding fits without the system prompt"
+    );
+    let system_prompt = "s".repeat(40_000);
+    assert!(
+        pre_shrink_to_window_budget(&history, None, &system_prompt, Some(12_000)).is_some(),
+        "the agent system prompt is part of the request budget"
+    );
+}
+
+#[tokio::test]
+async fn the_summarizer_request_is_emitted_as_a_compaction_llm_request() {
+    let history = compactable_messages();
+    let llm = SummarizerMockLlm::ok("summary");
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let emit = {
+        let events = events.clone();
+        move |event: serde_json::Value| events.lock().unwrap().push(event)
+    };
+    let outcome = summarize_with_llm_budgeted(
+        &history,
+        &llm,
+        None,
+        None,
+        None,
+        None,
+        "agent-1",
+        None,
+        None,
+        Some(&emit),
+    )
+    .await
+    .expect("summary");
+    assert_eq!(outcome.summary, "summary");
+    let events = events.lock().unwrap();
+    let request = events
+        .iter()
+        .find(|event| event["type"] == "llm.request")
+        .expect("the summarizer request must be recorded");
+    assert_eq!(request["kind"], "compaction");
+    assert_eq!(request["agent_id"], "agent-1");
+    assert_eq!(request["toolSelect"], false);
+    assert!(request.get("turnStep").is_none());
+    assert_eq!(request["messageCount"], 9);
+    assert!(
+        request.get("systemPrompt").is_none(),
+        "the compaction system prompt is the agent's own prompt, so it is not duplicated: {request:?}"
+    );
+    assert_eq!(
+        request["systemPromptHash"],
+        serde_json::json!(crate::session::agent_records::sha256_hex("test"))
+    );
+    assert_eq!(
+        request["toolsHash"],
+        serde_json::json!(crate::session::agent_records::sha256_hex("[]"))
+    );
+    assert_eq!(request["droppedCount"], 0);
 }
 
 /// v2 #4456: the summarization request reports its estimated size as
@@ -156,12 +219,13 @@ async fn summary_request_reports_used_context_tokens() {
         "",
         None,
         None,
+        None,
     )
     .await
     .expect("summary");
     assert_eq!(summary.summary, "summary");
 
-    let expected_estimate = summarization_prompt(&history, None)
+    let expected_estimate = summarization_prompt(&history, None, "test")
         .iter()
         .map(estimate_message_tokens)
         .fold(SUMMARY_REQUEST_TOKENS, u32::saturating_add);
@@ -174,7 +238,7 @@ async fn summary_request_reports_used_context_tokens() {
 
     // No window → no estimate (the clamp cannot engage without both).
     let llm = SummarizerMockLlm::ok("summary");
-    summarize_with_llm_budgeted(&history, &llm, None, None, None, None, "", None, None)
+    summarize_with_llm_budgeted(&history, &llm, None, None, None, None, "", None, None, None)
         .await
         .expect("summary");
     assert_eq!(*llm.last_used_context_tokens.lock().unwrap(), None);
@@ -1379,13 +1443,14 @@ impl LLM for SummarizerMockLlm {
         let user_content = params
             .messages
             .iter()
-            .rev()
-            .find(|m| m.role == "user")
-            .map(|m| m.content.clone());
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         *self
             .last_user_content
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = user_content;
+            .unwrap_or_else(|e| e.into_inner()) = Some(user_content);
         *self
             .last_used_context_tokens
             .lock()
@@ -1606,43 +1671,44 @@ fn test_snip_large_tool_results_keeps_head_and_tail() {
 #[tokio::test]
 async fn test_summarization_prompt_includes_instruction_and_transcript() {
     let omitted = vec![msg("user", "hello"), msg("assistant", "hi there")];
-    let prompt = summarization_prompt(&omitted, Some("Custom instruction."));
-    assert_eq!(prompt.len(), 2);
+    let prompt = summarization_prompt(&omitted, Some("Custom instruction."), "profile system");
+    assert_eq!(prompt.len(), 4);
     assert_eq!(prompt[0].role, "system");
-    assert_eq!(prompt[1].role, "user");
+    assert_eq!(prompt[0].content, "profile system");
+    assert_eq!(prompt[1].content, "hello");
+    assert_eq!(prompt[2].content, "hi there");
+    assert_eq!(prompt[3].role, "user");
     assert!(
-        prompt[1].content.contains("Custom instruction."),
-        "user message must contain the custom instruction"
+        prompt[3].content.contains("Custom instruction."),
+        "the instruction message must contain the custom instruction"
     );
     assert!(
-        prompt[1].content.contains("user: hello"),
-        "user message must contain the transcript"
-    );
-    assert!(
-        prompt[1].content.contains("assistant: hi there"),
-        "user message must contain the transcript"
+        prompt[3].content.contains("## Next steps"),
+        "the instruction keeps the v2 handoff template"
     );
 }
 
 #[tokio::test]
 async fn test_summarization_prompt_uses_the_v2_handoff_template_when_none() {
     let omitted = vec![msg("user", "hello")];
-    let prompt = summarization_prompt(&omitted, None);
-    assert_eq!(prompt.len(), 2);
+    let prompt = summarization_prompt(&omitted, None, "profile system");
+    assert_eq!(prompt.len(), 3);
+    assert_eq!(prompt[0].content, "profile system");
+    assert_eq!(prompt[1].content, "hello");
     assert_eq!(
-        prompt[1].content,
-        format!("user: hello\n\n{}", render_compaction_instruction(None)),
-        "the transcript is followed by the rendered v2 template"
+        prompt[2].content,
+        render_compaction_instruction(None),
+        "the history is followed by the rendered v2 template"
     );
     assert!(
-        !prompt[1].content.contains("${custom_instruction_block}"),
+        !prompt[2].content.contains("${custom_instruction_block}"),
         "the template placeholder must be filled, never sent verbatim"
     );
     // The two demands the retired one-liner omitted and the observed
     // summaries then omitted too: exact history, and a forward plan.
     assert!(
-        prompt[1].content.contains("exact file paths touched")
-            && prompt[1].content.contains("## Next steps"),
+        prompt[2].content.contains("exact file paths touched")
+            && prompt[2].content.contains("## Next steps"),
         "the v2 handoff template must ship in full"
     );
 }
@@ -1650,9 +1716,11 @@ async fn test_summarization_prompt_uses_the_v2_handoff_template_when_none() {
 #[tokio::test]
 async fn test_a_caller_instruction_lands_inside_the_template() {
     let omitted = vec![msg("user", "hello")];
-    let prompt = summarization_prompt(&omitted, Some("Custom instruction."));
+    let prompt = summarization_prompt(&omitted, Some("Custom instruction."), "profile system");
     let rendered = render_compaction_instruction(Some("Custom instruction."));
-    assert_eq!(prompt[1].content, format!("user: hello\n\n{rendered}"));
+    assert_eq!(prompt.len(), 3);
+    assert_eq!(prompt[1].content, "hello");
+    assert_eq!(prompt[2].content, rendered);
     assert!(
         rendered.contains("Optional user instruction:\nCustom instruction."),
         "v2 appends the caller's instruction inside the template"
@@ -1674,10 +1742,13 @@ async fn test_summarization_prompt_serializes_tool_calls() {
     m.tool_calls
         .push(tool_call("t1", "read", serde_json::json!({ "path": "/a" })));
     let omitted = vec![m];
-    let prompt = summarization_prompt(&omitted, None);
-    assert!(
-        prompt[1].content.contains("[tool_call: read("),
-        "tool calls must be serialized in the transcript"
+    let prompt = summarization_prompt(&omitted, None, "profile system");
+    assert_eq!(prompt[1].content, "running tools");
+    assert_eq!(prompt[1].tool_calls.len(), 1);
+    assert_eq!(prompt[1].tool_calls[0].name, "read");
+    assert_eq!(
+        prompt[1].tool_calls[0].arguments,
+        serde_json::json!({ "path": "/a" })
     );
 }
 
@@ -1958,7 +2029,8 @@ async fn test_summarizer_shrinks_history_after_overflow_and_retries() {
     ];
     let llm = SummarizerMockLlm::overflow_then_ok("Recovered summary.", 1);
     let result =
-        summarize_with_llm_budgeted(&omitted, &llm, None, None, None, None, "", None, None).await;
+        summarize_with_llm_budgeted(&omitted, &llm, None, None, None, None, "", None, None, None)
+            .await;
     assert_eq!(result.unwrap().summary, "Recovered summary.");
     assert_eq!(llm.call_count(), 2, "one shrink-retry after the overflow");
     let second_prompt = llm.last_user_content();
@@ -1987,9 +2059,19 @@ async fn test_summarizer_gives_up_after_max_overflow_shrinks() {
     }
     let llm = SummarizerMockLlm::overflow_always();
     // A generous attempt cap isolates the shrink bound as the stop reason.
-    let result =
-        summarize_with_llm_budgeted(&omitted, &llm, None, None, Some(10), None, "", None, None)
-            .await;
+    let result = summarize_with_llm_budgeted(
+        &omitted,
+        &llm,
+        None,
+        None,
+        Some(10),
+        None,
+        "",
+        None,
+        None,
+        None,
+    )
+    .await;
     assert!(
         matches!(result, Err(CompactionError::Provider { .. })),
         "the original overflow error must surface"
@@ -2179,11 +2261,11 @@ async fn a_compaction_probe_compares_the_captured_last_turn_request() {
     use crate::session::cache_observation::{CacheProbeRequest, fingerprint};
 
     let omitted = vec![msg("user", "user-1"), msg("assistant", "assistant-1")];
-    let prompt = summarization_prompt(&omitted, None);
+    let prompt = summarization_prompt(&omitted, None, "test");
     let baseline = CacheProbeRequest {
         model_alias: "test-summarizer".into(),
         tools_hash: fingerprint("[]"),
-        system_prompt_hash: fingerprint(""),
+        system_prompt_hash: fingerprint("test"),
         message_count: prompt.len(),
         history_hash: fingerprint(&serde_json::to_string(&prompt).expect("serialize prompt")),
         input_tokens: Some(900),
@@ -2202,6 +2284,7 @@ async fn a_compaction_probe_compares_the_captured_last_turn_request() {
         "agent-1",
         Some(&baseline),
         Some("turn-7"),
+        None,
     )
     .await
     .expect("summary");
@@ -2234,6 +2317,7 @@ async fn a_compaction_probe_compares_the_captured_last_turn_request() {
         "agent-1",
         Some(&changed),
         None,
+        None,
     )
     .await
     .expect("summary");
@@ -2251,6 +2335,7 @@ async fn a_compaction_probe_compares_the_captured_last_turn_request() {
         None,
         None,
         "agent-1",
+        None,
         None,
         None,
     )

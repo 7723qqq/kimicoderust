@@ -424,7 +424,10 @@ async fn read_sse_response(
 
 fn unwrap_json_rpc(value: Value) -> Result<Value, McpError> {
     if let Some(err) = value.get("error") {
-        return Err(McpError::json_rpc(format!("MCP Server Error: {err}")));
+        return Err(McpError::json_rpc(
+            err.get("code").and_then(Value::as_i64),
+            format!("MCP Server Error: {err}"),
+        ));
     }
     Ok(value.get("result").cloned().unwrap_or(Value::Null))
 }

@@ -1,14 +1,3 @@
-//! Provider create / replace / delete / get, porting kap-server's
-//! `protocol/rest-modelCatalog.ts` write half (the write routes live in
-//! `routes/modelCatalog.ts`; the schemas they validate against are the ones
-//! re-exported from `protocol/`).
-//!
-//! Writes mutate `config.toml` through [`crate::config::write`] (toml_edit,
-//! format-preserving) and refresh the server's cached config, so the next
-//! `/models` / `/providers` read reflects the change. `default_provider` and
-//! `default_model` are only migrated on a rename; plain create `default_model`
-//! seeding happens once, when no default is set.
-
 use std::collections::HashSet;
 
 use serde::Deserialize;
@@ -24,11 +13,8 @@ use crate::server::envelope::error_codes;
 use crate::server::model_catalog::{self, non_empty};
 use crate::server::models_dev;
 
-/// One protocol error: HTTP status, kap-server code, message.
 pub type WriteError = (u16, u32, String);
 
-/// `providerWireTypeSchema` (protocol/rest-modelCatalog.ts:24-31) — the six
-/// values, in the same order.
 const WIRE_TYPES: [&str; 6] = [
     "kimi",
     "openai",
@@ -70,7 +56,6 @@ fn persistence(error: String) -> WriteError {
     (500, error_codes::INTERNAL_ERROR, error)
 }
 
-/// One `models[]` entry (`createProviderModelSchema`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderModelForm {
     pub model: String,
@@ -88,7 +73,6 @@ pub struct ProviderModelForm {
     pub adaptive_thinking: Option<bool>,
 }
 
-/// `POST /providers` body (`createProviderRequestSchema`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateProviderForm {
     pub id: String,
@@ -96,10 +80,7 @@ pub struct CreateProviderForm {
     pub provider_type: String,
     #[serde(default)]
     pub api_key: Option<String>,
-    /// Name of an environment variable to read the key from instead of storing
-    /// it inline (kap-server `routes/modelCatalog.ts:239`); mutually exclusive
-    /// with `api_key`. Used to hardcode `None` here, which silently dropped
-    /// the field clients sent.
+
     #[serde(default)]
     pub api_key_env: Option<String>,
     #[serde(default)]
@@ -109,7 +90,6 @@ pub struct CreateProviderForm {
     pub models: Vec<ProviderModelForm>,
 }
 
-/// `PUT /providers/{id}` body (`replaceProviderRequestSchema`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReplaceProviderForm {
     #[serde(default)]
@@ -118,9 +98,7 @@ pub struct ReplaceProviderForm {
     pub provider_type: String,
     #[serde(default)]
     pub api_key: Option<String>,
-    /// Tri-state like `api_key` (kap-server `routes/modelCatalog.ts:328`):
-    /// omitted keeps the stored name, `""` clears it, any other value replaces
-    /// it; mutually exclusive with `api_key`.
+
     #[serde(default)]
     pub api_key_env: Option<String>,
     #[serde(default)]
@@ -130,10 +108,6 @@ pub struct ReplaceProviderForm {
     pub models: Vec<ProviderModelForm>,
 }
 
-/// `api_key` and `api_key_env` are mutually exclusive (kap-server
-/// `routes/modelCatalog.ts:239,328`): submitting both non-empty fails
-/// validation. Empty strings are the replace route's clear signals, not a
-/// conflict.
 fn validate_credentials(
     api_key: Option<&str>,
     api_key_env: Option<&str>,
@@ -144,10 +118,6 @@ fn validate_credentials(
     Ok(())
 }
 
-/// Engine-generated OAuth provider ids carry this prefix
-/// (`managed:kimi-code`, provisioned by the login flow — never submitted
-/// through these routes). A user-submitted id may not claim it; the managed
-/// entry itself is unaffected because config loads never validate ids.
 const MANAGED_PROVIDER_PREFIX: &str = "managed:";
 
 fn validate_provider_id(provider_id: &str) -> Result<(), WriteError> {
@@ -156,8 +126,7 @@ fn validate_provider_id(provider_id: &str) -> Result<(), WriteError> {
             "id must not start with \"managed:\": the prefix is reserved for OAuth-managed providers",
         ));
     }
-    // v2 `PROVIDER_ID_PATTERN` (`^[\p{L}\p{N}][\p{L}\p{N}\-_ ]*$`) — the same
-    // predicate the catalog-import route applies (`models_dev::is_provider_id`).
+
     if models_dev::is_provider_id(provider_id) {
         Ok(())
     } else {
@@ -233,8 +202,6 @@ fn alias_write(provider_id: &str, entry: &ProviderModelForm) -> ModelAliasWrite 
     }
 }
 
-/// The config the next write builds on: the file being written when the
-/// server pinned one, otherwise the discovered file.
 fn effective_config(config_path: Option<&std::path::Path>) -> KimiConfig {
     match config_path {
         Some(path) => KimiConfig::from_file(path).unwrap_or_default(),
@@ -244,8 +211,6 @@ fn effective_config(config_path: Option<&std::path::Path>) -> KimiConfig {
     }
 }
 
-/// `POST /providers`: create the provider, write its model aliases, and seed
-/// the global `default_model` when none is set yet.
 pub async fn create(
     config_lock: &Mutex<Option<KimiConfig>>,
     config_path: Option<&std::path::Path>,
@@ -286,9 +251,7 @@ pub async fn create(
             &form.id,
             &ProviderWrite {
                 provider_type: form.provider_type.clone(),
-                // Empty strings are meaningless on create: the provider
-                // carries neither credential key (mirrors `import_catalog`'s
-                // intake, and the replace route's `""`-clears semantics).
+
                 api_key: non_empty(form.api_key.as_deref()).map(str::to_string),
                 api_key_env: non_empty(form.api_key_env.as_deref()).map(str::to_string),
                 base_url: form.base_url.clone(),
@@ -309,8 +272,6 @@ pub async fn create(
     Ok(model_catalog::provider_item(&updated, &form.id, has_cached_token).unwrap_or(Value::Null))
 }
 
-/// `PUT /providers/{id}`: replace the provider and rebuild its aliases,
-/// optionally renaming it (migrating `default_provider` / `default_model`).
 pub async fn replace(
     config_lock: &Mutex<Option<KimiConfig>>,
     config_path: Option<&std::path::Path>,
@@ -347,7 +308,6 @@ pub async fn replace(
         return Err(already_exists(&new_id));
     }
 
-    // Aliases the new provider would take over must already belong to it.
     let new_aliases: Vec<String> = form
         .models
         .iter()
@@ -368,7 +328,6 @@ pub async fn replace(
         )));
     }
 
-    // Rename migration for the global pointers (only when they point here).
     let default_provider_hit =
         renamed && non_empty(before.default_provider.as_deref()) == Some(provider_id);
     let renamed_default_model = if renamed {
@@ -382,18 +341,12 @@ pub async fn replace(
         None
     };
 
-    // `api_key` is tri-state (kap-server `routes/modelCatalog.ts:328`):
-    // omitted keeps the stored key, `""` clears it, any other value replaces
-    // it.
     let api_key = match form.api_key.as_deref() {
         Some("") => None,
         Some(key) => Some(key.to_string()),
         None => target.api_key.clone(),
     };
-    // `api_key_env` follows the same tri-state: omitted keeps the stored
-    // name, `""` clears it, any other value replaces it. Setting a fresh env
-    // name clears the stored inline key, and submitting a fresh inline key
-    // clears the stored env name — the two are mutually exclusive.
+
     let api_key_env = match form.api_key_env.as_deref() {
         Some("") => None,
         Some(env) => Some(env.to_string()),
@@ -447,8 +400,6 @@ pub async fn replace(
     }))
 }
 
-/// `DELETE /providers/{id}`: drop the provider and its aliases; the global
-/// default pointers are the user's settings and stay untouched.
 pub async fn delete(
     config_lock: &Mutex<Option<KimiConfig>>,
     config_path: Option<&std::path::Path>,
@@ -474,8 +425,6 @@ pub async fn delete(
     Ok(json!({ "deleted": true }))
 }
 
-/// `GET /providers/{id}`: unlike the list route, the stored `api_key` is
-/// revealed so clients can prefill an edit form.
 pub async fn get(
     config_lock: &Mutex<Option<KimiConfig>>,
     config_path: Option<&std::path::Path>,
@@ -563,17 +512,15 @@ mod tests {
         assert!(validate_form("openai", &[model("a", 1000)], Some("a"), None).is_ok());
     }
 
-    // ── provider id rules (v2 `PROVIDER_ID_PATTERN` + the managed prefix) ────
-
     #[test]
     fn provider_id_follows_the_upstream_pattern() {
         for valid in [
-            "kimi",               // letters
-            "1st",                // a digit may lead
-            "MiniMax Token Plan", // spaces inside
-            "阶跃",               // unicode letters
+            "kimi",
+            "1st",
+            "MiniMax Token Plan",
+            "阶跃",
             "自定义",
-            "美团longcat", // mixed unicode + ascii
+            "美团longcat",
             "my-provider_1 x",
         ] {
             assert!(
@@ -582,11 +529,11 @@ mod tests {
             );
         }
         for invalid in [
-            "",               // empty
-            "   ",            // whitespace only
-            "-leading-dash",  // dash may not lead
-            "_leading",       // underscore may not lead
-            " leading-space", // space may not lead
+            "",
+            "   ",
+            "-leading-dash",
+            "_leading",
+            " leading-space",
             "has:colon",
             "line\nbreak",
             "tab\there",
@@ -631,10 +578,6 @@ mod tests {
 
     #[test]
     fn the_persisted_managed_provider_and_looser_user_ids_still_load() {
-        // The OAuth provisioning flow writes `managed:kimi-code` (a colon —
-        // outside the user-input pattern), and user ids the old ASCII rule
-        // rejected are persisted in the wild. Config loads never validate
-        // provider ids, so both keep loading.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -651,9 +594,6 @@ mod tests {
         assert!(config.providers.contains_key("阶跃"));
         assert!(config.providers.contains_key("MiniMax Token Plan"));
     }
-
-    // ── `api_key_env` modeling and write-through (kap-server
-    // `routes/modelCatalog.ts:239,328`) ────────────────────────────────────
 
     fn no_cached_token() -> impl Fn(&str) -> bool + Sync {
         |_| false

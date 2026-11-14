@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{arg_error, arg_error_text, err_result, ok_result};
+use super::{err_result, ok_result};
 use crate::callbacks::HostCallbacks;
 use crate::rpc::types::{StateReadRequest, StateWriteRequest};
 use crate::tools::todo_item::{read_todo_items, render_todo_list};
@@ -39,19 +39,9 @@ const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client doe
 
 pub async fn execute_todo_list(
     callbacks: &dyn HostCallbacks,
+    caller_agent_id: &str,
     args: &Value,
 ) -> ExecutableToolResult {
-    let has_todos = args.get("todos").is_some();
-    let has_updates = args.get("updates").is_some();
-    if has_todos && has_updates {
-        return err_result(
-            "Invalid TodoList arguments: `todos` and `updates` are mutually exclusive — pass one or the other."
-                .into(),
-        );
-    }
-    if has_updates {
-        return update_todo_list(callbacks, args).await;
-    }
     let Some(todos) = args.get("todos") else {
         return read_todo_list(callbacks, args).await;
     };
@@ -67,120 +57,7 @@ pub async fn execute_todo_list(
                 .into(),
         );
     };
-    write_todo_list(callbacks, args, normalized).await
-}
-
-async fn update_todo_list(callbacks: &dyn HostCallbacks, args: &Value) -> ExecutableToolResult {
-    let Some(patches) = args.get("updates").and_then(|v| v.as_array()) else {
-        return err_result(
-            "Invalid TodoList arguments: `updates` must be an array of { id, ...fields } objects."
-                .into(),
-        );
-    };
-    let current = match read_current_items(callbacks, args).await {
-        Ok(items) => items,
-        Err(result) => return result,
-    };
-    let mut items = current;
-    for patch in patches {
-        let Some(obj) = patch.as_object() else {
-            return err_result(
-                "Invalid TodoList arguments: each update must be an object with an `id`.".into(),
-            );
-        };
-        let Some(id) = obj
-            .get("id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        else {
-            return err_result(
-                "Invalid TodoList arguments: each update needs a non-empty `id`.".into(),
-            );
-        };
-        let Some(target) = items.iter_mut().find(|item| item.id == id) else {
-            let known: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-            return err_result(format!(
-                "Unknown todo id \"{id}\" — current ids: {}. Read the list first (call TodoList with no arguments) to see the ids you are tracking.",
-                if known.is_empty() {
-                    "(none — the list is empty)".to_string()
-                } else {
-                    known.join(", ")
-                }
-            ));
-        };
-        if let Some(title) = obj.get("title").and_then(|v| v.as_str()) {
-            if title.is_empty() {
-                return arg_error("TodoList", "title", "engine.tools.argMustNotBeEmpty");
-            }
-            target.title = title.to_string();
-        }
-        if let Some(status) = obj.get("status").and_then(|v| v.as_str()) {
-            match crate::tools::todo_item::TodoStatus::from_str(status) {
-                Some(parsed) => target.status = parsed,
-                None => {
-                    return err_result(format!(
-                        "Invalid TodoList arguments: status \"{status}\" is not one of \"pending\", \"in_progress\", \"done\"."
-                    ));
-                }
-            }
-        }
-        if let Some(progress) = obj.get("progress").and_then(|v| v.as_f64()) {
-            if !progress.is_finite() {
-                return err_result(arg_error_text(
-                    "TodoList",
-                    "progress",
-                    "engine.tools.argMustBeNumber",
-                ));
-            }
-            target.progress = Some(progress.round().clamp(0.0, 100.0) as u32);
-        }
-        if let Some(description) = obj.get("description").and_then(|v| v.as_str()) {
-            target.description = Some(description.to_string());
-        }
-        if let Some(parent_id) = obj.get("parentId").and_then(|v| v.as_str()) {
-            target.parent_id = if parent_id.is_empty() {
-                None
-            } else {
-                Some(parent_id.to_string())
-            };
-        }
-        if let Some(kind) = obj.get("kind").and_then(|v| v.as_str()) {
-            match kind {
-                "milestone" => target.kind = crate::tools::todo_item::TodoKind::Milestone,
-                "task" => target.kind = crate::tools::todo_item::TodoKind::Task,
-                other => {
-                    return err_result(format!(
-                        "Invalid TodoList arguments: kind \"{other}\" is not one of \"milestone\", \"task\"."
-                    ));
-                }
-            }
-        }
-    }
-    write_todo_list(callbacks, args, items).await
-}
-
-async fn read_current_items(
-    callbacks: &dyn HostCallbacks,
-    args: &Value,
-) -> Result<Vec<crate::tools::todo_item::TodoItem>, ExecutableToolResult> {
-    let request = StateReadRequest {
-        domain: "todo".into(),
-        key: "todo".into(),
-        turn_id: args
-            .get("turn_id")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string(),
-        tool_call_id: args
-            .get("tool_call_id")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string(),
-    };
-    match callbacks.state_read(request).await {
-        Ok(response) => Ok(read_todo_items(&response.value)),
-        Err(error) => Err(map_state_error(error)),
-    }
+    write_todo_list(callbacks, caller_agent_id, args, normalized).await
 }
 
 async fn read_todo_list(callbacks: &dyn HostCallbacks, args: &Value) -> ExecutableToolResult {
@@ -206,6 +83,7 @@ async fn read_todo_list(callbacks: &dyn HostCallbacks, args: &Value) -> Executab
 
 async fn write_todo_list(
     callbacks: &dyn HostCallbacks,
+    caller_agent_id: &str,
     args: &Value,
     normalized: Vec<crate::tools::todo_item::TodoItem>,
 ) -> ExecutableToolResult {
@@ -217,6 +95,7 @@ async fn write_todo_list(
             ));
         }
     };
+    let submitted = value.clone();
     let request = StateWriteRequest {
         domain: "todo".into(),
         key: "todo".into(),
@@ -235,6 +114,16 @@ async fn write_todo_list(
     };
     match callbacks.state_write(request).await {
         Ok(response) => {
+            let stored = match &response.value {
+                Value::Array(_) => response.value.clone(),
+                _ => submitted,
+            };
+            callbacks.emit_event(serde_json::json!({
+                "type": "tools.update_store",
+                "agent_id": caller_agent_id,
+                "key": "todo",
+                "value": stored,
+            }));
             let stored = read_todo_items(&response.value);
             if stored.is_empty() {
                 ok_result("Todo list cleared.".into())
@@ -279,7 +168,7 @@ fn map_state_error(error: String) -> ExecutableToolResult {
 pub fn todo_list_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "TodoList".into(),
-        description: "Use this tool to maintain a structured TODO list as you work through a multi-step task. Use it proactively and often when progress tracking helps the current work. The list is shown to the user as a live progress panel, so keep it in step with what you have actually done. This is especially useful in long-running investigations and implementation tasks with several tool calls; in plan mode, write the plan to the plan file rather than tracking it here.\n\n**When to use:**\n- Multi-step tasks that span several tool calls\n- Tracking investigation progress across a large codebase search\n- Planning a sequence of edits before making them\n- After receiving new multi-step instructions, capture the requirements as todos\n\n**When NOT to use:**\n- Single-shot answers that complete in one or two tool calls\n- Trivial requests where tracking adds no clarity\n- Purely conversational or informational replies\n\n**Granularity — split to the smallest verifiable unit:**\n- A leaf task must be one minimal, independently verifiable unit: read one file, change one function, run one command.\n- If finishing an item takes several distinct tool calls, split it further before starting it.\n- Splitting is not busywork: a fine-grained list is your working reference — each turn starts with a digest of the items you are tracking, so the granularity you record is the granularity you plan against. Finer items also make progress reportable (see below), which is how you signal and verify forward motion.\n\n**Milestone structure (tiered):**\n- Work of 3 steps or fewer: a flat list of fine-grained tasks, no milestones.\n- Work of 4 steps or more: first lay out a milestone skeleton — the first milestone is the starting point (confirm context / environment), 1..n middle milestones are coherent phases, the last milestone is the finish line (verify / wrap up) — then attach fine-grained leaf tasks under each milestone.\n- Milestones use `kind: \"milestone\"` with `parentId: null`; leaf tasks reference their milestone via `parentId`. The full list stays a flat array with parent links.\n\n**Progress reporting:**\n- On every meaningful update of an `in_progress` leaf task, include its `progress` (0-100). It is persisted and rendered — it is the signal your work is advancing.\n- Never set `progress` on milestones — it is computed from their children automatically.\n- `done` implies 100; omit `progress` on done items.\n\n**Keep updates cheap:**\n- For small changes — marking one item done, bumping a progress percent, reordering a status — prefer `updates: [{ id, ... }]` over rewriting the whole list. Only the fields you pass change; unknown ids are an error naming the current ids.\n- Use `todos` only when the structure itself changes (add/remove items, re-tier milestones).\n\n**Keeping it current:**\n- Before you start a tracked task, mark it `in_progress`; while work is underway, keep exactly one task `in_progress`.\n- As soon as a task is finished, mark it `done`, before you start the next one. Do not batch completions at the end.\n- Before you write your final message, make sure the list matches what you actually did.\n- An update can go in the same response as your next tool call; it does not need a step of its own.\n- Do not re-send an unchanged list. If you are stuck and no available tool can move any task forward, tell the user instead of re-ordering the same todos.\n\n**How to use:**\n- Call with `updates: [{ id, status?, progress?, title?, description?, parentId?, kind? }]` to patch existing items in place — the cheap path for daily progress.\n- Call with `todos: [...]` to replace the full list (when structure changes). Each item has `title`, `status`, and optionally `id`, `parentId`, `kind`, `progress`, `description`.\n- Call with no arguments to retrieve the current list without changing it.\n- Call with `todos: []` to clear the list.\n- `todos` and `updates` are mutually exclusive.\n- Keep titles short and actionable (e.g. \"Read session-control.ts\", \"Add planMode flag to TurnManager\").".into(),
+        description: "Use this tool to maintain a structured TODO list as you work through a multi-step task. Use it proactively and often when progress tracking helps the current work. The list is shown to the user as a live progress panel, so keep it in step with what you have actually done. This is especially useful in long-running investigations and implementation tasks with several tool calls; in plan mode, write the plan to the plan file rather than tracking it here.\n\n**When to use:**\n- Multi-step tasks that span several tool calls\n- Tracking investigation progress across a large codebase search\n- Planning a sequence of edits before making them\n- After receiving new multi-step instructions, capture the requirements as todos\n\n**When NOT to use:**\n- Single-shot answers that complete in one or two tool calls\n- Trivial requests where tracking adds no clarity\n- Purely conversational or informational replies\n\n**Granularity — split to the smallest verifiable unit:**\n- A leaf task must be one minimal, independently verifiable unit: read one file, change one function, run one command.\n- If finishing an item takes several distinct tool calls, split it further before starting it.\n- Splitting is not busywork: a fine-grained list is your working reference — each turn starts with a digest of the items you are tracking, so the granularity you record is the granularity you plan against. Finer items also make progress reportable (see below), which is how you signal and verify forward motion.\n\n**Milestone structure (tiered):**\n- Work of 3 steps or fewer: a flat list of fine-grained tasks, no milestones.\n- Work of 4 steps or more: first lay out a milestone skeleton — the first milestone is the starting point (confirm context / environment), 1..n middle milestones are coherent phases, the last milestone is the finish line (verify / wrap up) — then attach fine-grained leaf tasks under each milestone.\n- Milestones use `kind: \"milestone\"` with `parentId: null`; leaf tasks reference their milestone via `parentId`. The full list stays a flat array with parent links.\n\n**Progress reporting:**\n- On every meaningful update of an `in_progress` leaf task, include its `progress` (0-100). It is persisted and rendered — it is the signal your work is advancing.\n- Never set `progress` on milestones — it is computed from their children automatically.\n- `done` implies 100; omit `progress` on done items.\n\n**Keeping it current:**\n- Before you start a tracked task, mark it `in_progress`; while work is underway, keep exactly one task `in_progress`.\n- As soon as a task is finished, mark it `done`, before you start the next one. Do not batch completions at the end.\n- Before you write your final message, make sure the list matches what you actually did.\n- An update can go in the same response as your next tool call; it does not need a step of its own.\n- Do not re-send an unchanged list. If you are stuck and no available tool can move any task forward, tell the user instead of re-ordering the same todos.\n\n**How to use:**\n- Call with `todos: [...]` to replace the full list. Statuses: pending / in_progress / done.\n- Call with no `todos` argument to retrieve the current list without changing it.\n- Call with `todos: []` to clear the list.\n- Keep titles short and actionable (e.g. \"Read session-control.ts\", \"Add planMode flag to TurnManager\").".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -289,6 +178,19 @@ pub fn todo_list_tool_def() -> crate::turn_loop::types::ToolInfo {
                     "items": {
                         "type": "object",
                         "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Stable identifier of the item, as returned by a previous call. Reuse it so an update lands on the same item instead of creating a new one. Omit on first write; missing ids are assigned as T1, T1.1, and so on."
+                            },
+                            "parentId": {
+                                "type": ["string", "null"],
+                                "description": "Id of the milestone this item belongs to. Null or omitted for milestones and for a flat list."
+                            },
+                            "kind": {
+                                "type": "string",
+                                "enum": ["milestone", "task"],
+                                "description": "Milestone groups leaf tasks; task is a leaf unit of work. Defaults to task."
+                            },
                             "title": {
                                 "type": "string",
                                 "minLength": 1,
@@ -298,51 +200,19 @@ pub fn todo_list_tool_def() -> crate::turn_loop::types::ToolInfo {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "done"],
                                 "description": "Current status of the todo."
-                            }
-                        },
-                        "required": ["title", "status"]
-                    }
-                },
-                "updates": {
-                    "type": "array",
-                    "description": "Patch existing items in place by id — the cheap path for progress updates. Only the fields you pass change; an unknown id is an error naming the current ids. Mutually exclusive with `todos`.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {
-                                "type": "string",
-                                "minLength": 1,
-                                "description": "Id of the item to patch (from a previous read or write)."
-                            },
-                            "title": {
-                                "type": "string",
-                                "minLength": 1,
-                                "description": "New title."
-                            },
-                            "status": {
-                                "type": "string",
-                                "enum": ["pending", "in_progress", "done"],
-                                "description": "New status."
                             },
                             "progress": {
                                 "type": "number",
-                                "description": "New progress percentage (0-100)."
+                                "minimum": 0,
+                                "maximum": 100,
+                                "description": "Completion percentage 0-100 of an in_progress leaf task. Omit on milestones (computed from children) and on done items (implies 100)."
                             },
                             "description": {
                                 "type": "string",
-                                "description": "New description."
-                            },
-                            "parentId": {
-                                "type": "string",
-                                "description": "Move the item under this parent id (empty string to detach)."
-                            },
-                            "kind": {
-                                "type": "string",
-                                "enum": ["milestone", "task"],
-                                "description": "New item kind."
+                                "description": "Optional longer note about the item."
                             }
                         },
-                        "required": ["id"]
+                        "required": ["title", "status"]
                     }
                 }
             }
@@ -361,6 +231,7 @@ mod tests {
         write_response: Result<StateWriteResponse, String>,
         read_received: Arc<std::sync::Mutex<Option<StateReadRequest>>>,
         write_received: Arc<std::sync::Mutex<Option<StateWriteRequest>>>,
+        events: Arc<std::sync::Mutex<Vec<Value>>>,
     }
 
     impl HostCallbacks for ScriptedCallbacks {
@@ -402,6 +273,10 @@ mod tests {
             let response = self.write_response.clone();
             Box::pin(async move { response })
         }
+
+        fn emit_event(&self, event: Value) {
+            self.events.lock().unwrap().push(event);
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -421,6 +296,7 @@ mod tests {
                 write_response,
                 read_received: read_received.clone(),
                 write_received: write_received.clone(),
+                events: Arc::new(std::sync::Mutex::new(Vec::new())),
             },
             read_received,
             write_received,
@@ -444,7 +320,7 @@ mod tests {
             ])),
             write_ok(Value::Null),
         );
-        let result = execute_todo_list(&callbacks, &serde_json::json!({})).await;
+        let result = execute_todo_list(&callbacks, "main", &serde_json::json!({})).await;
         assert!(!result.is_error);
         assert_eq!(
             result.content,
@@ -460,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_mode_empty_list() {
         let (callbacks, _, _) = scripted(read_ok(serde_json::json!([])), write_ok(Value::Null));
-        let result = execute_todo_list(&callbacks, &serde_json::json!({})).await;
+        let result = execute_todo_list(&callbacks, "main", &serde_json::json!({})).await;
         assert!(!result.is_error);
         assert_eq!(result.content, "Todo list is empty.");
     }
@@ -476,6 +352,7 @@ mod tests {
         );
         let result = execute_todo_list(
             &callbacks,
+            "main",
             &serde_json::json!({
                 "todos": [
                     { "title": "Read session-control.ts", "status": "in_progress", "progress": 40 },
@@ -503,6 +380,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_todo_write_emits_the_v2_update_store_record() {
+        let (callbacks, _, _) = scripted(
+            read_ok(Value::Null),
+            write_ok(serde_json::json!([
+                { "id": "T1", "parentId": null, "kind": "task", "title": "one", "status": "pending" }
+            ])),
+        );
+        let result = execute_todo_list(
+            &callbacks,
+            "agent-7",
+            &serde_json::json!({ "todos": [{ "title": "one", "status": "pending" }] }),
+        )
+        .await;
+        assert!(!result.is_error);
+        let events = callbacks.events.lock().unwrap();
+        let record = events
+            .iter()
+            .find(|event| event["type"] == "tools.update_store")
+            .expect("the todo write must be recorded");
+        assert_eq!(record["agent_id"], "agent-7");
+        assert_eq!(record["key"], "todo");
+        assert_eq!(record["value"][0]["id"], "T1");
+    }
+
+    #[tokio::test]
     async fn test_write_mode_uses_host_response_when_present() {
         let (callbacks, _, _) = scripted(
             read_ok(Value::Null),
@@ -512,6 +414,7 @@ mod tests {
         );
         let result = execute_todo_list(
             &callbacks,
+            "main",
             &serde_json::json!({ "todos": [{ "title": "Submitted", "status": "pending" }] }),
         )
         .await;
@@ -524,7 +427,8 @@ mod tests {
     async fn test_clear_mode() {
         let (callbacks, _, write_received) =
             scripted(read_ok(Value::Null), write_ok(serde_json::json!([])));
-        let result = execute_todo_list(&callbacks, &serde_json::json!({ "todos": [] })).await;
+        let result =
+            execute_todo_list(&callbacks, "main", &serde_json::json!({ "todos": [] })).await;
         assert!(!result.is_error);
         assert_eq!(result.content, "Todo list cleared.");
         let request = write_received.lock().unwrap().clone().unwrap();
@@ -567,6 +471,7 @@ mod tests {
             let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(stored));
             let result = execute_todo_list(
                 &callbacks,
+                "main",
                 &serde_json::json!({ "todos": [{ "title": "x", "status": "pending" }] }),
             )
             .await;
@@ -586,6 +491,7 @@ mod tests {
         );
         let result = execute_todo_list(
             &callbacks,
+            "main",
             &serde_json::json!({ "todos": [{ "title": "x", "status": "done" }] }),
         )
         .await;
@@ -594,108 +500,6 @@ mod tests {
             result.content,
             "Todo list updated.\nCurrent todo list: (overall 1/1 · 100%)\n  [done] T1: closed"
         );
-    }
-
-    #[tokio::test]
-    async fn test_updates_patches_items_in_place() {
-        let (callbacks, read_received, write_received) = scripted(
-            read_ok(serde_json::json!([
-                { "id": "M1", "parentId": null, "kind": "milestone", "title": "Phase 1", "status": "pending" },
-                { "id": "T1", "parentId": "M1", "kind": "task", "title": "Read the file", "status": "pending" }
-            ])),
-            write_ok(serde_json::json!([
-                { "id": "M1", "parentId": null, "kind": "milestone", "title": "Phase 1", "status": "pending" },
-                { "id": "T1", "parentId": "M1", "kind": "task", "title": "Read the file", "status": "done", "progress": 100 }
-            ])),
-        );
-        let result = execute_todo_list(
-            &callbacks,
-            &serde_json::json!({ "updates": [{ "id": "T1", "status": "done", "progress": 100 }] }),
-        )
-        .await;
-        assert!(!result.is_error, "{}", result.content);
-        assert!(
-            result.content.contains("Todo list updated"),
-            "{}",
-            result.content
-        );
-        assert!(
-            read_received.lock().unwrap().is_some(),
-            "the patch reads first"
-        );
-        let request = write_received.lock().unwrap().clone().unwrap();
-
-        assert_eq!(request.value[0]["title"], "Phase 1");
-        assert_eq!(request.value[0]["status"], "pending");
-        assert_eq!(request.value[1]["id"], "T1");
-        assert_eq!(request.value[1]["status"], "done");
-        assert_eq!(request.value[1]["progress"], 100);
-        assert_eq!(request.value[1]["parentId"], "M1");
-        assert!(request.undoable);
-    }
-
-    #[tokio::test]
-    async fn test_updates_unknown_id_errors_with_known_ids() {
-        let (callbacks, _, write_received) = scripted(
-            read_ok(serde_json::json!([
-                { "id": "T1", "parentId": null, "kind": "task", "title": "only one", "status": "pending" }
-            ])),
-            write_ok(Value::Null),
-        );
-        let result = execute_todo_list(
-            &callbacks,
-            &serde_json::json!({ "updates": [{ "id": "T9", "status": "done" }] }),
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(
-            result.content.contains("Unknown todo id"),
-            "{}",
-            result.content
-        );
-        assert!(
-            result.content.contains("T1"),
-            "the error names the known ids: {}",
-            result.content
-        );
-        assert!(
-            write_received.lock().unwrap().is_none(),
-            "a rejected patch must not write"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_updates_and_todos_are_mutually_exclusive() {
-        let (callbacks, read_received, write_received) =
-            scripted(read_ok(Value::Null), write_ok(Value::Null));
-        let result = execute_todo_list(
-            &callbacks,
-            &serde_json::json!({
-                "todos": [],
-                "updates": [{ "id": "T1", "status": "done" }]
-            }),
-        )
-        .await;
-        assert!(result.is_error);
-        assert!(
-            result.content.contains("mutually exclusive"),
-            "{}",
-            result.content
-        );
-        assert!(read_received.lock().unwrap().is_none());
-        assert!(write_received.lock().unwrap().is_none());
-    }
-
-    #[test]
-    fn test_tool_def_advertises_updates_with_matching_shape() {
-        let def = todo_list_tool_def();
-        let updates = &def.input_schema["properties"]["updates"];
-        assert!(
-            updates.is_object(),
-            "the description promises updates; the schema must declare it"
-        );
-        assert_eq!(updates["items"]["required"][0], "id");
-        assert_eq!(updates["items"]["properties"]["status"]["enum"][2], "done");
     }
 
     #[tokio::test]
@@ -710,7 +514,7 @@ mod tests {
             serde_json::json!({ "todos": [{ "title": "x" }] }),
             serde_json::json!({ "todos": [42] }),
         ] {
-            let result = execute_todo_list(&callbacks, &bad).await;
+            let result = execute_todo_list(&callbacks, "main", &bad).await;
             assert!(result.is_error, "args: {bad}");
             assert!(result.content.contains("Invalid TodoList arguments"));
         }
@@ -724,7 +528,7 @@ mod tests {
             Err("host does not support state bridge".into()),
             write_ok(Value::Null),
         );
-        let result = execute_todo_list(&callbacks, &serde_json::json!({})).await;
+        let result = execute_todo_list(&callbacks, "main", &serde_json::json!({})).await;
         assert!(result.is_error);
         assert_eq!(result.content, STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE);
     }
@@ -737,6 +541,7 @@ mod tests {
         );
         let result = execute_todo_list(
             &callbacks,
+            "main",
             &serde_json::json!({ "todos": [{ "title": "x", "status": "pending" }] }),
         )
         .await;
@@ -750,7 +555,7 @@ mod tests {
             Err("State read error: [-32001] unknown domain: goal".into()),
             write_ok(Value::Null),
         );
-        let result = execute_todo_list(&callbacks, &serde_json::json!({})).await;
+        let result = execute_todo_list(&callbacks, "main", &serde_json::json!({})).await;
         assert!(result.is_error);
         assert!(result.content.contains("-32001"));
         assert!(result.content.contains("unknown domain"));
@@ -764,6 +569,7 @@ mod tests {
         );
         let result = execute_todo_list(
             &callbacks,
+            "main",
             &serde_json::json!({ "todos": [{ "title": "x", "status": "pending" }] }),
         )
         .await;
@@ -777,6 +583,7 @@ mod tests {
             scripted(read_ok(serde_json::json!([])), write_ok(Value::Null));
         let result = execute_todo_list(
             &callbacks,
+            "main",
             &serde_json::json!({ "turn_id": "turn-42", "tool_call_id": "call_abc" }),
         )
         .await;
@@ -800,6 +607,13 @@ mod tests {
             def.input_schema["properties"]["todos"]["items"]["properties"]["status"]["enum"][1],
             "in_progress"
         );
+        let item = &def.input_schema["properties"]["todos"]["items"]["properties"];
+        for field in ["id", "parentId", "kind", "progress", "description"] {
+            assert!(item[field].is_object(), "todos item must declare {field}");
+        }
+        assert_eq!(item["kind"]["enum"][0], "milestone");
+        assert_eq!(item["progress"]["minimum"], 0);
+        assert_eq!(item["progress"]["maximum"], 100);
         assert!(def.description.contains("multi-step task"));
         assert!(def.description.contains("todos: []"));
     }

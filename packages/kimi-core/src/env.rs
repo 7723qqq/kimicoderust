@@ -1,4 +1,3 @@
-
 pub fn parse_bool_env(value: Option<&str>) -> Option<bool> {
     match value?.trim().to_ascii_lowercase().as_str() {
         "" => None,

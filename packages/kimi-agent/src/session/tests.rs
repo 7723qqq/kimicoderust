@@ -167,6 +167,7 @@ async fn make_session_with_steer(
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -329,6 +330,7 @@ async fn shutdown_stops_the_sessions_background_tasks() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -467,6 +469,7 @@ async fn test_print_steer_feeds_task_notifications_back() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -551,6 +554,7 @@ async fn test_print_steer_ignores_another_sessions_notifications() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -637,6 +641,7 @@ async fn test_print_run_continues_active_goal() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -809,6 +814,218 @@ async fn draining_a_steer_reports_it_read_with_its_prompt_id() {
             prompt_ids: vec!["prompt-4-abc".to_string()],
         }
     );
+}
+
+#[tokio::test]
+async fn draining_a_steer_batch_merges_content_and_user_origin() {
+    use crate::rpc::types::ContentBlock;
+
+    let (inner, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
+    let first = LLMMessage {
+        role: "user".into(),
+        prompt_id: Some("prompt-first".into()),
+        blocks: vec![
+            ContentBlock::Text {
+                text: "bundled skill".into(),
+                meta: Some(serde_json::Map::from_iter([(
+                    "contentType".into(),
+                    serde_json::json!("text/plain"),
+                )])),
+            },
+            ContentBlock::Text {
+                text: "first body".into(),
+                meta: None,
+            },
+            ContentBlock::Text {
+                text: "<image path=\"/tmp/original.png\"></image>".into(),
+                meta: None,
+            },
+            ContentBlock::Text {
+                text: "visible <system>Image compressed to fit model limits: details</system>"
+                    .into(),
+                meta: None,
+            },
+            ContentBlock::AudioUrl {
+                url: "kimi-file://audio-1".into(),
+                id: Some("audio-1".into()),
+                name: None,
+            },
+        ],
+        origin: Some(serde_json::json!({
+            "kind": "user",
+            "skillActivations": [{ "activationId": "activation-1", "skillName": "skill-one" }],
+            "attachments": [{ "name": "first.txt", "mediaType": "text/plain", "size": 1, "path": "/tmp/first.txt" }]
+        })),
+        ..LLMMessage::default()
+    };
+    let second = LLMMessage {
+        role: "user".into(),
+        prompt_id: Some("prompt-second".into()),
+        blocks: vec![
+            ContentBlock::Text {
+                text: "already annotated".into(),
+                meta: Some(serde_json::Map::from_iter([
+                    ("source".into(), serde_json::json!("skill activation")),
+                    (
+                        "activationId".into(),
+                        serde_json::json!("activation-existing"),
+                    ),
+                ])),
+            },
+            ContentBlock::Text {
+                text: "second body".into(),
+                meta: None,
+            },
+        ],
+        origin: Some(serde_json::json!({
+            "kind": "user",
+            "clientMetadata": [{ "surface": "web" }],
+            "skillActivations": [{ "activationId": "activation-2", "skillName": "skill-two" }],
+            "attachments": [{ "name": "second.txt", "mediaType": "text/plain", "size": 2, "path": "/tmp/second.txt" }]
+        })),
+        ..LLMMessage::default()
+    };
+    let queue = Arc::new(Mutex::new(vec![first, second]));
+    let callbacks = SteerQueueCallbacks::new(Arc::new(inner), queue, None);
+
+    let drained = callbacks.drain_steers().await.unwrap();
+    assert_eq!(drained.len(), 1, "one drain batch is one user message");
+    let merged = &drained[0];
+    assert_eq!(merged.role, "user");
+    assert_eq!(merged.prompt_id, None);
+    assert!(merged.tool_calls.is_empty());
+    assert_eq!(
+        merged.content,
+        "bundled skillalready annotatedfirst body<image path=\"/tmp/original.png\"></image>visible <system>Image compressed to fit model limits: details</system>second body"
+    );
+    let texts: Vec<(&str, Option<&str>, Option<&str>)> = merged
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, meta } => Some((
+                text.as_str(),
+                meta.as_ref()
+                    .and_then(|meta| meta.get("source"))
+                    .and_then(serde_json::Value::as_str),
+                meta.as_ref()
+                    .and_then(|meta| meta.get("activationId"))
+                    .and_then(serde_json::Value::as_str),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            (
+                "bundled skill",
+                Some("skill activation"),
+                Some("activation-1")
+            ),
+            (
+                "already annotated",
+                Some("skill activation"),
+                Some("activation-existing")
+            ),
+            ("first body", None, None),
+            ("<image path=\"/tmp/original.png\"></image>", None, None),
+            (
+                "visible <system>Image compressed to fit model limits: details</system>",
+                None,
+                None
+            ),
+            ("second body", None, None),
+        ]
+    );
+    assert!(matches!(
+        merged.blocks.get(5),
+        Some(ContentBlock::AudioUrl { .. })
+    ));
+    let ContentBlock::Text {
+        meta: Some(skill_meta),
+        ..
+    } = &merged.blocks[0]
+    else {
+        panic!("the bundled skill stays a text part")
+    };
+    assert!(skill_meta.get("contentType").is_none());
+    let origin = merged.origin.as_ref().unwrap();
+    assert_eq!(origin["kind"], "user");
+    assert_eq!(origin["inTurn"], true);
+    assert_eq!(
+        origin["clientMetadata"][0]["display_text"],
+        "first body\nvisible \n[audio]"
+    );
+    assert_eq!(origin["clientMetadata"][1]["surface"], "web");
+    assert_eq!(origin["clientMetadata"].as_array().unwrap().len(), 2);
+    assert_eq!(origin["skillActivations"].as_array().unwrap().len(), 2);
+    assert_eq!(origin["attachments"].as_array().unwrap().len(), 2);
+
+    let recorded = recorded(&events);
+    assert_eq!(recorded.len(), 2, "read receipts stay per submitted prompt");
+    assert!(
+        recorded
+            .iter()
+            .all(|event| matches!(event, TurnEvent::Steer { .. }))
+    );
+}
+
+#[tokio::test]
+async fn draining_plain_steer_batch_omits_empty_origin_arrays() {
+    let (inner, _events) = TurnRecordingCallbacks::new(serde_json::json!({}));
+    let queue = Arc::new(Mutex::new(vec![
+        msg("user", "first"),
+        msg("user", "second"),
+    ]));
+    let callbacks = SteerQueueCallbacks::new(Arc::new(inner), queue, None);
+
+    let drained = callbacks.drain_steers().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    let merged = &drained[0];
+    assert_eq!(
+        merged.origin,
+        Some(serde_json::json!({ "kind": "user", "inTurn": true }))
+    );
+    let texts: Vec<&str> = merged
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            crate::rpc::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["first", "second"]);
+    assert!(
+        merged
+            .origin
+            .as_ref()
+            .unwrap()
+            .get("clientMetadata")
+            .is_none()
+    );
+    assert!(
+        merged
+            .origin
+            .as_ref()
+            .unwrap()
+            .get("skillActivations")
+            .is_none()
+    );
+    assert!(merged.origin.as_ref().unwrap().get("attachments").is_none());
+}
+
+#[tokio::test]
+async fn draining_one_steer_keeps_its_prompt_id() {
+    let (inner, _events) = TurnRecordingCallbacks::new(serde_json::json!({}));
+    let mut message = msg("user", "only");
+    message.prompt_id = Some("prompt-only".into());
+    let queue = Arc::new(Mutex::new(vec![message]));
+    let callbacks = SteerQueueCallbacks::new(Arc::new(inner), queue, None);
+
+    let drained = callbacks.drain_steers().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].prompt_id.as_deref(), Some("prompt-only"));
+    assert_eq!(drained[0].origin.as_ref().unwrap()["inTurn"], true);
 }
 
 #[tokio::test]
@@ -1387,6 +1604,7 @@ async fn turn_lifecycle_hooks_fire_from_the_session_wiring() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -1468,6 +1686,7 @@ async fn stop_failure_hook_fires_for_a_failed_turn() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -1728,33 +1947,79 @@ async fn test_failed_turn_reports_ended_with_error() {
     assert!(payload.get("type").is_none(), "{payload}");
 
     let emitted = emitted.lock().unwrap().clone();
+    let types: Vec<&str> = emitted
+        .iter()
+        .map(|event| event["type"].as_str().unwrap_or_default())
+        .collect();
     assert_eq!(
-        emitted,
+        types,
         vec![
-            serde_json::json!({
-                "type": "llm.step.begin",
-                "agent_id": "main",
-                "turn_id": "turn-0",
-                "step": 1,
-                "step_id": "turn-0-step-1",
-            }),
-            serde_json::json!({
-                "type": "llm.step.interrupted",
-                "agent_id": "main",
-                "turn_id": "turn-0",
-                "step": 1,
-                "step_id": "turn-0-step-1",
-                "reason": "error",
-                "message": "provider is offline",
-            }),
-            serde_json::json!({
-                "type": "error",
-                "code": "internal",
-                "message": "provider is offline",
-                "retryable": false,
-            }),
+            "agent.turn.started",
+            "agent.message.appended",
+            "context.append_message",
+            "llm.step.begin",
+            "llm.request",
+            "llm.step.interrupted",
+            "agent.turn.ended",
+            "error",
         ],
-        "the failure must reach the host's error channel"
+        "the failure must reach the host's error channel with the durable records around it"
+    );
+    assert_eq!(emitted[0]["turnId"], serde_json::json!(0));
+    assert_eq!(emitted[1]["message"]["content"][0]["text"], "boom");
+    assert_eq!(emitted[1]["meta"]["source"], "input");
+    assert_eq!(emitted[2]["agentId"], "main");
+    assert_eq!(emitted[2]["message"]["origin"]["kind"], "injection");
+    assert_eq!(
+        emitted[3],
+        serde_json::json!({
+            "type": "llm.step.begin",
+            "agent_id": "main",
+            "turn_id": "turn-0",
+            "step": 1,
+            "step_id": "turn-0-step-1",
+        })
+    );
+    assert_eq!(emitted[4]["type"], "llm.request");
+    assert_eq!(emitted[4]["agent_id"], "main");
+    assert_eq!(emitted[4]["kind"], "loop");
+    assert_eq!(emitted[4]["turnStep"], "turn-0.1");
+    assert_eq!(
+        emitted[4]["systemPromptHash"].as_str().map(str::len),
+        Some(64)
+    );
+    assert_eq!(emitted[4]["toolsHash"].as_str().map(str::len), Some(64));
+    assert_eq!(
+        emitted[5],
+        serde_json::json!({
+            "type": "llm.step.interrupted",
+            "agent_id": "main",
+            "turn_id": "turn-0",
+            "step": 1,
+            "step_id": "turn-0-step-1",
+            "reason": "error",
+            "message": "provider is offline",
+        })
+    );
+    assert_eq!(
+        emitted[6],
+        serde_json::json!({
+            "type": "agent.turn.ended",
+            "agent_id": "main",
+            "kind": "event",
+            "turnId": 0,
+            "outcome": "failed",
+            "errorMessage": "provider is offline",
+        })
+    );
+    assert_eq!(
+        emitted[7],
+        serde_json::json!({
+            "type": "error",
+            "code": "internal",
+            "message": "provider is offline",
+            "retryable": false,
+        })
     );
 }
 
@@ -2124,6 +2389,7 @@ async fn settle_goal_after_turn_folds_blocks_and_continues() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(crate::storage::StateStore::for_dir(dir.path().join("state")).unwrap());
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let host = Arc::new(HostGoalCallbacks {
         inner: rpc_callbacks(Arc::new(RpcServer::new())),
         goal: crate::rpc::types::GoalContext {
@@ -2139,7 +2405,7 @@ async fn settle_goal_after_turn_folds_blocks_and_continues() {
             updated_at: 0,
             terminal_reason: None,
         },
-        events: Arc::new(std::sync::Mutex::new(Vec::new())),
+        events: events.clone(),
     });
     let callbacks = crate::callbacks::StateStoreCallbacks {
         inner: host,
@@ -2190,6 +2456,29 @@ async fn settle_goal_after_turn_folds_blocks_and_continues() {
         store.goal_context().expect("the goal is stored").turns_used,
         2
     );
+    let records: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "goal.update")
+        .cloned()
+        .collect();
+    assert!(
+        records.iter().any(|record| {
+            record["agent_id"] == "main"
+                && record["turnsUsed"].as_u64().is_some_and(|turns| turns > 0)
+        }),
+        "the turn fold must be recorded: {records:?}"
+    );
+    assert!(
+        records.iter().any(|record| {
+            record["status"] == "blocked"
+                && record["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("turn budget 2"))
+        }),
+        "the block must be recorded: {records:?}"
+    );
 }
 
 #[tokio::test]
@@ -2206,6 +2495,7 @@ async fn test_interactive_session_wakes_on_a_background_task_completion() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -2825,6 +3115,7 @@ async fn test_interactive_session_continues_an_active_goal() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -3011,6 +3302,7 @@ async fn session_pump_announces_skill_catalog_changes() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -3090,6 +3382,7 @@ async fn session_pump_announces_subagent_catalog_changes() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -3168,6 +3461,7 @@ async fn session_pump_announces_workspace_root_changes() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,
@@ -3240,6 +3534,7 @@ async fn session_pump_announces_agents_md_changes() {
         max_attempts: None,
         max_context_tokens: None,
         compaction_max_attempts: None,
+        llm_request_byte_budget: u64::MAX,
         permission_mode: None,
         tool_defs: Arc::new(|| Box::pin(async { Vec::new() })),
         goal: None,

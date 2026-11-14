@@ -1,0 +1,1211 @@
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures_util::future::{BoxFuture, Shared};
+use futures_util::FutureExt;
+use kimi_core::primitives::errors::{Error2, Error2Options};
+use parking_lot::Mutex;
+use serde_json::{Map, Value, json};
+
+use crate::_base::di::instantiation::IInstantiationService;
+use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::scope::{
+    IAgentScopeHandle, LifecycleScope, ScopeActivation, ScopeSeed, create_scoped_child_handle,
+    register_scoped_service,
+};
+use crate::_base::errors::unexpected_error::on_unexpected_error;
+use crate::_base::log::log::ILogService;
+use crate::_base::utils::abort::{AbortSignal, abort_error};
+use crate::_base::utils::paths::join;
+use crate::agent::agent_context::agent_context::AgentContext;
+use crate::agent::blob::agent_blob_service::IAgentBlobService;
+use crate::agent::blob::agent_blob_service_impl::AgentBlobServiceImpl;
+use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
+use crate::agent::context_memory::open_tool_exchange::close_trailing_open_tool_exchange;
+use crate::agent::environment_binding::environment_binding::{
+    IAgentEnvironmentBindingSeed, IAgentEnvironmentBindingService,
+};
+use crate::agent::environment_binding::environment_binding_ops::EnvironmentSetBinding;
+use crate::agent::full_compaction::full_compaction::IAgentFullCompactionService;
+use crate::agent::interaction::interaction_wiring::{
+    attach_interaction_agent, cancel_interactions_for_turn, detach_interaction_agent,
+};
+use crate::agent::r#loop::r#loop::IAgentLoopService;
+use crate::agent::r#loop::machine::engine::{MACHINE_LOOP_MODEL, MachineEngineAttachRef};
+use crate::agent::r#loop::turn_ops::TurnEnded;
+use crate::agent::mcp::mcp::IAgentMcpService;
+use crate::agent::permission_mode::config_section::DEFAULT_PERMISSION_MODE_SECTION;
+use crate::agent::permission_mode::permission_mode::IAgentPermissionModeService;
+use crate::agent::permission_mode::permission_mode_ops::permission_mode_configured_key;
+use crate::agent::permission_policy::types::PermissionMode;
+use crate::agent::permission_rules::config_section::{PERMISSION_SECTION, PermissionConfig};
+use crate::agent::permission_rules::permission_rules::IAgentPermissionRulesService;
+use crate::agent::profile::profile::IAgentProfileService;
+use crate::agent::profile::profile_ops::{ProfileModelState, profile_replayable_key};
+use crate::agent::scope_context::scope_context::{
+    IAgentScopeContext, agent_context_of, make_agent_scope_context,
+};
+use crate::agent::state::agent_state_v2::I_AGENT_STATE_SERVICE;
+use crate::agent::task::task::IAgentTaskService;
+use crate::agent::tool_activation::tool_activation::IAgentToolActivationService;
+use crate::app::bootstrap::bootstrap::IBootstrapService;
+use crate::app::config::config::IConfigService;
+use crate::app::event::event_bus::ISessionEventBus;
+use crate::app::scopes::LifecycleScope as AppLifecycleScope;
+use crate::app::telemetry::telemetry::ITelemetryService;
+use crate::app::telemetry::telemetry_service::bind_telemetry_scope;
+use crate::environment::environment::LOCAL_ENVIRONMENT_ID;
+use crate::features::tower::tower::has_pinned_permission_mode;
+use crate::human::agent::machine::{
+    AgentInput, AgentMachineSelf, AgentScopeHandle, ScopeFactoryOutput, create_agent_machine,
+};
+use crate::human::interaction::facade::interactions;
+use crate::human::session::machine::{
+    AgentActorRef, SessionEmitted, SessionEvent, SessionInput, create_session_machine,
+};
+use crate::human::xstate2::{create_actor, set_root_actor_error_reporter, wait_for};
+use crate::persistence::interface::append_log_store::IAppendLogStore;
+use crate::persistence::interface::blob_store::IBlobStore;
+use crate::persistence::interface::session_lock::ISessionLockService;
+use crate::persistence::interface::storage::IFileSystemStorageService;
+use crate::session::session_context::session_context::ISessionContext;
+use crate::session::session_metadata::session_metadata::{
+    AgentMeta, AgentType, ISessionMetadata,
+};
+use crate::session::workdir::workdir::ISessionWorkdir;
+use crate::state::event_dispatcher::IEventDispatcher;
+use crate::wire::record::WireAsyncError;
+use crate::wire::wire::IWireService;
+use crate::wire::wire_service::WireService;
+
+use super::agent_lifecycle::{
+    AgentListFilter, AgentScopeCreatedEvent, CreateAgentOptions, ForkAgentOptions,
+    IAgentLifecycleService, MAIN_AGENT_ID,
+};
+use super::errors::{AGENT_ALREADY_EXISTS, AGENT_NOT_FOUND};
+use super::managed_agent::ManagedAgent;
+use super::subagent_metadata::with_subagent_profile;
+
+static NEXT_AGENT_ID: AtomicI64 = AtomicI64::new(0);
+
+pub const REMOVE_PROMPT_QUIESCE_TIMEOUT_MS: u64 = 3_000;
+pub const REMOVE_PROMPT_QUIESCE_POLL_MS: u64 = 10;
+
+#[derive(Debug, Clone)]
+struct SharedAgentError(Arc<String>);
+
+impl SharedAgentError {
+    fn new(error: WireAsyncError) -> Self {
+        Self(Arc::new(error.to_string()))
+    }
+
+    fn boxed(self) -> WireAsyncError {
+        Box::new(self)
+    }
+}
+
+impl fmt::Display for SharedAgentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
+impl Error for SharedAgentError {}
+
+type AgentFuture = Shared<BoxFuture<'static, Result<Arc<AgentContext>, SharedAgentError>>>;
+
+struct ListenerRegistry<T> {
+    next_id: AtomicU64,
+    listeners: Mutex<Vec<(u64, Arc<dyn Fn(T) + Send + Sync>)>>,
+}
+
+impl<T> Default for ListenerRegistry<T> {
+    fn default() -> Self {
+        Self {
+            next_id: AtomicU64::new(0),
+            listeners: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl<T: Clone + 'static> ListenerRegistry<T> {
+    fn subscribe_in(
+        self: &Arc<Self>,
+        listener: Arc<dyn Fn(T) + Send + Sync>,
+    ) -> Box<dyn IDisposable> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.listeners.lock().push((id, listener));
+        let this = Arc::downgrade(self);
+        to_disposable(move || {
+            if let Some(this) = this.upgrade() {
+                this.listeners.lock().retain(|(candidate, _)| *candidate != id);
+            }
+        })
+    }
+
+    fn fire(&self, event: T) {
+        let listeners = self.listeners.lock().clone();
+        for (_, listener) in listeners {
+            listener(event.clone());
+        }
+    }
+}
+
+pub struct AgentLifecycleService {
+    instantiation: Arc<dyn IInstantiationService>,
+    ctx: Arc<dyn ISessionContext>,
+    workdir: Arc<dyn ISessionWorkdir>,
+    session_metadata: Arc<dyn ISessionMetadata>,
+    bootstrap: Arc<dyn IBootstrapService>,
+    config: Arc<dyn IConfigService>,
+    telemetry: Arc<dyn ITelemetryService>,
+    bus: Arc<dyn ISessionEventBus>,
+    append_log_store: Arc<dyn IAppendLogStore>,
+    session_locks: Arc<dyn ISessionLockService>,
+    blob_store: Arc<dyn IBlobStore>,
+    storage: Arc<dyn IFileSystemStorageService>,
+    logger: Arc<dyn ILogService>,
+    roster: Arc<Mutex<HashMap<String, Arc<ManagedAgent>>>>,
+    creating: Arc<Mutex<HashMap<String, AgentFuture>>>,
+    next_lifecycle_generation: AtomicU64,
+    session_actor: crate::human::session::machine::AgentActorRef,
+    did_create: Arc<ListenerRegistry<Arc<AgentContext>>>,
+    did_create_scope: Arc<ListenerRegistry<AgentScopeCreatedEvent>>,
+    will_close: Arc<ListenerRegistry<Arc<AgentContext>>>,
+    did_close: Arc<ListenerRegistry<Arc<AgentContext>>>,
+    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+}
+
+impl AgentLifecycleService {
+    pub fn new(
+        instantiation: Arc<dyn IInstantiationService>,
+        ctx: Arc<dyn ISessionContext>,
+        workdir: Arc<dyn ISessionWorkdir>,
+        session_metadata: Arc<dyn ISessionMetadata>,
+        bootstrap: Arc<dyn IBootstrapService>,
+        config: Arc<dyn IConfigService>,
+        telemetry: Arc<dyn ITelemetryService>,
+        bus: Arc<dyn ISessionEventBus>,
+        append_log_store: Arc<dyn IAppendLogStore>,
+        session_locks: Arc<dyn ISessionLockService>,
+        blob_store: Arc<dyn IBlobStore>,
+        storage: Arc<dyn IFileSystemStorageService>,
+        logger: Arc<dyn ILogService>,
+    ) -> Arc<Self> {
+        let reporter = logger.clone();
+        set_root_actor_error_reporter(Arc::new(move |error| {
+            reporter.error("root actor stopped on aborted operation", Some(error));
+        }));
+        let session_actor = create_actor(
+            create_session_machine(),
+            SessionInput {
+                request: MACHINE_LOOP_MODEL.clone(),
+            },
+        );
+        session_actor.start();
+        let this = Arc::new(Self {
+            instantiation,
+            ctx,
+            workdir,
+            session_metadata,
+            bootstrap,
+            config,
+            telemetry,
+            bus,
+            append_log_store,
+            session_locks,
+            blob_store,
+            storage,
+            logger,
+            roster: Arc::new(Mutex::new(HashMap::new())),
+            creating: Arc::new(Mutex::new(HashMap::new())),
+            next_lifecycle_generation: AtomicU64::new(0),
+            session_actor,
+            did_create: Arc::new(ListenerRegistry::default()),
+            did_create_scope: Arc::new(ListenerRegistry::default()),
+            will_close: Arc::new(ListenerRegistry::default()),
+            did_close: Arc::new(ListenerRegistry::default()),
+            subscriptions: Mutex::new(Vec::new()),
+        });
+        let weak = Arc::downgrade(&this);
+        this.subscriptions.lock().push(this.session_actor.on(
+            "agent.restarted",
+            Arc::new(move |event| {
+                let SessionEmitted::AgentRestarted { agent_id, ref_ } = event else {
+                    return;
+                };
+                if let Some(this) = weak.upgrade()
+                    && let Some(managed) = this.roster.lock().get(&agent_id)
+                {
+                    *managed.ref_.lock() = Some(ref_);
+                }
+            }),
+        ));
+        let session_id = this.ctx.session_id();
+        this.subscriptions.lock().push(this.bus.subscribe_turn_ended(
+            Arc::new(move |event: TurnEnded| {
+                cancel_interactions_for_turn(&event.agent_id, &session_id, event.turn_id);
+            }),
+        ));
+        let session_id = this.ctx.session_id();
+        let subscription = this.did_close.subscribe_in(Arc::new(move |context| {
+            detach_interaction_agent(&context.agent_id, &session_id);
+        }));
+        this.subscriptions.lock().push(subscription);
+        this
+    }
+
+    pub async fn create(
+        self: &Arc<Self>,
+        opts: Option<CreateAgentOptions>,
+    ) -> Result<Arc<AgentContext>, WireAsyncError> {
+        let opts = opts.unwrap_or_default();
+        if let Some(agent_id) = opts.agent_id.as_deref() {
+            if let Some(inflight) = self.creating.lock().get(agent_id).cloned() {
+                return inflight.await.map_err(SharedAgentError::boxed);
+            }
+            if let Some(existing) = self.roster.lock().get(agent_id)
+                && !existing.closing.load(Ordering::Acquire)
+            {
+                return Ok(existing.context.clone());
+            }
+        }
+        let agent_id = match opts.agent_id.clone() {
+            Some(agent_id) => agent_id,
+            None => self.next_available_agent_id().await?,
+        };
+        let this = self.clone();
+        let create_opts = opts.clone();
+        let create_id = agent_id.clone();
+        let future = async move {
+            this.do_create(create_id, create_opts)
+                .await
+                .map_err(SharedAgentError::new)
+        }
+        .boxed()
+        .shared();
+        self.creating.lock().insert(agent_id.clone(), future.clone());
+        let result = future.await.map_err(SharedAgentError::boxed);
+        self.creating.lock().remove(&agent_id);
+        result
+    }
+
+    async fn next_available_agent_id(&self) -> Result<String, WireAsyncError> {
+        let mut max_suffix = -1_i64;
+        let mut consider = |id: &str| {
+            if let Some(suffix) = id.strip_prefix("agent-")
+                && let Ok(suffix) = suffix.parse::<i64>()
+            {
+                max_suffix = max_suffix.max(suffix);
+            }
+        };
+        for id in self.roster.lock().keys() {
+            consider(id);
+        }
+        let persisted = self.session_metadata.read().await?.agents.unwrap_or_default();
+        for id in persisted.keys() {
+            consider(id);
+        }
+        let candidate = (max_suffix + 1).max(NEXT_AGENT_ID.load(Ordering::Relaxed));
+        NEXT_AGENT_ID.store(candidate + 1, Ordering::Relaxed);
+        Ok(format!("agent-{candidate}"))
+    }
+
+    fn do_create(
+        self: &Arc<Self>,
+        agent_id: String,
+        opts: CreateAgentOptions,
+    ) -> BoxFuture<'static, Result<Arc<AgentContext>, WireAsyncError>> {
+        if self.session_actor.get_snapshot().context.agents.contains_key(&agent_id) {
+            return Box::pin(std::future::ready(Err(agent_error(
+                AGENT_ALREADY_EXISTS,
+                format!("Agent \"{agent_id}\" already exists"),
+                &agent_id,
+            ))));
+        }
+        let this = self.clone();
+        let scope_agent_id = agent_id.clone();
+        let input = AgentInput {
+            request: MACHINE_LOOP_MODEL.clone(),
+            store: None,
+            session: Some(json!({
+                "sessionId": self.ctx.session_id(),
+                "workspaceId": self.ctx.workspace_id(),
+            })),
+            scope_factory: Arc::new(move |self_, signal| {
+                this.build_agent_scope(scope_agent_id.clone(), opts.clone(), self_, signal)
+            }),
+        };
+        self.session_actor.send(SessionEvent::AgentCreate {
+            agent_id: Some(agent_id.clone()),
+            logic: create_agent_machine(Default::default()),
+            input,
+        });
+        let snapshot = self.session_actor.get_snapshot();
+        let Some(entry) = snapshot.context.agents.get(&agent_id) else {
+            return Box::pin(std::future::ready(Err(format!(
+                "Agent \"{agent_id}\" was not spawned by the session actor"
+            )
+            .into())));
+        };
+        let ref_ = entry.ref_.clone();
+        if let Some(managed) = self.roster.lock().get(&agent_id) {
+            *managed.ref_.lock() = Some(ref_.clone());
+        }
+        self.await_linked(agent_id, ref_)
+    }
+
+    fn await_linked(
+        self: &Arc<Self>,
+        agent_id: String,
+        ref_: AgentActorRef,
+    ) -> BoxFuture<'static, Result<Arc<AgentContext>, WireAsyncError>> {
+        let this = self.clone();
+        Box::pin(async move {
+            let failure = Arc::new(Mutex::new(None::<String>));
+            let failure_slot = failure.clone();
+            let subscription = ref_.on(
+                "agent.failed",
+                Arc::new(move |event| {
+                    *failure_slot.lock() = Some(event.error.to_string());
+                }),
+            );
+            let waited = wait_for(&ref_, |snapshot| snapshot.value != "linking").await;
+            subscription.unsubscribe();
+            if let Some(error) = failure.lock().clone() {
+                return Err(error.into());
+            }
+            if let Err(error) = waited {
+                return Err(error);
+            }
+            let managed = this.roster.lock().get(&agent_id).cloned();
+            match managed {
+                Some(managed) => Ok(managed.context.clone()),
+                None => Err(abort_error(format!(
+                    "Agent \"{agent_id}\" linking was cancelled"
+                ))),
+            }
+        })
+    }
+
+    fn build_agent_scope(
+        self: &Arc<Self>,
+        agent_id: String,
+        opts: CreateAgentOptions,
+        self_: AgentMachineSelf,
+        signal: AbortSignal,
+    ) -> BoxFuture<'static, Result<ScopeFactoryOutput, WireAsyncError>> {
+        let this = self.clone();
+        Box::pin(async move {
+            let agent_scope = this.ctx.scope(&format!("agents/{agent_id}"));
+            let agent_homedir = join(&this.bootstrap.home_dir(), &[agent_scope.clone()]);
+            let generation = this.next_lifecycle_generation.fetch_add(1, Ordering::AcqRel) + 1;
+            let scope_context = make_agent_scope_context(
+                agent_id.clone(),
+                agent_scope,
+                opts.forked_from.clone(),
+                generation,
+            );
+            let agent = scope_context.agent_context.clone();
+            let event_bus = this.bus.clone();
+            event_bus.activate_agent(agent.clone());
+            let telemetry_binding = bind_telemetry_scope(
+                this.telemetry.clone(),
+                json!({ "agent_id": agent_id, "mode": "agent" }),
+            );
+            let blob_view = Arc::new(AgentBlobServiceImpl::new(
+                this.blob_store.clone(),
+                scope_context.clone(),
+            ));
+            let wire = Arc::new(WireService::new(
+                scope_context.clone(),
+                this.append_log_store.clone(),
+                blob_view.clone(),
+                this.storage.clone(),
+                this.logger.clone(),
+                telemetry_binding.telemetry.clone(),
+                this.session_locks.clone(),
+                this.ctx.clone(),
+            ));
+            let finalizer_armed = Arc::new(AtomicBool::new(false));
+            let armed = finalizer_armed.clone();
+            let telemetry_dispose = telemetry_binding.clone();
+            let wire_dispose = wire.clone();
+            let event_dispose = event_bus.clone();
+            let agent_dispose = agent.clone();
+            let seeds = vec![
+                ScopeSeed::new::<IAgentScopeContext>(scope_context.clone()),
+                ScopeSeed::new::<ITelemetryService>(telemetry_binding.telemetry.clone()),
+                ScopeSeed::new::<IAgentEnvironmentBindingSeed>(environment_binding_seed(
+                    &this,
+                    &opts,
+                )),
+                ScopeSeed::new::<IAgentBlobService>(blob_view),
+                ScopeSeed::new::<IWireService>(wire.clone()),
+            ];
+            let handle = create_scoped_child_handle(
+                this.instantiation.clone(),
+                LifecycleScope::Agent,
+                &agent_id,
+                seeds,
+                move |container| {
+                    let telemetry_dispose = telemetry_dispose.clone();
+                    container.anchor_kernel_entry(
+                        Box::new(move || telemetry_dispose.dispose()),
+                        "telemetry:agent-context",
+                    );
+                    let wire_dispose = wire_dispose.clone();
+                    container.anchor_kernel_entry(
+                        Box::new(move || wire_dispose.dispose()),
+                        "wire-view-dispose",
+                    );
+                    container.anchor_kernel_finalizer(Box::new(move || {
+                        event_dispose.deactivate_agent(agent_dispose.clone());
+                    }));
+                    armed.store(true, Ordering::Release);
+                },
+            );
+            let handle = match handle {
+                Ok(handle) => handle,
+                Err(error) => {
+                    wire.dispose();
+                    telemetry_binding.dispose();
+                    event_bus.deactivate_agent(agent.clone());
+                    return Err(error);
+                }
+            };
+            let dispose_handle = handle.clone();
+            signal.add_event_listener(
+                "abort",
+                Arc::new(move || {
+                    let handle = dispose_handle.clone();
+                    tokio::spawn(async move {
+                        let _ = handle.dispose().await;
+                    });
+                }),
+                true,
+            );
+            let managed = match this.roster_adopt(handle.clone()) {
+                Ok(_) => this.roster.lock().get(&agent_id).cloned(),
+                Err(error) => {
+                    let _ = handle.dispose().await;
+                    return Err(error);
+                }
+            };
+            let result = this
+                .initialize_agent_scope(
+                    agent_id.clone(),
+                    opts,
+                    agent.clone(),
+                    handle.clone(),
+                    agent_homedir,
+                    self_,
+                )
+                .await;
+            match result {
+                Ok(bundle) => {
+                    if let Some(managed) = managed {
+                        *managed.bundle.lock() = Some(bundle.clone());
+                    }
+                    let dispose = handle.clone();
+                    Ok(ScopeFactoryOutput {
+                        handle: Some(AgentScopeHandle::new(move || {
+                            let handle = dispose.clone();
+                            Box::pin(async move { handle.dispose().await }) as BoxFuture<'static, Result<(), WireAsyncError>>
+                        })),
+                        store: bundle.store.clone(),
+                        turn_logic: bundle.turn_logic.clone(),
+                        tool_logic: bundle.tool_logic.clone(),
+                        tools: bundle.tools.clone(),
+                        request: bundle.request.clone(),
+                        prompt_gate: bundle.prompt_gate.clone(),
+                    })
+                }
+                Err(error) => {
+                    this.telemetry.track2(
+                        "agent_create_failed",
+                        json!({
+                            "agent_id": agent_id,
+                            "stage": "bootstrap",
+                            "error_type": error_name(&error),
+                        }),
+                    );
+                    if let Some(managed) = managed {
+                        managed.closing.store(true, Ordering::Release);
+                        this.roster.lock().remove(&agent_id);
+                        managed.kill_space();
+                        let _ = managed.handle.dispose().await;
+                    } else {
+                        let _ = handle.dispose().await;
+                    }
+                    if !finalizer_armed.load(Ordering::Acquire) {
+                        event_bus.deactivate_agent(agent.clone());
+                    }
+                    this.did_close.fire(agent);
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    async fn initialize_agent_scope(
+        &self,
+        agent_id: String,
+        opts: CreateAgentOptions,
+        agent: Arc<AgentContext>,
+        handle: Arc<IAgentScopeHandle>,
+        agent_homedir: String,
+        self_: AgentMachineSelf,
+    ) -> Result<crate::agent::r#loop::machine::engine::MachineEngineAttachBundle, WireAsyncError> {
+        handle.accessor().get::<IWireService>().seal().await?;
+        let labels = with_subagent_profile(
+            opts.labels,
+            (agent_id != MAIN_AGENT_ID)
+                .then(|| opts.binding.as_ref().map(|binding| binding.profile.clone()))
+                .flatten(),
+        );
+        let meta = AgentMeta {
+            homedir: Some(agent_homedir),
+            type_: Some(if agent_id == MAIN_AGENT_ID {
+                AgentType::Main
+            } else {
+                AgentType::Sub
+            }),
+            parent_agent_id: (agent_id != MAIN_AGENT_ID)
+                .then_some(Some(MAIN_AGENT_ID.to_string())),
+            forked_from: opts.forked_from.clone(),
+            labels,
+            swarm_item: None,
+        };
+        self.session_metadata.register_agent(&agent_id, meta.clone()).await?;
+        self.did_create.fire(agent.clone());
+        self.did_create_scope.fire(AgentScopeCreatedEvent {
+            context: agent.clone(),
+            handle: handle.clone(),
+            meta: Some(meta),
+        });
+        if let Some(environment_id) = opts.environment_id.as_deref()
+            && environment_id != LOCAL_ENVIRONMENT_ID
+        {
+            handle
+                .accessor()
+                .get::<IEventDispatcher>()
+                .dispatch(EnvironmentSetBinding {
+                    agent_id: agent_id.clone(),
+                    environment_id: environment_id.to_string(),
+                    cwd: opts.environment_cwd.clone(),
+                })
+                .await?;
+        }
+        handle.accessor().get::<IAgentProfileService>();
+        handle.accessor().get::<IAgentPermissionModeService>();
+        handle.accessor().get::<IAgentMcpService>();
+        handle.accessor().get::<IEventDispatcher>().restore().await?;
+        attach_interaction_agent(
+            &agent_id,
+            &self.ctx.session_id(),
+            handle.accessor().get::<IEventDispatcher>(),
+        );
+        self.bind_bootstrap(&handle, &opts).await?;
+        handle.accessor().get::<IAgentToolActivationService>().activate().await;
+        let loop_ = handle.accessor().get::<IAgentLoopService>();
+        let bundle = loop_.build_attach_bundle();
+        loop_.attach_engine(self_ as MachineEngineAttachRef, bundle.clone());
+        Ok(bundle)
+    }
+
+    async fn bind_bootstrap(
+        &self,
+        handle: &Arc<IAgentScopeHandle>,
+        opts: &CreateAgentOptions,
+    ) -> Result<(), WireAsyncError> {
+        if let Some(binding) = opts.binding.clone() {
+            handle.accessor().get::<IAgentProfileService>().bind(binding).await?;
+            handle.accessor().get::<IAgentMcpService>().register();
+        }
+        let permission_mode = self
+            .config
+            .get::<PermissionMode>(DEFAULT_PERMISSION_MODE_SECTION);
+        let restored = handle
+            .accessor()
+            .get(&I_AGENT_STATE_SERVICE)
+            .get(&permission_mode_configured_key().state_key())
+            .as_bool()
+            .unwrap_or(false);
+        if let Some(permission_mode) = permission_mode
+            && !restored
+        {
+            handle
+                .accessor()
+                .get::<IAgentPermissionModeService>()
+                .set_mode(permission_mode);
+        }
+        let rules = self
+            .config
+            .get::<PermissionConfig>(PERMISSION_SECTION)
+            .map(|config| config.rules)
+            .unwrap_or_default();
+        if !rules.is_empty() {
+            handle
+                .accessor()
+                .get::<IAgentPermissionRulesService>()
+                .add_rules(rules);
+        }
+        Ok(())
+    }
+
+    pub async fn fork(
+        self: &Arc<Self>,
+        source_context: Arc<AgentContext>,
+        opts: Option<ForkAgentOptions>,
+    ) -> Result<Arc<AgentContext>, WireAsyncError> {
+        let source_managed = self.managed_for(&source_context).ok_or_else(|| {
+            agent_error(
+                AGENT_NOT_FOUND,
+                format!("Source agent \"{}\" does not exist", source_context.agent_id),
+                &source_context.agent_id,
+            )
+        })?;
+        if let Some(agent_id) = opts.as_ref().and_then(|opts| opts.agent_id.as_deref())
+            && self.get(agent_id).is_some()
+        {
+            return Err(agent_error(
+                AGENT_ALREADY_EXISTS,
+                format!("Agent \"{agent_id}\" already exists"),
+                agent_id,
+            ));
+        }
+        let source = source_managed.handle.clone();
+        let source_data = source.accessor().get::<IAgentProfileService>().data();
+        let source_binding = source
+            .accessor()
+            .get::<IAgentEnvironmentBindingService>()
+            .current();
+        let override_ = opts.as_ref().and_then(|opts| opts.binding.clone());
+        let labels = with_subagent_profile(
+            opts.as_ref().and_then(|opts| opts.labels.clone()),
+            override_
+                .as_ref()
+                .and_then(|binding| binding.profile.clone())
+                .or_else(|| source_data.profile_name.clone()),
+        );
+        let child_context = self
+            .create(Some(CreateAgentOptions {
+                agent_id: opts.as_ref().and_then(|opts| opts.agent_id.clone()),
+                binding: None,
+                environment_id: Some(source_binding.environment_id),
+                environment_cwd: source_binding.cwd,
+                forked_from: Some(source.id().to_string()),
+                labels,
+            }))
+            .await?;
+        let child = self.require_managed(&child_context)?.handle.clone();
+        let child_profile = child.accessor().get::<IAgentProfileService>();
+        if let Some(profile) = override_.as_ref().and_then(|binding| binding.profile.clone()) {
+            child_profile
+                .bind(crate::agent::profile::profile::BindAgentInput {
+                    profile,
+                    model: override_
+                        .as_ref()
+                        .and_then(|binding| binding.model.clone())
+                        .or(source_data.model_alias.clone()),
+                    thinking: override_
+                        .as_ref()
+                        .and_then(|binding| binding.thinking.clone())
+                        .or_else(|| Some(source_data.thinking_level.clone())),
+                    strict_thinking: None,
+                })
+                .await?;
+        } else {
+            child_profile.apply_binding_snapshot(source_data.clone());
+            if let Some(model) = override_.as_ref().and_then(|binding| binding.model.clone()) {
+                child_profile.set_model(model).await?;
+            }
+            if let Some(thinking) = override_.as_ref().and_then(|binding| binding.thinking.clone()) {
+                child_profile.set_thinking(thinking);
+            }
+        }
+        let source_messages = source.accessor().get::<IAgentContextMemoryService>().get();
+        if !source_messages.is_empty() {
+            child
+                .accessor()
+                .get::<IAgentContextMemoryService>()
+                .append(close_trailing_open_tool_exchange(source_messages));
+        }
+        Ok(child_context)
+    }
+
+    pub fn get(&self, agent_id: &str) -> Option<Arc<AgentContext>> {
+        self.roster.lock().get(agent_id).and_then(|managed| {
+            (!managed.closing.load(Ordering::Acquire) && managed.active.load(Ordering::Acquire))
+                .then(|| managed.context.clone())
+        })
+    }
+
+    pub fn list(&self, filter: Option<AgentListFilter>) -> Vec<Arc<AgentContext>> {
+        let prefix = filter.and_then(|filter| filter.prefix);
+        self.roster
+            .lock()
+            .values()
+            .filter(|managed| {
+                managed.active.load(Ordering::Acquire) && !managed.closing.load(Ordering::Acquire)
+            })
+            .map(|managed| managed.context.clone())
+            .filter(|context| {
+                prefix
+                    .as_deref()
+                    .is_none_or(|prefix| context.agent_id.starts_with(prefix))
+            })
+            .collect()
+    }
+
+    pub fn broadcast_permission_mode(&self, mode: PermissionMode) {
+        for managed in self.roster.lock().values() {
+            if managed.closing.load(Ordering::Acquire) || !managed.active.load(Ordering::Acquire) {
+                continue;
+            }
+            let handle = managed.handle.clone();
+            let profile = serde_json::from_value::<ProfileModelState>(
+                handle
+                    .accessor()
+                    .get(&I_AGENT_STATE_SERVICE)
+                    .get(&profile_replayable_key().state_key()),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            if has_pinned_permission_mode(profile.profile_name.as_deref()) {
+                continue;
+            }
+            handle
+                .accessor()
+                .get::<IAgentPermissionModeService>()
+                .set_mode(mode);
+        }
+    }
+
+    pub fn handle_of(&self, agent_id: &str) -> Option<Arc<IAgentScopeHandle>> {
+        self.roster.lock().get(agent_id).and_then(|managed| {
+            (!managed.closing.load(Ordering::Acquire) && managed.active.load(Ordering::Acquire))
+                .then(|| managed.handle.clone())
+        })
+    }
+
+    pub fn adopt(
+        self: &Arc<Self>,
+        handle: Arc<IAgentScopeHandle>,
+    ) -> Result<Arc<AgentContext>, WireAsyncError> {
+        let agent = agent_context_of(&handle);
+        let agent_id = agent.agent_id.clone();
+        if let Some(existing) = self.roster.lock().get(&agent_id) {
+            if !existing.closing.load(Ordering::Acquire)
+                && Arc::ptr_eq(&existing.context, &agent)
+            {
+                return Ok(existing.context.clone());
+            }
+            if !existing.closing.load(Ordering::Acquire) {
+                return Err(format!(
+                    "Agent \"{agent_id}\" is already managed by a different context"
+                )
+                .into());
+            }
+        }
+        let this = self.clone();
+        let scope_agent = agent.clone();
+        let scope_handle = handle.clone();
+        self.session_actor.send(SessionEvent::AgentCreate {
+            agent_id: Some(agent_id.clone()),
+            logic: create_agent_machine(Default::default()),
+            input: AgentInput {
+                request: MACHINE_LOOP_MODEL.clone(),
+                store: None,
+                session: Some(json!({
+                    "sessionId": self.ctx.session_id(),
+                    "workspaceId": self.ctx.workspace_id(),
+                })),
+                scope_factory: Arc::new(move |self_, signal| {
+                    this.adopt_agent_scope(
+                        scope_agent.clone(),
+                        scope_handle.clone(),
+                        self_,
+                        signal,
+                    )
+                }),
+            },
+        });
+        let snapshot = self.session_actor.get_snapshot();
+        if let Some(managed) = self.roster.lock().get(&agent_id)
+            && let Some(entry) = snapshot.context.agents.get(&agent_id)
+        {
+            *managed.ref_.lock() = Some(entry.ref_.clone());
+        }
+        Ok(agent)
+    }
+
+    fn adopt_agent_scope(
+        self: &Arc<Self>,
+        agent: Arc<AgentContext>,
+        handle: Arc<IAgentScopeHandle>,
+        self_: AgentMachineSelf,
+        signal: AbortSignal,
+    ) -> BoxFuture<'static, Result<ScopeFactoryOutput, WireAsyncError>> {
+        let this = self.clone();
+        Box::pin(async move {
+            let result = async {
+                this.roster_adopt(handle.clone())?;
+                let managed = this.roster.lock().get(&agent.agent_id).cloned();
+                let dispose_handle = handle.clone();
+                signal.add_event_listener(
+                    "abort",
+                    Arc::new(move || {
+                        let handle = dispose_handle.clone();
+                        tokio::spawn(async move {
+                            let _ = handle.dispose().await;
+                        });
+                    }),
+                    true,
+                );
+                let loop_ = handle.accessor().get::<IAgentLoopService>();
+                let bundle = loop_.build_attach_bundle();
+                loop_.attach_engine(self_ as MachineEngineAttachRef, bundle.clone());
+                if let Some(managed) = managed {
+                    *managed.bundle.lock() = Some(bundle.clone());
+                }
+                this.did_create.fire(agent.clone());
+                this.did_create_scope.fire(AgentScopeCreatedEvent {
+                    context: agent.clone(),
+                    handle: handle.clone(),
+                    meta: None,
+                });
+                attach_interaction_agent(
+                    &agent.agent_id,
+                    &this.ctx.session_id(),
+                    handle.accessor().get::<IEventDispatcher>(),
+                );
+                Ok(bundle)
+            }
+            .await;
+            match result {
+                Ok(bundle) => {
+                    let dispose = handle.clone();
+                    Ok(ScopeFactoryOutput {
+                        handle: Some(AgentScopeHandle::new(move || {
+                            let handle = dispose.clone();
+                            Box::pin(async move { handle.dispose().await }) as BoxFuture<'static, Result<(), WireAsyncError>>
+                        })),
+                        store: bundle.store.clone(),
+                        turn_logic: bundle.turn_logic.clone(),
+                        tool_logic: bundle.tool_logic.clone(),
+                        tools: bundle.tools.clone(),
+                        request: bundle.request.clone(),
+                        prompt_gate: bundle.prompt_gate.clone(),
+                    })
+                }
+                Err(error) => {
+                    if let Some(managed) = this.roster.lock().get(&agent.agent_id).cloned()
+                        && Arc::ptr_eq(&managed.context, &agent)
+                    {
+                        managed.closing.store(true, Ordering::Release);
+                        this.roster.lock().remove(&agent.agent_id);
+                        managed.kill_space();
+                    }
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    fn roster_adopt(
+        &self,
+        handle: Arc<IAgentScopeHandle>,
+    ) -> Result<Arc<AgentContext>, WireAsyncError> {
+        let agent = agent_context_of(&handle);
+        if let Some(existing) = self.roster.lock().get(&agent.agent_id) {
+            if !existing.closing.load(Ordering::Acquire)
+                && Arc::ptr_eq(&existing.context, &agent)
+            {
+                return Ok(existing.context.clone());
+            }
+            if !existing.closing.load(Ordering::Acquire) {
+                return Err(format!(
+                    "Agent \"{}\" is already managed by a different context",
+                    agent.agent_id
+                )
+                .into());
+            }
+        }
+        let managed = Arc::new(ManagedAgent::new(agent.clone(), handle));
+        managed.active.store(true, Ordering::Release);
+        self.roster.lock().insert(agent.agent_id.clone(), managed);
+        Ok(agent)
+    }
+
+    pub async fn remove(&self, agent: Arc<AgentContext>) -> Result<(), WireAsyncError> {
+        let managed = self.roster.lock().get(&agent.agent_id).cloned();
+        let Some(managed) = managed else {
+            return Ok(());
+        };
+        if !Arc::ptr_eq(&managed.context, &agent)
+            || managed.closing.swap(true, Ordering::AcqRel)
+        {
+            return Ok(());
+        }
+        self.remove_managed(agent, managed).await
+    }
+
+    async fn remove_managed(
+        &self,
+        agent: Arc<AgentContext>,
+        managed: Arc<ManagedAgent>,
+    ) -> Result<(), WireAsyncError> {
+        self.will_close.fire(agent.clone());
+        let handle = managed.handle.clone();
+        handle
+            .accessor()
+            .get::<IAgentTaskService>()
+            .suppress_all_terminal_notifications()
+            .await?;
+        let loop_ = handle.accessor().get::<IAgentLoopService>();
+        let compacting = handle.accessor().get::<IAgentFullCompactionService>().compacting();
+        let compaction_settled = async {
+            if let Some(compacting) = compacting.clone() {
+                let _ = compacting.promise.clone().await;
+            }
+        }
+        .boxed()
+        .shared();
+        let reason = abort_error("Agent removed");
+        if let Some(compacting) = compacting.as_ref()
+            && !compacting.abort_controller.signal().aborted()
+        {
+            compacting.abort_controller.abort(reason.clone());
+        }
+        let prompt_idle_deadline = tokio::time::Instant::now()
+            + Duration::from_millis(REMOVE_PROMPT_QUIESCE_TIMEOUT_MS);
+        let mut release_quiescence = None::<Box<dyn IDisposable>>;
+        loop {
+            let snapshot = loop_.snapshot();
+            for prompt_id in snapshot
+                .queue
+                .iter()
+                .filter_map(|item| item.meta.as_ref().and_then(|meta| meta.prompt_id.clone()))
+            {
+                loop_.cancel_prompt(&prompt_id, reason.clone());
+            }
+            loop_.cancel(reason.clone());
+            let remaining = prompt_idle_deadline.saturating_duration_since(tokio::time::Instant::now());
+            let settled = tokio::time::timeout(remaining, async {
+                let _ = tokio::join!(loop_.settled(), compaction_settled.clone());
+            })
+            .await
+            .is_ok();
+            if !settled {
+                break;
+            }
+            let idle = loop_
+                .try_snapshot()
+                .map(|snapshot| snapshot.state == "idle" && snapshot.queue.is_empty())
+                .unwrap_or(true);
+            if idle {
+                match loop_.try_acquire_quiescence() {
+                    Ok(Some(guard)) => {
+                        release_quiescence = Some(guard);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
+                }
+            }
+            if tokio::time::Instant::now() >= prompt_idle_deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(REMOVE_PROMPT_QUIESCE_POLL_MS)).await;
+        }
+        let stop_error = handle
+            .accessor()
+            .get::<IAgentTaskService>()
+            .stop_all_on_exit("Session closed")
+            .await
+            .err();
+        let cleanup = async {
+            if let Err(error) = handle.accessor().get::<IEventDispatcher>().flush().await {
+                on_unexpected_error(error);
+            }
+            managed.kill_space();
+            if managed.ref_.lock().is_some() {
+                self.session_actor.send(SessionEvent::AgentStop {
+                    agent_id: agent.agent_id.clone(),
+                });
+                let ref_ = managed.ref_.lock().clone().unwrap();
+                wait_for(&ref_, |snapshot| snapshot.status == "done").await?;
+            } else {
+                managed.handle.dispose().await?;
+            }
+            Ok::<(), WireAsyncError>(())
+        }
+        .await;
+        drop(release_quiescence);
+        cleanup?;
+        if self
+            .roster
+            .lock()
+            .get(&agent.agent_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &managed))
+        {
+            self.roster.lock().remove(&agent.agent_id);
+        }
+        self.did_close.fire(agent);
+        if let Some(error) = stop_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn managed_for(&self, agent: &Arc<AgentContext>) -> Option<Arc<ManagedAgent>> {
+        self.roster.lock().get(&agent.agent_id).and_then(|managed| {
+            (Arc::ptr_eq(&managed.context, agent) && !managed.closing.load(Ordering::Acquire))
+                .then(|| managed.clone())
+        })
+    }
+
+    fn require_managed(
+        &self,
+        agent: &Arc<AgentContext>,
+    ) -> Result<Arc<ManagedAgent>, WireAsyncError> {
+        self.managed_for(agent).ok_or_else(|| {
+            format!(
+                "Agent {}:{} is not a lifecycle-issued context",
+                agent.agent_id, agent.generation
+            )
+            .into()
+        })
+    }
+}
+
+impl Drop for AgentLifecycleService {
+    fn drop(&mut self) {
+        self.session_actor.stop();
+        interactions().purge_session(&self.ctx.session_id());
+    }
+}
+
+#[async_trait]
+impl IAgentLifecycleService for AgentLifecycleService {
+    fn on_did_create(
+        &self,
+        listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
+    ) -> Box<dyn IDisposable> {
+        self.did_create.subscribe_in(listener)
+    }
+
+    fn on_did_create_scope(
+        &self,
+        listener: Arc<dyn Fn(AgentScopeCreatedEvent) + Send + Sync>,
+    ) -> Box<dyn IDisposable> {
+        self.did_create_scope.subscribe_in(listener)
+    }
+
+    fn on_will_close(
+        &self,
+        listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
+    ) -> Box<dyn IDisposable> {
+        self.will_close.subscribe_in(listener)
+    }
+
+    fn on_did_close(
+        &self,
+        listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
+    ) -> Box<dyn IDisposable> {
+        self.did_close.subscribe_in(listener)
+    }
+
+    async fn create(
+        self: &Arc<Self>,
+        opts: Option<CreateAgentOptions>,
+    ) -> Result<Arc<AgentContext>, WireAsyncError> {
+        AgentLifecycleService::create(self, opts).await
+    }
+
+    async fn fork(
+        self: &Arc<Self>,
+        source: Arc<AgentContext>,
+        opts: Option<ForkAgentOptions>,
+    ) -> Result<Arc<AgentContext>, WireAsyncError> {
+        AgentLifecycleService::fork(self, source, opts).await
+    }
+
+    fn get(&self, agent_id: &str) -> Option<Arc<AgentContext>> {
+        AgentLifecycleService::get(self, agent_id)
+    }
+
+    fn list(&self, filter: Option<AgentListFilter>) -> Vec<Arc<AgentContext>> {
+        AgentLifecycleService::list(self, filter)
+    }
+
+    fn broadcast_permission_mode(&self, mode: PermissionMode) {
+        AgentLifecycleService::broadcast_permission_mode(self, mode)
+    }
+
+    async fn remove(&self, agent: Arc<AgentContext>) -> Result<(), WireAsyncError> {
+        AgentLifecycleService::remove(self, agent).await
+    }
+
+    fn handle_of(&self, agent_id: &str) -> Option<Arc<IAgentScopeHandle>> {
+        AgentLifecycleService::handle_of(self, agent_id)
+    }
+
+    fn adopt(
+        self: &Arc<Self>,
+        handle: Arc<IAgentScopeHandle>,
+    ) -> Result<Arc<AgentContext>, WireAsyncError> {
+        AgentLifecycleService::adopt(self, handle)
+    }
+}
+
+fn environment_binding_seed(
+    service: &AgentLifecycleService,
+    opts: &CreateAgentOptions,
+) -> crate::agent::environment_binding::environment_binding::AgentEnvironmentBindingSeed {
+    if opts.environment_id.is_some() {
+        crate::agent::environment_binding::environment_binding::AgentEnvironmentBindingSeed {
+            environment_id: opts.environment_id.clone(),
+            cwd: opts.environment_cwd.clone(),
+        }
+    } else {
+        crate::agent::environment_binding::environment_binding::AgentEnvironmentBindingSeed {
+            environment_id: Some(service.workdir.environment_id()),
+            cwd: Some(service.workdir.cwd()),
+        }
+    }
+}
+
+fn agent_error(code: &'static str, message: String, agent_id: &str) -> WireAsyncError {
+    let mut details = Map::new();
+    details.insert("agentId".to_string(), Value::String(agent_id.to_string()));
+    Box::new(Error2::with_options(
+        code,
+        message,
+        Error2Options {
+            details: Some(details),
+            ..Default::default()
+        },
+    ))
+}
+
+fn error_name(error: &WireAsyncError) -> String {
+    error
+        .downcast_ref::<Error2>()
+        .map(|error| error.name().to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+pub fn register_agent_lifecycle_service() {
+    register_scoped_service(
+        AppLifecycleScope::Session,
+        ScopeActivation::OnScopeCreated,
+        "agentLifecycle",
+    );
+}

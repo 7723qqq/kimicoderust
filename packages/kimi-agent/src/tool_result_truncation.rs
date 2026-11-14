@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use crate::_base::text::code_points::{code_point_boundary_start, slice_on_code_point_boundary};
 use crate::turn_loop::types::ToolResultSpill;
 
-const DEFAULT_TOOL_RESULT_MAX_CHARS: usize = 50_000;
-const DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS: usize = 10_000_000;
+use crate::tool::tool_contract::{
+    DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS,
+};
 const TOOL_RESULT_PREVIEW_HEAD_CHARS: usize = 4_096;
 const TOOL_RESULT_PREVIEW_TAIL_CHARS: usize = 1_024;
 const TOOL_RESULT_MAX_LINE_CHARS: usize = 2_000;
@@ -29,6 +30,8 @@ pub struct TruncationRequest<'a> {
     pub content: &'a str,
     pub is_error: bool,
     pub note: Option<&'a str>,
+    pub spill_exempt: bool,
+    pub has_media: bool,
 
     pub spill: Option<&'a ToolResultSpill>,
 }
@@ -120,6 +123,12 @@ impl ToolResultTruncator {
         Self::new(agent_spill_dir(workspace_root, session_id, agent_id, home))
     }
 
+    pub fn is_spill_file_path(&self, path: &str) -> bool {
+        let requested = lexical_normalize(Path::new(path));
+        let spill = lexical_normalize(&self.spill_dir());
+        requested.starts_with(&spill)
+    }
+
     pub fn is_spill_read(&self, tool_name: &str, args: &serde_json::Value) -> bool {
         if !tool_name.eq_ignore_ascii_case("read") {
             return false;
@@ -127,30 +136,15 @@ impl ToolResultTruncator {
         let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
             return false;
         };
-        let requested = lexical_normalize(Path::new(path));
-        let spill = lexical_normalize(&self.spill_dir());
-        requested.starts_with(&spill)
+        self.is_spill_file_path(path)
     }
 
-    pub fn truncate_call(
-        &self,
-        args: &serde_json::Value,
-        req: TruncationRequest<'_>,
-    ) -> FinalizedToolResult {
-        if self.is_spill_read(req.tool_name, args) {
-            return FinalizedToolResult {
-                content: req.content.to_string(),
-                is_error: req.is_error,
-                note: req.note.map(String::from),
-                spill_path: None,
-                truncated: false,
-            };
-        }
+    pub fn truncate_call(&self, req: TruncationRequest<'_>) -> FinalizedToolResult {
         self.truncate(req)
     }
 
     pub fn truncate(&self, req: TruncationRequest<'_>) -> FinalizedToolResult {
-        if req.content.is_empty() {
+        if req.spill_exempt || req.content.is_empty() {
             return FinalizedToolResult {
                 content: req.content.to_string(),
                 is_error: req.is_error,
@@ -171,15 +165,8 @@ impl ToolResultTruncator {
             };
         }
 
-        let retained: String = if req.content.len() <= DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS {
-            req.content.to_string()
-        } else {
-            req.content
-                .char_indices()
-                .nth(DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS)
-                .map(|(idx, _)| req.content[..idx].to_string())
-                .unwrap_or_else(|| req.content.to_string())
-        };
+        let retained =
+            slice_on_code_point_boundary(req.content, DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS);
         let total_chars = req
             .spill
             .and_then(|spill| spill.total_chars)
@@ -210,7 +197,7 @@ impl ToolResultTruncator {
                     *preserved,
                     total_chars,
                     &inline_suffix,
-                    false,
+                    req.has_media,
                 );
                 append_to_output(&shaped, &pointer)
             }
@@ -222,7 +209,7 @@ impl ToolResultTruncator {
                 *preserved,
                 total_chars,
                 suffix,
-                false,
+                req.has_media,
             ),
             None => render_unpersisted_pointer(
                 req.tool_name,
@@ -249,10 +236,11 @@ impl ToolResultTruncator {
             return None;
         }
         let stem = safe_stem(tool_name, tool_call_id);
-        let suffix = short_uuid();
+        let suffix = uuid_v4();
         let filename = format!("{stem}-{suffix}.txt");
         let path = dir.join(&filename);
-        let mut f = match fs::File::create(&path) {
+        let temp = dir.join(format!(".{filename}.tmp"));
+        let mut f = match fs::File::create(&temp) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("[kimi-agent] spill file create failed: {e}");
@@ -261,10 +249,17 @@ impl ToolResultTruncator {
         };
         if let Err(e) = f.write_all(text.as_bytes()) {
             eprintln!("[kimi-agent] spill file write failed: {e}");
+            let _ = fs::remove_file(&temp);
             return None;
         }
         if let Err(e) = f.sync_all() {
             eprintln!("[kimi-agent] spill file sync failed: {e}");
+        }
+        drop(f);
+        if let Err(e) = fs::rename(&temp, &path) {
+            eprintln!("[kimi-agent] spill file rename failed: {e}");
+            let _ = fs::remove_file(&temp);
+            return None;
         }
         Some(path.to_string_lossy().into_owned())
     }
@@ -304,7 +299,7 @@ fn agent_spill_dir(
         .join("tool-results")
 }
 
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     let mut normal_components = 0usize;
     for component in path.components() {
@@ -333,27 +328,42 @@ fn shape_per_line(text: &str, max_chars: usize) -> String {
     let mut out = String::with_capacity(text.len());
     let mut start = 0usize;
     let bytes = text.as_bytes();
-    for (idx, b) in bytes.iter().enumerate() {
-        if *b == b'\n' {
-            let line = &text[start..=idx];
-            shape_line_into(&mut out, line, max_chars);
-            start = idx + 1;
-        }
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let end = match bytes[index] {
+            b'\r' => {
+                index += 1;
+                if bytes.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+                index
+            }
+            b'\n' => {
+                index += 1;
+                index
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        shape_line_into(&mut out, &text[start..end], max_chars);
+        start = end;
     }
     if start < bytes.len() {
-        let line = &text[start..];
-        shape_line_into(&mut out, line, max_chars);
+        shape_line_into(&mut out, &text[start..], max_chars);
     }
     out
 }
 
 fn shape_line_into(out: &mut String, line: &str, max_chars: usize) {
     if utf16_len(line) > max_chars {
-        let line_break = if line.ends_with('\n') { "\n" } else { "" };
+        let body_len = line.trim_end_matches(['\r', '\n']).len();
+        let (body, line_break) = line.split_at(body_len);
         let suffix = format!("{TRUNCATION_MARKER}{line_break}");
         let effective_max = max_chars.max(utf16_len(&suffix));
         let keep = effective_max.saturating_sub(utf16_len(&suffix));
-        out.push_str(&slice_on_code_point_boundary(line, keep));
+        out.push_str(&slice_on_code_point_boundary(body, keep));
         out.push_str(&suffix);
     } else {
         out.push_str(line);
@@ -375,23 +385,23 @@ fn render_appended_spill_pointer(
     suffix: &str,
     has_media: bool,
 ) -> String {
-    let first_line = if total_chars > preserved_chars {
-        format!(
-            "[Per-line truncation occurred; only the first {preserved_chars} characters (of {total_chars}) were saved to a file."
-        )
-    } else if has_media {
-        "[Per-line truncation occurred; the complete text output was saved to a file (media parts stay attached to this result)."
-            .to_string()
-    } else {
-        "[Per-line truncation occurred; the complete output was saved to a file.".to_string()
-    };
-    let pointer = format!(
-        "{first_line}\noutput_path: {output_path}\nnext_step: Use Read with output_path to page through the saved output, or Grep to search it.]"
+    let pointer = crate::tool::output_pointer::render_appended_pointer(
+        &crate::tool::output_pointer::AppendedPointerInput {
+            path: output_path,
+            total_size: total_chars,
+            unit: crate::tool::output_pointer::OutputUnit::Chars,
+            preserved: Some(preserved_chars),
+            has_media,
+        },
     );
     if suffix.is_empty() {
         pointer
     } else {
-        format!("{pointer}\n\n{suffix}")
+        format!(
+            "{pointer}
+
+{suffix}"
+        )
     }
 }
 
@@ -405,47 +415,31 @@ fn render_persisted_pointer(
     suffix: &str,
     has_media: bool,
 ) -> String {
-    let partial = preserved_chars < total_chars;
-    let first_line = if partial {
-        format!(
-            "Tool output exceeded {DEFAULT_TOOL_RESULT_MAX_CHARS} characters; the first {preserved_chars} characters (of {total_chars}) were saved to a file."
-        )
-    } else if has_media {
-        format!(
-            "Tool output exceeded {DEFAULT_TOOL_RESULT_MAX_CHARS} characters; the full text output was saved to a file (media parts stay attached to this result)."
-        )
-    } else {
-        format!(
-            "Tool output exceeded {DEFAULT_TOOL_RESULT_MAX_CHARS} characters; the full output was saved to a file."
-        )
-    };
-    let size_line = if partial {
-        format!(
-            "output_size_chars: {total_chars} (only the first {preserved_chars} characters were preserved)"
-        )
-    } else {
-        format!("output_size_chars: {total_chars}")
-    };
-    let mut lines = vec![
-        first_line,
-        format!("tool_name: {tool_name}"),
-        format!("tool_call_id: {tool_call_id}"),
-        size_line,
-    ];
-    if preserved_chars == utf16_len(preview_text) {
-        lines.push(format!("output_size_bytes: {}", preview_text.len()));
-    }
-    lines.push(format!("output_path: {output_path}"));
-    lines.push(
-        "next_step: Use Read with output_path to page through the saved output, or Grep to search it."
-            .to_string(),
-    );
+    let mut lines: Vec<String> = crate::tool::output_pointer::render_replaced_pointer(
+        &crate::tool::output_pointer::ReplacedPointerInput {
+            path: output_path,
+            total_size: total_chars,
+            preserved: preserved_chars,
+            max_size: DEFAULT_TOOL_RESULT_MAX_CHARS,
+            tool_name,
+            tool_call_id,
+            unit: crate::tool::output_pointer::OutputUnit::Chars,
+            byte_size: (preserved_chars == utf16_len(preview_text)).then(|| preview_text.len()),
+            has_media,
+        },
+    )
+    .lines()
+    .map(str::to_string)
+    .collect();
     append_preview_lines(&mut lines, preview_text);
     if !suffix.is_empty() {
         lines.push(String::new());
         lines.push(suffix.to_string());
     }
-    lines.join("\n")
+    lines.join(
+        "
+",
+    )
 }
 
 fn render_unpersisted_pointer(
@@ -455,20 +449,27 @@ fn render_unpersisted_pointer(
     total_chars: usize,
     suffix: &str,
 ) -> String {
-    let mut lines = vec![
-        format!(
-            "Tool output exceeded {DEFAULT_TOOL_RESULT_MAX_CHARS} characters and could not be saved to a file; only this preview is available."
-        ),
-        format!("tool_name: {tool_name}"),
-        format!("tool_call_id: {tool_call_id}"),
-        format!("output_size_chars: {total_chars}"),
-    ];
+    let mut lines: Vec<String> = crate::tool::output_pointer::render_unpersisted_pointer(
+        &crate::tool::output_pointer::UnpersistedPointerInput {
+            total_size: total_chars,
+            unit: crate::tool::output_pointer::OutputUnit::Chars,
+            max_size: DEFAULT_TOOL_RESULT_MAX_CHARS,
+            tool_name,
+            tool_call_id,
+        },
+    )
+    .lines()
+    .map(str::to_string)
+    .collect();
     append_preview_lines(&mut lines, preview_text);
     if !suffix.is_empty() {
         lines.push(String::new());
         lines.push(suffix.to_string());
     }
-    lines.join("\n")
+    lines.join(
+        "
+",
+    )
 }
 
 fn drop_inline_suffix_lines(suffix: &str, shaped_text: &str) -> String {
@@ -528,16 +529,17 @@ fn utf16_index_to_byte(text: &str, index: usize) -> usize {
 }
 
 fn safe_stem(tool_name: &str, tool_call_id: &str) -> String {
-    let raw: String = format!("{tool_name}-{tool_call_id}")
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let mut raw = String::new();
+    let mut in_run = false;
+    for c in format!("{tool_name}-{tool_call_id}").chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            raw.push(c);
+            in_run = false;
+        } else if !in_run {
+            raw.push('_');
+            in_run = true;
+        }
+    }
     let trimmed = slice_on_code_point_boundary(raw.trim_matches('_'), 80);
     if trimmed.is_empty() {
         "tool-result".to_string()
@@ -546,14 +548,22 @@ fn safe_stem(tool_name: &str, tool_call_id: &str) -> String {
     }
 }
 
-fn short_uuid() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id();
-    format!("{nanos:x}-{pid:x}")
+fn uuid_v4() -> String {
+    let mut bytes = [0u8; 16];
+    for byte in &mut bytes {
+        *byte = fastrand::u8(..);
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 #[cfg(test)]
@@ -661,6 +671,8 @@ mod tests {
             content: "hello world",
             is_error: false,
             note: None,
+            spill_exempt: false,
+            has_media: false,
             spill: None,
         });
         assert_eq!(r.content, "hello world");
@@ -678,6 +690,8 @@ mod tests {
             content: &long,
             is_error: true,
             note: Some("boom"),
+            spill_exempt: false,
+            has_media: false,
             spill: None,
         });
 
@@ -698,6 +712,8 @@ mod tests {
             content: &long,
             is_error: false,
             note: None,
+            spill_exempt: false,
+            has_media: false,
             spill: None,
         });
         assert!(r.truncated);
@@ -729,6 +745,8 @@ mod tests {
             content: &content,
             is_error: false,
             note: None,
+            spill_exempt: false,
+            has_media: false,
             spill: None,
         });
         assert!(r.truncated);
@@ -759,6 +777,8 @@ mod tests {
             content: &content,
             is_error: false,
             note: None,
+            spill_exempt: false,
+            has_media: false,
             spill: None,
         });
         assert!(r.truncated);
@@ -768,7 +788,7 @@ mod tests {
 
     #[test]
     fn spill_failure_falls_back_to_unpersisted_pointer() {
-        let blocker = env::temp_dir().join(format!("kimi-block-{}", short_uuid()));
+        let blocker = env::temp_dir().join(format!("kimi-block-{}", uuid_v4()));
         fs::write(&blocker, b"i am a file").unwrap();
         let bad = blocker.join("subdir").join("file.txt");
         let t = ToolResultTruncator::new(bad);
@@ -779,6 +799,8 @@ mod tests {
             content: &long,
             is_error: false,
             note: None,
+            spill_exempt: false,
+            has_media: false,
             spill: None,
         });
         assert!(r.spill_path.is_none());
@@ -806,6 +828,8 @@ mod tests {
             content: &long,
             is_error: true,
             note: None,
+            spill_exempt: false,
+            has_media: false,
             spill: Some(&spill),
         });
         assert!(r.truncated);
@@ -837,6 +861,8 @@ mod tests {
             content: &long,
             is_error: false,
             note: None,
+            spill_exempt: false,
+            has_media: false,
             spill: Some(&spill),
         });
         assert!(r.truncated);
@@ -871,6 +897,8 @@ mod tests {
             content: &content,
             is_error: false,
             note: None,
+            spill_exempt: false,
+            has_media: false,
             spill: Some(&spill),
         });
         assert!(r.content.contains("output_size_chars: 100000"));
@@ -883,7 +911,7 @@ mod tests {
 }
 
 #[test]
-fn reading_back_a_spilled_file_is_not_truncated_again() {
+fn spill_exempt_reads_are_never_truncated() {
     let dir = tempfile::tempdir().unwrap();
     let spill_dir = dir.path().join(".kimi").join("spill");
     std::fs::create_dir_all(&spill_dir).unwrap();
@@ -895,38 +923,71 @@ fn reading_back_a_spilled_file_is_not_truncated_again() {
     let args = serde_json::json!({ "path": spilled.to_string_lossy() });
     assert!(truncator.is_spill_read("Read", &args));
 
-    let result = truncator.truncate_call(
-        &args,
-        TruncationRequest {
-            tool_name: "Read",
-            tool_call_id: "toolu_2",
-            content: &body,
-            is_error: false,
-            note: None,
-            spill: None,
-        },
-    );
+    let outside = dir.path().join("ordinary.txt");
+    let outside_args = serde_json::json!({ "path": outside.to_string_lossy() });
+    assert!(!truncator.is_spill_read("Read", &outside_args));
+
+    let result = truncator.truncate_call(TruncationRequest {
+        tool_name: "Read",
+        tool_call_id: "toolu_2",
+        content: &body,
+        is_error: false,
+        note: None,
+        spill_exempt: true,
+        has_media: false,
+        spill: None,
+    });
     assert_eq!(result.content, body);
     assert!(!result.truncated);
     assert!(result.spill_path.is_none());
+}
 
-    let outside = dir.path().join("ordinary.txt");
-    std::fs::write(&outside, &body).unwrap();
-    let args = serde_json::json!({ "path": outside.to_string_lossy() });
-    assert!(!truncator.is_spill_read("Read", &args));
-    let result = truncator.truncate_call(
-        &args,
-        TruncationRequest {
-            tool_name: "Read",
-            tool_call_id: "toolu_3",
-            content: &body,
-            is_error: false,
-            note: None,
-            spill: None,
-        },
+#[test]
+fn a_media_tool_result_reports_that_media_stays_attached() {
+    let t = ToolResultTruncator::new(std::env::temp_dir().join("kimi-agent-truncation-media-test"));
+    let mut content = String::with_capacity(70_000);
+    for _ in 0..30 {
+        content.push_str(&"b".repeat(2_000));
+        content.push('\n');
+    }
+    let r = t.truncate(TruncationRequest {
+        tool_name: "Read",
+        tool_call_id: "c-media",
+        content: &content,
+        is_error: false,
+        note: None,
+        spill_exempt: false,
+        has_media: true,
+        spill: None,
+    });
+    assert!(r.truncated);
+    assert!(
+        r.content
+            .contains("media parts stay attached to this result"),
+        "{}",
+        r.content
     );
-    assert!(result.truncated);
-    assert!(result.spill_path.is_some());
+}
+
+#[test]
+fn carriage_return_lines_keep_their_break_when_shaped() {
+    let mut content = String::with_capacity(60_000);
+    content.push_str(&"a".repeat(3_000));
+    content.push('\r');
+    content.push_str(&"b".repeat(3_000));
+    content.push_str("\r\n");
+    content.push_str(&"c".repeat(60_000));
+    let shaped = shape_per_line(&content, 2_000);
+    assert!(shaped.contains(&format!("{TRUNCATION_MARKER}\r")));
+    assert!(shaped.contains(&format!("{TRUNCATION_MARKER}\r\n")));
+    assert!(shaped.ends_with(TRUNCATION_MARKER));
+}
+
+#[test]
+fn spill_file_stems_collapse_invalid_runs_like_v2() {
+    assert_eq!(safe_stem("A  B", "c"), "A_B-c");
+    assert_eq!(safe_stem("A//B", "c"), "A_B-c");
+    assert_eq!(safe_stem("___", ""), "-");
 }
 
 #[test]

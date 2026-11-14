@@ -342,13 +342,25 @@ pub fn find_inactive_tool_patterns(
     issues
 }
 
-fn subagent_defs(
-    pool: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
-) -> Vec<ToolInfo> {
-    vec![
-        crate::tools::agent_tool::agent_tool_def(pool),
-        crate::tools::swarm_tool::agent_swarm_tool_def(pool),
-    ]
+pub fn describe_inactive_tool_pattern(
+    context: &str,
+    field: &str,
+    issue: &InactiveToolPattern,
+) -> String {
+    match issue.kind {
+        InactiveToolPatternKind::UnknownTool => format!(
+            "Tool pattern \"{}\" in {context} {field} does not match any registered or built-in tool; it will never activate anything.",
+            issue.pattern
+        ),
+        InactiveToolPatternKind::WildcardNotMcp => format!(
+            "Tool pattern \"{}\" in {context} {field} uses wildcards, which only match MCP tools (names starting with \"mcp__\"); it will never activate anything.",
+            issue.pattern
+        ),
+        InactiveToolPatternKind::IncompleteMcpName => format!(
+            "Tool pattern \"{}\" in {context} {field} matches no tool; use \"{}__*\" to match the whole MCP server.",
+            issue.pattern, issue.pattern
+        ),
+    }
 }
 
 pub fn native_tool_defs(
@@ -373,51 +385,37 @@ pub fn native_tool_defs_with_notify(
     filter: Option<&ToolsFilter>,
     secondary_model: Option<&crate::subagent::secondary::SecondaryModelRuntime>,
 ) -> Vec<ToolInfo> {
-    let mut defs = crate::tools::core_tool_defs::core_tool_defs();
-    defs.extend(subagent_defs(secondary_model));
-    defs.push(crate::tools::todo_list::todo_list_tool_def());
-    defs.push(crate::tools::ask_user_question::ask_user_question_tool_def());
-    defs.push(crate::tools::exit_plan_mode::exit_plan_mode_tool_def());
-    defs.push(crate::tools::spec_mode::enter_spec_mode_tool_def());
-    defs.push(crate::tools::spec_mode::exit_spec_mode_tool_def());
-    defs.push(crate::tools::get_goal::get_goal_tool_def());
-    defs.push(crate::tools::create_goal::create_goal_tool_def());
-    defs.push(crate::tools::goal_tools::update_goal_tool_def());
-    defs.push(crate::tools::goal_tools::set_goal_budget_tool_def());
-    defs.push(crate::tools::cron_tools::cron_list_tool_def());
-    defs.push(crate::tools::cron_tools::cron_create_tool_def());
-    defs.push(crate::tools::cron_tools::cron_delete_tool_def());
-    defs.push(crate::tools::task_tools::task_list_tool_def());
-    defs.push(crate::tools::task_tools::task_output_tool_def());
-    defs.push(crate::tools::task_tools::task_stop_tool_def());
-    if crate::tools::task_tools::wait_for_enabled() {
-        defs.push(crate::tools::task_tools::wait_for_tool_def());
-    }
-    defs.push(crate::tools::skill::skill_tool_def());
-    defs.push(crate::tools::knowledge_tool::knowledge_tool_def());
+    use crate::agent::tool_activation::tool_activation_service::AgentToolActivationService;
+    use crate::agent::tool_registry::builtin_tool_assembly::BuiltinToolAssembly;
+    use crate::tools::builtin_assembly::{
+        BuiltinToolContext, EngineEnvironment, FilterActivationSource, builtin_tool_contributions,
+    };
 
-    if crate::tools::memory_action::memory_tool_enabled() {
-        defs.push(crate::tools::core_tool_defs::memory_tool_def());
-    }
-    defs.push(crate::tools::workflow::workflow_tool_def());
-    defs.push(crate::tools::run_code::run_code_tool_def());
-
-    defs.push(crate::tools::core_tool_defs::session_query_tool_def());
-    if github_available {
-        defs.extend(crate::tools::github::github_tool_defs());
-    }
-    if notify_user_enabled {
-        defs.push(crate::tools::core_tool_defs::notify_user_tool_def());
-    }
-    if tower_enabled {
-        defs.extend(crate::tools::tower::tower_tool_defs_with_models(
+    let assembly =
+        BuiltinToolAssembly::from_records(builtin_tool_contributions(&BuiltinToolContext {
+            github_available,
+            tower_enabled,
+            notify_user_enabled,
             secondary_model,
-        ));
-    }
-    match filter {
-        Some(filter) => filter.apply(defs),
-        None => defs,
-    }
+            filter,
+        }));
+    let service = AgentToolActivationService::new(
+        std::sync::Arc::new(FilterActivationSource::new(filter)),
+        std::sync::Arc::new(EngineEnvironment),
+    );
+    service.activate_records(assembly.contributions());
+    let registry = service.registry();
+    assembly
+        .contributions()
+        .iter()
+        .filter_map(|record| {
+            registry.resolve(&record.options.name).map(|tool| ToolInfo {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -736,6 +734,37 @@ mod tests {
             .map(str::to_string)
             .collect();
         assert_eq!(literal_tool_names(&patterns), vec!["Read".to_string()]);
+    }
+
+    #[test]
+    fn inactive_tool_pattern_messages_match_v2() {
+        let cases = [
+            (
+                InactiveToolPattern {
+                    pattern: "Ghost".into(),
+                    kind: InactiveToolPatternKind::UnknownTool,
+                },
+                "does not match any registered or built-in tool",
+            ),
+            (
+                InactiveToolPattern {
+                    pattern: "mcp__srv".into(),
+                    kind: InactiveToolPatternKind::IncompleteMcpName,
+                },
+                "use \"mcp__srv__*\" to match the whole MCP server",
+            ),
+            (
+                InactiveToolPattern {
+                    pattern: "Read*".into(),
+                    kind: InactiveToolPatternKind::WildcardNotMcp,
+                },
+                "only match MCP tools",
+            ),
+        ];
+        for (issue, needle) in cases {
+            let message = describe_inactive_tool_pattern("profile \"x\"", "tools", &issue);
+            assert!(message.contains(needle), "{message}");
+        }
     }
 
     #[test]

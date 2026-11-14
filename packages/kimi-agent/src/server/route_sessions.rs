@@ -1,8 +1,6 @@
 use super::catalog_routes::format_wire_session;
 use super::*;
 
-/// v2 `SESSION_NOT_FOUND` (`session/errors.ts`), which kap-server maps to
-/// HTTP 404 / wire code 40401.
 fn session_not_found(session_id: &str) -> HttpResponse {
     HttpResponse::json(
         404,
@@ -28,8 +26,6 @@ impl HttpServer {
                 }
                 let prompt = crate::prompt::DEFAULT_INIT_PROMPT;
                 let Some(engine) = self.engine.as_ref() else {
-                    // No engine attached: still hand back the analyzed prompt so
-                    // a caller can run it elsewhere.
                     return HttpResponse::ok(&json!({
                         "status": "initiated",
                         "sessionId": session_id,
@@ -39,18 +35,6 @@ impl HttpServer {
                 let history = match self.store.load_session_history(session_id) {
                     Ok(messages) => messages,
                     Err(error) => {
-                        // v2 `session_load_failed`: a session whose stored
-                        // history cannot be read is the failure a user hits as
-                        // "my conversation is gone", and until now it left no
-                        // event behind — only a 500 in the access log. Both
-                        // sites here are the same failure mode: a turn cannot
-                        // start, so the user sees the same nothing.
-                        //
-                        // v2's `SessionLoadFailedEvent` declares exactly one
-                        // property, `reason`. `session_id` and `stage` were this
-                        // engine's own invention: a consumer written against v2
-                        // would not look for them, and a strict one would reject
-                        // them.
                         self.emit_session_telemetry(
                             "session_load_failed",
                             serde_json::json!({
@@ -118,11 +102,7 @@ impl HttpServer {
                     .load_session_history(session_id)
                     .unwrap_or_default();
                 let context_tokens: usize = history.iter().map(|m| m.content.len() / 4).sum();
-                // Read the session's own profile. `permission` / `thinking_level`
-                // used to be string literals ("auto" / "medium"), so a client that
-                // read the REST status once saw the defaults no matter what the
-                // user had configured — and disagreed with the same engine's
-                // `agent.status.updated` event, which reads `agent_config`.
+
                 let agent_config = self
                     .store
                     .get_state("agent_config", session_id)
@@ -141,9 +121,7 @@ impl HttpServer {
                     .map(str::to_string)
                     .or_else(|| self.engine.as_ref().map(|e| e.model_name().to_string()))
                     .unwrap_or_else(|| "kimi-latest".to_string());
-                // Same two homes as `ServerEngine::status_payload`: the profile
-                // route writes `agent_config`, the engine's per-turn resolution
-                // reads `metadata`.
+
                 let permission = agent_config
                     .get("permission_mode")
                     .and_then(|v| v.as_str())
@@ -167,9 +145,7 @@ impl HttpServer {
                 } else {
                     context_tokens as f64 / max_context_tokens as f64
                 };
-                // Swarm / tower ride the session profile (`agent_config`), which
-                // the profile route writes; tower additionally follows the
-                // engine-wide experimental gate.
+
                 let swarm_mode = agent_config
                     .get("swarm_mode")
                     .and_then(|v| v.as_bool())
@@ -179,10 +155,10 @@ impl HttpServer {
                     None,
                 );
                 HttpResponse::ok(&json!({
-                    // v2 `sessionStatusResponseSchema`
-                    // (agent-core-v2/src/app/sessionLegacy/sessionProtocol.ts:74):
-                    // exactly these keys, answered bare. `sessionId` /
-                    // `total_turns` / `created_at` were fork additions.
+
+
+
+
                     "busy": busy,
                     "model": active_model,
                     "thinking_level": thinking_level,
@@ -235,12 +211,7 @@ impl HttpServer {
 
                 let subagent_manager = self.subagent_manager();
                 let subagent_list = subagent_manager.list().await;
-                // The swarm identity a reconnecting client needs to rebuild the
-                // members under their `AgentSwarm` call instead of drawing each
-                // one as an ordinary subagent (v2 `role: 'member'`;
-                // `snapshotSubagentSchema`). `swarm_index` is absent for a plain
-                // `Agent` child, which is exactly the discriminator, so both
-                // keys are omitted rather than nulled when there is no swarm.
+
                 let mut identities: std::collections::HashMap<
                     String,
                     crate::subagent::manager::SubagentParent,
@@ -321,9 +292,7 @@ impl HttpServer {
                     .and_then(|value| value.parse::<u64>().ok())
                     .unwrap_or(0);
                 let latest_seq = self.store.latest_wire_event_seq(session_id).unwrap_or(0);
-                // `complete` mirrors the transcript contract: the persisted
-                // journal covers the cursor only once it holds events; an empty
-                // journal signals the caller to do a full refresh instead.
+
                 let complete = latest_seq > 0 && since_seq <= latest_seq;
                 let batches: Vec<Value> = if latest_seq > since_seq {
                     let history = self
@@ -353,9 +322,7 @@ impl HttpServer {
                         ),
                         "meta": {},
                     });
-                    // A single idempotent `reset` op rebuilds the client from the
-                    // authoritative snapshot —correct for any lag, at the cost
-                    // of not being a minimal delta.
+
                     vec![json!({
                         "seq": latest_seq,
                         "ops": [{
@@ -492,11 +459,7 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
-                // v2 `fork` (sessionLifecycleService.ts:625) takes the source
-                // session's lease for the whole copy rather than refusing a
-                // running turn: a foreign process's publish denies the fork,
-                // while this process's own turn holds the same publish and the
-                // lease re-enters it.
+
                 let _source_lease = match crate::session::lock::SESSION_LOCKS.lease(session_id) {
                     Ok(lease) => lease,
                     Err(error) => {
@@ -509,13 +472,7 @@ impl HttpServer {
                         );
                     }
                 };
-                // A running turn does not block the fork. v2 takes
-                // `tryAcquireHistorySnapshot()` and copies only the records
-                // before the pending work (`sliceRecordsBeforePendingWork`);
-                // this store's copy reads `turns` + `messages`, which the
-                // active turn has not written yet — its rows land at turn end
-                // — so the copy is the same committed prefix, and the source
-                // turn keeps running.
+
                 let body: Value = if req.body.is_empty() {
                     json!({})
                 } else {
@@ -526,11 +483,7 @@ impl HttpServer {
                 };
                 let new_session_id = format!("sess-{}", fastrand::u64(..));
                 let title = body.get("title").and_then(|v| v.as_str());
-                // v2 `forkSession`'s `opts.turnIndex` (`sessionLifecycle.ts:25`,
-                // validated by `assertForkTurnIndex`): a non-negative safe
-                // integer naming a user-visible turn to cut at. A present but
-                // non-integer / negative / fractional value is a client error,
-                // not a silent "copy everything".
+
                 let turn_index = match body.get("turnIndex") {
                     None | Some(Value::Null) => None,
                     Some(raw) => match raw.as_u64() {
@@ -551,10 +504,6 @@ impl HttpServer {
                     body.get("metadata"),
                 ) {
                     Ok(true) => {
-                        // v2 `forkSessionResponseSchema = sessionSchema`
-                        // (kap-server/src/protocol/rest-session.ts:103) answered as
-                        // the bare wire session via `okEnvelope` — the new
-                        // session's document, nothing wrapped around it.
                         let created = self.store.get_session(&new_session_id).ok().flatten();
                         let wire = match created {
                             Some(ref session) => format_wire_session(
@@ -568,9 +517,7 @@ impl HttpServer {
                         HttpResponse::ok(&wire)
                     }
                     Ok(false) => HttpResponse::not_found(),
-                    // v2 raises `REQUEST_INVALID` for both a malformed index
-                    // and one naming a turn the session does not have, so both
-                    // are 400s here rather than a store 500.
+
                     Err(crate::session::sqlite_store::ForkError::Store(e)) => {
                         HttpResponse::internal_error(format!("Database error: {e}"))
                     }
@@ -581,9 +528,6 @@ impl HttpServer {
                 let session_id = extract_session_action(p, "restore").unwrap();
                 match self.store.restore_session(session_id) {
                     Ok(true) => {
-                        // v2 `restoreSessionAction` answers the restored session
-                        // via `okEnvelope(session, …)`
-                        // (kap-server/src/routes/sessions.ts:976).
                         self.clear_reclaimed(session_id);
                         let summary = self.store.get_session(session_id).ok().flatten();
                         let wire = match summary {
@@ -605,15 +549,9 @@ impl HttpServer {
                 let session_id = extract_session_action(p, "archive").unwrap();
                 match self.store.archive_session(session_id) {
                     Ok(true) => {
-                        // v2 #4281: archiving evicts the session's event state —
-                        // the lane's numbering restarts under a fresh epoch, so
-                        // no client can resume the archived session's stream.
                         self.hub.evict_lane(session_id);
                         self.clear_reclaimed(session_id);
                         if let Some(engine) = self.engine.as_ref() {
-                            // v2 disposes the change-notifier snapshot with the
-                            // agent; an archived session has no further turns,
-                            // and a later restore must seed a fresh baseline.
                             engine.forget_change_notifier(session_id);
                             engine.forget_mcp_status(session_id);
                         }
@@ -633,23 +571,18 @@ impl HttpServer {
                     }
                 };
                 let workspace_id = session.workspace_id.clone();
-                // v2 `sessionManagerService.delete` (`:366-392`) closes the
-                // session before the cleanup hooks run, so an in-flight turn
-                // cannot re-create rows between cleanup and the row delete.
+
                 self.interaction_manager.cancel_session(session_id);
                 if let Some(engine) = self.engine.as_ref() {
                     engine.cancel_turn(session_id);
-                    // The close awaits the session's lifecycle chain; a turn
-                    // that is slow to notice cancellation is bounded at the
-                    // same 3s the lock release grace uses.
+
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
                     while engine.is_busy(session_id) && std::time::Instant::now() < deadline {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 }
                 crate::session::lock::SESSION_LOCKS.release(session_id);
-                // v2 runs every `onWillDeleteSession` cleanup and rethrows the
-                // first failure, leaving the session intact.
+
                 if let Err(error) = self.run_session_cleanup_hooks(session_id) {
                     return HttpResponse::json(
                         500,
@@ -669,9 +602,7 @@ impl HttpServer {
                             engine.forget_change_notifier(session_id);
                             engine.forget_mcp_status(session_id);
                         }
-                        // Session-level hooks run in the session's workspace
-                        // (v2 #4242's session cwd, which session hooks always
-                        // had upstream).
+
                         let session_cwd = workspace_id
                             .as_deref()
                             .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
@@ -695,8 +626,7 @@ impl HttpServer {
                         self.hub
                             .bus_for("global")
                             .publish(&crate::events::EngineEvent::Custom(del_event));
-                        // v2 #4281: deletion evicts the session's event state
-                        // (after the deletion notice went out).
+
                         self.hub.evict_lane(session_id);
                         HttpResponse::ok(&json!({ "deleted": true, "sessionId": session_id }))
                     }
@@ -722,11 +652,7 @@ impl HttpServer {
                                 )
                             })
                             .collect();
-                        // v2 answers the paged `{items, has_more}` contract
-                        // (kap-server routes/sessions.ts:694,
-                        // pageResponseSchema(sessionSchema)); the web client
-                        // reads `.items`, so a `children` key leaves it
-                        // mapping over undefined.
+
                         HttpResponse::ok(&json!({ "items": items, "has_more": false }))
                     }
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
@@ -747,9 +673,7 @@ impl HttpServer {
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
                 };
                 let child_session_id = format!("sess-{}", fastrand::u64(..));
-                // v2 `createChild` (`sessionLifecycleService.ts:831-846`): the
-                // default title names the parent, and the metadata document
-                // carries the parent/kind keys on top of the caller's patch.
+
                 let parent_title = parent
                     .title
                     .as_deref()
@@ -765,9 +689,7 @@ impl HttpServer {
                     object.insert("parentSessionId".into(), json!(parent_session_id));
                     object.insert("sessionKind".into(), json!("child"));
                 }
-                // v2 `createChild` (`sessionLifecycleService.ts:831-846`) is a
-                // `fork` with a fixed title and the parent/kind metadata, so the
-                // child inherits titleKind/agents/custom and the source history.
+
                 match self.store.fork_session_with_metadata(
                     parent_session_id,
                     &child_session_id,
@@ -793,10 +715,7 @@ impl HttpServer {
                 } else {
                     json!(created_session)
                 };
-                // v2 has no `statusCode` on create routes, so the envelope ships
-                // as HTTP 200 (`success: { data: sessionSchema }`,
-                // kap-server/src/routes/sessions.ts:181-184 for the parent,
-                // :707-710 for the child) — not 201.
+
                 HttpResponse::ok(&session_val)
             }
             ("GET", p) if p.starts_with("/api/v1/sessions/") && p.ends_with("/warnings") => {
@@ -807,9 +726,7 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
-                // The engine's own degradations: MCP servers it could not
-                // connect, and servers waiting on the user's authorization.
-                // A healthy roster produces an empty list.
+
                 let warnings = self.mcp_manager.session_warnings().await;
                 HttpResponse::ok(&json!({ "warnings": warnings }))
             }
@@ -828,10 +745,7 @@ impl HttpServer {
                 };
                 let source = body.get("source").and_then(|v| v.as_str());
                 let force = body.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-                // v2 `generateTitleOnce`: a non-forced call is a no-op while the
-                // title is host-custom or already generated. Answering the
-                // existing title (rather than regenerating) is what keeps a
-                // custom title from being overwritten by the automatic pass.
+
                 let existing = self.store.get_session(session_id).ok().flatten();
                 let existing_kind = existing
                     .as_ref()
@@ -845,16 +759,12 @@ impl HttpServer {
                     }));
                 }
                 let Some(engine) = self.engine.as_ref() else {
-                    // v2 `generateTitle` answers `undefined` when there is no
-                    // main agent to ask — a normal outcome, not a request error.
                     return HttpResponse::ok(&json!({ "title": null }));
                 };
                 let Some(llm) = engine.session_llm(session_id).await else {
                     return HttpResponse::ok(&json!({ "title": null }));
                 };
-                // One attempt per session at a time: a concurrent caller waits
-                // and then re-reads the applied title instead of issuing a
-                // second model request (v2 `_shared`).
+
                 let _slot = crate::session::title::title_generation_slot(session_id).await;
                 let refreshed = self.store.get_session(session_id).ok().flatten();
                 if !force
@@ -876,8 +786,19 @@ impl HttpServer {
                     .store
                     .load_session_history(session_id)
                     .unwrap_or_default();
-                match crate::session::title::generate_session_title(&history, source, llm.as_ref())
-                    .await
+                let emit_title_request = |event: serde_json::Value| {
+                    self.hub
+                        .bus_for(session_id)
+                        .publish(&crate::events::EngineEvent::Custom(event));
+                };
+                match crate::session::title::generate_session_title_with_events(
+                    &history,
+                    source,
+                    llm.as_ref(),
+                    crate::callbacks::MAIN_AGENT_ID,
+                    Some(&emit_title_request),
+                )
+                .await
                 {
                     Ok(Some(title)) => {
                         match self
@@ -885,10 +806,6 @@ impl HttpServer {
                             .set_generated_title_if_uncustomized(session_id, &title, force)
                         {
                             Ok(true) => {
-                                // Mirror v2 `SessionMetaUpdated` on the existing
-                                // `session.meta.updated` contract: a patch plus
-                                // its inverse, so an undo restores the previous
-                                // title and clients fold one shape.
                                 let patch = json!({
                                     "title": title,
                                     "title_kind": "generated",
@@ -940,9 +857,7 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
-                // v2 `runGate.begin()` at compaction (fullCompactionService,
-                // upstream #4246): the history rewrite runs under this
-                // process's occupancy hold.
+
                 let _occupancy = match crate::session::lock::SESSION_LOCKS.hold_guard(session_id) {
                     Ok(guard) => guard,
                     Err(error) => {
@@ -955,8 +870,7 @@ impl HttpServer {
                         );
                     }
                 };
-                // Never rewrite history under a running turn (v2 raises
-                // SESSION_BUSY before beginning a compaction).
+
                 if let Some(engine) = self.engine.as_ref()
                     && engine.is_busy(session_id)
                 {
@@ -973,17 +887,12 @@ impl HttpServer {
                 } else {
                     serde_json::from_slice(&req.body).unwrap_or(json!({}))
                 };
-                // v2 `rest-session.ts:131-137`: the caller may pass a
-                // summarization hint with the request.
+
                 let instruction = body
                     .get("instruction")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.is_empty());
-                // One owner for manual compaction: the engine resolves the
-                // model, summarizes, persists, re-baselines the counting
-                // state and publishes the start/finish facts. This route used
-                // to re-implement that sequence, and the copy had drifted —
-                // it never re-baselined the token counter after the cut.
+
                 let engine = match self.engine.as_ref() {
                     Some(engine) => engine,
                     None => {
@@ -995,9 +904,6 @@ impl HttpServer {
                 };
                 match engine.compact_session(session_id, instruction).await {
                     Ok(report) => {
-                        // The rewrite shrank the journal; adopt the new head so
-                        // the next turn does not read our own compaction as a
-                        // foreign modification.
                         engine.observe_journal_head(session_id);
                         HttpResponse::ok(&json!({
                             "compacted": true,
@@ -1019,9 +925,7 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
-                // v2 `takeoverSessionAction` (upstream #4246): evict a foreign
-                // holder so the next claim succeeds; a hold of ours is left
-                // alone.
+
                 crate::session::lock::SESSION_LOCKS.takeover(session_id);
                 HttpResponse::ok(&json!({ "taken_over": true }))
             }
@@ -1030,9 +934,7 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
-                // v2 `runGate.begin()` at undo (undoService, upstream #4246):
-                // the row delete and state rollback run under this process's
-                // occupancy hold.
+
                 let _occupancy = match crate::session::lock::SESSION_LOCKS.hold_guard(session_id) {
                     Ok(guard) => guard,
                     Err(error) => {
@@ -1051,12 +953,9 @@ impl HttpServer {
                     serde_json::from_slice(&req.body).unwrap_or(json!({}))
                 };
                 let count = body.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-                let revert_files = body
-                    .get("revert_files")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                // Never delete rows under a running turn (v2 raises
-                // SESSION_BUSY before undoing).
+                let explicit_revert = body.get("revert_files").and_then(|v| v.as_bool());
+                let revert_files = explicit_revert.unwrap_or(true);
+
                 if let Some(engine) = self.engine.as_ref()
                     && engine.is_busy(session_id)
                 {
@@ -1068,127 +967,177 @@ impl HttpServer {
                         }),
                     );
                 }
-                // Resolve the turns first: a compaction-boundary refusal must
-                // happen before any workspace file is touched, and file
-                // history is keyed by turn *number*, not by the undo count.
+
                 let turn_numbers = match self.store.plan_undo_turns(session_id, count) {
                     Ok(numbers) => numbers,
                     Err(e) if e.contains("undo refused") => return HttpResponse::bad_request(e),
                     Err(e) => return HttpResponse::internal_error(format!("Database error: {e}")),
                 };
-                // Paths restored by `revert_files`, reported as v2's
-                // `checkpoint.restored` payload once the undo commits.
+
                 let mut restored_files: Vec<String> = Vec::new();
-                // Revert the workspace files *before* the turn rows are deleted:
-                // if a file cannot be restored we must not report a successful
-                // undo, and the history must stay intact so the operation can be
-                // retried instead of silently diverging from the workspace.
+
                 if revert_files {
-                    let Some(workdir) = fs_routes::resolve_session_workdir(&self.store, session_id)
-                    else {
+                    let workdir = fs_routes::resolve_session_workdir(&self.store, session_id);
+                    if workdir.is_none() && explicit_revert == Some(true) {
                         return HttpResponse::bad_request(
-                            "undo requested `revert_files` but this session has no resolvable working directory, so its files cannot be restored. Retry without `revert_files` to undo history only.",
+                            "undo requested `revert_files: true` but this session has no resolvable working directory, so its files cannot be restored. Retry with `revert_files: false` to undo history only.",
                         );
-                    };
-                    let mut revert_failures: Vec<String> = Vec::new();
-                    let mut file_conflicts: Vec<String> = Vec::new();
-                    for turn_number in &turn_numbers {
-                        match self.store.revert_turn_file_changes(
-                            session_id,
-                            *turn_number as usize,
-                            &workdir,
-                        ) {
-                            Ok(paths) => restored_files.extend(paths),
-                            // A file that moved on since the tool wrote it is
-                            // the user's to keep: v2 reports `manual_edit` /
-                            // `deleted` and leaves the file alone. Undo is
-                            // refused here (the fork's rule: no partial undo)
-                            // and the caller is told how to proceed.
-                            Err(crate::session::sqlite_store::FileRevertError::Conflict {
-                                path,
-                                reason,
-                            }) => {
-                                file_conflicts.push(format!("{path} ({reason})"));
-                            }
-                            Err(error) => {
-                                revert_failures.push(format!("turn {turn_number}: {error}"));
+                    }
+                    if crate::features::operationLog::operationService::operation_log_enabled() {
+                        if let Some(workdir) = workdir
+                            && let Some(from_turn_id) = turn_numbers.last()
+                        {
+                            let operations = crate::features::operationLog::operationService::AgentOperationService::new(
+                                workdir.to_string_lossy(),
+                                session_id,
+                                crate::callbacks::MAIN_AGENT_ID,
+                            );
+                            if let Err(error) = operations
+                                .restore_before_turn(*from_turn_id as u64)
+                                .await
+                            {
+                                return HttpResponse::internal_error(format!(
+                                    "undo refused: the workspace files could not be restored ({}). No history was removed.",
+                                    error.message
+                                ));
                             }
                         }
-                    }
-                    if !file_conflicts.is_empty() {
-                        return HttpResponse::json(
-                            409,
-                            &json!({
-                                "code": "UNDO_FILE_CONFLICT",
-                                "error": format!(
-                                    "undo refused: {} changed since the tool wrote it. No history was removed. Retry with `revert_files: false` to undo history only, or restore the file yourself first.",
-                                    file_conflicts.join(", ")
-                                ),
-                            }),
-                        );
-                    }
-                    if !revert_failures.is_empty() {
-                        return HttpResponse::internal_error(format!(
-                            "undo refused: the workspace files of {} could not be restored ({}). No history was removed.",
-                            turn_numbers
-                                .iter()
-                                .map(|n| n.to_string())
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                            revert_failures.join("; ")
-                        ));
+                    } else if let Some(workdir) = workdir {
+                        let mut revert_failures: Vec<String> = Vec::new();
+                        let mut file_conflicts: Vec<String> = Vec::new();
+                        for turn_number in &turn_numbers {
+                            match self.store.revert_turn_file_changes(
+                                session_id,
+                                *turn_number as usize,
+                                &workdir,
+                            ) {
+                                Ok(paths) => restored_files.extend(paths),
+
+                                Err(crate::session::sqlite_store::FileRevertError::Conflict {
+                                    path,
+                                    reason,
+                                }) => {
+                                    file_conflicts.push(format!("{path} ({reason})"));
+                                }
+                                Err(error) => {
+                                    revert_failures.push(format!("turn {turn_number}: {error}"));
+                                }
+                            }
+                        }
+                        if !file_conflicts.is_empty() {
+                            return HttpResponse::json(
+                                409,
+                                &json!({
+                                    "code": "UNDO_FILE_CONFLICT",
+                                    "error": format!(
+                                        "undo refused: {} changed since the tool wrote it. No history was removed. Retry with `revert_files: false` to undo history only, or restore the file yourself first.",
+                                        file_conflicts.join(", ")
+                                    ),
+                                }),
+                            );
+                        }
+                        if !revert_failures.is_empty() {
+                            return HttpResponse::internal_error(format!(
+                                "undo refused: the workspace files of {} could not be restored ({}). No history was removed.",
+                                turn_numbers
+                                    .iter()
+                                    .map(|n| n.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                revert_failures.join("; ")
+                            ));
+                        }
                     }
                 }
                 match self.store.undo_turns(session_id, count) {
                     Ok(undone) => {
-                        // Restore the engine-owned state domains (`todo`,
-                        // `plan`, …) to the anchor each turn pushed. Without
-                        // this the transcript loses turns while `todo.json`
-                        // still lists work the model can no longer see, and the
-                        // next turn inherits a stale plan.
-                        //
-                        // Runs *after* the rows are deleted so that the
-                        // compaction-boundary refusal above (`plan_undo_turns`)
-                        // happens before any state changes; a failure here is
-                        // therefore a partial application and must be reported
-                        // rather than swallowed — a silent divergence is worse
-                        // than a visible error.
                         if let Err(e) = self.rollback_state_for_undo(session_id, count) {
                             return HttpResponse::internal_error(format!(
                                 "undo removed {undone} turn(s) but the workspace state could not be restored ({e}). The transcript and the todo/plan state now disagree; re-run /undo or restart the session."
                             ));
                         }
-                        // The transcript shrank: anchors that measured the cut
-                        // messages no longer apply to the session's context.
+
                         if let Some(engine) = self.engine.as_ref() {
                             engine.record_context_truncation(session_id);
-                            // Undo shrank the journal through this process's
-                            // own hold; adopt the new head so the next turn
-                            // does not read it as a foreign modification.
                             engine.observe_journal_head(session_id);
                         }
-                        // v2 `sessionOutcomeMirrorService.clearIfMatches` at
-                        // undo: removing the turn that produced the recorded
-                        // outcome invalidates it. Leaving it in place would
-                        // report the outcome of a turn the user just discarded.
+                        match self.store.refresh_last_prompt_after_undo(session_id) {
+                            Ok(last_prompt) => {
+                                let title = self
+                                    .store
+                                    .get_session(session_id)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|session| session.title);
+                                self.hub.bus_for(session_id).publish(
+                                    &crate::events::EngineEvent::Custom(json!({
+                                        "type": "session.meta.updated",
+                                        "agentId": crate::callbacks::MAIN_AGENT_ID,
+                                        "sessionId": session_id,
+                                        "title": title,
+                                        "patch": { "lastPrompt": last_prompt },
+                                    })),
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    %session_id,
+                                    %e,
+                                    "failed to reconcile lastPrompt at undo"
+                                );
+                            }
+                        }
+
                         if let Err(e) = self.store.set_last_turn_reason(session_id, None) {
                             tracing::warn!(%session_id, %e, "failed to clear last_turn_reason at undo");
                         }
-                        // Online transcripts must learn about the cut, exactly
-                        // like delete/patch publish their own events.
-                        self.hub
-                            .bus_for(session_id)
-                            .publish(&crate::events::EngineEvent::Custom(json!({
-                                "type": "context.undone",
-                                "sessionId": session_id,
-                                "undone": undone,
-                                "turnNumbers": turn_numbers,
-                            })));
-                        // v2 `CheckpointRestored` (`checkpointService.ts:27-31`):
-                        // the files the undo put back, emitted only when the
-                        // caller asked for a workspace revert and something was
-                        // actually restored. Conflicts refuse the undo above, so
-                        // the payload's conflict list is always empty here.
+                        if crate::session::wire_journal::journal_authoritative(
+                            &self.store,
+                            session_id,
+                        ) {
+                            let plan = match crate::session::wire_journal::undo_switch_plan(
+                                &self.store,
+                                session_id,
+                                count,
+                            ) {
+                                Some(plan) => plan,
+                                None => {
+                                    return HttpResponse::bad_request(
+                                        "undo refused: insufficient".to_string(),
+                                    );
+                                }
+                            };
+                            self.hub.bus_for(session_id).publish(
+                                &crate::events::EngineEvent::Custom(json!({
+                                    "type": "agent.switched",
+                                    "agentId": crate::callbacks::MAIN_AGENT_ID,
+                                    "branch": plan.branch,
+                                    "reason": "undo",
+                                    "base": { "branch": plan.base_branch, "line": plan.base_line },
+                                    "turns": count,
+                                    "legacyUndoLine": plan.legacy_undo_line,
+                                })),
+                            );
+                            self.hub.bus_for(session_id).publish(
+                                &crate::events::EngineEvent::Custom(json!({
+                                    "type": "context.undo",
+                                    "agentId": crate::callbacks::MAIN_AGENT_ID,
+                                    "count": count,
+                                })),
+                            );
+                            self.hub.bus_for(session_id).publish(
+                                &crate::events::EngineEvent::Custom(json!({
+                                    "type": "context.undone",
+                                    "sessionId": session_id,
+                                    "undone": undone,
+                                    "turnNumbers": turn_numbers,
+                                    "agentId": crate::callbacks::MAIN_AGENT_ID,
+                                    "turns": count,
+                                    "fromTurnId": Value::Null,
+                                })),
+                            );
+                        }
+
                         if !restored_files.is_empty() {
                             self.hub.bus_for(session_id).publish(
                                 &crate::events::EngineEvent::Custom(json!({
@@ -1204,8 +1153,7 @@ impl HttpServer {
                             "sessionId": session_id
                         }))
                     }
-                    // Crossing the compaction boundary is a client error, not
-                    // a database failure —surface the refusal verbatim.
+
                     Err(e) if e.contains("undo refused") => HttpResponse::bad_request(e),
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
                 }
@@ -1240,14 +1188,7 @@ impl HttpServer {
                             .store
                             .load_session_history(session_id)
                             .unwrap_or_default();
-                        // v2 `listMessagesResponseSchema` is
-                        // `{ items: messageSchema[], has_more }`
-                        // (kap-server/src/protocol/rest-message.ts:14). The fork
-                        // answered `{sessionId, messages}` with raw `LLMMessage`
-                        // rows, so `items` was missing and each element lacked
-                        // the `id`/`session_id`/`content[]` block projection the
-                        // schema requires. `messages` stays for the in-tree
-                        // consumers that predate the paged contract.
+
                         let items: Vec<Value> = history
                             .iter()
                             .enumerate()
@@ -1278,11 +1219,7 @@ impl HttpServer {
                 let Some(objective) = body.get("objective").and_then(|v| v.as_str()) else {
                     return HttpResponse::bad_request("objective must be a string");
                 };
-                // v2 #4568: edit the objective of the current goal in place.
-                // The engine owns the goal store, so the write and the
-                // returned snapshot both come from there (same store the GET
-                // route reads). Without an attached engine, answer 404 — this
-                // server has no goal state to edit.
+
                 let Some(result) = self
                     .engine
                     .as_ref()
@@ -1301,10 +1238,7 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return session_not_found(session_id);
                 }
-                // The engine's goal store is the authority: the turn settle
-                // folds / pauses / blocks there, and the REST read must see
-                // that snapshot (with its budget report). The sqlite state row
-                // remains the fallback for a server running without an engine.
+
                 let goal_val = self
                     .engine
                     .as_ref()
@@ -1316,11 +1250,7 @@ impl HttpServer {
                             .filter(|goal| !goal.is_null())
                     })
                     .unwrap_or(Value::Null);
-                // v2 answers the bare `goalSnapshotSchema` or `null`
-                // (kap-server/src/routes/sessions.ts:798 →
-                // `getSessionGoalResponseSchema = goalSnapshotSchema.nullable()`);
-                // the fork's `{sessionId, goal}` wrapper made every client read
-                // `status` off a level that never had it.
+
                 HttpResponse::ok(&goal_val)
             }
             ("GET", p) if extract_session_action(p, "skills").is_some() => {

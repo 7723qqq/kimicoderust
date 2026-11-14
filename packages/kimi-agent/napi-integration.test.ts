@@ -2770,8 +2770,8 @@ describe.skipIf(!nativeEntry)('EngineSessionHandle quiescence (M1c via handle)',
 });
 
 describe.skipIf(!nativeEntry)('napi EngineSessionHandle — manual compaction', () => {
-  /** The summarizer prompt's system message (compaction/mod.rs). */
-  const SUMMARIZER_MARKER = 'conversation summarizer';
+  /** The v2 compaction instruction is the summarizer request's last message. */
+  const SUMMARIZER_MARKER = 'You are about to run out of context';
 
   interface LlmChatWire {
     messages?: Array<{ role?: string; content?: string }>;
@@ -2779,8 +2779,8 @@ describe.skipIf(!nativeEntry)('napi EngineSessionHandle — manual compaction', 
 
   function isSummarizerCall(request: string): boolean {
     const parsed = JSON.parse(request) as LlmChatWire;
-    const first = parsed.messages?.[0];
-    return first?.role === 'system' && (first.content ?? '').includes(SUMMARIZER_MARKER);
+    const last = parsed.messages?.at(-1);
+    return last?.role === 'user' && (last.content ?? '').includes(SUMMARIZER_MARKER);
   }
 
   it('rewrites the history with the model-written summary', async () => {

@@ -165,6 +165,7 @@ impl WorkflowService {
         script: String,
         args: Option<Value>,
         host: Arc<dyn WorkflowHost>,
+        deadline_ms: Option<u64>,
     ) -> String {
         let run_id = format!("wf_{}", self.counter.fetch_add(1, Ordering::SeqCst) + 1);
         let entry = Arc::new(RunState::new(run_id.clone()));
@@ -184,6 +185,7 @@ impl WorkflowService {
                     args,
                     host,
                     Arc::clone(&settle),
+                    deadline_ms,
                 )),
                 Err(error) => Err(error.to_string()),
             };
@@ -285,7 +287,7 @@ mod tests {
     #[tokio::test]
     async fn minimal_script() {
         let service = WorkflowService::new();
-        let run_id = service.start("return 42;".to_string(), None, Arc::new(EchoHost));
+        let run_id = service.start("return 42;".to_string(), None, Arc::new(EchoHost), None);
         let result = service.wait(&run_id, Some(5_000)).await.unwrap();
         assert_eq!(result.status, WorkflowStatus::Completed);
         assert_eq!(result.result, Some(serde_json::json!(42)));
@@ -295,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn without_the_js_engine_runs_fail_cleanly() {
         let service = WorkflowService::new();
-        let run_id = service.start("return 1;".to_string(), None, Arc::new(EchoHost));
+        let run_id = service.start("return 1;".to_string(), None, Arc::new(EchoHost), None);
         let result = service.wait(&run_id, Some(5_000)).await.unwrap();
         assert_eq!(result.status, WorkflowStatus::Failed);
         assert!(
@@ -314,6 +316,7 @@ mod tests {
             "phase('Go');\nlog('hi');\nconst a = await agent('x');\nconst b = await agent('y');\nreturn [a, b];".to_string(),
             None,
             Arc::new(EchoHost),
+            None,
         );
         let result = service.wait(&run_id, Some(10_000)).await.unwrap();
         assert_eq!(result.status, WorkflowStatus::Completed);
@@ -333,6 +336,7 @@ mod tests {
             "await sleep(60000); return 'late';".to_string(),
             None,
             Arc::new(EchoHost),
+            None,
         );
         service.cancel(&run_id).await;
         let result = service.status(&run_id).unwrap();
@@ -347,6 +351,7 @@ mod tests {
             "throw new Error('boom');".to_string(),
             None,
             Arc::new(EchoHost),
+            None,
         );
         let result = service.wait(&run_id, Some(10_000)).await.unwrap();
         assert_eq!(result.status, WorkflowStatus::Failed);

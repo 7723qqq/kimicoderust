@@ -1,14 +1,6 @@
 use super::super::*;
 use std::collections::HashMap;
 
-// A session whose turn is streaming right now answers history with
-// `in_flight` — the same turn/step entity ids the live deltas carry —
-// so a reconnecting client splices at the right position (upstream
-// `projection.inFlight`).
-
-// The official Web bundle's listSessionsV2/archiveSessions/restoreSessions
-// contract (upstream routes/v2/sessions.ts): a domain-grouped page plus
-// per-item batch results.
 #[tokio::test]
 async fn v2_sessions_contract_serves_the_official_web_bundle() {
     let server = HttpServer::in_memory().unwrap();
@@ -35,8 +27,6 @@ async fn v2_sessions_contract_serves_the_official_web_bundle() {
         )
         .unwrap();
 
-    // GET /api/v2/sessions answers the v2SessionPageSchema envelope with
-    // domain-grouped items.
     let res = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -56,8 +46,7 @@ async fn v2_sessions_contract_serves_the_official_web_bundle() {
     assert!(body["next_page_token"].is_null());
     let first = &body["items"][0];
     assert_eq!(first["id"], "sess-v2-a");
-    // Title may be null for a session created without one; the bundle
-    // falls back to last_prompt then the id prefix.
+
     assert!(first["meta"]["title"].is_null() || first["meta"]["title"].is_string());
     assert!(first["meta"]["archived"].is_boolean());
     assert!(
@@ -65,9 +54,6 @@ async fn v2_sessions_contract_serves_the_official_web_bundle() {
             .contains(&first["activity"]["status"].as_str().unwrap())
     );
 
-    // view=by_workspace (the sessions sidebar's first load) returns
-    // per-workspace groups: the workspace object plus the first
-    // group.page_size sessions of that workspace.
     let res = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -85,8 +71,6 @@ async fn v2_sessions_contract_serves_the_official_web_bundle() {
     assert_eq!(groups[0]["sessions"].as_array().unwrap().len(), 1);
     assert_eq!(groups[0]["total"], 1);
 
-    // Batch archive: {ids} in, per-item results out — a missing session
-    // folds into its own item instead of failing the batch.
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -106,7 +90,6 @@ async fn v2_sessions_contract_serves_the_official_web_bundle() {
     assert_eq!(body["results"][0]["ok"], true);
     assert_eq!(body["results"][1]["ok"], false);
 
-    // The archived flag is visible on the item after the batch.
     let res = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -126,7 +109,6 @@ async fn v2_sessions_contract_serves_the_official_web_bundle() {
         .clone();
     assert_eq!(archived, true);
 
-    // Restore flips it back.
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -141,9 +123,6 @@ async fn v2_sessions_contract_serves_the_official_web_bundle() {
     assert_eq!(body["succeeded"], 1);
 }
 
-/// Every shape here is read off the shipped `dist-web` bundle's API client;
-/// each assertion fails against the response the route used to serve, which
-/// is what made the corresponding Web feature unusable.
 #[tokio::test]
 async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
     let server = HttpServer::in_memory().unwrap();
@@ -169,10 +148,7 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
             None,
         )
         .unwrap();
-    // The outcome of the last turn, as the engine persists it at the end of
-    // one. Without this on the wire the value is only ever a live event, so
-    // a client that attaches after the turn — or after a restart — never
-    // learns how it ended.
+
     let updated_before = server
         .store
         .get_session("sess-wire")
@@ -184,9 +160,6 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
         .set_last_turn_reason("sess-wire", Some("cancelled"))
         .unwrap();
 
-    // Every shape here is read off the shipped `dist-web` bundle's API client;
-    // each assertion fails against the response the route used to serve, which
-    // is what made the corresponding Web feature unusable.
     async fn get(server: &HttpServer, path: &str) -> HttpResponse {
         server
             .handle_request(&HttpRequest {
@@ -199,16 +172,11 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
             .await
     }
 
-    // v2 `GET /sessions/{session_id}` answers the bare session document
-    // (`sessionSchema`), which is why the mapper can read `metadata.cwd`
-    // straight off the top level.
     let res = get(&server, "/api/v1/sessions/sess-wire").await;
     assert_eq!(res.status, 200);
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(body["id"], "sess-wire");
-    // `format_wire_session` falls back to the process cwd when the session
-    // never recorded one; the contract being pinned is that `metadata.cwd`
-    // is a string at the top level, which is what the mapper dereferences.
+
     assert!(
         body["metadata"]["cwd"].is_string(),
         "the mapper reads `e.metadata.cwd` unconditionally"
@@ -218,16 +186,12 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
         body.get("messages").is_none(),
         "messages live on `/messages`, not on the session document"
     );
-    // The persisted turn outcome, read back by a client that did not see the
-    // live event. `null` is the honest answer for a session whose turn never
-    // ended, which is why the value is asserted rather than its presence.
+
     assert_eq!(
         body["last_turn_reason"], "cancelled",
         "the wire must carry the persisted outcome: {body}"
     );
-    // v2 passes `touchUpdatedAt: false` for this write, because the mirror
-    // records a turn that already ended elsewhere; treating it as activity
-    // would reorder the session list on every turn end.
+
     let updated_after = server
         .store
         .get_session("sess-wire")
@@ -239,23 +203,17 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
         "the mirror must not read as activity"
     );
 
-    // v2 `listMessagesResponseSchema` is `{items, has_more}`.
     let res = get(&server, "/api/v1/sessions/sess-wire/messages").await;
     assert_eq!(res.status, 200);
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert!(body.get("items").is_some() || body.get("messages").is_some());
 
-    // v2 `listTasks` answers `pageResponseSchema(taskSchema)`: `{items}`,
-    // every element carrying the protocol field names including
-    // `run_in_background`.
     let res = get(&server, "/api/v1/sessions/sess-wire/tasks").await;
     assert_eq!(res.status, 200);
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     let items = body["items"].as_array().expect("`items` key");
     assert!(items.is_empty(), "no task was spawned in this test");
 
-    // v2 `getSessionGoalResponseSchema = goalSnapshotSchema.nullable()`, so
-    // an inactive goal is `null` — never a wrapper object.
     let res = get(&server, "/api/v1/sessions/sess-wire/goal").await;
     assert_eq!(res.status, 200);
     let body: Value = serde_json::from_slice(&res.body).unwrap();
@@ -264,8 +222,6 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
         "no active goal reads as null, matching goalSnapshotSchema.nullable()"
     );
 
-    // `getSessionStatus` reads the session's real profile; these used to be
-    // the literals "auto" / "medium" with five fields absent entirely.
     let res = get(&server, "/api/v1/sessions/sess-wire/status").await;
     assert_eq!(res.status, 200);
     let body: Value = serde_json::from_slice(&res.body).unwrap();
@@ -282,8 +238,6 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
     }
     assert!(body["max_context_tokens"].as_u64().unwrap() > 0);
 
-    // `listCapabilities` filters on `supported`, so the elements must be
-    // objects — a bare id array made every row disappear.
     let res = get(&server, "/api/v1/capabilities").await;
     assert_eq!(res.status, 200);
     let body: Value = serde_json::from_slice(&res.body).unwrap();
@@ -292,15 +246,11 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
     assert!(caps.iter().all(|c| c["supported"] == true));
     assert!(caps.iter().all(|c| c["id"].is_string()));
 
-    // `pollOAuthLogin` reads snake_case and treats `authenticated` as the
-    // terminal success; no flow is running, so the body is null.
     let res = get(&server, "/api/v1/oauth/login").await;
     assert_eq!(res.status, 200);
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert!(body.is_null(), "no live flow reads as null");
 
-    // The bundle's `installPlugin` posts `{ source }`, which used to 400 as
-    // "Missing plugin id" because only `id` / `name` were read.
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -315,9 +265,6 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
         "a `source`-only body must reach the installer, not be rejected as malformed"
     );
 
-    // The bundle spells the suggest route with a single colon; only the
-    // `search` sibling accepted that form, so every file-mention request
-    // paid a 404 round-trip first.
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -330,9 +277,6 @@ async fn the_web_bundle_contract_holds_for_the_shapes_it_maps_directly() {
     assert_ne!(res.status, 404, "single-colon fs:suggest is routed");
 }
 
-/// v2 `POST /workspace/fs::list` (from #4457) — the literal
-/// `/workspace/fs:list`: the session-less fs:list with the workspace
-/// reference in the body.
 #[tokio::test]
 async fn workspace_fs_list_lists_without_a_session() {
     let server = HttpServer::in_memory().unwrap();
@@ -365,8 +309,6 @@ async fn workspace_fs_list_lists_without_a_session() {
         );
     }
 
-    // A missing workspace reference is a client error, not a listing of the
-    // server's own cwd.
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -379,9 +321,6 @@ async fn workspace_fs_list_lists_without_a_session() {
     assert_eq!(res.status, 400);
 }
 
-/// The engine's export must describe itself the way the host's exporter
-/// does: a manifest head naming the session, and log members only when they
-/// were asked for.
 #[test]
 fn session_export_archive_names_itself_and_gates_the_log_members() {
     use std::io::Read as _;
@@ -413,6 +352,7 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
         first_activity_at: Some("2026-10-01T00:00:00Z".into()),
         last_activity_at: Some("2026-10-02T00:00:00Z".into()),
         wire_jsonl: Vec::new(),
+        agent_wires: Vec::new(),
     };
 
     let names_of = |bytes: Vec<u8>| -> (Vec<String>, Value) {
@@ -430,9 +370,6 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
         (names, serde_json::from_slice(&manifest).unwrap())
     };
 
-    // Default: the manifest rides along, no logs, and the key that names the
-    // primary log is absent rather than null — the host's e2e pins that
-    // absence, so a null here would be a different document.
     let (names, manifest) =
         names_of(build_session_export_zip_with(&export, Vec::new(), Vec::new()).unwrap());
     assert_eq!(
@@ -451,8 +388,7 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
         manifest["os"],
         format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
     );
-    // v2 `buildExportManifest` names the session's activity span from the
-    // wire scan; the engine carries the same two keys when it has them.
+
     assert_eq!(manifest["sessionFirstActivity"], "2026-10-01T00:00:00Z");
     assert_eq!(manifest["sessionLastActivity"], "2026-10-02T00:00:00Z");
     assert!(
@@ -464,9 +400,6 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
         "the session log is named only when it is bundled"
     );
 
-    // v2 bundles the session log under `logs/kimi-code.log` (rotations beside
-    // it) and names it in the manifest; the global log is namespaced under
-    // `logs/global/` so the two never collide.
     let (names, manifest) = names_of(
         build_session_export_zip_with(
             &export,
@@ -494,8 +427,6 @@ fn session_export_archive_names_itself_and_gates_the_log_members() {
     assert_eq!(manifest["globalLogPath"], "logs/global/kimi-code.log");
 }
 
-/// A session log is bundled even without the global-log request, exactly like
-/// v2's exporter.
 #[test]
 fn a_bundled_session_log_does_not_require_the_global_one() {
     let (names, manifest) = export_names_and_manifest(
@@ -538,6 +469,7 @@ fn export_names_and_manifest(
         first_activity_at: Some("2026-10-01T00:00:00Z".into()),
         last_activity_at: Some("2026-10-02T00:00:00Z".into()),
         wire_jsonl: Vec::new(),
+        agent_wires: Vec::new(),
     };
     names_of(build_session_export_zip_with(&export, session_logs, global_logs).unwrap())
 }
@@ -558,8 +490,6 @@ fn names_of(bytes: Vec<u8>) -> (Vec<String>, serde_json::Value) {
     (names, serde_json::from_slice(&manifest).unwrap())
 }
 
-/// The log selection and member naming have to match the host exporter and
-/// `apps/vis`: `kimi-code.log` plus its `.N` rotations, nothing else.
 #[test]
 fn global_log_members_take_the_rotations_and_nothing_else() {
     let dir = std::env::temp_dir().join(format!(
@@ -590,8 +520,6 @@ fn global_log_members_take_the_rotations_and_nothing_else() {
     );
     assert_eq!(members[0].1, b"newest".to_vec());
 
-    // A session log is named relative to its own session directory: the active
-    // file plus its rotations, never the global prefix.
     let session_dir = dir.join("session");
     std::fs::create_dir_all(session_dir.join("logs")).unwrap();
     std::fs::write(session_dir.join("logs").join("kimi-code.log"), b"live").unwrap();
@@ -609,4 +537,63 @@ fn global_log_members_take_the_rotations_and_nothing_else() {
     );
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn session_export_archive_ships_subagent_journals() {
+    let export = crate::session::sqlite_store::SessionExport {
+        session: crate::session::sqlite_store::SessionSummary {
+            session_id: "sess-agents".into(),
+            title: Some("T".into()),
+            created_at: 1,
+            updated_at: 2,
+            workspace_id: None,
+            archived: false,
+            parent_session_id: None,
+            title_kind: None,
+            last_prompt: None,
+            archived_at: None,
+            forked_from: None,
+            version: None,
+            cwd: None,
+            environment_id: None,
+            environment_cwd: None,
+            agents: None,
+            custom: None,
+            last_turn_reason: None,
+        },
+        messages: Vec::new(),
+        turns_count: 0,
+        exported_at: "2026-10-03T00:00:00Z".into(),
+        first_activity_at: None,
+        last_activity_at: None,
+        wire_jsonl: vec![r#"{"type":"metadata","protocol_version":"1.5"}"#.into()],
+        agent_wires: vec![
+            (
+                "agent-7".into(),
+                vec![
+                    r#"{"type":"metadata","protocol_version":"1.5"}"#.into(),
+                    r#"{"type":"turn.prompt","agentId":"agent-7"}"#.into(),
+                ],
+            ),
+            (
+                "main".into(),
+                vec![r#"{"type":"metadata","protocol_version":"1.5"}"#.into()],
+            ),
+        ],
+    };
+    let (names, _) =
+        names_of(build_session_export_zip_with(&export, Vec::new(), Vec::new()).unwrap());
+    assert!(
+        names.contains(&"agents/agent-7/wire.jsonl".to_string()),
+        "{names:?}"
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.starts_with("agents/main/wire.jsonl"))
+            .count(),
+        1,
+        "the main journal must be written once"
+    );
 }

@@ -1,18 +1,9 @@
-//! Per-provider image policy (v2 `human/llm/media/image-formats.ts`).
-//!
-//! The baseline policy every OpenAI-compatible vendor speaks, plus the wider
-//! Kimi policy (BMP/HEIC/HEIF and a 5 MiB inline budget). The request builders
-//! use this for the two things the wire shape depends on: which `data:` mime
-//! types are acceptable, and how large an inline image may be.
-
-/// The accepted mime types and inline size budget of one provider.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderImagePolicy {
     pub accepted_mimes: &'static [&'static str],
     pub inline_byte_budget: usize,
 }
 
-/// v2 `DEFAULT_INLINE_IMAGE_BYTE_BUDGET`.
 pub const DEFAULT_INLINE_IMAGE_BYTE_BUDGET: usize = (3.75 * 1024.0 * 1024.0) as usize;
 
 const BASELINE_IMAGE_POLICY: ProviderImagePolicy = ProviderImagePolicy {
@@ -33,8 +24,6 @@ const KIMI_IMAGE_POLICY: ProviderImagePolicy = ProviderImagePolicy {
     inline_byte_budget: 5 * 1024 * 1024,
 };
 
-/// v2 `providerImagePolicy`: Kimi detects the wider policy, every other
-/// provider (and an unresolved one) falls back to the baseline.
 pub fn provider_image_policy(provider: Option<&str>) -> ProviderImagePolicy {
     match provider {
         Some(provider) if provider.eq_ignore_ascii_case("kimi") => KIMI_IMAGE_POLICY,
@@ -43,7 +32,6 @@ pub fn provider_image_policy(provider: Option<&str>) -> ProviderImagePolicy {
 }
 
 impl ProviderImagePolicy {
-    /// Whether a `data:` image mime type may reach this provider.
     pub fn accepts(&self, mime: &str) -> bool {
         self.accepted_mimes.contains(&mime)
     }
@@ -128,8 +116,8 @@ pub fn build_unsupported_image_notice(
 }
 
 pub fn build_malformed_image_notice(url: &str) -> String {
-    let shown: String = url.chars().take(80).collect();
-    let shown = if url.chars().count() > 80 {
+    let shown: String = String::from_utf16_lossy(&url.encode_utf16().take(80).collect::<Vec<_>>());
+    let shown = if url.encode_utf16().count() > 80 {
         format!("{shown}…")
     } else {
         shown
@@ -150,8 +138,13 @@ pub fn parse_image_data_url(url: &str) -> Option<(String, String)> {
     }
     let body = &url[5..];
     let marker = lower[5..].find(";base64,")?;
-    let mime_type = body[..marker].split(';').next().unwrap_or("").trim();
-    if mime_type.is_empty() || mime_type.contains(',') {
+    let prefix = &body[..marker];
+    let mut segments = prefix.split(';');
+    let mime_type = segments.next().unwrap_or("");
+    if mime_type.is_empty()
+        || mime_type.contains(',')
+        || segments.any(|segment| segment.is_empty() || segment.contains(','))
+    {
         return None;
     }
     Some((
@@ -161,7 +154,7 @@ pub fn parse_image_data_url(url: &str) -> Option<(String, String)> {
 }
 
 pub fn decode_base64_prefix(base64: &str) -> Vec<u8> {
-    let prefix: String = base64.chars().take(48).collect();
+    let prefix = String::from_utf16_lossy(&base64.encode_utf16().take(48).collect::<Vec<_>>());
     let trimmed = prefix.trim_end_matches('=');
     let padded = match trimmed.len() % 4 {
         0 => trimmed.to_string(),
@@ -224,10 +217,7 @@ mod tests {
 
     #[test]
     fn the_notices_match_v2_wording() {
-        assert_eq!(
-            accepted_formats_text(None),
-            "PNG, JPEG, GIF, and WebP"
-        );
+        assert_eq!(accepted_formats_text(None), "PNG, JPEG, GIF, and WebP");
         assert_eq!(
             accepted_formats_text(Some("kimi")),
             "PNG, JPEG, GIF, WebP, BMP, HEIC, and HEIF"
@@ -240,9 +230,10 @@ mod tests {
             build_unsupported_image_notice("image/heic", Some("a.heic"), Some("openai")),
             "[Image omitted: \"a.heic\" uses unsupported image format image/heic. The current model provider accepts only PNG, JPEG, GIF, and WebP — convert it to PNG or JPEG and try again.]"
         );
-        assert!(build_malformed_image_notice("data:image/png;base64").starts_with(
-            "[Image omitted: \"data:image/png;base64\" is not a valid data URL"
-        ));
+        assert!(
+            build_malformed_image_notice("data:image/png;base64")
+                .starts_with("[Image omitted: \"data:image/png;base64\" is not a valid data URL")
+        );
     }
 
     #[test]
@@ -290,6 +281,9 @@ mod tests {
             unsupported_image_mime_from_url("https://x/a.png", Some("openai")),
             None
         );
-        assert_eq!(unsupported_image_mime_from_url("https://x/a", Some("openai")), None);
+        assert_eq!(
+            unsupported_image_mime_from_url("https://x/a", Some("openai")),
+            None
+        );
     }
 }

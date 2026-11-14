@@ -10,9 +10,9 @@ description:
   en: >
       Registered core tool names: Read, Write, Edit, Bash, PowerShell (Windows only), Grep, Glob, run_code, EnterSpecMode/ExitSpecMode and the goal/cron/task/ask families.
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.321Z"
-fingerprint: a52381a0f8359ab8d58c3cc5b061c65ad71a79be3ebf3a207c4f7612f92dded6
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-13T12:20:11.773Z"
+fingerprint: 417c4986a5fcc3c38f1ad54b395197b4b4001f7bf65c26cb3ca0367538894645
 source:
   - path: "packages/kimi-agent/src/tools/core_tool_defs.rs"
   - path: "packages/kimi-agent/src/tools/sandbox.rs"

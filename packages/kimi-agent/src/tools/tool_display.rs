@@ -232,6 +232,17 @@ pub fn tool_call_description(
             budget_label(args.get("value")?, text(args, "unit")?)?
         ),
         "cronlist" => "Listing scheduled cron jobs".to_string(),
+        "croncreate" => {
+            let cron = text(args, "cron")?
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if args.get("recurring").and_then(Value::as_bool) == Some(false) {
+                format!("Scheduling one-shot {cron}")
+            } else {
+                format!("Scheduling cron {cron}")
+            }
+        }
         "crondelete" => format!("Deleting cron {}", text(args, "id")?),
         "lsp" => format!(
             "Running LSP {} at {}:{}:{}",
@@ -446,6 +457,32 @@ mod tests {
         assert_eq!(
             tool_call_description("Bash", &json!({ "command": "ls" }), None).as_deref(),
             Some("Running: ls")
+        );
+        assert_eq!(
+            tool_call_description(
+                "CronCreate",
+                &json!({ "cron": " */5   * * * * ", "prompt": "p" }),
+                None
+            )
+            .as_deref(),
+            Some("Scheduling cron */5 * * * *")
+        );
+        assert_eq!(
+            tool_call_description(
+                "CronCreate",
+                &json!({ "cron": "0 0 1 1 *", "prompt": "p", "recurring": false }),
+                None
+            )
+            .as_deref(),
+            Some("Scheduling one-shot 0 0 1 1 *")
+        );
+        assert_eq!(
+            tool_call_description("CronList", &json!({}), None).as_deref(),
+            Some("Listing scheduled cron jobs")
+        );
+        assert_eq!(
+            tool_call_description("CronDelete", &json!({ "id": "job-1" }), None).as_deref(),
+            Some("Deleting cron job-1")
         );
         assert_eq!(
             tool_call_description(

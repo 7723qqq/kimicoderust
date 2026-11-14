@@ -13,7 +13,7 @@ pub enum McpError {
     /// The remote answered the HTTP request with a non-2xx status.
     HttpStatus { status: u16, message: String },
     /// The server replied with a JSON-RPC error object.
-    JsonRpc { message: String },
+    JsonRpc { code: Option<i64>, message: String },
     /// A request exceeded its resolved deadline.
     Timeout(String),
     /// The transport (child stdout, SSE stream, response channel) closed.
@@ -41,8 +41,9 @@ impl McpError {
         }
     }
 
-    pub fn json_rpc(message: impl Into<String>) -> Self {
+    pub fn json_rpc(code: Option<i64>, message: impl Into<String>) -> Self {
         McpError::JsonRpc {
+            code,
             message: message.into(),
         }
     }
@@ -87,9 +88,20 @@ impl McpError {
     /// permanent, and an auth rejection is permanent only when OAuth cannot
     /// supply the credential — the manager decides that case from
     /// [`Self::is_auth_rejection`] before asking this.
+    pub fn is_request_timeout(&self) -> bool {
+        matches!(
+            self,
+            McpError::JsonRpc {
+                code: Some(-32001),
+                ..
+            }
+        )
+    }
+
     pub fn is_permanent(&self) -> bool {
         match self {
-            McpError::Config(_) | McpError::Protocol(_) | McpError::JsonRpc { .. } => true,
+            McpError::Config(_) | McpError::Protocol(_) => true,
+            McpError::JsonRpc { code, .. } => *code == Some(-32601),
             McpError::HttpStatus { status, .. } => {
                 matches!(status, 401 | 403)
             }
@@ -102,7 +114,7 @@ impl fmt::Display for McpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             McpError::HttpStatus { message, .. }
-            | McpError::JsonRpc { message }
+            | McpError::JsonRpc { message, .. }
             | McpError::Timeout(message)
             | McpError::Closed(message)
             | McpError::Transport(message)
@@ -129,10 +141,25 @@ mod tests {
 
     #[test]
     fn test_non_http_errors_are_never_unauthorized() {
-        assert!(!McpError::json_rpc("MCP Server Error: 401").is_unauthorized());
+        assert!(!McpError::json_rpc(None, "MCP Server Error: 401").is_unauthorized());
         assert!(!McpError::transport("connection 401 gone").is_unauthorized());
         assert!(!McpError::timeout("MCP request timed out after 401ms").is_unauthorized());
         assert!(!McpError::closed("401").is_unauthorized());
+    }
+
+    #[test]
+    fn test_only_method_not_found_is_a_permanent_discovery_rpc_failure() {
+        assert!(McpError::json_rpc(Some(-32601), "method not found").is_permanent());
+        assert!(!McpError::json_rpc(Some(-32603), "internal error").is_permanent());
+        assert!(!McpError::json_rpc(None, "unknown").is_permanent());
+        assert!(McpError::Protocol("malformed result".into()).is_permanent());
+    }
+
+    #[test]
+    fn test_request_timeout_is_distinct_from_other_rpc_answers() {
+        assert!(McpError::json_rpc(Some(-32001), "timeout").is_request_timeout());
+        assert!(!McpError::json_rpc(Some(-32601), "method not found").is_request_timeout());
+        assert!(!McpError::timeout("deadline elapsed").is_request_timeout());
     }
 
     #[test]

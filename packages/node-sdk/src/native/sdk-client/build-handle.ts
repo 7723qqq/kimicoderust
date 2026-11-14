@@ -35,6 +35,7 @@ import {
   resolveWebFetchService,
   resolveBingApiService,
   resolveImageReadByteBudget,
+  resolveLlmRequestByteBudget,
   resolveImageMaxEdgePx,
   resolveModelCapabilities,
   resolveModelContextWindow,
@@ -66,6 +67,8 @@ import {
 /** The client surface the engine handle assembly needs, passed explicitly. */
 export interface BuildHandleDeps {
   homeDir: string;
+  /** The engine's data directory (`<home>/agent`): holds `sessions.db`. */
+  engineDataDir: string;
   configPath: string;
   /** The shell the Bash tool will run, resolved once per client (see `resolvedShellPath`). */
   shellPath: string | undefined;
@@ -132,9 +135,9 @@ export async function buildSessionHandle(
   // cacheable input).
   const cacheAgg = new CacheUsageAggregator();
 
-  // Background tasks seen this handle. `event.task.completed` carries only
-  // the id and status, so the create-time facts are remembered to fill the
-  // terminal `background.task.terminated` info.
+  // Background tasks seen this handle. `task.terminated` carries the full
+  // `info`, but the create-time facts are still remembered so the terminal
+  // `background.task.terminated` info can fill gaps the entry no longer has.
   const backgroundTasks = new Map<
     string,
     { description: string; kind: 'agent' | 'process'; startedAt: number; subagentType?: string }
@@ -540,23 +543,26 @@ export async function buildSessionHandle(
             snapshot: toGoalSnapshot(meta.goal) as unknown as ProtocolGoalSnapshot,
           });
         }
-      } else if (parsed.type === 'event.task.created') {
-        // The engine's per-pipeline task runner reports its lifecycle here
-        // (the napi pipeline wires its sink to the host callbacks). The TUI
+      } else if (parsed.type === 'task.started') {
+        // The engine's per-pipeline task runner reports its lifecycle with
+        // the v2 `task.started` record (`info: AgentTaskInfo`). The TUI
         // consumes the protocol `background.task.*` spelling, so map it: the
-        // engine's `subagent` kind is the protocol's `agent`, everything else
+        // engine's `agent` kind is the protocol's `agent`, everything else
         // (bash / tool) is a `process`.
-        const task = parsed.task as Record<string, unknown> | undefined;
-        if (task !== undefined && typeof task['id'] === 'string') {
-          const kind = task['kind'] === 'subagent' ? 'agent' : 'process';
+        const info = parsed.info as Record<string, unknown> | undefined;
+        const taskId = typeof info?.['taskId'] === 'string' ? info['taskId'] : undefined;
+        if (taskId !== undefined) {
+          const kind = info?.['kind'] === 'agent' ? 'agent' : 'process';
           const startedAt =
-            (typeof task['started_at'] === 'string'
-              ? Date.parse(task['started_at'])
-              : Number.NaN) || Date.now();
-          const description = typeof task['description'] === 'string' ? task['description'] : '';
+            typeof info?.['startedAt'] === 'number' ? info['startedAt'] : Date.now();
+          const description = typeof info?.['description'] === 'string' ? info['description'] : '';
           const subagentType =
-            typeof task['subagent_type'] === 'string' ? task['subagent_type'] : undefined;
-          backgroundTasks.set(task['id'], {
+            typeof info?.['subagentType'] === 'string' ? info['subagentType'] : undefined;
+          const agentId =
+            typeof info?.['agentId'] === 'string' && info['agentId'].length > 0
+              ? info['agentId']
+              : taskId;
+          backgroundTasks.set(taskId, {
             description,
             kind,
             startedAt,
@@ -566,44 +572,65 @@ export async function buildSessionHandle(
             sessionId,
             agentId: eventAgentId,
             type: 'background.task.started',
-            // The Rust runner does not own the process, so it carries no
-            // `command` / `pid`; no consumer of this event reads them (the
-            // task browser pulls `listBackgroundTasks` for the full row).
+            // Process tasks carry the engine's real `command` / `pid` /
+            // `exitCode`; agent tasks have none, so the optional fields are
+            // spread only when the engine supplied them.
             info: {
-              taskId: task['id'],
+              taskId,
               description,
               status: 'running',
               kind,
               startedAt,
               endedAt: null,
               detached: true,
+              exitCode: null,
+              ...(typeof info?.['command'] === 'string' ? { command: info['command'] } : {}),
+              ...(typeof info?.['pid'] === 'number' ? { pid: info['pid'] } : {}),
               ...(subagentType !== undefined ? { subagentType } : {}),
               // Agent tasks use the agent id as their task id
               // (`subagent/manager.rs` spawns with `id`), so this is the id
               // the TUI's detach path matches on.
-              ...(kind === 'agent' ? { agentId: task['id'] } : {}),
+              ...(kind === 'agent' ? { agentId } : {}),
             } as unknown as TaskInfo,
           });
         }
-      } else if (parsed.type === 'event.task.completed') {
-        const taskId = typeof parsed.task_id === 'string' ? parsed.task_id : undefined;
+      } else if (parsed.type === 'task.terminated') {
+        const info = parsed.info as Record<string, unknown> | undefined;
+        const taskId = typeof info?.['taskId'] === 'string' ? info['taskId'] : undefined;
         if (taskId !== undefined) {
           const prior = backgroundTasks.get(taskId);
           backgroundTasks.delete(taskId);
+          const kind = prior?.kind ?? (info?.['kind'] === 'agent' ? 'agent' : 'process');
+          const agentId =
+            typeof info?.['agentId'] === 'string' && info['agentId'].length > 0
+              ? info['agentId']
+              : taskId;
+          const subagentType =
+            prior?.subagentType ??
+            (typeof info?.['subagentType'] === 'string' ? info['subagentType'] : undefined);
           deps.receiveEvent({
             sessionId,
             agentId: eventAgentId,
             type: 'background.task.terminated',
             info: {
               taskId,
-              description: prior?.description ?? '',
-              status: parsed.status as TaskInfo['status'],
-              kind: prior?.kind ?? 'process',
-              startedAt: prior?.startedAt ?? Date.now(),
-              endedAt: Date.now(),
+              description:
+                prior?.description ??
+                (typeof info?.['description'] === 'string' ? info['description'] : ''),
+              status: (typeof info?.['status'] === 'string'
+                ? info['status']
+                : 'completed') as TaskInfo['status'],
+              kind,
+              startedAt:
+                prior?.startedAt ??
+                (typeof info?.['startedAt'] === 'number' ? info['startedAt'] : Date.now()),
+              endedAt: typeof info?.['endedAt'] === 'number' ? info['endedAt'] : Date.now(),
               detached: true,
-              ...(prior?.subagentType !== undefined ? { subagentType: prior.subagentType } : {}),
-              ...(prior?.kind === 'agent' ? { agentId: taskId } : {}),
+              exitCode: typeof info?.['exitCode'] === 'number' ? info['exitCode'] : null,
+              ...(typeof info?.['command'] === 'string' ? { command: info['command'] } : {}),
+              ...(typeof info?.['pid'] === 'number' ? { pid: info['pid'] } : {}),
+              ...(subagentType !== undefined ? { subagentType } : {}),
+              ...(kind === 'agent' ? { agentId } : {}),
             } as unknown as TaskInfo,
           });
         }
@@ -830,10 +857,15 @@ export async function buildSessionHandle(
     },
     askQuestion: async (req: string) => {
       try {
-        const parsed = JSON.parse(req) as { tool_call_id?: string; questions?: QuestionItem[] };
+        const parsed = JSON.parse(req) as {
+          agent_id?: string;
+          session_id?: string;
+          tool_call_id?: string;
+          questions?: QuestionItem[];
+        };
         const res = await deps.requestQuestion({
-          sessionId,
-          agentId: 'main',
+          sessionId: parsed.session_id ?? sessionId,
+          agentId: parsed.agent_id ?? 'main',
           toolCallId: parsed.tool_call_id ?? randomUUID(),
           questions: parsed.questions ?? [],
         });
@@ -1112,6 +1144,7 @@ export async function buildSessionHandle(
   const webFetch = resolveWebFetchService(config);
   const bingApi = resolveBingApiService(config);
   const imageReadByteBudget = resolveImageReadByteBudget(config);
+  const requestByteBudget = resolveLlmRequestByteBudget(config);
   const imageMaxEdgePx = resolveImageMaxEdgePx(config);
   const modelCapabilities = resolveModelCapabilities(config, meta.model);
   // Progressive tool disclosure (v2 `toolSelectService.enabled()`): the
@@ -1152,6 +1185,7 @@ export async function buildSessionHandle(
   const params = {
     turnId: sessionId,
     sessionId,
+    dataDir: deps.engineDataDir,
     callerAgentId: 'main',
     rustSelfContained: config.agent?.rustSelfContained === true,
     // Empty means "let the engine build `prompt/system.md` for this
@@ -1205,6 +1239,7 @@ export async function buildSessionHandle(
     bingApi: bingApi ?? undefined,
     imageReadByteBudget: imageReadByteBudget ?? undefined,
     imageMaxEdgePx: imageMaxEdgePx ?? undefined,
+    requestByteBudget: requestByteBudget ?? undefined,
     modelCapabilities: modelCapabilities ?? undefined,
     toolSelect,
     towerEnabled,

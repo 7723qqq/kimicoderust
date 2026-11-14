@@ -2,9 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// The injection pass must append the date-change reminder right before
-/// the LLM call: the captured request contains a `<system-reminder>`
-/// user message with the baseline date text.
 #[tokio::test]
 async fn test_injections_appended_before_llm_call() {
     use std::sync::Mutex;
@@ -54,6 +51,7 @@ async fn test_injections_appended_before_llm_call() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-injection".into(),
@@ -98,9 +96,6 @@ async fn test_injections_appended_before_llm_call() {
     assert!(date_injection.content.ends_with("\n</system-reminder>"));
 }
 
-/// The permission-mode reminders ride the same injection pass: entering
-/// auto mode announces itself, a turn whose history already carries the
-/// reminder does not repeat it, and leaving auto mode announces the exit.
 #[tokio::test]
 async fn test_permission_mode_reminders_follow_the_mode_transitions() {
     use crate::permission::PermissionMode;
@@ -111,6 +106,7 @@ async fn test_permission_mode_reminders_follow_the_mode_transitions() {
         mode: PermissionMode,
     ) -> RunTurnInput<'a> {
         RunTurnInput {
+            llm_request_byte_budget: u64::MAX,
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
             turn_id: "test-permission-mode".into(),
             llm,
@@ -192,9 +188,6 @@ async fn test_permission_mode_reminders_follow_the_mode_transitions() {
     );
 }
 
-/// v2 `todoReminder` reads `runtime.getState()` on every provider call, not
-/// once when the turn starts. A write earlier in the same turn must therefore
-/// be what the next eligible reminder renders.
 #[tokio::test]
 async fn test_todo_reminder_reads_state_updated_earlier_in_turn() {
     struct TodoSequenceLlm {
@@ -297,6 +290,7 @@ async fn test_todo_reminder_reads_state_updated_earlier_in_turn() {
     });
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-todo-reminder-live-state".into(),
@@ -357,12 +351,6 @@ async fn test_todo_reminder_reads_state_updated_earlier_in_turn() {
     );
 }
 
-// ── Telemetry emission tests (M1c `host/telemetry`) ─────────────────
-
-/// The telemetry events must carry the host-injected context merged with
-/// the engine-observed outcome, in v2's payload vocabulary — the host
-/// forwards these to track2 verbatim, so a field drift here is a
-/// dashboard drift.
 #[tokio::test]
 async fn test_run_turn_with_telemetry_emits_started_and_ended() {
     let llm = PredictTestLlm {
@@ -376,6 +364,7 @@ async fn test_run_turn_with_telemetry_emits_started_and_ended() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-telemetry-ok".into(),
@@ -421,7 +410,7 @@ async fn test_run_turn_with_telemetry_emits_started_and_ended() {
     assert_eq!(emitted[0]["provider_type"], "kimi");
     assert_eq!(emitted[0]["protocol"], "openai");
     assert_eq!(emitted[0]["thinking_effort"], "high");
-    // v2 #3963: the enabled-plugin set rides both lifecycle events.
+
     assert_eq!(emitted[0]["enabled_plugins"], "kimi-webbridge,plugin-b");
     assert_eq!(emitted[1]["event"], "turn_ended");
     assert_eq!(emitted[1]["reason"], "completed");
@@ -430,8 +419,6 @@ async fn test_run_turn_with_telemetry_emits_started_and_ended() {
     assert_eq!(emitted[1]["enabled_plugins"], "kimi-webbridge,plugin-b");
 }
 
-/// A context without a plugin snapshot omits the field entirely (v2 #3963:
-/// absent means "no snapshot", an empty string means "known empty set").
 #[tokio::test]
 async fn test_run_turn_with_telemetry_omits_an_absent_plugin_snapshot() {
     let llm = PredictTestLlm {
@@ -445,6 +432,7 @@ async fn test_run_turn_with_telemetry_omits_an_absent_plugin_snapshot() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-telemetry-no-plugins".into(),
@@ -492,10 +480,6 @@ async fn test_run_turn_with_telemetry_omits_an_absent_plugin_snapshot() {
     }
 }
 
-/// A Stop-hook veto is consumed transparently inside the telemetry
-/// wrapper too: the turn still ends `completed` with the usual two
-/// events, and the veto text plus the follow-up reply fold into the
-/// returned message history.
 #[tokio::test]
 async fn test_run_turn_with_telemetry_consumes_stop_hook_continuation() {
     let llm = PredictTestLlm {
@@ -509,6 +493,7 @@ async fn test_run_turn_with_telemetry_consumes_stop_hook_continuation() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-telemetry-stop-hook".into(),
@@ -553,13 +538,10 @@ async fn test_run_turn_with_telemetry_consumes_stop_hook_continuation() {
     assert_eq!(emitted[1]["event"], "turn_ended");
     assert_eq!(emitted[1]["reason"], "completed");
 
-    // The veto re-prompt and the follow-up reply are in the history.
     let texts: Vec<&str> = turn.messages.iter().map(|m| m.content.as_str()).collect();
     assert!(texts.iter().any(|t| t.contains("keep going")));
 }
 
-/// An aborted turn ends as `cancelled` and additionally reports
-/// `turn_interrupted` with the engine-side interrupt reason.
 #[tokio::test]
 async fn test_run_turn_with_telemetry_reports_cancellation_as_interrupted() {
     let llm = PredictTestLlm {
@@ -574,6 +556,7 @@ async fn test_run_turn_with_telemetry_reports_cancellation_as_interrupted() {
 
     let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-telemetry-cancel".into(),
@@ -628,13 +611,6 @@ async fn test_run_turn_with_telemetry_reports_cancellation_as_interrupted() {
     );
 }
 
-// ── Tool-table refresh tests (M1d `host/list_tools`) ────────────────
-
-/// The engine must pull the host's current tool table before every LLM
-/// call on native transports: a table captured at turn start goes stale
-/// the moment the registry changes mid-turn (feature tools, MCP
-/// reconnects), and the model would keep calling a tool that no longer
-/// exists.
 #[tokio::test]
 async fn test_list_tools_refreshes_table_per_step() {
     struct ToolsRecordingLlm {
@@ -730,6 +706,7 @@ async fn test_list_tools_refreshes_table_per_step() {
     });
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-list-tools-refresh".into(),
@@ -740,8 +717,7 @@ async fn test_list_tools_refreshes_table_per_step() {
             ..Default::default()
         }],
         tools: &[],
-        // The turn-start snapshot must never reach the LLM here: the
-        // host answers list_tools with a fresh table on every step.
+
         tool_defs: vec![crate::turn_loop::types::ToolInfo {
             name: "snapshot".into(),
             description: "stale".into(),
@@ -773,8 +749,6 @@ async fn test_list_tools_refreshes_table_per_step() {
     assert_eq!(seen[1], vec!["fresh_b".to_string()]);
 }
 
-/// A host without the seam (or with a failing one) must not break the
-/// turn: run_turn falls back to the turn-start snapshot.
 #[tokio::test]
 async fn test_list_tools_failure_falls_back_to_snapshot() {
     struct ToolsRecordingLlm {
@@ -820,15 +794,13 @@ async fn test_list_tools_failure_falls_back_to_snapshot() {
     };
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
-    // The seam is wired but the host answers with an error — the same
-    // Err branch in run_turn as an unwired host, without the stdio
-    // round-trip timeout a missing handler would cost. Registered after
-    // the helper so it wins over the no-op default.
+
     RpcServer::register_arc(&server, types::methods::HOST_LIST_TOOLS, |_params| {
         Box::pin(async move { Err(JsonRpcError::method_not_found("host/list_tools")) })
     });
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-list-tools-fallback".into(),
@@ -864,8 +836,6 @@ async fn test_list_tools_failure_falls_back_to_snapshot() {
     assert_eq!(seen[0], vec!["snapshot".to_string()]);
 }
 
-/// Host-proxy mode rebuilds tools host-side per call; the engine must
-/// not spend a round trip pulling a table it never uses.
 #[tokio::test]
 async fn test_list_tools_skipped_in_host_proxy_mode() {
     struct HostProxyLlm {
@@ -926,6 +896,7 @@ async fn test_list_tools_skipped_in_host_proxy_mode() {
     });
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-list-tools-host-proxy".into(),

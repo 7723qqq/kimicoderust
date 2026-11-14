@@ -1,19 +1,7 @@
-//! MCP tool name sanitization and qualification.
-//!
-//! Mirrors `packages/agent-core-v2/src/mcpCore/tool-naming.ts`:
-//!   - `sanitize_mcp_name_part`: replace non-safe chars with `_`, collapse runs
-//!   - `qualify_mcp_tool_name`: build `mcp__<server>__<tool>` with length cap + hash
-//!   - `is_mcp_tool_name`: check if a name starts with the MCP prefix
-//!
-//! Called once per MCP tool registration (10-50 tools per session).
-//! The FNV-1a hash is a single tight loop — trivially fast in Rust.
-
 const MCP_NAME_PREFIX: &str = "mcp__";
 const MCP_NAME_SEPARATOR: &str = "__";
 const MAX_QUALIFIED_LENGTH: usize = 64;
 
-/// Replace any character outside the safe ASCII set with `_`, then collapse
-/// any run of `_` into a single underscore.
 pub fn sanitize_mcp_name_part(part: &str) -> String {
     let mut out = String::with_capacity(part.len());
     let mut prev_underscore = false;
@@ -21,7 +9,6 @@ pub fn sanitize_mcp_name_part(part: &str) -> String {
         let safe = b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
         if safe {
             if b == b'_' && prev_underscore {
-                // Skip consecutive underscores.
                 continue;
             }
             out.push(b as char);
@@ -36,14 +23,10 @@ pub fn sanitize_mcp_name_part(part: &str) -> String {
     out
 }
 
-/// Check if a tool name starts with the MCP prefix.
 pub fn is_mcp_tool_name(name: &str) -> bool {
     name.starts_with(MCP_NAME_PREFIX)
 }
 
-/// Produce the qualified MCP tool name: `mcp__<server>__<tool>`.
-/// If the result exceeds 64 chars, a deterministic FNV-1a hash suffix replaces
-/// the tail so the prefix structure stays intact.
 pub fn qualify_mcp_tool_name(server_name: &str, tool_name: &str) -> String {
     let sanitized_server = sanitize_mcp_name_part(server_name);
     let sanitized_tool = sanitize_mcp_name_part(tool_name);
@@ -61,27 +44,13 @@ pub fn qualify_mcp_tool_name(server_name: &str, tool_name: &str) -> String {
     format!("{}_{}", &full[..keep], hash)
 }
 
-/// FNV-1a over the input's code points, formatted exactly like the TS
-/// implementation (`tool-naming.ts:19-26`): `hash.toString(16).padStart(8,
-/// '0')`, where `hash` is a **signed** int32 after the first `Math.imul`.
-///
-/// `padStart` pads the whole rendered string, so a short negative tail gains
-/// its zero *before* the sign (`0-53fcf0`), not after it — the difference only
-/// shows below `0x1000000` (roughly one name in 256), but those names would
-/// otherwise hash to a different tool name than v2's. A 9-character negative
-/// tail (`-785fd989`) is already past the width and keeps no zero. Not
-/// cryptographic — only used for collision resistance among a handful of tool
-/// names within a single server's tool list.
 fn stable_hash8(input: &str) -> String {
     let mut bits: u32 = 0x811c_9dc5;
     for ch in input.chars() {
         bits ^= ch as u32;
         bits = bits.wrapping_mul(0x0100_0193);
     }
-    // The empty input never enters the loop, so the JS accumulator is still
-    // the positive literal — not the int32 the first `Math.imul` would make of
-    // it — and renders unsigned. Unreachable from `qualify` (the prefix is
-    // always present), kept because the TS contract is the spec.
+
     if input.is_empty() {
         return format!("{bits:08x}");
     }
@@ -125,9 +94,6 @@ mod tests {
         assert_eq!(sanitize_mcp_name_part("my工具"), "my_");
     }
 
-    /// Ported verbatim from `test/mcpCore/tool-naming.test.ts`
-    /// (`sanitizeMcpNamePart` cases), including the leading/trailing
-    /// underscores the TS collapse step keeps.
     #[test]
     fn test_sanitize_matches_ts_contract() {
         assert_eq!(sanitize_mcp_name_part("github_v2-alpha"), "github_v2-alpha");
@@ -153,8 +119,6 @@ mod tests {
         assert!(result.len() <= MAX_QUALIFIED_LENGTH);
     }
 
-    /// Ported verbatim from `test/mcpCore/tool-naming.test.ts`
-    /// (`qualifyMcpToolName` cases).
     #[test]
     fn test_qualify_matches_ts_contract() {
         assert_eq!(
@@ -165,8 +129,7 @@ mod tests {
             qualify_mcp_tool_name("My Search", "do.thing"),
             "mcp__My_Search__do_thing"
         );
-        // The server / tool boundary stays unambiguous when either half
-        // contained `__`.
+
         assert_eq!(
             qualify_mcp_tool_name("my__server", "foo"),
             "mcp__my_server__foo"
@@ -177,9 +140,6 @@ mod tests {
         );
     }
 
-    /// The exact TS output for the hash-truncated case: the FNV-1a
-    /// accumulator is negative, so the suffix is `-<hex>` (9 chars) and the
-    /// head is truncated to 54 characters.
     #[test]
     fn test_qualify_long() {
         let long_server = "a".repeat(40);
@@ -193,7 +153,6 @@ mod tests {
         assert!(result.starts_with(MCP_NAME_PREFIX));
     }
 
-    /// Different servers must not collapse onto the same hashed name.
     #[test]
     fn test_qualify_long_differentiates_servers() {
         let tool = "x".repeat(40);
@@ -210,14 +169,10 @@ mod tests {
         assert_ne!(from_a, from_b);
     }
 
-    /// v2 `toString(16).padStart(8, '0')` pads the whole rendered string, so a
-    /// negative tail shorter than seven hex digits gains its zero *before* the
-    /// sign. This input's FNV-1a lands at `-0x53fcf0`; v2 renders `0-53fcf0`,
-    /// and a name hashed differently from v2's is a different tool name.
     #[test]
     fn test_stable_hash_pads_a_short_negative_like_js() {
         assert_eq!(stable_hash8("mcp__s190__t190"), "0-53fcf0");
-        // A nine-character negative tail is past the pad width: no zero.
+
         let long_full = format!("mcp__{}__{}", "a".repeat(40), "b".repeat(40));
         assert_eq!(stable_hash8(&long_full), "-785fd989");
     }
@@ -239,11 +194,8 @@ mod tests {
 
     #[test]
     fn test_hash_format() {
-        // FNV-1a of the empty string is the offset basis 0x811c9dc5. TS never
-        // applies an int32 operator when there is nothing to hash, so it stays
-        // positive and renders unsigned.
         assert_eq!(stable_hash8(""), "811c9dc5");
-        // Any real input goes through the signed interpretation.
+
         assert!(stable_hash8("mcp__a__b").starts_with('-'));
     }
 }

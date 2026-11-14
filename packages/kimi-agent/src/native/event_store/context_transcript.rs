@@ -479,7 +479,14 @@ fn to_mutable_entry(message: &Value, time: Option<Value>) -> Entry {
             .cloned()
             .unwrap_or_else(|| json!([])),
     );
-    for key in ["toolCallId", "isError", "origin", "usage", "llmTiming"] {
+    for key in [
+        "toolCallId",
+        "isError",
+        "origin",
+        "usage",
+        "llmTiming",
+        "tools",
+    ] {
         if let Some(value) = message.get(key) {
             out.insert(key.to_string(), value.clone());
         }

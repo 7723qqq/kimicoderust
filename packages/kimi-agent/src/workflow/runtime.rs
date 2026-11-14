@@ -43,7 +43,7 @@ pub trait WorkflowHost: Send + Sync {
     fn home_dir(&self) -> Option<PathBuf>;
 }
 
-const DEFAULT_DEADLINE_MS: u64 = 12 * 60 * 60 * 1000;
+const DEFAULT_DEADLINE_MS: u64 = 30 * 60 * 1000;
 const CANCEL_POLL_MS: u64 = 50;
 
 pub(crate) async fn execute_workflow(
@@ -51,14 +51,15 @@ pub(crate) async fn execute_workflow(
     args: Option<Value>,
     host: Arc<dyn WorkflowHost>,
     run: Arc<RunState>,
+    deadline_ms: Option<u64>,
 ) -> Result<Value, String> {
     #[cfg(feature = "workflow-js")]
     {
-        execute_workflow_js(script, args, host, run).await
+        execute_workflow_js(script, args, host, run, deadline_ms).await
     }
     #[cfg(not(feature = "workflow-js"))]
     {
-        let _ = (script, args, host, run);
+        let _ = (script, args, host, run, deadline_ms);
         Err("the workflow JS engine is not compiled into this build".to_string())
     }
 }
@@ -69,6 +70,7 @@ async fn execute_workflow_js(
     args: Option<Value>,
     host: Arc<dyn WorkflowHost>,
     run: Arc<RunState>,
+    deadline_ms: Option<u64>,
 ) -> Result<Value, String> {
     let runtime = AsyncRuntime::new().map_err(|error| error.to_string())?;
     let ctx = AsyncContext::full(&runtime)
@@ -88,7 +90,9 @@ async fn execute_workflow_js(
         let promise: Promise = ctx.eval(wrapped)?;
 
         let cancelled = wait_for_cancel(run_for_ctx.clone());
-        let deadline = tokio::time::sleep(Duration::from_millis(DEFAULT_DEADLINE_MS));
+        let deadline = tokio::time::sleep(Duration::from_millis(
+            deadline_ms.unwrap_or(DEFAULT_DEADLINE_MS),
+        ));
         let fut = promise.into_future::<JsValue>();
 
         let result = tokio::select! {

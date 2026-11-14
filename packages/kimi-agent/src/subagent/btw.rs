@@ -174,6 +174,7 @@ mod tests {
                 blocks: Vec::new(),
                 tool_calls: vec![in_flight_call],
                 tool_call_id: None,
+                tools: Vec::new(),
                 prompt_id: None,
                 origin: None,
             },

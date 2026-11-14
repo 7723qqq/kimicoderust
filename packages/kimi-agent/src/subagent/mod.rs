@@ -4,6 +4,8 @@
 //! inter-agent messaging, and lifecycle management without Node/Bun dependencies.
 
 pub mod allowlist;
+pub mod backend;
+pub mod backend_compat;
 pub mod btw;
 pub mod fork;
 pub mod manager;

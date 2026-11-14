@@ -2,20 +2,13 @@ use super::*;
 
 #[test]
 fn the_safe_plugin_id_accepts_everything_upstream_relaxed_regex_accepts() {
-    // Upstream #4188 relaxed `PLUGIN_NAME_REGEX` from lowercase-only to
-    // `[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*(@[A-Za-z0-9_-]+)?`. The fork's
-    // container-safety check already accepts every shape that regex admits
-    // (uppercase, dotted segments, one `@` suffix), so no tightening lands
-    // here — tightening would newly reject third-party plugins, which is a
-    // policy call, not a port.
     for accepted in ["MyPlugin", "plugin.v2", "name@variant", "a-b_c.d"] {
         assert!(
             is_safe_plugin_id(accepted),
             "upstream's relaxed regex accepts {accepted:?}, so the fork must too"
         );
     }
-    // Container safety is unchanged: separators, drive prefixes, `..` and
-    // empty names stay refused.
+
     for refused in ["", ".", "..", "a/b", "a\\b", "a:b", "../x"] {
         assert!(!is_safe_plugin_id(refused), "still refused: {refused:?}");
     }
@@ -93,8 +86,6 @@ fn test_load_marketplace_from_custom_repo_root() {
     assert_eq!(entries[0].sha256sum.as_deref(), Some(&"a".repeat(64)[..]));
 }
 
-/// v2 #3963 `enabled_plugins`: the sorted, comma-joined enabled set —
-/// an empty string when the set is known empty.
 #[test]
 fn test_enabled_plugin_ids_reports_the_sorted_enabled_set() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
@@ -123,8 +114,6 @@ fn test_plugin_manager_enable_disable_and_remove() {
 
     assert!(pm.list_plugins().is_empty());
 
-    // 1. A catalogued plugin can be enabled, and it is recorded with the
-    //    catalog's version — not a fabricated literal.
     assert!(pm.set_plugin_enabled("kimi-webbridge", true).unwrap());
     let list1 = pm.list_plugins();
     assert_eq!(list1.len(), 1);
@@ -133,41 +122,33 @@ fn test_plugin_manager_enable_disable_and_remove() {
     assert!(list1[0].enabled);
     assert_eq!(list1[0].version, "1.11.3");
 
-    // 2. An id that is neither installed nor in the catalog is rejected and
-    //    must NOT be recorded (it used to get a fake `version: "1.0.0"`).
     assert!(!pm.set_plugin_enabled("custom-plugin-x", true).unwrap());
     assert_eq!(pm.list_plugins().len(), 1);
     assert!(pm.list_plugins().iter().all(|p| p.id != "custom-plugin-x"));
 
-    // 3. `install_plugin`: unknown → None; catalogued → recorded info.
     assert!(pm.install_plugin("no-such-plugin").unwrap().is_none());
     let installed = pm.install_plugin("superpowers").unwrap().unwrap();
     assert_eq!(installed.version, None);
     let ids: Vec<String> = pm.list_plugins().into_iter().map(|p| p.id).collect();
     assert!(ids.contains(&"superpowers".to_string()));
 
-    // 4. Disable
     assert!(pm.set_plugin_enabled("kimi-webbridge", false).unwrap());
     let list2 = pm.list_plugins();
     let wb = list2.iter().find(|p| p.id == "kimi-webbridge").unwrap();
     assert!(!wb.enabled);
 
-    // 5. Marketplace merge status
     let market = pm.list_marketplace();
     let wb_market = market.iter().find(|p| p.id == "kimi-webbridge").unwrap();
     assert_eq!(wb_market.installed.as_ref().map(|i| i.enabled), Some(false));
 
-    // 6. Persistence across a fresh PluginManager instance on the same store
     let pm_fresh = PluginManager::new(store);
     assert_eq!(pm_fresh.list_plugins().len(), 2);
 
-    // 7. Remove plugin
     assert!(pm_fresh.remove_plugin("kimi-webbridge").unwrap());
     let list3 = pm_fresh.list_plugins();
     assert_eq!(list3.len(), 1);
     assert_eq!(list3[0].id, "superpowers");
 
-    // Remove non-existent plugin returns false
     assert!(!pm_fresh.remove_plugin("non-existent").unwrap());
 }
 
@@ -186,13 +167,11 @@ fn parse_plugin_command_reads_frontmatter_and_falls_back() {
     assert_eq!(with_frontmatter.body, "Review $ARGUMENTS");
     assert_eq!(with_frontmatter.plugin_id, "demo");
 
-    // No frontmatter: the file stem names it, the first body line describes it.
     let bare = parse_plugin_command("Do the thing\n\nmore\n", path, "demo", None);
     assert_eq!(bare.name, "review");
     assert_eq!(bare.description, "Do the thing");
     assert_eq!(bare.body, "Do the thing\n\nmore");
 
-    // An explicit manifest name wins over the file stem.
     let named = parse_plugin_command("body\n", path, "demo", Some("explicit"));
     assert_eq!(named.name, "explicit");
     assert_eq!(named.description, "body");
@@ -219,10 +198,6 @@ fn resolve_plugin_root_skips_remote_and_missing_sources() {
     assert_eq!(resolve_plugin_root("./official/demo", None), None);
 }
 
-/// The panel renders an install date and the pre-resolution source, and the
-/// engine sent neither. Both are facts only the install record knows, so
-/// they are recorded once at install and preserved afterwards — a re-install
-/// must not silently restate when the plugin arrived.
 #[test]
 fn an_install_records_when_and_from_where_and_keeps_both() {
     let temp = tempfile::tempdir().unwrap();
@@ -251,7 +226,6 @@ fn an_install_records_when_and_from_where_and_keeps_both() {
         "the catalog source, before it was resolved to a root"
     );
 
-    // A second install is not a new arrival.
     std::thread::sleep(std::time::Duration::from_millis(5));
     let again = pm
         .install_plugin("demo")
@@ -260,15 +234,11 @@ fn an_install_records_when_and_from_where_and_keeps_both() {
     assert_eq!(again.installed_at.as_deref(), Some(first_install.as_str()));
     assert_eq!(again.original_source.as_deref(), Some("./official/demo"));
 
-    // And they reach the host, which is the point of recording them.
     let info = pm.plugin_info("demo").expect("info");
     assert_eq!(info.installed_at.as_deref(), Some(first_install.as_str()));
     assert_eq!(info.original_source.as_deref(), Some("./official/demo"));
 }
 
-/// A record written before these fields existed still loads, and reports
-/// them as absent rather than inventing a date. The panel then omits the
-/// lines, which is the truth: the moment was never written down.
 #[test]
 fn an_older_install_record_loads_without_the_new_fields() {
     let temp = tempfile::tempdir().unwrap();
@@ -284,7 +254,7 @@ fn an_older_install_record_loads_without_the_new_fields() {
 
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
     let pm = PluginManager::new(store).with_marketplace_dir(Some(marketplace.to_path_buf()));
-    // The shape a fork from before these fields wrote: enabled, version, root.
+
     let legacy = InstalledPluginInfo {
         enabled: true,
         version: Some("1.0.0".into()),
@@ -311,35 +281,25 @@ fn an_older_install_record_loads_without_the_new_fields() {
     assert!(info.installed_at.is_none(), "no invented date");
 }
 
-/// v2's `resolveInstallSource` / `parseGithubUrl` (`app/plugin/source.ts:19-92`),
-/// case for case. The `source` value is the whole basis of the host's
-/// provenance label and trust badge, so a misclassification is a wrong badge
-/// rather than a cosmetic difference.
 #[test]
 fn an_install_source_is_classified_the_way_v2_classifies_it() {
     let github = |source: &str| classify_plugin_source(source).github.expect("github");
 
-    // A bare repository URL: no ref named, so v2's "no explicit pin"
-    // spelling. v2 would have resolved the latest release tag over the
-    // network here; `explicitGithubRef` drops a `HEAD` branch before
-    // comparing, so every consumer reads it the same way.
     let bare = github("https://github.com/octocat/hello");
     assert_eq!(bare.owner, "octocat");
     assert_eq!(bare.repo, "hello");
     assert_eq!(bare.ref_.kind, PluginGithubRefKind::Branch);
     assert_eq!(bare.ref_.value, "HEAD");
 
-    // `.git` is stripped from the repo, `www.` accepted from the host.
     let suffix = github("https://www.github.com/octocat/hello.git");
     assert_eq!(suffix.repo, "hello");
 
-    // `tree/<ref>`: hex is a commit, anything else a branch.
     let branch = github("https://github.com/octocat/hello/tree/main");
     assert_eq!(branch.ref_.kind, PluginGithubRefKind::Branch);
     assert_eq!(branch.ref_.value, "main");
     let sha = github("https://github.com/octocat/hello/tree/a1b2c3d4e5f6");
     assert_eq!(sha.ref_.kind, PluginGithubRefKind::Sha);
-    // 6 hex characters is not a SHA — too short to be one.
+
     assert_eq!(
         github("https://github.com/octocat/hello/tree/a1b2c3")
             .ref_
@@ -355,12 +315,9 @@ fn an_install_source_is_classified_the_way_v2_classifies_it() {
     assert_eq!(commit.ref_.kind, PluginGithubRefKind::Sha);
     assert_eq!(commit.ref_.value, "deadbeef");
 
-    // A ref with an escaped slash keeps it: v2 joins the decoded segments.
     let slashy = github("https://github.com/octocat/hello/tree/feature%2Fx");
     assert_eq!(slashy.ref_.value, "feature/x");
 
-    // Not a github source: another host, a non-https scheme, a bare host, a
-    // trailing path that names no ref, or a non-URL.
     for source in [
         "https://example.test/octocat/hello",
         "http://github.com/octocat/hello",
@@ -383,18 +340,13 @@ fn an_install_source_is_classified_the_way_v2_classifies_it() {
         classify_plugin_source("./official/demo").kind,
         PluginSourceKind::LocalPath
     );
-    // Surrounding whitespace is trimmed, as v2's `source.trim()` does.
+
     assert_eq!(
         classify_plugin_source("  https://example.test/p.zip  ").kind,
         PluginSourceKind::ZipUrl
     );
 }
 
-/// The wire has to carry the *vocabulary*, because every host-side reader
-/// compares against it: the provenance label, the trust badge, the official
-/// install check and the update notifier's identity key all branch on
-/// `source === 'github' | 'zip-url'`. A raw URL matched none of them, so the
-/// badge was always "third-party" and the update notifier never fired.
 #[test]
 fn the_wire_carries_the_source_vocabulary_and_the_github_metadata() {
     let temp = tempfile::tempdir().unwrap();
@@ -419,15 +371,12 @@ fn the_wire_carries_the_source_vocabulary_and_the_github_metadata() {
     assert_eq!(github.repo, "remote");
     assert_eq!(github.ref_.kind, PluginGithubRefKind::Branch);
     assert_eq!(github.ref_.value, "main");
-    // The pre-resolution spelling is kept, which is what the host pairs with
-    // the vocabulary to render `github <owner>/<repo>@<ref>`.
+
     assert_eq!(
         info.original_source.as_deref(),
         Some("https://github.com/example/remote/tree/main")
     );
 
-    // The list projection carries both too: the list view's label and badge
-    // are computed from a `PluginSummary`, not from the detail view.
     let summary = pm
         .list_plugins()
         .into_iter()
@@ -443,9 +392,6 @@ fn the_wire_carries_the_source_vocabulary_and_the_github_metadata() {
     assert_eq!(json["github"]["ref"]["value"], "main");
 }
 
-/// v2 stamps `updatedAt` on every install and keeps `installedAt` from the
-/// first (`manager.ts:140-141`), so a re-install is what an update looks
-/// like here — the panel only shows the line when the two differ.
 #[test]
 fn a_reinstall_keeps_the_install_time_and_advances_the_update_time() {
     let temp = tempfile::tempdir().unwrap();
@@ -480,21 +426,12 @@ fn a_reinstall_keeps_the_install_time_and_advances_the_update_time() {
     assert!(chrono::DateTime::parse_from_rfc3339(again.updated_at.as_ref().unwrap()).is_ok());
 }
 
-/// A declared root that does not exist must be reported as v2 reports it — a
-/// `warn` for "not a directory" — never as an escape.
-///
-/// This regressed: the first containment check canonicalized the *target* and
-/// fell back to the path as written when that failed, while the root was
-/// canonicalized. On Windows those two disagree whenever the root is spelled
-/// with an 8.3 short name (`C:\Users\ADMINI~1\...`), so every missing
-/// directory came back as "resolves outside the plugin" — an error, on the
-/// most ordinary manifest there is.
 #[test]
 fn a_missing_declared_root_is_a_warning_and_not_an_escape() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("plugin");
     std::fs::create_dir_all(&root).unwrap();
-    // Neither the root's skills dir nor its agents dir exists.
+
     std::fs::write(
         root.join("kimi.plugin.json"),
         r#"{"name":"hollow","skills":"./skills/","agents":"./agents/"}"#,
@@ -526,15 +463,6 @@ fn a_missing_declared_root_is_a_warning_and_not_an_escape() {
     );
 }
 
-/// v2's state rule (`manager.ts:596-602`): an `error` diagnostic or an
-/// unreadable manifest makes the record an error, a **warning does not**.
-/// The fork used to answer `ok` for a plugin whose manifest the same read had
-/// just rejected — and `hasErrors` contradicted it at the same time.
-///
-/// `state` is badge-only in the fork: nothing gates a plugin's contributions
-/// on it, so this changes what the panel says and nothing else. That is also
-/// why the "an error-state plugin contributes nothing" half of v2's rule is
-/// *not* adopted here — see the ledger.
 #[test]
 fn the_state_follows_the_diagnostics_and_a_warning_does_not_flip_it() {
     let temp = tempfile::tempdir().unwrap();
@@ -561,14 +489,11 @@ fn the_state_follows_the_diagnostics_and_a_warning_does_not_flip_it() {
         (pm, info)
     };
 
-    // Clean: ok, no diagnostics.
     let (_, clean) = install("clean", r#"{"name":"clean","skills":"./skills/"}"#, true);
     assert_eq!(clean.state, "ok");
     assert!(!clean.has_errors);
     assert!(clean.diagnostics.is_empty());
 
-    // A warning — here a declared skill root that is not a directory — leaves
-    // the state alone, exactly as v2 does.
     let (_, warned) = install("warned", r#"{"name":"warned","skills":"./skills/"}"#, false);
     assert_eq!(
         warned.state, "ok",
@@ -585,9 +510,6 @@ fn the_state_follows_the_diagnostics_and_a_warning_does_not_flip_it() {
         warned.diagnostics
     );
 
-    // An error — a path that tries to leave the plugin — flips it. The skill
-    // root was already dropped when the path was resolved, so the badge now
-    // matches what the plugin actually does.
     let (_, escaping) = install(
         "escaping",
         r#"{"name":"escaping","skills":"../elsewhere/"}"#,
@@ -601,7 +523,6 @@ fn the_state_follows_the_diagnostics_and_a_warning_does_not_flip_it() {
         escaping.diagnostics
     );
 
-    // No manifest at all is an error too — and used to report `ok`.
     let (pm, _) = install("manifestless", r#"{"name":"manifestless"}"#, true);
     std::fs::remove_file(
         temp.path()
@@ -629,7 +550,7 @@ fn plugin_commands_and_info_read_the_manifest() {
     let marketplace = temp.path();
     let root = marketplace.join("official/demo");
     std::fs::create_dir_all(root.join("commands")).unwrap();
-    // Declared below, so it has to exist for the skill count to be 1.
+
     std::fs::create_dir_all(root.join("skills")).unwrap();
     std::fs::write(
             marketplace.join("marketplace.json"),
@@ -656,7 +577,6 @@ fn plugin_commands_and_info_read_the_manifest() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
     let pm = PluginManager::new(store).with_marketplace_dir(Some(marketplace.to_path_buf()));
 
-    // Nothing is installed yet, so nothing is contributed.
     assert!(pm.enabled_commands().is_empty());
 
     pm.install_plugin("demo").unwrap().expect("catalogued");
@@ -676,24 +596,19 @@ fn plugin_commands_and_info_read_the_manifest() {
     assert_eq!(info.mcp_servers[0].transport, "stdio");
     assert!(info.mcp_servers[0].enabled);
 
-    // Disabling one MCP server is recorded and reflected; an unknown name
-    // is refused rather than silently recorded.
     assert!(pm.set_mcp_server_enabled("demo", "data", false).unwrap());
     let info = pm.plugin_info("demo").expect("installed");
     assert!(!info.mcp_servers[0].enabled);
     assert!(!pm.set_mcp_server_enabled("demo", "nope", false).unwrap());
 
-    // Disabling the plugin drops its commands.
     pm.set_plugin_enabled("demo", false).unwrap();
     assert!(pm.enabled_commands().is_empty());
 
-    // Reload reports the diff against the snapshot taken at construction.
     let summary = pm.reload();
     assert_eq!(summary.added, vec!["demo".to_string()]);
     assert!(summary.removed.is_empty());
     assert!(summary.errors.is_empty());
 
-    // A second reload has nothing new to report.
     let summary = pm.reload();
     assert!(summary.added.is_empty());
     assert!(summary.removed.is_empty());
@@ -705,9 +620,7 @@ fn enabled_plugins_contribute_skill_dirs_and_mcp_configs() {
     let temp = tempfile::tempdir().unwrap();
     let marketplace = temp.path();
     let root = marketplace.join("official/demo");
-    // The declared skill root has to exist: v2 drops a path that is not a
-    // directory (with a `warn`), where the fork used to count the entry and
-    // let the later scan find nothing.
+
     std::fs::create_dir_all(root.join("skills/review")).unwrap();
     std::fs::write(
             marketplace.join("marketplace.json"),
@@ -731,22 +644,19 @@ fn enabled_plugins_contribute_skill_dirs_and_mcp_configs() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
     let pm = PluginManager::new(store).with_marketplace_dir(Some(marketplace.to_path_buf()));
 
-    // Nothing installed: nothing contributed.
     assert!(pm.plugin_skill_dirs().is_empty());
     assert!(pm.plugin_mcp_configs().is_empty());
 
     pm.install_plugin("demo").unwrap().expect("catalogued");
     let skill_dirs = pm.plugin_skill_dirs();
     assert_eq!(skill_dirs.len(), 1);
-    // Resolved, so the answer is the real path rather than the manifest's
-    // `./skills/` joined onto however the root happened to be spelled.
+
     assert_eq!(
         skill_dirs[0].dir,
         without_verbatim_prefix(&std::fs::canonicalize(root.join("skills")).unwrap())
     );
     assert_eq!(skill_dirs[0].plugin_id, "demo");
-    // Trimmed on the way in: the renderer wraps the text in
-    // `<plugin-instructions>` and an indented body would only widen the gap.
+
     assert_eq!(
         skill_dirs[0].instructions.as_deref(),
         Some("Always answer in the house voice.")
@@ -762,7 +672,7 @@ fn enabled_plugins_contribute_skill_dirs_and_mcp_configs() {
     assert_eq!(data.command.as_deref(), Some("node"));
     assert_eq!(data.args, vec!["server.mjs"]);
     assert_eq!(data.env.get("TOKEN").map(String::as_str), Some("x"));
-    // A manifest `cwd` is anchored to the plugin root, not the process cwd.
+
     let root_posix = root.to_string_lossy().replace('\\', "/");
     assert!(
         data.cwd
@@ -778,23 +688,16 @@ fn enabled_plugins_contribute_skill_dirs_and_mcp_configs() {
     assert_eq!(remote.transport, "http");
     assert_eq!(remote.url.as_deref(), Some("https://example.test/mcp"));
 
-    // Disabling one server drops it from the contributed set.
     assert!(pm.set_mcp_server_enabled("demo", "data", false).unwrap());
     let configs = pm.plugin_mcp_configs();
     assert_eq!(configs.len(), 1);
     assert_eq!(configs[0].name, "demo__remote");
 
-    // Disabling the plugin drops everything.
     pm.set_plugin_enabled("demo", false).unwrap();
     assert!(pm.plugin_skill_dirs().is_empty());
     assert!(pm.plugin_mcp_configs().is_empty());
 }
 
-/// v2's two manifest locations, root first (`app/plugin/manifest.ts:16-17`,
-/// `:55-57`): the dir form answers when the root form is absent, and when
-/// both exist the root one wins with the other reported as shadowed. The
-/// fork read only `kimi.plugin.json`, so a plugin on the dir form
-/// contributed nothing at all.
 #[test]
 fn a_manifest_is_read_from_either_location_and_a_shadowed_one_is_reported() {
     let temp = tempfile::tempdir().unwrap();
@@ -853,8 +756,7 @@ fn a_manifest_is_read_from_either_location_and_a_shadowed_one_is_reported() {
         Some("winner"),
         "the root manifest wins"
     );
-    // Reported rather than silently ignored: an author editing the file that
-    // has no effect otherwise gets no signal at all.
+
     assert_eq!(
         parsed.shadowed_manifest_path.as_deref(),
         Some(
@@ -879,13 +781,6 @@ fn a_manifest_is_read_from_either_location_and_a_shadowed_one_is_reported() {
     );
 }
 
-/// A manifest is third-party content, so a declared path may not lead out of
-/// the plugin (v2 `resolveDirListField`'s containment check,
-/// `app/plugin/manifest.ts:194-201`). The fork resolved `skills` with
-/// `root.join(rel.trim_start_matches("./"))` and additionally accepted an
-/// absolute path outright, so a plugin could point the scan at any directory
-/// on the machine. Every drop is reported, because a missing skill root is
-/// otherwise indistinguishable from a plugin that never declared one.
 #[test]
 fn a_manifest_path_may_not_leave_the_plugin_and_every_drop_is_reported() {
     let temp = tempfile::tempdir().unwrap();
@@ -924,9 +819,7 @@ fn a_manifest_path_may_not_leave_the_plugin_and_every_drop_is_reported() {
         .iter()
         .map(|d| d.message.as_str())
         .collect();
-    // `./../outside-skills` passes the `./` rule and is caught by the
-    // containment check — the case that actually matters, since it is the
-    // one a prefix test would wave through.
+
     assert_eq!(
         messages
             .iter()
@@ -935,8 +828,7 @@ fn a_manifest_path_may_not_leave_the_plugin_and_every_drop_is_reported() {
         1,
         "{messages:?}"
     );
-    // The other two are refused by the prefix rule before containment is
-    // reached; the absolute one used to be accepted outright by the fork.
+
     assert_eq!(
         messages
             .iter()
@@ -947,9 +839,6 @@ fn a_manifest_path_may_not_leave_the_plugin_and_every_drop_is_reported() {
     );
 }
 
-/// A sibling directory whose name merely starts with the plugin's is not
-/// inside it (`isWithin` is component-wise, `manifest.ts:552-555`), so
-/// `../plugin-evil` cannot pass as `plugin`.
 #[test]
 fn containment_is_component_wise_not_a_prefix_match() {
     let temp = tempfile::tempdir().unwrap();
@@ -983,10 +872,6 @@ fn containment_is_component_wise_not_a_prefix_match() {
     );
 }
 
-/// The panel's manifest-derived lines read these fields, and the engine sent
-/// none of them: `keywords` and `sessionStart` were not even parsed, and
-/// `skills` reached the host as whatever shape the JSON had — a single
-/// string, which the panel then iterated character by character.
 #[test]
 fn the_manifest_reaches_the_host_in_the_shape_the_panel_reads() {
     let temp = tempfile::tempdir().unwrap();
@@ -1019,8 +904,6 @@ fn the_manifest_reaches_the_host_in_the_shape_the_panel_reads() {
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let manifest = parsed.manifest.expect("manifest");
 
-    // A bare string author is v2's `{ name }` shorthand (`readAuthor`), which
-    // is the form the bundled plugins use.
     assert_eq!(
         manifest.author.as_ref().and_then(|a| a.name.as_deref()),
         Some("Moonshot AI")
@@ -1045,13 +928,11 @@ fn the_manifest_reaches_the_host_in_the_shape_the_panel_reads() {
             .and_then(|i| i.short_description.as_deref()),
         Some("Keeps the house voice.")
     );
-    // A list, always: the panel iterates this, and a bare string would have
-    // produced one line per character.
+
     let skills = manifest.skills.as_deref().expect("skills list");
     assert_eq!(skills.len(), 1);
     assert!(skills[0].ends_with("skills"), "{}", skills[0]);
 
-    // And the serialized wire is what the host parses.
     let json = serde_json::to_value(&manifest).unwrap();
     assert_eq!(json["sessionStart"]["skill"], "brandpack.onboard");
     assert_eq!(json["skillInstructions"], "Answer in the house voice.");
@@ -1094,9 +975,7 @@ fn a_node_runner_rewrites_node_plugin_servers_onto_the_host_runtime() {
         .iter()
         .find(|config| config.name == "demo__data")
         .expect("data");
-    // `node` + its entry arg are folded into the host's hidden sub-command;
-    // the rest of the argument vector and the env pass through unchanged,
-    // and the plugin root rides KIMI_PLUGIN_ROOT.
+
     assert_eq!(
         data.command.as_deref(),
         Some(temp.path().join("kimi").to_string_lossy().as_ref())
@@ -1110,8 +989,7 @@ fn a_node_runner_rewrites_node_plugin_servers_onto_the_host_runtime() {
         Some(root.to_string_lossy().as_ref())
     );
     assert_eq!(data.env.get("TOKEN").map(String::as_str), Some("x"));
-    // A non-node command is left un-rewritten (its `./` path still
-    // resolves against the plugin root, as always).
+
     let native = configs
         .iter()
         .find(|config| config.name == "demo__native")
@@ -1141,8 +1019,6 @@ fn a_remote_install_lands_in_the_managed_root() {
         .with_marketplace_dir(Some(marketplace))
         .with_home_dir(Some(home.clone()));
 
-    // The managed root is where a remote install would land, and it wins
-    // over the catalog source once it holds a manifest.
     let managed = pm.managed_root("demo").expect("home is set");
     assert_eq!(managed, home.join("plugins").join("demo"));
     assert!(pm.plugin_root("demo").is_none());
@@ -1151,9 +1027,6 @@ fn a_remote_install_lands_in_the_managed_root() {
     std::fs::write(managed.join("kimi.plugin.json"), r#"{"name":"demo"}"#).unwrap();
     assert_eq!(pm.plugin_root("demo"), Some(managed.clone()));
 
-    // A local path that is not catalogued installs under its manifest name,
-    // never the path string, and stays resolvable to the directory the user
-    // pointed at.
     let local = temp.path().join("local-plugin");
     std::fs::create_dir_all(&local).unwrap();
     std::fs::write(
@@ -1174,10 +1047,6 @@ fn a_remote_install_lands_in_the_managed_root() {
     assert!(pm.install_plugin_from("no-such-plugin").unwrap().is_none());
 }
 
-/// A catalogued plugin whose `source` is a URL is remote even when it is
-/// installed by its catalog id: the install has to fetch the archive, not
-/// just record a row. The loopback source is refused by the SSRF guard, so
-/// the refusal proves the download path was entered.
 #[test]
 fn a_catalogued_url_source_downloads_when_installed_by_id() {
     let temp = tempfile::tempdir().unwrap();
@@ -1225,13 +1094,11 @@ fn an_uncatalogued_local_path_never_installs_as_a_path_shaped_id() {
         .unwrap()
         .expect("the manifest identifies it");
     assert_eq!(id, "standalone");
-    // The id is a real key: every later call resolves through it.
+
     let ids: Vec<String> = pm.list_plugins().into_iter().map(|p| p.id).collect();
     assert_eq!(ids, vec!["standalone".to_string()]);
     assert_eq!(pm.plugin_root(&id), Some(local));
 
-    // A directory with no manifest is not installable, so a bogus path can
-    // never record an install.
     let bare = temp.path().join("bare");
     std::fs::create_dir_all(&bare).unwrap();
     assert!(
@@ -1263,7 +1130,6 @@ fn removing_a_plugin_also_drops_its_managed_copy() {
         .with_marketplace_dir(Some(marketplace))
         .with_home_dir(Some(home.clone()));
 
-    // A remote install is the case that lands a copy under `<home>/plugins`.
     let managed = home.join("plugins").join("demo");
     std::fs::create_dir_all(&managed).unwrap();
     std::fs::write(managed.join("kimi.plugin.json"), r#"{"name":"demo"}"#).unwrap();
@@ -1277,7 +1143,7 @@ fn removing_a_plugin_also_drops_its_managed_copy() {
         !managed.exists(),
         "the managed copy is gone, so a removed plugin cannot keep contributing"
     );
-    // The catalog still declares it, but nothing is installed.
+
     assert!(pm.list_plugins().is_empty());
 }
 
@@ -1296,10 +1162,6 @@ fn managed_roots_refuse_ids_that_are_not_a_single_path_segment() {
     }
 }
 
-/// v2 `readSystemPrompt`: the inline field and the `systemPromptPath` file are
-/// joined with a blank line; each is capped at 32 KB, a BOM is stripped from
-/// the file, and a path outside the plugin (or not `./`-relative) is dropped
-/// with a warning instead of being read.
 #[test]
 fn a_manifest_reads_inline_and_file_system_prompts() {
     let temp = tempfile::tempdir().unwrap();
@@ -1326,8 +1188,6 @@ fn a_manifest_reads_inline_and_file_system_prompts() {
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
 
-    // An oversized inline field is ignored as a whole; the valid file still
-    // contributes, and the warning names the limit.
     std::fs::write(
         root.join("kimi.plugin.json"),
         format!(
@@ -1350,8 +1210,6 @@ fn a_manifest_reads_inline_and_file_system_prompts() {
         parsed.diagnostics
     );
 
-    // A path that leaves the plugin, and one that is not `./`-relative, are
-    // both refused before any read.
     std::fs::write(temp.path().join("outside.md"), "Outside text").unwrap();
     for (path, expected) in [
         ("./../outside.md", "resolves outside the plugin"),
@@ -1379,9 +1237,6 @@ fn a_manifest_reads_inline_and_file_system_prompts() {
     }
 }
 
-/// Enabled plugins contribute their prompt block and hooks; disabling one
-/// removes both. Hooks carry the plugin root as `cwd` and v2's environment,
-/// and a malformed entry is skipped instead of dropping the plugin.
 #[test]
 fn enabled_plugins_contribute_prompt_sections_and_hooks() {
     let temp = tempfile::tempdir().unwrap();
@@ -1410,7 +1265,6 @@ fn enabled_plugins_contribute_prompt_sections_and_hooks() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
     let pm = PluginManager::new(store).with_marketplace_dir(Some(marketplace.to_path_buf()));
 
-    // Not installed yet: no contributions at all.
     assert!(pm.plugin_system_prompt_block().is_none());
     assert!(pm.enabled_hooks().is_empty());
 
@@ -1453,8 +1307,6 @@ fn enabled_plugins_contribute_prompt_sections_and_hooks() {
     assert!(pm.enabled_hooks().is_empty());
 }
 
-/// v2 `PLUGIN_SECTIONS_MAX_BYTES`: the aggregate budget skips a contribution
-/// that does not fit, whole, instead of truncating it mid-sentence.
 #[test]
 fn plugin_prompt_sections_respect_the_aggregate_budget() {
     let temp = tempfile::tempdir().unwrap();
@@ -1463,9 +1315,7 @@ fn plugin_prompt_sections_respect_the_aggregate_budget() {
     for id in ["big-one", "big-two"] {
         let root = marketplace.join(format!("official/{id}"));
         std::fs::create_dir_all(&root).unwrap();
-        // Each plugin contributes two 30 KB fields (inline + file), inside the
-        // 32 KB per-field cap: the first plugin's ~60 KB fits the 64 KB
-        // aggregate budget, the second's does not.
+
         let content = "x".repeat(30 * 1024);
         std::fs::write(root.join("PROMPT.md"), &content).unwrap();
         std::fs::write(
@@ -1504,16 +1354,6 @@ fn plugin_prompt_sections_respect_the_aggregate_budget() {
     );
 }
 
-/// The registry must not keep a file handle between calls.
-///
-/// It used to hold the `Arc<SqliteSessionStore>` it was constructed with, so
-/// every clone of the manager pinned an open connection on
-/// `<data dir>/sessions.db`. On Windows that is a file lock: removing the data
-/// directory failed even after the host called its shutdown (`EBUSY` in the
-/// SDK's harness teardown, which is how this was found). A file-backed registry
-/// now reopens the store for each operation and drops it, so the record has to
-/// survive on disk alone — which is what this asserts, plus that the file can be
-/// removed once the manager is gone.
 #[test]
 fn test_file_backed_registry_persists_without_retaining_the_store() {
     let dir = tempfile::tempdir().unwrap();
@@ -1525,8 +1365,6 @@ fn test_file_backed_registry_persists_without_retaining_the_store() {
     pm.write_state("registry", &blob).unwrap();
     assert_eq!(pm.read_state("registry"), Some(blob.clone()));
 
-    // A fresh connection — the manager's own handle is long gone — still reads
-    // what the write committed.
     let reopened = SqliteSessionStore::open(&path).unwrap();
     assert_eq!(
         reopened.get_state("plugins", "registry").unwrap(),
@@ -1535,6 +1373,5 @@ fn test_file_backed_registry_persists_without_retaining_the_store() {
     drop(reopened);
     drop(pm);
 
-    // Nothing may hold the file now; on Windows an open handle fails here.
     std::fs::remove_file(&path).expect("the registry must not retain a file handle");
 }

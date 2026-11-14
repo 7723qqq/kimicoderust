@@ -10,9 +10,9 @@ description:
   en: >
       Google GenAI adapter: request/stream mapping for Gemini models.
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.302Z"
-fingerprint: 833895b25b7a26f6db2852ba21e5c61f25304e42f85acb0757edd77fd8f5494b
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-11T19:20:38.917Z"
+fingerprint: 8abf2d371745ac6bbd194fcfdd933a2d7501150e6fe1adc4a8ed4c1922ef38f2
 source:
   - path: "packages/kimi-agent/src/llm/google_genai.rs"
 apis: []

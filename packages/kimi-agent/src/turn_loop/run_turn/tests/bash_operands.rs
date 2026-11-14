@@ -2,11 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-// ── AGENTS.md bash operand dirs (`host/parse_bash`) ─────────────────────
-
-// One scripted exchange: step 1 emits the configured Bash call, step 2
-/// stops. Every request's messages are captured so the injection pass that
-/// follows the Bash call is observable.
 struct BashThenStopLlm {
     bash_args: serde_json::Value,
     requests: Arc<Mutex<Vec<Vec<LLMMessage>>>>,
@@ -65,8 +60,6 @@ impl LLM for BashThenStopLlm {
     }
 }
 
-/// A `HostCallbacks` wrapper whose `parse_bash` answer is scripted, with the
-/// requests recorded for inspection.
 struct ParseBashStub {
     inner: Arc<dyn HostCallbacks>,
     requests: Arc<Mutex<Vec<crate::rpc::types::ParseBashRequest>>>,
@@ -110,6 +103,7 @@ impl HostCallbacks for ParseBashStub {
 
 fn bash_turn_input<'a>(llm: &'a BashThenStopLlm) -> RunTurnInput<'a> {
     RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-bash-targets".into(),
@@ -141,6 +135,7 @@ fn bash_turn_input_with_toolset<'a>(
     toolset: Arc<crate::tools::NativeToolset>,
 ) -> RunTurnInput<'a> {
     RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         toolset: Some(toolset),
         ..bash_turn_input(llm)
     }
@@ -169,8 +164,6 @@ fn reminder_in(request: &[LLMMessage]) -> Option<&LLMMessage> {
         .find(|m| m.content.contains("AGENTS.md file(s) apply"))
 }
 
-/// The full chain: the seam asks the host parser, the returned operand dirs
-/// feed the reminder, and the next request names the discovered files.
 #[tokio::test]
 async fn bash_operand_dirs_reach_the_agents_md_reminder_through_the_host_parser() {
     let tmp = tempfile::tempdir().unwrap();
@@ -197,8 +190,6 @@ async fn bash_operand_dirs_reach_the_agents_md_reminder_through_the_host_parser(
     let turn = run_turn(bash_turn_input(&llm), &callbacks).await.unwrap();
     assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
 
-    // The seam asked exactly once, with the command and the call's
-    // effective cwd (no declared `cwd` → the process one).
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].command, "ls sub");
@@ -208,22 +199,18 @@ async fn bash_operand_dirs_reach_the_agents_md_reminder_through_the_host_parser(
     );
     assert!(!requests[0].home.is_empty());
 
-    // The returned operand dir fed the reminder: the chain lists the root
-    // file and the one in `sub`.
     let captured = captured.lock().unwrap();
     let reminder = reminder_in(&captured[1]).expect("the operand dir must inject");
     assert!(reminder.content.contains("AGENTS.md"), "{reminder:?}");
     assert!(reminder.content.contains("sub"), "{reminder:?}");
 }
 
-/// The engine parses the command itself: a host that carries no parser still
-/// gets operand directories for the reminder.
 #[tokio::test]
 async fn bash_operands_resolve_without_a_host_parser() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     std::fs::create_dir(root.join("sub")).unwrap();
-    // The only AGENTS.md sits where *only* an operand could reach it.
+
     std::fs::write(root.join("sub").join("AGENTS.md"), "sub rules").unwrap();
     let _cwd = crate::test_support::CwdScope::enter(root).await;
 
@@ -300,8 +287,6 @@ async fn a_command_that_does_not_parse_keeps_the_cwd_only_reminder() {
     );
 }
 
-/// Degradation arm two: without a parser the Bash call's own declared `cwd`
-/// still probes, exactly as before this seam existed.
 #[tokio::test]
 async fn the_declared_cwd_still_probes_when_the_host_has_no_parser() {
     let tmp = tempfile::tempdir().unwrap();
@@ -324,9 +309,6 @@ async fn the_declared_cwd_still_probes_when_the_host_has_no_parser() {
     assert!(reminder.content.contains("sub"), "{reminder:?}");
 }
 
-/// Degradation arm three: a wired host whose parse fails (`Ok(None)`, v2's
-/// `!parsed.ok` arm) or whose channel errors keeps the cwd-only shape —
-/// the declared cwd probes, the operands do not.
 #[tokio::test]
 async fn a_failed_parse_keeps_the_cwd_only_shape() {
     let tmp = tempfile::tempdir().unwrap();
@@ -384,17 +366,17 @@ async fn owned_tower_bash_deletion_returns_a_guard_veto_before_execution() {
             .join(crate::tools::tower::paths::STATE_FILE),
     )
     .unwrap();
-    assert!(crate::tools::tower::bash_guard::tower_workspace_owned_json(
+    assert!(crate::features::tower::bashGuard::tower_workspace_owned_json(
         &state
     ));
     assert!(
-        crate::tools::tower::bash_guard::analyze_tower_bash_command(
-            &crate::tools::tower::bash_guard::TowerBashGuardTarget {
+        crate::features::tower::bashGuard::analyze_tower_bash_command(
+            &crate::features::tower::bashGuard::TowerBashGuardTarget {
                 command: "rm -rf .tower/comms".into(),
                 cwd: root.to_path_buf(),
                 main_checkout: root.to_path_buf(),
             },
-            crate::tools::tower::bash_guard::parse_shell_script,
+            crate::features::tower::bashGuard::parse_shell_script,
         )
         .is_some()
     );
@@ -425,11 +407,6 @@ async fn owned_tower_bash_deletion_returns_a_guard_veto_before_execution() {
     assert!(reminder_in(&captured[1]).is_none());
 }
 
-// ── D14(a): hard-failure observation sink ──────────────────────────────────
-
-/// A turn that fails hard (`Err`, no `TurnResult`) must still hand the steps
-/// that completed before the failure to the caller through the out-of-band
-/// sink; otherwise the engine's end-of-turn fold never sees them.
 #[tokio::test]
 async fn a_hard_failed_turn_still_reports_its_completed_steps_through_the_sink() {
     struct SucceedsThenFailsLlm;
@@ -483,6 +460,7 @@ async fn a_hard_failed_turn_still_reports_its_completed_steps_through_the_sink()
     let llm = SucceedsThenFailsLlm;
     let callbacks: Arc<dyn HostCallbacks> = rpc_callbacks(stub_tool_server());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-sink-on-failure".into(),

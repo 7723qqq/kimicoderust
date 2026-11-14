@@ -9,8 +9,6 @@ fn queued_prompt(prompt_id: &str) -> Value {
     })
 }
 
-/// A13: the snapshot folds the prompt queue (tracked prompts vs notification
-/// wakes) into one read; nothing here needs a running turn.
 #[test]
 fn loop_snapshot_folds_queue_and_separates_notifications() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
@@ -53,14 +51,13 @@ fn loop_snapshot_folds_queue_and_separates_notifications() {
         snapshot.notification_count, 1,
         "an untracked wake is a notification, not a queued prompt id"
     );
-    // camelCase on the wire, matching v2's snapshot shape.
+
     let wire = serde_json::to_value(&snapshot).unwrap();
     assert_eq!(wire["queuedPromptIds"][0], "p-queued");
     assert_eq!(wire["notificationCount"], 1);
     assert!(wire.get("turn").is_none());
 }
 
-/// A13: the machine's three-value phase plus retry/tool detail.
 #[test]
 fn loop_turn_snapshot_maps_activity_phases() {
     let retrying = activity::AgentPhase::Retrying {
@@ -101,7 +98,6 @@ fn loop_turn_snapshot_maps_activity_phases() {
     assert!(turn.retry.is_none());
     assert!(!turn.ending);
 
-    // `streaming` and `awaiting_approval` sit inside the machine's running.
     let streaming = activity::AgentPhase::Streaming {
         turn_id: 7,
         step: 3,
@@ -116,7 +112,6 @@ fn loop_turn_snapshot_maps_activity_phases() {
         "running"
     );
 
-    // Without a turn id there is no turn to report.
     assert!(
         LoopTurnSnapshot::from_phase(None, &activity::AgentPhase::Idle, 0, false, None).is_none()
     );

@@ -18,10 +18,6 @@ async fn test_http_health_endpoint() {
     assert_eq!(val, json!({ "ok": true }));
 }
 
-/// v2 #3832: a metadata object that names its own variant is a prompt
-/// origin (the transcript contract's shape), not opaque client metadata —
-/// the v3 projection reads the `skill_activation` variant off the turn
-/// origin for the opening user message's `skill_activations`.
 #[test]
 fn prompt_origin_from_metadata_distinguishes_origin_variants() {
     let opaque = prompt_origin_from_metadata(Some(&json!([{ "surface": "web" }]))).unwrap();
@@ -50,9 +46,6 @@ fn prompt_origin_from_metadata_distinguishes_origin_variants() {
 
 #[tokio::test]
 async fn test_turn_origin_persists_and_projects() {
-    // #3764: the origin the route builds from the request's `metadata`
-    // lands in the turns table and comes back through list_turns, so the
-    // v3 projection can carry it instead of assuming `user`.
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-origin", Some("origin")).unwrap();
     let origin = json!({
@@ -75,7 +68,6 @@ async fn test_turn_origin_persists_and_projects() {
     assert_eq!(saved["kind"], "user");
     assert_eq!(saved["clientMetadata"][0]["threadId"], "abc");
 
-    // A turn saved without an origin reads back as None (pre-#3764 rows).
     store
         .save_turn(
             "sess-origin",
@@ -95,7 +87,6 @@ async fn test_turn_origin_persists_and_projects() {
 async fn test_http_sessions_crud_and_prompt() {
     let server = HttpServer::in_memory().unwrap();
 
-    // 1. Create session
     let req_create = HttpRequest {
         method: "POST".into(),
         path: "/api/v1/sessions".into(),
@@ -104,12 +95,11 @@ async fn test_http_sessions_crud_and_prompt() {
         body: serde_json::to_vec(&json!({ "title": "Web REST Test" })).unwrap(),
     };
     let res_create = server.handle_request(&req_create).await;
-    // v2 answers the bare `sessionSchema` (no `statusCode` override).
+
     assert_eq!(res_create.status, 200);
     let val_create: Value = serde_json::from_slice(&res_create.body).unwrap();
     let sid = val_create["id"].as_str().unwrap();
 
-    // 2. List sessions
     let req_list = HttpRequest {
         method: "GET".into(),
         path: "/api/v1/sessions".into(),
@@ -122,7 +112,6 @@ async fn test_http_sessions_crud_and_prompt() {
     let val_list: Value = serde_json::from_slice(&res_list.body).unwrap();
     assert_eq!(val_list["sessions"].as_array().unwrap().len(), 1);
 
-    // 3. Prompt session
     let req_prompt = HttpRequest {
         method: "POST".into(),
         path: format!("/api/v1/sessions/{sid}/prompt"),
@@ -130,9 +119,7 @@ async fn test_http_sessions_crud_and_prompt() {
         headers: HashMap::new(),
         body: serde_json::to_vec(&json!({ "prompt": "Hello REST" })).unwrap(),
     };
-    // No engine attached: refuse. This route used to answer
-    // `Processed: {prompt}` with status 200, which a client could not tell
-    // apart from a real turn.
+
     let res_prompt = server.handle_request(&req_prompt).await;
     assert_eq!(res_prompt.status, 503);
     let val_prompt: Value = serde_json::from_slice(&res_prompt.body).unwrap();
@@ -148,7 +135,6 @@ async fn test_http_sessions_crud_and_prompt() {
         "the canned reply is still being served"
     );
 
-    // 4. Get specific session
     let req_get = HttpRequest {
         method: "GET".into(),
         path: format!("/api/v1/sessions/{sid}"),
@@ -159,11 +145,10 @@ async fn test_http_sessions_crud_and_prompt() {
     let res_get = server.handle_request(&req_get).await;
     assert_eq!(res_get.status, 200);
     let val_get: Value = serde_json::from_slice(&res_get.body).unwrap();
-    // v2 answers the bare `sessionSchema` (`toWireSession`), not a wrapper.
+
     assert_eq!(val_get["session_id"], sid);
     assert_eq!(val_get["title"], "Web REST Test");
 
-    // 4b. Create child session
     let req_child = HttpRequest {
         method: "POST".into(),
         path: format!("/api/v1/sessions/{sid}/children"),
@@ -177,7 +162,6 @@ async fn test_http_sessions_crud_and_prompt() {
     assert_eq!(val_child["parent_session_id"], sid);
     assert_eq!(val_child["title"], "Child Session");
 
-    // Verify child listed
     let req_children = HttpRequest {
         method: "GET".into(),
         path: format!("/api/v1/sessions/{sid}/children"),
@@ -188,12 +172,10 @@ async fn test_http_sessions_crud_and_prompt() {
     let res_children = server.handle_request(&req_children).await;
     assert_eq!(res_children.status, 200);
     let val_children: Value = serde_json::from_slice(&res_children.body).unwrap();
-    // v2 answers the paged `{items, has_more}` contract; the web client
-    // reads `.items`.
+
     assert_eq!(val_children["items"].as_array().unwrap().len(), 1);
     assert_eq!(val_children["has_more"], false);
 
-    // 5. Delete session
     let req_del = HttpRequest {
         method: "DELETE".into(),
         path: format!("/api/v1/sessions/{sid}"),
@@ -206,17 +188,10 @@ async fn test_http_sessions_crud_and_prompt() {
     let val_del: Value = serde_json::from_slice(&res_del.body).unwrap();
     assert_eq!(val_del["deleted"], true);
 
-    // 6. Verify deleted
     let res_get_after = server.handle_request(&req_get).await;
     assert_eq!(res_get_after.status, 404);
 }
 
-/// The REST surface for remote control (#3594) is backed by a real runtime
-/// (`server/remote_control.rs`): enabling without the Kimi login credential
-/// is refused honestly (the relay WS upgrade would fail anyway), and the
-/// off state is reported as such — with a reason that says the runtime is
-/// not started, not that it does not exist. The `501` era is over — a start
-/// request with a credential would actually arm the runtime.
 #[tokio::test]
 async fn test_remote_control_reports_the_not_started_runtime() {
     let server = HttpServer::in_memory().unwrap();
@@ -243,9 +218,6 @@ async fn test_remote_control_reports_the_not_started_runtime() {
         "the response must explain that the runtime simply is not started: {val_get}"
     );
 
-    // Enabling requires the Kimi login credential: without it the relay
-    // WS upgrade would fail mid-handshake, so the honest answer is a 400
-    // naming the missing field — not a fabricated `state: "on"`.
     let req_enable = HttpRequest {
         method: "POST".into(),
         path: "/api/v1/remote-control".into(),
@@ -264,7 +236,6 @@ async fn test_remote_control_reports_the_not_started_runtime() {
         "{val_enable}"
     );
 
-    // A missing `enabled` field is still a client error.
     let req_missing = HttpRequest {
         method: "POST".into(),
         path: "/api/v1/remote-control".into(),
@@ -274,13 +245,11 @@ async fn test_remote_control_reports_the_not_started_runtime() {
     };
     assert_eq!(server.handle_request(&req_missing).await.status, 400);
 
-    // GET is unchanged by the refused enable.
     let res_get2 = server.handle_request(&req_get).await;
     let val_get2: Value = serde_json::from_slice(&res_get2.body).unwrap();
     assert_eq!(val_get2["state"], "off");
     assert_eq!(val_get2["enabled"], false);
 
-    // Disabling when nothing runs is an honest idempotent off.
     let req_disable = HttpRequest {
         method: "POST".into(),
         path: "/api/v1/remote-control".into(),
@@ -295,9 +264,6 @@ async fn test_remote_control_reports_the_not_started_runtime() {
     assert_eq!(val_disable["state"], "off");
 }
 
-/// v2 #3969 on the server side: the relay the toggle arms follows the
-/// login region, resolved from the persisted OAuth ref — with no new wire
-/// field. An operator's relay env override still wins over both.
 #[test]
 fn remote_control_relay_follows_the_persisted_login_region() {
     let override_relay = || {
@@ -335,7 +301,6 @@ fn remote_control_relay_follows_the_persisted_login_region() {
         "a mainland login keeps the .com relay"
     );
 
-    // A provider without an oauth ref (never logged in) is mainland, too.
     let no_login: crate::config::KimiConfig =
         "[providers.openai]\ntype = \"openai\"\n".parse().unwrap();
     assert_eq!(
@@ -376,9 +341,6 @@ async fn test_session_delete_action_endpoint() {
     assert_eq!(res_get.status, 404);
 }
 
-/// The REST goal read is served from the engine's goal store — the store the
-/// turn settle writes — so it reports the budget and counters the engine
-/// folded, not a stale sqlite row or a host-side copy.
 #[tokio::test]
 async fn session_goal_route_serves_the_engine_store_snapshot() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
@@ -403,7 +365,7 @@ async fn session_goal_route_serves_the_engine_store_snapshot() {
         let outcome = session_store.apply_write("goal", &write).unwrap();
         session_store.write_domain("goal", &outcome.stored).unwrap();
     }
-    // A stale sqlite row must not shadow the engine store.
+
     store
         .put_state("goal", "sess-engine-goal", &json!({ "objective": "stale" }))
         .unwrap();
@@ -427,9 +389,6 @@ async fn session_goal_route_serves_the_engine_store_snapshot() {
     assert_eq!(body["budget"]["remainingTurns"], 3);
 }
 
-/// v2 #4568: `PATCH /sessions/{id}/goal` edits the current objective in
-/// place, without resetting counters or the goal id, and refuses an empty
-/// objective or an unknown session.
 #[tokio::test]
 async fn patch_session_goal_edits_the_objective_in_place() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
@@ -496,18 +455,12 @@ async fn the_prompt_route_reaches_the_engine_and_reports_its_failure() {
     let store = server.store_arc();
     let server = server.with_engine(engine_without_a_model(store, hub));
 
-    // No providers and no native_llm: the pipeline refuses to build, which
-    // must surface as a server error naming the cause —not a fake 200.
     let response = prompt(&server, &sid).await;
     let body = String::from_utf8_lossy(&response.body).into_owned();
     assert_eq!(response.status, 500, "{body}");
     assert!(body.contains("rustSelfContained"), "{body}");
 }
 
-/// A session whose stored history cannot be read is the failure a user
-/// experiences as "my conversation is gone". It used to leave no event
-/// behind — only a 500 in the access log — and renaming the telemetry event
-/// left every test in this file green, so nothing observed that it fires.
 #[tokio::test]
 async fn an_unreadable_history_reports_session_load_failed() {
     let dir = std::env::temp_dir().join(format!("kimi-sload-{}", std::process::id()));
@@ -515,8 +468,6 @@ async fn an_unreadable_history_reports_session_load_failed() {
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("sessions.db");
 
-    // File-backed, not in-memory: the failure has to be injected from a
-    // second connection, which an in-memory database cannot have.
     let store = Arc::new(SqliteSessionStore::open(&db).unwrap());
     let hub = Arc::new(EventHub::new());
 
@@ -543,8 +494,6 @@ async fn an_unreadable_history_reports_session_load_failed() {
 
     let server = server.with_engine(engine_without_a_model(store, hub));
 
-    // Break the read the route depends on, leaving everything else the route
-    // checks first — the session row, the workspace — intact.
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute("DROP TABLE messages", []).unwrap();
@@ -562,8 +511,7 @@ async fn an_unreadable_history_reports_session_load_failed() {
         "the failure must be reported, not only logged: {events:?}"
     );
     let payload = &failed.unwrap().1;
-    // v2's `SessionLoadFailedEvent` declares exactly one property.
-    // `session_id` and `stage` were this engine's invention.
+
     assert!(payload.get("session_id").is_none());
     assert!(payload.get("stage").is_none());
     assert!(

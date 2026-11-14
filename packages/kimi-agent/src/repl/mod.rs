@@ -287,15 +287,19 @@ fn plan_mode_guard(
 /// model would only see 34 tools that always fail.
 async fn build_repl_tool_defs(
     mcp_manager: &McpManager,
-    github_credentials: Option<&crate::tools::github::GitHubCredentials>,
+    github_credentials: Option<&crate::agent::tools::github::github_legacy::GitHubCredentials>,
 ) -> Vec<crate::turn_loop::types::ToolInfo> {
     let mut defs = crate::tools::core_tool_defs::core_tool_defs();
     defs.extend(crate::tools::subagent_tools::subagent_tool_defs());
-    if crate::tools::github::has_token(github_credentials) {
-        defs.extend(crate::tools::github::github_tool_defs());
+    if crate::agent::tools::github::github_legacy::has_token(github_credentials) {
+        defs.extend(crate::agent::tools::github::github_legacy::github_tool_defs());
     }
     defs.extend(mcp_manager.list_tool_infos().await);
-    defs.push(crate::tools::ask_user_question::ask_user_question_tool_def());
+    defs.push(
+        crate::agent::tools::ask_user_question::ask_user_question_tool::ask_user_question_tool_def(
+            true,
+        ),
+    );
     defs.push(crate::tools::todo_list::todo_list_tool_def());
     defs.push(crate::tools::get_goal::get_goal_tool_def());
     defs.push(crate::tools::cron_tools::cron_list_tool_def());
@@ -483,7 +487,7 @@ pub async fn start_repl(
 
     let native_count = Arc::new(AtomicU32::new(0));
     let workspace_str = workspace.to_string_lossy().to_string();
-    let github_credentials = crate::tools::github::GitHubCredentials {
+    let github_credentials = crate::agent::tools::github::github_legacy::GitHubCredentials {
         token: config.github.token.clone(),
         base_url: config.github.base_url.clone(),
     };
@@ -616,6 +620,7 @@ pub async fn start_repl(
         max_attempts: config.resolve_max_attempts_per_step(),
         max_context_tokens: None,
         compaction_max_attempts: config.resolve_compaction_max_attempts(),
+        llm_request_byte_budget: config.resolve_llm_request_byte_budget(),
         permission_mode,
         tool_defs: Arc::new(move || {
             let mcp = mcp_for_defs.clone();
@@ -658,7 +663,7 @@ pub async fn start_repl(
     ));
     let wake_handler = toolset.bind_tower_wake_driver(wake_driver);
     engine_session.set_wake_replay_handler(
-        crate::tools::tower::wake::TOWER_INBOX_WAKE_VARIANT,
+        crate::features::tower::wake::TOWER_INBOX_WAKE_VARIANT,
         wake_handler,
     );
 
@@ -711,6 +716,7 @@ pub async fn start_repl(
 
                     prompt_id: None,
                     origin: None,
+                    tools: Vec::new(),
                 }]);
             }
             continue;
@@ -907,6 +913,7 @@ pub async fn start_repl(
 
             prompt_id: None,
             origin: None,
+            tools: Vec::new(),
         };
         let mut receipt = engine_session
             .enqueue_turn(crate::session::TurnRequest::user(
@@ -967,7 +974,9 @@ mod tests {
     /// bridge the toolset builds.
     fn bridge() -> crate::native::shell_path_bridge::ShellPathBridge {
         crate::native::shell_path_bridge::ShellPathBridge::new(
-            &crate::native::shell::resolve_shell(None).program,
+            &crate::native::shell::resolve_shell(None)
+                .expect("a shell resolves")
+                .program,
         )
     }
 
@@ -991,6 +1000,8 @@ mod tests {
             question_id: "question_test".into(),
             turn_id: "turn_test".into(),
             tool_call_id: "call_test".into(),
+            agent_id: None,
+            session_id: None,
             background: false,
             timeout_ms: None,
             questions,
@@ -1080,7 +1091,7 @@ mod tests {
         // so the serialized region runs on a dedicated blocking thread
         // instead — serialization semantics are unchanged.
         std::thread::spawn(|| {
-            let _env_guard = crate::tools::github::GITHUB_ENV_TEST_LOCK
+            let _env_guard = crate::agent::tools::github::github_legacy::GITHUB_ENV_TEST_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let saved_token = std::env::var("GITHUB_TOKEN").ok();
@@ -1135,7 +1146,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_repl_tool_defs_include_github_with_token() {
-        let credentials = crate::tools::github::GitHubCredentials {
+        let credentials = crate::agent::tools::github::github_legacy::GitHubCredentials {
             token: Some("t".into()),
             base_url: None,
         };

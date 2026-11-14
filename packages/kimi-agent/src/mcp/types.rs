@@ -25,6 +25,8 @@ pub struct McpContent {
     pub content_type: String,
     pub text: Option<String>,
     #[serde(default)]
+    pub uri: Option<String>,
+    #[serde(rename = "mimeType", default)]
     pub mime_type: Option<String>,
     #[serde(default)]
     pub data: Option<String>,
@@ -45,6 +47,43 @@ pub struct McpToolCallResult {
     pub structured_content: Option<Value>,
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
+}
+
+pub fn to_mcp_tool_result(result: Value) -> Result<McpToolCallResult, super::errors::McpError> {
+    if let Some(object) = result.as_object() {
+        if let Some(content) = object.get("content").and_then(Value::as_array) {
+            let content =
+                serde_json::from_value(Value::Array(content.clone())).map_err(|error| {
+                    super::errors::McpError::transport(format!(
+                        "Failed to parse tool call result: {error}"
+                    ))
+                })?;
+            return Ok(McpToolCallResult {
+                content,
+                is_error: object.get("isError").and_then(Value::as_bool) == Some(true),
+                structured_content: object.get("structuredContent").cloned(),
+                meta: object
+                    .get("_meta")
+                    .filter(|value| value.is_object())
+                    .cloned(),
+            });
+        }
+        if let Some(legacy) = object.get("toolResult") {
+            let text = match legacy {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            return Ok(McpToolCallResult {
+                content: vec![McpContent {
+                    content_type: "text".to_string(),
+                    text: Some(text),
+                    ..McpContent::default()
+                }],
+                ..McpToolCallResult::default()
+            });
+        }
+    }
+    Ok(McpToolCallResult::default())
 }
 
 #[cfg(test)]
@@ -168,5 +207,70 @@ mod tests {
             Some(json!({ "rows": [{ "id": 1 }] }))
         );
         assert_eq!(structured_res.meta, Some(json!({ "source": "db" })));
+    }
+
+    #[test]
+    fn test_to_mcp_tool_result_supports_legacy_and_empty_shapes() {
+        let legacy = to_mcp_tool_result(json!({ "toolResult": { "answer": 42 } })).unwrap();
+        assert_eq!(legacy.content.len(), 1);
+        assert_eq!(legacy.content[0].content_type, "text");
+        assert_eq!(legacy.content[0].text.as_deref(), Some("{\"answer\":42}"));
+        assert!(!legacy.is_error);
+
+        let legacy_text = to_mcp_tool_result(json!({ "toolResult": "plain" })).unwrap();
+        assert_eq!(legacy_text.content[0].text.as_deref(), Some("plain"));
+        assert!(
+            to_mcp_tool_result(json!({ "unexpected": true }))
+                .unwrap()
+                .content
+                .is_empty()
+        );
+        assert!(to_mcp_tool_result(Value::Null).unwrap().content.is_empty());
+    }
+
+    #[test]
+    fn test_to_mcp_tool_result_uses_v2_boolean_and_meta_filters() {
+        let result = to_mcp_tool_result(json!({
+            "content": [],
+            "isError": "true",
+            "structuredContent": [1, 2],
+            "_meta": "not-an-object"
+        }))
+        .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.structured_content, Some(json!([1, 2])));
+        assert_eq!(result.meta, None);
+    }
+
+    #[test]
+    fn test_mcp_content_uses_the_v2_mime_type_key() {
+        let content: McpContent = serde_json::from_value(json!({
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "AA=="
+        }))
+        .unwrap();
+        assert_eq!(content.mime_type.as_deref(), Some("image/png"));
+        let wire = serde_json::to_value(content).unwrap();
+        assert_eq!(wire["mimeType"], "image/png");
+        assert!(wire.get("mime_type").is_none());
+    }
+
+    #[test]
+    fn test_resource_link_preserves_the_top_level_uri() {
+        let result = to_mcp_tool_result(json!({
+            "content": [{
+                "type": "resource_link",
+                "uri": "https://example.com/image.png",
+                "mimeType": "image/png"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            result.content[0].uri.as_deref(),
+            Some("https://example.com/image.png")
+        );
+        let wire = serde_json::to_value(&result.content[0]).unwrap();
+        assert_eq!(wire["uri"], "https://example.com/image.png");
     }
 }

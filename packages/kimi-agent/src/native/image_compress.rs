@@ -1,22 +1,8 @@
-//! Image compression and cropping — native Rust replacement for
-//! `packages/agent-core-v2/src/agent/media/image-compress.ts`.
-//!
-//! The TS module uses `jimp` (pure JS) for PNG/JPEG decode, resize, and
-//! encode — 10–100× slower than native codecs. This module does the same
-//! work with the `image` crate (native PNG/JPEG codecs), cutting per-image
-//! latency from hundreds of milliseconds to single-digit milliseconds.
-//!
-//! The TS wrapper retains the fast-path checks (already within budgets,
-//! decode-bomb guard) and telemetry; this module handles only the
-//! compute-heavy decode → resize → encode → quality-ladder path.
-
 use std::io::Cursor;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, ImageReader};
-
-// ── config / result structs ──────────────────────────────────────────────
 
 pub struct CompressConfig {
     pub max_edge: u32,
@@ -104,7 +90,6 @@ impl CropError {
         }
     }
 
-    /// Short stable identifier for telemetry (matches TS `CropErrorKind`).
     pub fn kind(&self) -> &'static str {
         match self {
             CropError::Empty => "empty",
@@ -124,15 +109,6 @@ struct EncodedImage {
     height: u32,
 }
 
-// ── public API ───────────────────────────────────────────────────────────
-
-/// Compress (resize + re-encode) `bytes` to fit the pixel + byte budget.
-///
-/// Returns `None` on decode/encode failure (caller passes through original).
-/// Returns `Some` with `changed: false` when the re-encode didn't help.
-/// Returns `Some` with `changed: true` when the result is smaller.
-///
-/// Animated WebP is passed through unchanged (returned as `None`).
 pub fn compress_image(
     bytes: &[u8],
     mime_type: &str,
@@ -146,7 +122,6 @@ pub fn compress_image(
         "image/jpeg" => ImageFormat::Jpeg,
         "image/bmp" => ImageFormat::Bmp,
         "image/webp" => {
-            // Animated WebP — pass through unchanged; decoding would flatten.
             if is_animated_webp(bytes) {
                 return None;
             }
@@ -161,9 +136,6 @@ pub fn compress_image(
 
     let resized = fit_within_edge(&mut img, config.max_edge);
     if !resized && bytes.len() <= config.byte_budget {
-        // Already within both budgets — send the original bytes untouched.
-        // Dimensions still report display space (EXIF orientation applied),
-        // which is the space captions and region readbacks share.
         return Some(CompressResult {
             data: bytes.to_vec(),
             mime_type: normalized,
@@ -205,9 +177,6 @@ pub fn compress_image(
     })
 }
 
-/// Crop `region` out of `bytes` and encode it for the model.
-///
-/// Explicit operation: returns `Err` on any failure (no passthrough).
 pub fn crop_image(
     bytes: &[u8],
     mime_type: &str,
@@ -228,7 +197,6 @@ pub fn crop_image(
         "image/jpeg" => ImageFormat::Jpeg,
         "image/bmp" => ImageFormat::Bmp,
         "image/webp" => {
-            // Animated WebP cannot be cropped sensibly.
             if is_animated_webp(bytes) {
                 return Err(CropError::UnsupportedFormat);
             }
@@ -332,12 +300,6 @@ pub fn crop_image(
     })
 }
 
-// ── internals ────────────────────────────────────────────────────────────
-
-/// Pre-multiply alpha into the RGB channels so fully transparent pixels
-/// contribute zero color during resize. Without this, the Triangle filter
-/// blends the RGB values of transparent pixels into their visible neighbors,
-/// producing visible color fringes on edges with alpha.
 fn premultiply_alpha(img: &mut DynamicImage) {
     if !img.color().has_alpha() {
         return;
@@ -353,9 +315,6 @@ fn premultiply_alpha(img: &mut DynamicImage) {
     *img = DynamicImage::ImageRgba8(out);
 }
 
-/// Reverse {@link premultiply_alpha} after resizing. Fully transparent
-/// pixels (alpha=0) get their RGB cleared to avoid stray color from
-/// rounding.
 fn unpremultiply_alpha(img: &mut DynamicImage) {
     if !img.color().has_alpha() {
         return;
@@ -377,11 +336,6 @@ fn unpremultiply_alpha(img: &mut DynamicImage) {
     *img = DynamicImage::ImageRgba8(out);
 }
 
-/// Scale `img` so its longest edge is at most `edge`, preserving aspect
-/// ratio. No-op (returns false) when the image already fits. Uses Triangle
-/// (bilinear) filtering which covers all source pixels during downscaling —
-/// no aliasing on text or fine patterns. Pre-multiplies alpha before
-/// resizing to prevent color bleed from transparent pixels.
 fn fit_within_edge(img: &mut DynamicImage, edge: u32) -> bool {
     let (w, h) = img.dimensions();
     let longest = w.max(h);
@@ -402,21 +356,8 @@ fn fit_within_edge(img: &mut DynamicImage, edge: u32) -> bool {
     true
 }
 
-/// PNG rescales stop at this edge; below it the ladder goes lossy instead.
-/// Mirrors the TS constant in image-compress.ts.
 const PNG_RESCALE_FLOOR_PX: u32 = 1000;
 
-/// Encode `img` under the byte budget, trying progressively smaller sizes
-/// and lower quality levels. Mirrors `encodeWithinBudget` in `image-compress.ts`.
-///
-/// Strategy:
-/// - Lossless source (PNG/WebP): lossless PNG at fitted size → smaller PNGs at
-///   fallback edges down to PNG_RESCALE_FLOOR_PX → lossy JPEG quality ladder
-///   (drops transparency) at floored size → JPEG ladder again at each sub-floor edge.
-/// - JPEG source: quality ladder at fitted size → full ladder at each
-///   fallback edge.
-///
-/// Always returns the smallest encoding produced, even if none met the budget.
 fn encode_within_budget(
     img: &mut DynamicImage,
     source_is_lossless: bool,
@@ -435,7 +376,6 @@ fn encode_within_budget(
             }
         }
 
-        // Progressively smaller PNGs down to the floor.
         for &edge in fallback_edges {
             if edge < PNG_RESCALE_FLOOR_PX {
                 break;
@@ -458,7 +398,6 @@ fn encode_within_budget(
             }
         }
 
-        // Lossy JPEG ladder at the floored size.
         for &quality in jpeg_quality_steps {
             if let Ok(jpeg) = encode_jpeg(img, quality) {
                 let len = jpeg.len();
@@ -469,7 +408,6 @@ fn encode_within_budget(
             }
         }
 
-        // JPEG ladder at each sub-floor edge.
         for &edge in fallback_edges {
             if edge >= PNG_RESCALE_FLOOR_PX {
                 continue;
@@ -534,7 +472,6 @@ fn track_smallest(
     }
 }
 
-/// Encode as PNG with best compression (matches jimp `deflateLevel: 9`).
 fn encode_png(img: &DynamicImage) -> Result<Vec<u8>, image::ImageError> {
     let mut buf = Vec::new();
     {
@@ -551,7 +488,6 @@ fn encode_png(img: &DynamicImage) -> Result<Vec<u8>, image::ImageError> {
     Ok(buf)
 }
 
-/// Encode as JPEG with the given quality (1–100).
 fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>, image::ImageError> {
     let mut buf = Vec::new();
     {
@@ -567,12 +503,7 @@ fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>, image::ImageE
     Ok(buf)
 }
 
-/// Check whether a WebP byte slice is animated (VP8X with ANIM flag).
-/// Mirrors `isAnimatedWebp` in `webp-decode.ts`. Returns true when the bytes
-/// look like an animated WebP; returns false for still WebP, other formats, or
-/// truncated headers.
 fn is_animated_webp(bytes: &[u8]) -> bool {
-    // RIFF header: "RIFF" + 4 bytes size + "WEBP"
     if bytes.len() < 30 {
         return false;
     }
@@ -583,33 +514,16 @@ fn is_animated_webp(bytes: &[u8]) -> bool {
     if chunk_type != b"VP8X" {
         return false;
     }
-    // VP8X flags at bytes[20..24]; bit 1 is the animation flag.
-    // The flags field is 4 bytes: [bitfield byte] [0] [0] [0]
+
     bytes[20] & 0x02 != 0
 }
 
-/// Decode `bytes` (known `format`) into a `DynamicImage` with EXIF
-/// orientation applied, so the returned image lives in the same display
-/// (EXIF-rotated) coordinate space as jimp's decode.
-///
-/// This is the crucial parity point with the TS `jimp` pipeline: jimp rotates
-/// on decode, so `image-compress.ts` reports original dimensions and accepts
-/// crop regions in the rotated space. The raw `image` crate decode does NOT
-/// auto-rotate, so without this a portrait JPEG shot in landscape+EXIF would
-/// report swapped width/height and crop the wrong region. We read the
-/// orientation tag from the decoder's Exif metadata and apply it after decode.
-///
-/// Formats without orientation metadata (e.g. WebP, or a JPEG/PNG with no
-/// Exif) resolve to `Orientation::NoTransforms`, so this is a no-op there and
-/// behaviour matches the previous direct decode.
 fn decode_with_orientation(
     bytes: &[u8],
     format: ImageFormat,
 ) -> Result<DynamicImage, image::ImageError> {
     let mut decoder = ImageReader::with_format(Cursor::new(bytes), format).into_decoder()?;
-    // `orientation()` reads the decoder's Exif metadata; its default is
-    // `NoTransforms` when absent or unreadable. Never fail the whole decode
-    // over a missing/garbled orientation tag — fall back to no transform.
+
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
@@ -618,13 +532,6 @@ fn decode_with_orientation(
     Ok(img)
 }
 
-/// Lowercase and fold the `image/jpg` alias onto `image/jpeg`.
-///
-/// Deliberately *not* the same rule as `mcp::output::strip_mime_params`, which
-/// only drops MIME parameters. This one picks an encoder, where `image/jpg` and
-/// `image/jpeg` must land on the same codec; the other compares wire metadata,
-/// where the parameters carry meaning. Folding them together would either lose
-/// `charset` or make a metadata comparison depend on an alias rule.
 fn normalize_mime(mime_type: &str) -> String {
     let lower = mime_type.trim().to_lowercase();
     if lower == "image/jpg" {
@@ -633,8 +540,6 @@ fn normalize_mime(mime_type: &str) -> String {
         lower
     }
 }
-
-// ── tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -688,8 +593,6 @@ mod tests {
         }
     }
 
-    // ── fit_within_edge ──────────────────────────────────────────────────
-
     #[test]
     fn test_fit_within_edge_noop() {
         let mut img = make_rgb_image(100, 50);
@@ -724,14 +627,12 @@ mod tests {
         assert!(!fit_within_edge(&mut img, 3000));
     }
 
-    // ── encode_png / encode_jpeg ─────────────────────────────────────────
-
     #[test]
     fn test_encode_png_rgb() {
         let img = make_rgb_image(100, 100);
         let bytes = encode_to_png_bytes(&img);
         assert!(!bytes.is_empty());
-        // PNG magic bytes
+
         assert_eq!(
             &bytes[..8],
             &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
@@ -754,7 +655,7 @@ mod tests {
         let img = make_rgb_image(100, 100);
         let bytes = encode_to_jpeg_bytes(&img, 80);
         assert!(!bytes.is_empty());
-        // JPEG magic bytes: FF D8 FF
+
         assert_eq!(&bytes[..3], &[0xFF, 0xD8, 0xFF]);
     }
 
@@ -765,8 +666,6 @@ mod tests {
         let low = encode_to_jpeg_bytes(&img, 20);
         assert!(low.len() < high.len());
     }
-
-    // ── compress_image ──────────────────────────────────────────────────
 
     #[test]
     fn test_compress_unsupported_format() {
@@ -784,8 +683,6 @@ mod tests {
 
     #[test]
     fn test_compress_png_downscale() {
-        // Large PNG that exceeds edge budget — synthetic gradient compresses
-        // very well, so the result may not shrink in bytes, but pixels do.
         let img = make_rgb_image(4000, 3000);
         let bytes = encode_to_png_bytes(&img);
         let config = default_compress_config(375_000);
@@ -804,10 +701,9 @@ mod tests {
 
     #[test]
     fn test_compress_jpeg_quality_ladder() {
-        // Large JPEG that exceeds byte budget
         let img = make_rgb_image(2000, 2000);
         let bytes = encode_to_jpeg_bytes(&img, 100);
-        let config = default_compress_config(100); // tiny budget forces quality down
+        let config = default_compress_config(100);
         let result = compress_image(&bytes, "image/jpeg", &config);
         assert!(result.is_some());
         let r = result.unwrap();
@@ -817,14 +713,13 @@ mod tests {
 
     #[test]
     fn test_compress_png_no_help() {
-        // Small PNG that's already tiny — re-encode won't help
         let img = make_rgb_image(10, 10);
         let bytes = encode_to_png_bytes(&img);
         let config = default_compress_config(375_000);
         let result = compress_image(&bytes, "image/png", &config);
         assert!(result.is_some());
         let r = result.unwrap();
-        assert!(!r.changed); // didn't shrink
+        assert!(!r.changed);
     }
 
     #[test]
@@ -834,15 +729,13 @@ mod tests {
         let config = default_compress_config(375_000);
         let result = compress_image(&bytes, "image/png", &config);
         let r = result.unwrap();
-        // PNG source should stay PNG (unless quality ladder kicks in for tiny budget)
+
         assert!(
             r.mime_type == "image/png" || r.mime_type == "image/jpeg",
             "unexpected mime: {}",
             r.mime_type
         );
     }
-
-    // ── crop_image ──────────────────────────────────────────────────────
 
     #[test]
     fn test_crop_empty() {
@@ -907,11 +800,11 @@ mod tests {
         let img = make_rgb_image(100, 100);
         let bytes = encode_to_png_bytes(&img);
         let config = default_crop_config(375_000);
-        // Region extends past the image — should clamp
+
         let result = crop_image(&bytes, "image/png", 80.0, 80.0, 100.0, 100.0, &config);
         assert!(result.is_ok());
         let r = result.unwrap();
-        assert_eq!(r.region_width, 20); // clamped: 100 - 80
+        assert_eq!(r.region_width, 20);
         assert_eq!(r.region_height, 20);
     }
 
@@ -949,7 +842,7 @@ mod tests {
     fn test_crop_skip_resize_budget_exceeded() {
         let img = make_rgb_image(500, 500);
         let bytes = encode_to_png_bytes(&img);
-        let mut config = default_crop_config(10); // tiny budget
+        let mut config = default_crop_config(10);
         config.skip_resize = true;
         let result = crop_image(&bytes, "image/png", 0.0, 0.0, 400.0, 400.0, &config);
         assert!(matches!(result, Err(CropError::Budget { .. })));
@@ -967,8 +860,6 @@ mod tests {
         assert_eq!(r.original_height, 300);
         assert!(!r.data.is_empty());
     }
-
-    // ── is_animated_webp ──────────────────────────────────────────────────
 
     #[test]
     fn test_is_animated_webp_empty() {
@@ -997,30 +888,24 @@ mod tests {
 
     #[test]
     fn test_is_animated_webp_still() {
-        // Minimum valid WebP with VP8X but no ANIM flag.
         let mut buf = vec![0u8; 30];
         buf[0..4].copy_from_slice(b"RIFF");
         buf[8..12].copy_from_slice(b"WEBP");
         buf[12..16].copy_from_slice(b"VP8X");
-        // flags[20] = 0 (no ANIM)
+
         assert!(!is_animated_webp(&buf));
     }
 
     #[test]
     fn test_is_animated_webp_animated() {
-        // Minimum valid WebP with VP8X and ANIM flag set (bit 1).
         let mut buf = vec![0u8; 30];
         buf[0..4].copy_from_slice(b"RIFF");
         buf[8..12].copy_from_slice(b"WEBP");
         buf[12..16].copy_from_slice(b"VP8X");
-        buf[20] = 0x02; // ANIM flag
+        buf[20] = 0x02;
         assert!(is_animated_webp(&buf));
     }
 
-    // ── WebP compress / crop ──────────────────────────────────────────────
-
-    /// Build a tiny valid WebP image (lossless). The `image` crate's webp
-    /// encoder produces a valid still WebP.
     fn make_still_webp_bytes() -> Vec<u8> {
         let img = image::DynamicImage::ImageRgba8(image::ImageBuffer::from_fn(32, 32, |x, y| {
             image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255])
@@ -1061,42 +946,33 @@ mod tests {
         assert_eq!(r.region_height, 16);
     }
 
-    // ── EXIF orientation ─────────────────────────────────────────────────
-
-    /// Build a JPEG carrying an EXIF `Orientation` tag with the given value by
-    /// splicing a hand-built APP1/Exif segment right after the SOI marker of a
-    /// crate-encoded JPEG. Orientation 6 = rotate 90° CW on display, which
-    /// swaps the displayed width/height relative to the stored pixels.
     fn make_jpeg_with_exif_orientation(width: u32, height: u32, orientation: u16) -> Vec<u8> {
         let jpeg = encode_to_jpeg_bytes(&make_rgb_image(width, height), 90);
         assert_eq!(&jpeg[0..2], &[0xFF, 0xD8], "crate JPEG must start with SOI");
 
-        // TIFF (little-endian) with a single IFD0 entry: Orientation (0x0112),
-        // type SHORT (3), count 1, value = `orientation`.
         let mut tiff: Vec<u8> = Vec::new();
-        tiff.extend_from_slice(b"II"); // little-endian byte order
-        tiff.extend_from_slice(&0x002Au16.to_le_bytes()); // TIFF magic 42
-        tiff.extend_from_slice(&8u32.to_le_bytes()); // offset to IFD0
-        tiff.extend_from_slice(&1u16.to_le_bytes()); // entry count
-        tiff.extend_from_slice(&0x0112u16.to_le_bytes()); // tag: Orientation
-        tiff.extend_from_slice(&3u16.to_le_bytes()); // type: SHORT
-        tiff.extend_from_slice(&1u32.to_le_bytes()); // count
-        // SHORT value in the low 2 bytes of the 4-byte value field.
+        tiff.extend_from_slice(b"II");
+        tiff.extend_from_slice(&0x002Au16.to_le_bytes());
+        tiff.extend_from_slice(&8u32.to_le_bytes());
+        tiff.extend_from_slice(&1u16.to_le_bytes());
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+        tiff.extend_from_slice(&3u16.to_le_bytes());
+        tiff.extend_from_slice(&1u32.to_le_bytes());
+
         tiff.extend_from_slice(&orientation.to_le_bytes());
-        tiff.extend_from_slice(&[0u8, 0u8]); // pad to 4 bytes
-        tiff.extend_from_slice(&0u32.to_le_bytes()); // next IFD offset (none)
+        tiff.extend_from_slice(&[0u8, 0u8]);
+        tiff.extend_from_slice(&0u32.to_le_bytes());
 
         let mut payload: Vec<u8> = Vec::new();
         payload.extend_from_slice(b"Exif\0\0");
         payload.extend_from_slice(&tiff);
 
-        let seg_len = (payload.len() + 2) as u16; // length field includes itself
+        let seg_len = (payload.len() + 2) as u16;
         let mut app1: Vec<u8> = Vec::new();
-        app1.extend_from_slice(&[0xFF, 0xE1]); // APP1 marker
-        app1.extend_from_slice(&seg_len.to_be_bytes()); // big-endian length
+        app1.extend_from_slice(&[0xFF, 0xE1]);
+        app1.extend_from_slice(&seg_len.to_be_bytes());
         app1.extend_from_slice(&payload);
 
-        // SOI + APP1 + (rest of the crate JPEG after SOI).
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(&jpeg[0..2]);
         out.extend_from_slice(&app1);
@@ -1106,8 +982,6 @@ mod tests {
 
     #[test]
     fn test_decode_applies_exif_orientation() {
-        // Stored pixels are 120x80 (landscape); Orientation 6 displays it
-        // rotated 90° CW, so the decoded image must be 80x120 (portrait).
         let bytes = make_jpeg_with_exif_orientation(120, 80, 6);
         let img = decode_with_orientation(&bytes, ImageFormat::Jpeg)
             .expect("EXIF-oriented JPEG should decode");
@@ -1125,11 +999,8 @@ mod tests {
 
     #[test]
     fn test_compress_reports_exif_rotated_dimensions() {
-        // Regression for the parity gap with jimp: compression must report the
-        // ORIGINAL dimensions in EXIF-rotated (display) space, matching the TS
-        // pipeline. Without applying orientation this reported 120x80.
         let bytes = make_jpeg_with_exif_orientation(120, 80, 6);
-        let config = default_compress_config(100); // tiny budget forces a re-encode
+        let config = default_compress_config(100);
         let result = compress_image(&bytes, "image/jpeg", &config)
             .expect("EXIF-oriented JPEG should compress");
         assert_eq!(result.original_width, 80);
@@ -1138,15 +1009,12 @@ mod tests {
 
     #[test]
     fn test_no_exif_orientation_is_noop() {
-        // A plain JPEG with no Exif keeps its stored dimensions (no rotation).
         let bytes = encode_to_jpeg_bytes(&make_rgb_image(120, 80), 90);
         let img =
             decode_with_orientation(&bytes, ImageFormat::Jpeg).expect("plain JPEG should decode");
         assert_eq!(img.width(), 120);
         assert_eq!(img.height(), 80);
     }
-
-    // ── normalize_mime ──────────────────────────────────────────────────
 
     #[test]
     fn test_normalize_mime() {

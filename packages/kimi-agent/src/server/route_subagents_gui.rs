@@ -46,7 +46,6 @@ impl HttpServer {
                 }
             }
 
-            // GUI store endpoints (mirrors localStorage API for Web UI / Desktop)
             ("GET", "/api/v1/gui/store/getItem") => {
                 let key = match req.query_param("key") {
                     Some(k) if !k.is_empty() => k,
@@ -98,7 +97,6 @@ impl HttpServer {
                 Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
             },
 
-            // Session sub-resources: status, abort, fork, compact, undo, messages, goal, init
             _ => return HttpResponse::route_miss(),
         };
         finalize_response(req, resp)

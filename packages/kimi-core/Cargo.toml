@@ -14,3 +14,7 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["time", "sync"] }
 tracing = "0.1"
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
+
+[dev-dependencies]
+fastrand = "2.4.1"
+tokio = { version = "1", features = ["test-util", "macros", "rt"] }

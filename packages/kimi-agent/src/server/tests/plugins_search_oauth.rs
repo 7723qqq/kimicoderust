@@ -7,7 +7,6 @@ async fn test_http_plugins_endpoints() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
     let server = HttpServer::new(store.clone());
 
-    // 1. GET /api/v1/plugins/marketplace
     let res_market = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -22,7 +21,6 @@ async fn test_http_plugins_endpoints() {
     let entries = val_market["entries"].as_array().unwrap();
     assert!(entries.iter().any(|p| p["id"] == "kimi-webbridge"));
 
-    // 2. GET /api/v1/plugins (initial empty)
     let res_list_empty = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -36,7 +34,6 @@ async fn test_http_plugins_endpoints() {
     let val_list_empty: Value = serde_json::from_slice(&res_list_empty.body).unwrap();
     assert_eq!(val_list_empty["plugins"].as_array().unwrap().len(), 0);
 
-    // 3. POST /api/v1/plugins/kimi-webbridge:enable
     let res_enable = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -51,7 +48,6 @@ async fn test_http_plugins_endpoints() {
     assert_eq!(val_enable["ok"], true);
     assert_eq!(val_enable["enabled"], true);
 
-    // 4. GET /api/v1/plugins (now 1)
     let res_list_one = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -68,7 +64,6 @@ async fn test_http_plugins_endpoints() {
     assert_eq!(plugins_one[0]["id"], "kimi-webbridge");
     assert_eq!(plugins_one[0]["enabled"], true);
 
-    // 5. POST /api/v1/plugins/kimi-webbridge:disable
     let res_disable = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -82,7 +77,6 @@ async fn test_http_plugins_endpoints() {
     let val_disable: Value = serde_json::from_slice(&res_disable.body).unwrap();
     assert_eq!(val_disable["enabled"], false);
 
-    // 6. GET /api/v1/workspaces/:id/plugins
     let temp_dir = tempfile::tempdir().unwrap();
     let ws = store
         .create_workspace(&temp_dir.path().to_string_lossy(), Some("Plugin WS"))
@@ -102,7 +96,6 @@ async fn test_http_plugins_endpoints() {
     let val_ws_plugins: Value = serde_json::from_slice(&res_ws_plugins.body).unwrap();
     assert_eq!(val_ws_plugins["plugins"].as_array().unwrap().len(), 1);
 
-    // 7. POST /api/v1/plugins/kimi-webbridge:remove
     let res_remove = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -114,7 +107,6 @@ async fn test_http_plugins_endpoints() {
         .await;
     assert_eq!(res_remove.status, 200);
 
-    // 8. Remove non-existent -> 404
     let res_remove_again = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -126,11 +118,6 @@ async fn test_http_plugins_endpoints() {
         .await;
     assert_eq!(res_remove_again.status, 404);
 
-    // 9. Install plugin via POST /api/v1/plugins
-    //
-    // The id must resolve against the catalog (or already be installed):
-    // an unknown id is a 404, not a fabricated `installed: true` with a
-    // hardcoded version.
     let res_install_unknown = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -155,10 +142,9 @@ async fn test_http_plugins_endpoints() {
     let val_inst: Value = serde_json::from_slice(&res_install.body).unwrap();
     assert_eq!(val_inst["id"], "kimi-webbridge");
     assert_eq!(val_inst["enabled"], true);
-    // The version comes from the catalog entry, never from a literal.
+
     assert_eq!(val_inst["version"], "1.11.3");
 
-    // 10. Global skills endpoint GET /api/v1/skills
     let res_skills = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -172,7 +158,6 @@ async fn test_http_plugins_endpoints() {
     let val_skills: Value = serde_json::from_slice(&res_skills.body).unwrap();
     assert!(val_skills["skills"].is_array());
 
-    // 11. ACP JSON-RPC endpoint POST /api/v1/acp
     let rpc_req = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -191,13 +176,10 @@ async fn test_http_plugins_endpoints() {
     assert_eq!(res_acp.status, 200);
     let val_acp: Value = serde_json::from_slice(&res_acp.body).unwrap();
     assert_eq!(val_acp["jsonrpc"], "2.0");
-    // ACP handshake uses the spec shape: numeric protocolVersion plus
-    // camelCase agentCapabilities (see src/acp/types.rs).
+
     assert_eq!(val_acp["result"]["protocolVersion"], 1);
     assert!(val_acp["result"]["agentCapabilities"].is_object());
 
-    // 12. The bridge attaches the server engine when one is configured:
-    // `session/new` must create a session, not fail with -32000.
     let hub = Arc::new(EventHub::new());
     let engine = engine_without_a_model(store.clone(), hub.clone());
     let eng_server = HttpServer::with_hub(store.clone(), hub).with_engine(engine);
@@ -228,9 +210,6 @@ async fn test_http_plugins_endpoints() {
     );
 }
 
-/// v2 #3963: a plugin toggle reports `plugin_toggle` with the resulting
-/// enabled set, so telemetry can attribute later turns to the plugins
-/// that were loaded.
 #[tokio::test]
 async fn test_http_plugin_toggle_emits_telemetry() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
@@ -284,10 +263,6 @@ async fn test_http_plugin_toggle_emits_telemetry() {
     );
 }
 
-/// `POST /api/v1/plugins` must reach the download path for a remote source,
-/// not merely record a catalog row: a URL install that cannot be fetched has
-/// to fail loudly instead of reporting `installed: true` with nothing behind
-/// it. The loopback URL is refused by the SSRF guard before any connection.
 #[tokio::test]
 async fn test_http_plugin_install_from_a_url_downloads() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
@@ -342,7 +317,6 @@ async fn test_http_search_pagination_is_real() {
         body,
     };
 
-    // Page 1 of 3 with page_size 2: two items, more available, cursor set.
     let res1 = server
         .handle_request(&post_search(
             serde_json::to_vec(&json!({ "query": "pagination probe", "page_size": 2 })).unwrap(),
@@ -354,7 +328,6 @@ async fn test_http_search_pagination_is_real() {
     assert_eq!(page1["has_more"], true);
     let cursor = page1["page_token"].as_str().expect("cursor must be set");
 
-    // Page 2 follows the cursor: the remaining item, no more pages.
     let res2 = server
         .handle_request(&post_search(
             serde_json::to_vec(
@@ -369,7 +342,6 @@ async fn test_http_search_pagination_is_real() {
     assert_eq!(page2["has_more"], false);
     assert!(page2["page_token"].is_null());
 
-    // A garbage cursor is a client error, not silently page one.
     let res_bad = server
         .handle_request(&post_search(
             serde_json::to_vec(&json!({ "query": "pagination probe", "page_token": "nope" }))
@@ -383,15 +355,13 @@ async fn test_http_search_pagination_is_real() {
 async fn test_http_oauth_and_media_endpoints() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
     let mut server = HttpServer::new(store.clone());
-    // Point OAuth at a closed local port: the flow must surface an
-    // honest "error" snapshot instead of a fabricated pending login.
+
     server.oauth_manager = Arc::new(crate::server::oauth::OAuthManager::with_hosts(
         "http://127.0.0.1:1".into(),
         "http://127.0.0.1:1".into(),
         Some(std::env::temp_dir().join(format!("kimi-oauth-srv-test-{}", fastrand::u32(..)))),
     ));
 
-    // 1. POST /api/v1/oauth/login
     let res_login = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -403,8 +373,7 @@ async fn test_http_oauth_and_media_endpoints() {
         .await;
     assert_eq!(res_login.status, 200);
     let val_login: Value = serde_json::from_slice(&res_login.body).unwrap();
-    // v2 has no `error` status: a failed flow is `denied`/`expired`, and the
-    // reason travels in `error_message`.
+
     assert!(
         matches!(
             val_login["status"].as_str(),
@@ -418,7 +387,6 @@ async fn test_http_oauth_and_media_endpoints() {
         "the failure reason must travel"
     );
 
-    // 2. GET /api/v1/oauth/login
     let res_poll = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -430,8 +398,7 @@ async fn test_http_oauth_and_media_endpoints() {
         .await;
     assert_eq!(res_poll.status, 200);
     let val_poll: Value = serde_json::from_slice(&res_poll.body).unwrap();
-    // Same vocabulary as the start route: a failed flow is a terminal v2
-    // status carrying `error_message`, never `"error"`.
+
     assert!(
         matches!(
             val_poll["status"].as_str(),
@@ -441,7 +408,6 @@ async fn test_http_oauth_and_media_endpoints() {
         val_poll["status"]
     );
 
-    // 3. GET /api/v1/oauth/usage & /api/v1/oauth/user
     let res_usage = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -468,7 +434,6 @@ async fn test_http_oauth_and_media_endpoints() {
     let val_user: Value = serde_json::from_slice(&res_user.body).unwrap();
     assert_eq!(val_user["authenticated"], false, "no credentials stored");
 
-    // 4. DELETE /api/v1/oauth/login (cancel)
     let res_cancel = server
         .handle_request(&HttpRequest {
             method: "DELETE".into(),
@@ -482,7 +447,6 @@ async fn test_http_oauth_and_media_endpoints() {
     let val_cancel: Value = serde_json::from_slice(&res_cancel.body).unwrap();
     assert_eq!(val_cancel["cancelled"], true);
 
-    // 5. POST /api/v1/oauth/logout
     let res_logout = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -494,12 +458,10 @@ async fn test_http_oauth_and_media_endpoints() {
         .await;
     assert_eq!(res_logout.status, 200);
     let val_logout: Value = serde_json::from_slice(&res_logout.body).unwrap();
-    // The wire follows `oauthLogoutResponseSchema` (`{ logged_out: true,
-    // provider }`), not the engine's internal camelCase bool.
+
     assert_eq!(val_logout["logged_out"], true);
     assert_eq!(val_logout["provider"], "kimi");
 
-    // 6. Session Media: existing file
     store
         .create_session("sess-media", Some("Media Test"))
         .unwrap();
@@ -522,7 +484,6 @@ async fn test_http_oauth_and_media_endpoints() {
     assert_eq!(res_media.header("content-type"), Some("image/png"));
     assert_eq!(res_media.body, b"\x89PNG\r\n\x1a\nfakeimage");
 
-    // 7. Session Media: missing file / missing session -> 404
     let res_media_none = server
         .handle_request(&HttpRequest {
             method: "GET".into(),

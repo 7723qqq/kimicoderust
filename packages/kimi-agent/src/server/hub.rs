@@ -1,38 +1,3 @@
-//! Per-session event lanes and the fan-out bridge to live connections, which is
-//! how an engine turn's events reach a WebSocket client.
-//!
-//! One [`EventHub`] belongs to the server. A session gets a **lane** the first
-//! time anything asks for it: its own [`EventBus`] and its own consecutive `seq`,
-//! numbered from an `epoch` minted when the lane was created. kap-server's
-//! `SessionEventJournal` is the thing this mirrors, and the two properties that
-//! make a client's cursor meaningful are kept for the same reasons:
-//!
-//! - `seq` is assigned **once per publish**, by the single subscriber the lane
-//!   installs when it is created. Numbering per connection instead would let two
-//!   connections watching the same session disagree about which number an event
-//!   carried, and a reconnecting client's cursor would be meaningless.
-//! - `epoch` changes when a lane is rebuilt, so a client that sees a new epoch
-//!   knows its cursor refers to a stream that no longer exists.
-//!
-//! The pipeline still receives a plain `Arc<EventBus>`, so a turn's events are
-//! stamped by the lane rather than by the engine: `EngineEvent` gains no
-//! session field, and the stdio and addon transports are untouched.
-//!
-//! The bus delivers synchronously (`publish` calls each handler while holding
-//! the subscriber read lock), so a handler that blocks would stall the turn
-//! loop, and one that unsubscribed would deadlock on the write lock. Each
-//! connection therefore owns an unbounded `mpsc` queue and the handler only
-//! ever does a non-blocking `send`.
-//!
-//! Backpressure policy: **none, matching v2.** The TS broadcaster
-//! (`kap-server`'s `sessionEventBroadcaster`) serializes per connection behind
-//! an await chain (`sessionEventBroadcaster.ts:121`, `:840-842`, `:856-858`)
-//! and never checks its length, so a slow client grows that chain without
-//! bound; we do the same. A client that cannot keep up accumulates events in
-//! its queue instead of being disconnected with 1013, and no cursor gap is
-//! reported because nothing is dropped. See ROADMAP P77 for the rejected
-//! bound-and-close policy.
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -41,34 +6,23 @@ use tokio::sync::{mpsc, watch};
 
 use crate::events::{EngineEvent, EventBus};
 
-/// Watch states for one subscription slot.
-/// `STATE_OPEN`: live delivery; `STATE_DETACHED`: the subscription is gone
-/// (server shutdown or handle dropped).
 pub const STATE_OPEN: u8 = 0;
 pub const STATE_DETACHED: u8 = 2;
 
-/// Why a subscription stopped delivering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HubClosed {
-    /// The subscription is gone (server shutting down or handle dropped).
     Detached,
 }
 
-/// One event as it reaches a connection: numbered by the lane it came from.
-///
-/// Cloned around the fan-out as `Arc<SequencedEvent>`, so a subscriber pays a
-/// refcount bump, not a deep copy of the event body.
 #[derive(Debug)]
 pub struct SequencedEvent {
     pub session_id: Arc<str>,
-    /// Identity of the lane that produced this, so a client can tell a resumed
-    /// stream from a continued one.
+
     pub epoch: Arc<str>,
-    /// Consecutive within `(session_id, epoch)`, starting at 1.
+
     pub seq: u64,
     pub event: EngineEvent,
-    /// WS envelope bytes, encoded lazily once (on the first subscriber that
-    /// needs them) and shared by every connection and replay thereafter.
+
     envelope: OnceLock<Arc<[u8]>>,
 }
 
@@ -83,8 +37,6 @@ impl SequencedEvent {
         }
     }
 
-    /// The encoded envelope, computed on first use and cached for the life of
-    /// the event so the per-subscriber fan-out never re-serializes it.
     pub fn envelope(&self) -> Arc<[u8]> {
         self.envelope
             .get_or_init(|| {
@@ -102,27 +54,17 @@ impl SequencedEvent {
     }
 }
 
-/// A session's bus plus the numbering that travels with it.
 struct Lane {
     bus: Arc<EventBus>,
     session_id: Arc<str>,
     epoch: Arc<str>,
     next_seq: AtomicU64,
-    /// The most recent sequenced events this lane has stamped, in order.
-    /// A connection that attaches mid-turn replays this buffer so its cursor
-    /// starts as far back as the buffer still reaches; until a persistent
-    /// journal exists it is the only replay source. No length cap: v2's
-    /// broadcaster keeps its per-connection promise chain unbounded
-    /// (`sessionEventBroadcaster.ts:121`, `:840-842`).
+
     history: Mutex<VecDeque<Arc<SequencedEvent>>>,
-    /// `publish` only takes the bus's *read* lock, so two concurrent publishers on
-    /// one session could each take a number and then deliver out of order. Taking
-    /// this around the stamp-and-forward step is what makes `seq` mean what it
-    /// claims: consecutive, and in the order a connection receives them.
+
     order: Mutex<()>,
 }
 
-/// One connection's inbound queue, written by every lane it can see.
 struct Slot {
     id: u64,
     sender: mpsc::UnboundedSender<Arc<SequencedEvent>>,
@@ -134,7 +76,6 @@ struct Slot {
     subscriptions: Arc<Mutex<HashSet<String>>>,
 }
 
-/// Live-connection metadata for `GET /api/v1/connections`.
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
     pub id: u64,
@@ -147,22 +88,12 @@ pub struct ConnectionInfo {
 
 type Slots = Arc<RwLock<Vec<Arc<Slot>>>>;
 
-/// Callback for persisting sequenced wire events onto durable storage.
 pub type EventPersister = Arc<dyn Fn(&SequencedEvent) + Send + Sync>;
 
-/// The journal sequence this process's persister last wrote, per session.
-///
-/// The engine's stale-journal gate ([`crate::server::engine::ServerEngine`])
-/// compares the store's `MAX(seq)` against this: rows this process appended
-/// are its own in-flight tail, not a foreign modification (v2
-/// `AppendLogStore`'s `knownLength` + `inFlight`). Without it, the turn's own
-/// post-turn events and the next prompt's `prompt.submitted` would read as an
-/// external write and every second turn would be refused as `session.stale`.
 #[derive(Clone, Default)]
 pub struct PersistedHeads(Arc<Mutex<HashMap<String, u64>>>);
 
 impl PersistedHeads {
-    /// Record the row the persister just appended for `session_id`.
     pub fn note(&self, session_id: &str, seq: u64) {
         self.0
             .lock()
@@ -170,7 +101,6 @@ impl PersistedHeads {
             .insert(session_id.to_string(), seq);
     }
 
-    /// The last sequence this process wrote for `session_id`.
     pub fn get(&self, session_id: &str) -> Option<u64> {
         self.0
             .lock()
@@ -180,7 +110,6 @@ impl PersistedHeads {
     }
 }
 
-/// The server's event lanes and its live connections.
 pub struct EventHub {
     lanes: RwLock<HashMap<String, Arc<Lane>>>,
     slots: Slots,
@@ -206,19 +135,14 @@ impl EventHub {
         }
     }
 
-    /// The handle a persister uses to record the rows it writes; the engine
-    /// reads the same record to tell its own journal tail from a foreign one.
     pub fn persisted_heads(&self) -> PersistedHeads {
         self.persisted_heads.clone()
     }
 
-    /// The last journal sequence this process wrote for `session_id`.
     pub fn persisted_head(&self, session_id: &str) -> Option<u64> {
         self.persisted_heads.get(session_id)
     }
 
-    /// Forget the persisted head of a journal that no longer exists (session
-    /// delete). A re-created session id starts a fresh journal.
     pub fn forget_persisted_head(&self, session_id: &str) {
         self.persisted_heads
             .0
@@ -227,7 +151,6 @@ impl EventHub {
             .remove(session_id);
     }
 
-    /// Set a persister callback to record every sequenced wire event to persistent storage.
     pub fn set_persister(&self, persister: EventPersister) {
         *self
             .persister
@@ -235,14 +158,7 @@ impl EventHub {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(persister);
     }
 
-    /// The bus a session's turns publish onto, creating the lane on first use.
-    ///
-    /// Handing out a plain `Arc<EventBus>` is the point: the engine, the addon
-    /// host and a test all publish the same way, and the numbering below them
-    /// cannot be bypassed by a caller that forgot to ask for it.
     pub fn bus_for(&self, session_id: &str) -> Arc<EventBus> {
-        // Bound the guard to this statement: a publisher must not be holding the
-        // lane map while it takes a lane's ordering mutex.
         let existing = self
             .lanes
             .read()
@@ -256,8 +172,7 @@ impl EventHub {
             .lanes
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Another publisher may have won the race while this thread waited for
-        // the write lock; that lane is the one to use, not a second numbering.
+
         if let Some(lane) = lanes.get(session_id) {
             return lane.bus.clone();
         }
@@ -303,7 +218,6 @@ impl EventHub {
         lane.bus.clone()
     }
 
-    /// Ensure a lane exists and ensure its sequence number is at least `initial_seq`.
     pub fn ensure_lane_with_initial_seq(
         &self,
         session_id: &str,
@@ -322,11 +236,6 @@ impl EventHub {
         )
     }
 
-    /// Which sessions have a lane. A lane is dropped only by an explicit
-    /// [`EventHub::evict_lane`] (archive/delete), so this is every session that
-    /// has published since the process started. Dropping a lane restarts that
-    /// session's numbering under a fresh epoch, which is how a client holding
-    /// the old cursor detects the restart.
     pub fn lane_session_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self
             .lanes
@@ -339,8 +248,6 @@ impl EventHub {
         ids
     }
 
-    /// Whether a lane exists for `session_id` — a plain map lookup, for callers
-    /// that would otherwise clone and sort every lane id just to test membership.
     pub fn lane_exists(&self, session_id: &str) -> bool {
         self.lanes
             .read()
@@ -348,10 +255,6 @@ impl EventHub {
             .contains_key(session_id)
     }
 
-    /// Drop the session's lane outright (v2 #4281 `evictSession` on
-    /// archive/delete): the event state goes away with the session, so a client
-    /// holding the old cursor sees a fresh epoch instead of resuming a dead
-    /// session's stream.
     pub fn evict_lane(&self, session_id: &str) {
         self.lanes
             .write()
@@ -359,7 +262,6 @@ impl EventHub {
             .remove(session_id);
     }
 
-    /// How many lanes have been opened, for observability.
     pub fn lane_count(&self) -> usize {
         self.lanes
             .read()
@@ -367,7 +269,6 @@ impl EventHub {
             .len()
     }
 
-    /// Return the cursor `(seq, epoch)` for a given session, ensuring a lane exists.
     pub fn ensure_lane_cursor(&self, session_id: &str) -> (u64, Arc<str>) {
         let _bus = self.bus_for(session_id);
         let lanes = self
@@ -381,7 +282,6 @@ impl EventHub {
         )
     }
 
-    /// Return the current cursor `(seq, epoch)` for a given session, if its lane exists.
     pub fn session_cursor(&self, session_id: &str) -> Option<(u64, Arc<str>)> {
         let lanes = self
             .lanes
@@ -395,7 +295,6 @@ impl EventHub {
         })
     }
 
-    /// Replay buffered events for a session with seq > `since_seq`.
     pub fn replay_for(&self, session_id: &str, since_seq: u64) -> Vec<Arc<SequencedEvent>> {
         let lanes = self
             .lanes
@@ -419,20 +318,10 @@ impl EventHub {
             .collect()
     }
 
-    /// Attach a connection to every lane, present and future.
-    ///
-    /// Each existing lane's buffered history is replayed into the new
-    /// subscription before any live event, so a connection that attaches
-    /// mid-turn still sees the turn's events from seq 1. The snapshot and the
-    /// slot registration happen under every lane's ordering lock, so a
-    /// concurrent publish can neither duplicate an event (in history and in
-    /// the queue) nor drop one (in neither).
     pub fn attach(&self) -> WsSubscription {
         self.attach_from(None, None)
     }
 
-    /// Like [`Self::attach`], recording the peer address and `User-Agent` for
-    /// the `GET /api/v1/connections` introspection surface.
     pub fn attach_from(
         &self,
         remote_address: Option<String>,
@@ -444,13 +333,6 @@ impl EventHub {
         let client_hello = Arc::new(AtomicBool::new(false));
         let subscriptions = Arc::new(Mutex::new(HashSet::new()));
 
-        // Register the slot *before* snapshotting lane history. A lane created
-        // (or an event published) between the snapshot and the registration
-        // would otherwise reach neither the replay buffer nor the live queue,
-        // and this connection would lose it permanently. Registering first
-        // means every lane's live events flow here from this instant; the
-        // history snapshot below then overlaps the live queue for anything
-        // published during the snapshot, which recv() de-duplicates by seq.
         let slot = Arc::new(Slot {
             id,
             sender,
@@ -506,7 +388,6 @@ impl EventHub {
         }
     }
 
-    /// Live connection metadata for `GET /api/v1/connections`.
     pub fn connections(&self) -> Vec<ConnectionInfo> {
         self.slots
             .read()
@@ -529,8 +410,6 @@ impl EventHub {
             .collect()
     }
 
-    /// Live connection count, for observability and for proving a closed
-    /// connection released its slot.
     pub fn subscriber_count(&self) -> usize {
         self.slots
             .read()
@@ -543,66 +422,45 @@ fn new_epoch() -> String {
     format!("epoch-{:016x}", fastrand::u64(..))
 }
 
-/// Hand one event to every live connection, never blocking.
 fn deliver(slots: &Slots, event: Arc<SequencedEvent>) {
     for slot in slots
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter()
     {
-        // An unbounded queue only fails once the receiver is gone, which means
-        // this connection is already detaching. v2 has no overflow path either
-        // (`sessionEventBroadcaster.ts:840-842` just chains the promise).
         if slot.sender.send(Arc::clone(&event)).is_err() {
             let _ = slot.state.send(STATE_DETACHED);
         }
     }
 }
 
-/// One connection's view of the event stream.
 pub struct WsSubscription {
     slots: Slots,
     id: u64,
     receiver: mpsc::UnboundedReceiver<Arc<SequencedEvent>>,
     state: watch::Receiver<u8>,
-    /// Lane history snapshotted at attach time, handed over before the live
-    /// queue. Because the slot is registered before the snapshot, an event
-    /// published during the snapshot can sit in both this buffer and the live
-    /// queue; `delivered` de-duplicates it.
+
     replay: VecDeque<Arc<SequencedEvent>>,
-    /// Per `(session_id, epoch)` high-water mark of seqs already handed to the
-    /// caller, so the replay/live overlap yields each event exactly once.
+
     delivered: HashMap<(Arc<str>, Arc<str>), u64>,
-    /// Shared with the connection's slot: whether `client_hello` completed.
+
     client_hello: Arc<AtomicBool>,
-    /// Shared with the connection's slot: the session ids it is subscribed to.
+
     subscriptions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl WsSubscription {
-    /// Record that the client completed its `client_hello` handshake.
     pub fn mark_client_hello(&self) {
         self.client_hello.store(true, Ordering::Relaxed);
     }
 
-    /// Replace the connection's visible subscription set (`GET /connections`).
     pub fn set_subscriptions(&self, ids: &HashSet<String>) {
         let mut set = self.subscriptions.lock().unwrap_or_else(|e| e.into_inner());
         *set = ids.clone();
     }
 
-    /// Next event, or why the stream ended.
-    ///
-    /// Replayed lane history is handed over first, then events already
-    /// buffered, so a connection that kept up until a burst receives a
-    /// contiguous prefix and then the close — rather than losing a prefix it
-    /// could have used. Cancel-safe: waiting is all it does, so it can sit in
-    /// a `select!` arm alongside socket reads.
     pub async fn recv(&mut self) -> Result<Arc<SequencedEvent>, HubClosed> {
         loop {
-            // Replay the snapshotted history first, then the live queue. An
-            // event published while attach() was snapshotting can appear in
-            // both, so every candidate is filtered through the high-water mark.
             while let Some(event) = self.replay.pop_front() {
                 if mark_delivered(&mut self.delivered, &event) {
                     return Ok(event);
@@ -625,10 +483,10 @@ impl WsSubscription {
                             if mark_delivered(&mut self.delivered, &event) {
                                 return Ok(event);
                             }
-                            // A duplicate from the overlap window: keep waiting.
+
                         }
-                        // The sender lives in the lane's subscriber, so a closed
-                        // channel means the subscription was released.
+
+
                         None => {
                             let _ = self.state.borrow_and_update();
                             return Err(HubClosed::Detached);
@@ -643,15 +501,11 @@ impl WsSubscription {
             }
         }
     }
-    /// The subscription's closed-state watch, cloned for senders that must
-    /// race a blocking send against the hub's overflow verdict — a stalled
-    /// consumer blocks `outbound.send`, and only this watch says why.
+
     pub fn state_rx(&self) -> watch::Receiver<u8> {
         self.state.clone()
     }
 
-    /// The closed reason, once the watch reports a non-open state. `None`
-    /// while the subscription is still live.
     pub fn closed(&self) -> Option<HubClosed> {
         let state = *self.state.borrow();
         if state == STATE_OPEN {
@@ -662,9 +516,6 @@ impl WsSubscription {
     }
 }
 
-/// Record `event` as handed to the caller. Returns `false` when its seq is at
-/// or below the high-water mark for `(session_id, epoch)` — a duplicate from
-/// the attach() replay/live overlap — and `true` (advancing the mark) otherwise.
 fn mark_delivered(
     delivered: &mut HashMap<(Arc<str>, Arc<str>), u64>,
     event: &SequencedEvent,
@@ -680,8 +531,6 @@ fn mark_delivered(
 
 impl Drop for WsSubscription {
     fn drop(&mut self) {
-        // Runs on the connection task, never inside a lane handler, so taking
-        // the write lock here is safe.
         let mut slots = self
             .slots
             .write()
@@ -714,8 +563,6 @@ mod tests {
         assert_eq!(first.event.event_type(), "llm.step.begin");
         assert_eq!(first.seq, 1);
 
-        // Pre-attach publishes would have been replayed from the lane's
-        // history; this one published after attach, so it arrived live.
         drop(sub);
         assert_eq!(hub.subscriber_count(), 0, "dropping leaked a slot");
     }
@@ -730,9 +577,6 @@ mod tests {
         hub.evict_lane("sess-1");
         assert!(!hub.lane_exists("sess-1"));
 
-        // The next publish opens a fresh lane: numbering restarts under a new
-        // epoch, so a client holding the old cursor detects the restart (v2
-        // #4281: the event state goes away with the session).
         let mut sub = hub.attach();
         let (_, epoch_after) = hub.ensure_lane_cursor("sess-1");
         assert_ne!(epoch_before, epoch_after);
@@ -812,9 +656,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_publishers_on_one_lane_stay_consecutive_and_in_order() {
-        // `publish` shares the bus's read lock, so two turns of one session can
-        // be stamping at the same instant. A client's cursor is only usable if
-        // the numbers still ascend for that session.
         let hub = EventHub::new();
         let bus = hub.bus_for("sess-1");
         let mut sub = hub.attach();
@@ -860,8 +701,6 @@ mod tests {
 
     #[tokio::test]
     async fn publishing_does_not_run_a_handler_that_can_reenter_the_hub() {
-        // Guards the design constraint the queue exists for: teardown
-        // must happen on the connection side only, never from a lane handler.
         let hub = EventHub::new();
         let bus = hub.bus_for("sess-1");
         let sub = hub.attach();
@@ -879,9 +718,9 @@ mod tests {
         let bus = hub.bus_for("sess-1");
         bus.publish(&step_event(1));
         bus.publish(&step_event(2));
-        // Attach after history exists: 1,2 arrive via replay.
+
         let mut sub = hub.attach();
-        // Publish after attach: 3,4 arrive live.
+
         bus.publish(&step_event(3));
         bus.publish(&step_event(4));
 
@@ -905,11 +744,11 @@ mod tests {
         };
         assert!(mark_delivered(&mut delivered, &event(1)));
         assert!(mark_delivered(&mut delivered, &event(2)));
-        // The same seqs seen again from the live queue are duplicates.
+
         assert!(!mark_delivered(&mut delivered, &event(1)));
         assert!(!mark_delivered(&mut delivered, &event(2)));
         assert!(mark_delivered(&mut delivered, &event(3)));
-        // A different lane's stream is numbered independently.
+
         let other =
             SequencedEvent::new(Arc::from("sess-2"), Arc::from("epoch-b"), 1, step_event(1));
         assert!(mark_delivered(&mut delivered, &other));
@@ -917,9 +756,6 @@ mod tests {
 
     #[tokio::test]
     async fn lane_history_is_not_capped() {
-        // v2's broadcaster keeps every event on the per-connection chain
-        // (`sessionEventBroadcaster.ts:121`, `:840-842`); a late attacher must
-        // replay the whole buffered lane, not just a recent window.
         let hub = EventHub::new();
         let bus = hub.bus_for("sess-1");
         const TOTAL: u64 = 1_000;

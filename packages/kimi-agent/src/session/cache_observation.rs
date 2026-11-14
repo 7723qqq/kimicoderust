@@ -1,38 +1,11 @@
-//! Prompt-cache observability (v2 `agent/usage/cacheObservation.ts`,
-//! `cacheBreakService.ts`, `cacheProbeService.ts`).
-//!
-//! Three related records, all derived from the usage a provider reports:
-//!
-//! - [`CacheObservation`]: what the last turn-sourced request looked like —
-//!   model, protocol, effort, the request projection, the history it carried
-//!   and the cache buckets the provider charged. v2 stores it as
-//!   `llmRequesterLastTurnRequest.observation` on every request.
-//! - [`CacheBreakTracker`]: v2 `AgentCacheBreakService.observe`. It keeps the
-//!   previous step's snapshot and reports a break when the prompt cache read
-//!   collapses (`< 95%` of the previous read and by more than 2000 tokens),
-//!   classified into model / effort / projection / prefix resets. A compaction
-//!   resets the baseline.
-//! - [`CacheProbeRequest`] / [`build_cache_probe`]: v2 `prompt_cache_probe`
-//!   telemetry. It compares a fork's first request (or a compaction request)
-//!   with the parent agent's last request, so a forked conversation's cache
-//!   reuse can be attributed.
-//!
-//! Nothing here is a wire type: the tracker's output is only logged, kept for
-//! an engine read entry, and emitted through the existing host telemetry
-//! channel (`cache_break_detected`, exactly v2's `track2` event). v2 also
-//! carries the observation on `TurnStepCompleted.cache`; Rust's step event is
-//! a wire payload and deliberately keeps that field out.
-
 use serde::{Deserialize, Serialize};
 
 use crate::rpc::types::TokenUsage;
 
-/// v2 `CACHE_BREAK_MIN_DROP_TOKENS`.
 pub const CACHE_BREAK_MIN_DROP_TOKENS: u64 = 2000;
-/// v2 `CACHE_BREAK_DROP_RATIO`.
+
 pub const CACHE_BREAK_DROP_RATIO: f64 = 0.95;
 
-/// The request one provider response answered (v2 `CacheObservation`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheObservation {
     pub model_alias: String,
@@ -40,18 +13,16 @@ pub struct CacheObservation {
     pub protocol: Option<String>,
     #[serde(default)]
     pub provider_type: Option<String>,
-    /// Messages the request carried (`llm.request.messageCount`).
+
     pub message_count: usize,
-    /// Fingerprint of the request's message list.
+
     pub history_hash: String,
-    /// The media projection in effect (`llm.request.projection`), when a
-    /// degrade/strip/strict round applied.
+
     #[serde(default)]
     pub projection: Option<String>,
     #[serde(default)]
     pub thinking_effort: Option<String>,
-    /// Every input bucket (`inputTotal`: uncached + cache read + cache
-    /// creation), v2 `buildCacheObservation`.
+
     #[serde(default)]
     pub input_tokens: Option<u64>,
     #[serde(default)]
@@ -62,7 +33,6 @@ pub struct CacheObservation {
     pub output_tokens: u64,
 }
 
-/// The inputs of [`build_cache_observation`] (v2 `CacheObservationInput`).
 pub struct CacheObservationInput<'a> {
     pub model_alias: &'a str,
     pub protocol: Option<&'a str>,
@@ -74,7 +44,6 @@ pub struct CacheObservationInput<'a> {
     pub usage: Option<&'a TokenUsage>,
 }
 
-/// v2 `inputTotal`: every input bucket, cached or not.
 pub fn input_total(usage: &TokenUsage) -> u64 {
     u64::from(usage.input_tokens)
         + u64::from(usage.input_cache_read)
@@ -82,9 +51,6 @@ pub fn input_total(usage: &TokenUsage) -> u64 {
 }
 
 impl CacheObservation {
-    /// The measured usage the observation was built from: the uncached input
-    /// bucket is the total minus the cache buckets. Used by the engine's break
-    /// tracker, which receives observations rather than raw usages.
     pub fn usage(&self) -> TokenUsage {
         let total = self.input_tokens.unwrap_or(0);
         let cache_read = self.cache_read.min(u64::from(u32::MAX)) as u32;
@@ -123,7 +89,6 @@ pub fn build_cache_observation(input: CacheObservationInput<'_>) -> CacheObserva
     }
 }
 
-/// Why a cache break happened (v2 `CacheBreakCause`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheBreakCause {
@@ -146,7 +111,6 @@ impl CacheBreakCause {
     }
 }
 
-/// One step's cache state (v2 `CacheBreakSnapshot`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheBreakSnapshot {
     pub model: String,
@@ -155,16 +119,15 @@ pub struct CacheBreakSnapshot {
     pub projection: Option<String>,
     #[serde(default)]
     pub message_count: Option<usize>,
-    /// The non-cached input bucket (v2 `usage.inputOther`).
+
     pub input_other: u64,
     pub input_cache_read: u64,
     pub input_cache_creation: u64,
     pub output: u64,
-    /// Epoch millis of the observation.
+
     pub at: i64,
 }
 
-/// A detected break (v2 `CacheBreakObservation`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheBreakObservation {
     pub cause: CacheBreakCause,
@@ -175,8 +138,6 @@ pub struct CacheBreakObservation {
 }
 
 impl CacheBreakObservation {
-    /// The `cache_break_detected` telemetry body (v2 `CacheBreakDetectedEvent`),
-    /// field for field.
     pub fn telemetry_payload(&self, turn_id: Option<&str>, step: Option<u32>) -> serde_json::Value {
         serde_json::json!({
             "type": "cache_break_detected",
@@ -205,7 +166,6 @@ impl CacheBreakObservation {
     }
 }
 
-/// Per-agent cache-break baseline (v2 `AgentCacheBreakService`).
 #[derive(Debug, Clone, Default)]
 pub struct CacheBreakTracker {
     baseline: Option<CacheBreakSnapshot>,
@@ -216,10 +176,6 @@ impl CacheBreakTracker {
         Self::default()
     }
 
-    /// v2 `observe`: fold one step's usage in and report a break. No cache
-    /// observation (the request did not come from the turn loop) or an
-    /// all-zero usage (the provider reported nothing measurable) produces no
-    /// baseline update and no output.
     pub fn observe(
         &mut self,
         usage: &TokenUsage,
@@ -248,9 +204,6 @@ impl CacheBreakTracker {
             return None;
         }
         if previous_read.saturating_sub(current_read) <= CACHE_BREAK_MIN_DROP_TOKENS {
-            // v2 computes the difference on `number`s; a previous read below
-            // the minimum can never produce a drop above it, and the
-            // saturating subtraction keeps the comparison exact at zero.
             return None;
         }
         let cause = classify_cache_break(&previous, &current);
@@ -263,8 +216,6 @@ impl CacheBreakTracker {
         })
     }
 
-    /// v2 resets the baseline when a compaction completes: the transcript was
-    /// replaced, so the pre-compaction read is not comparable.
     pub fn reset(&mut self) {
         self.baseline = None;
     }
@@ -274,7 +225,6 @@ impl CacheBreakTracker {
     }
 }
 
-/// v2 `isUnmeasured`: the provider reported nothing at all.
 pub fn is_unmeasured(usage: &TokenUsage) -> bool {
     usage.input_tokens == 0
         && usage.output_tokens == 0
@@ -282,7 +232,6 @@ pub fn is_unmeasured(usage: &TokenUsage) -> bool {
         && usage.input_cache_creation == 0
 }
 
-/// v2 `classifyCacheBreak`, in the same precedence order.
 pub fn classify_cache_break(
     previous: &CacheBreakSnapshot,
     current: &CacheBreakSnapshot,
@@ -305,8 +254,6 @@ pub fn classify_cache_break(
     CacheBreakCause::Unexplained
 }
 
-/// The per-request snapshot `prompt_cache_probe` compares (v2
-/// `AgentLLMTurnRequestSnapshot`, restricted to the probe's fields).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheProbeRequest {
     pub model_alias: String,
@@ -320,7 +267,6 @@ pub struct CacheProbeRequest {
     pub finished_at: i64,
 }
 
-/// Which request the probe is attached to (v2 `promptCacheProbe.source`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheProbeSource {
@@ -328,7 +274,6 @@ pub enum CacheProbeSource {
     Compaction,
 }
 
-/// The `prompt_cache_probe` telemetry body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheProbeObservation {
     pub source: CacheProbeSource,
@@ -356,19 +301,6 @@ pub struct CacheProbeObservation {
     pub parent_request_gap_ms: Option<i64>,
 }
 
-/// v2 `AgentCacheProbeService.probe` (fork) and `llmRequesterService`'s
-/// compaction arm. `parent` is the fork's captured baseline (or the
-/// compaction request's last-turn baseline), and is only passed when the
-/// caller established that it is still comparable (the fork's parent context
-/// did not change under it, and a compaction baseline was captured before the
-/// request). v2 leaves every comparison field `undefined` when there is no
-/// baseline or the model switched; serialization skips those fields instead of
-/// writing `null`.
-///
-/// The fork probe deliberately has no `history_prefix_match` and no
-/// `model_match`: v2's `cacheProbeService` payload only carries tool/system
-/// comparisons for a fork, while the compaction arm is the one that reports a
-/// model match and a history-prefix check.
 pub fn build_cache_probe(
     source: CacheProbeSource,
     turn_id: Option<&str>,
@@ -389,8 +321,7 @@ pub fn build_cache_probe(
         input_cache_read: usage.map_or(0, |usage| u64::from(usage.input_cache_read)),
         input_cache_creation: usage.map_or(0, |usage| u64::from(usage.input_cache_creation)),
         output_tokens: usage.map_or(0, |usage| u64::from(usage.output_tokens)),
-        // v2's compaction arm reports `model_match` whenever a baseline exists;
-        // the fork arm reports neither.
+
         model_match: match source {
             CacheProbeSource::Compaction => {
                 parent.map(|parent| parent.model_alias == own.model_alias)
@@ -400,10 +331,7 @@ pub fn build_cache_probe(
         tools_match: compared_parent.map(|parent| parent.tools_hash == own.tools_hash),
         system_prompt_match: compared_parent
             .map(|parent| parent.system_prompt_hash == own.system_prompt_hash),
-        // Only the compaction arm prefixes the request's history with the
-        // baseline snapshot (v2 `historyPrefixMatch`). v2 writes
-        // `compared && ...`, so a baseline whose model switched reports a
-        // definite `false` rather than leaving the field undefined.
+
         history_prefix_match: match source {
             CacheProbeSource::Compaction => parent.and_then(|parent| {
                 if parent.model_alias == own.model_alias {
@@ -419,9 +347,6 @@ pub fn build_cache_probe(
     }
 }
 
-/// v2 compaction `historyPrefixMatch`: the baseline's message list must still
-/// be the head of the compaction request's messages, so a request that dropped
-/// history during pre-shrinking is not reported as a clean cache probe.
 pub fn compaction_history_prefix_matches(
     request_messages: &[crate::turn_loop::types::LLMMessage],
     baseline: &CacheProbeRequest,
@@ -444,9 +369,6 @@ impl CacheProbeObservation {
     }
 }
 
-/// A stable, deterministic fingerprint over a request's serialized shape.
-/// v2 uses `fingerprint` for the same purpose: hashes are only ever compared
-/// with other hashes produced here, so the algorithm need not match v2's.
 pub fn fingerprint(text: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
@@ -456,7 +378,6 @@ pub fn fingerprint(text: &str) -> String {
     format!("{hash:016x}")
 }
 
-/// The media projection label v2 records on `llm.request.projection`.
 pub fn projection_label(
     structure_strict: bool,
     media_degraded: bool,
@@ -469,7 +390,7 @@ pub fn projection_label(
         (false, true, false) => Some("media-degraded"),
         (true, false, true) => Some("strict-media-stripped"),
         (true, true, false) => Some("strict-media-degraded"),
-        // A later strip supersedes a degrade within the same turn.
+
         (false, true, true) => Some("media-stripped"),
         (true, true, true) => Some("strict-media-stripped"),
     }
@@ -523,8 +444,6 @@ mod tests {
         assert_eq!(observation.projection.as_deref(), Some("strict"));
     }
 
-    /// A measured cache collapse is reported once, classified, and becomes the
-    /// next baseline.
     #[test]
     fn a_cache_read_collapse_is_recorded() {
         let mut tracker = CacheBreakTracker::new();
@@ -548,7 +467,6 @@ mod tests {
         );
     }
 
-    /// A small dip (below the 5%/2000-token thresholds) stays silent.
     #[test]
     fn a_small_cache_read_dip_is_not_noise() {
         let mut tracker = CacheBreakTracker::new();
@@ -567,7 +485,6 @@ mod tests {
         );
     }
 
-    /// The absolute floor applies even when the ratio is exceeded.
     #[test]
     fn the_absolute_drop_floor_is_enforced() {
         let mut tracker = CacheBreakTracker::new();
@@ -592,8 +509,6 @@ mod tests {
         );
     }
 
-    /// Nothing is recorded without a cache observation or without measured
-    /// usage, and such a step does not disturb the baseline.
     #[test]
     fn unobserved_and_unmeasured_steps_do_not_touch_the_baseline() {
         let mut tracker = CacheBreakTracker::new();
@@ -775,7 +690,6 @@ mod tests {
         assert_eq!(probe.parent_input_tokens, Some(900));
         assert_eq!(probe.parent_request_gap_ms, Some(50));
 
-        // No baseline still emits the probe, with every comparison undefined.
         let probe = build_cache_probe(
             CacheProbeSource::Compaction,
             Some("turn-7"),
@@ -791,9 +705,6 @@ mod tests {
         assert_eq!(probe.history_prefix_match, None);
         assert_eq!(probe.turn_id.as_deref(), Some("turn-7"));
 
-        // A switched model: v2's `compared && ...` reports a model mismatch
-        // and a definite prefix failure, while the parent usage comparisons
-        // stay undefined.
         let switched = CacheProbeRequest {
             model_alias: "other".into(),
             ..baseline.clone()
@@ -836,14 +747,14 @@ mod tests {
             finished_at: 0,
         };
         assert!(compaction_history_prefix_matches(&messages, &baseline));
-        // The same prefix with a changed message is no longer the captured one.
+
         let changed = vec![
             messages[0].clone(),
             LLMMessage::user("changed"),
             messages[2].clone(),
         ];
         assert!(!compaction_history_prefix_matches(&changed, &baseline));
-        // A baseline longer than the request cannot be a prefix of it.
+
         baseline.message_count = 4;
         assert!(!compaction_history_prefix_matches(&messages, &baseline));
     }

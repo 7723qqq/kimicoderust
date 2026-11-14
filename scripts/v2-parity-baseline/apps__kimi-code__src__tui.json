@@ -1,0 +1,6 @@
+{
+  "note": "Initial unverified v2 parity baseline for apps/kimi-code/src/tui. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "apps/kimi-code/src/tui",
+  "redEntries": []
+}

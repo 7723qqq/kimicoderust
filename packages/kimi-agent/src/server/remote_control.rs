@@ -1,22 +1,3 @@
-//! Remote Control runtime (Rust port).
-//!
-//! This module is a faithful port of the TypeScript reference implementation at
-//! `apps/kimi-code/src/cli/sub/web/remote-control.ts` (1109 lines). It implements
-//! the standalone Remote Control client: device registration against the relay,
-//! a long-lived WebSocket management + HTTP-tunnel connection, a 30s heartbeat /
-//! 300s silence watchdog, exponential-backoff reconnection (capped at 30s), and a
-//! reverse HTTP proxy that forwards tunneled requests to the local loopback kimi
-//! service via `reqwest`.
-//!
-//! **Scope of this port:** the module body only. Wiring the runtime into the
-//! standalone HTTP server's `GET/POST /api/v1/remote-control` endpoints (and
-//! reading `RemoteControlStatusWire` from `server/mod.rs`) is performed by
-//! `team-lead` in `server/mod.rs`. This file must not be edited by the wiring
-//! step beyond the single `pub mod remote_control;` declaration.
-//!
-//! Conventions: every timeout / constant mirrors the TS source; the TS source
-//! line that defines it is noted in a trailing comment.
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,39 +17,27 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::http as ws_http;
 use url::Url;
 
-// Re-use the wire shape declared (and the `/api/v1/remote-control` endpoint)
-// by the wiring layer in `server/mod.rs`; this keeps our status payloads
-// exactly aligned with what the HTTP server serializes.
 use super::RemoteControlStatusWire;
 
-// ----------------------------------------------------------------------------
-// Constants (mirrored from remote-control.ts)
-// ----------------------------------------------------------------------------
-
-/// Default relay origin. (ts:27)
 pub const REMOTE_CONTROL_RELAY_ORIGIN: &str = "https://code-rc.kimi.com";
-/// Environment variable overriding the relay origin. (ts:29)
+
 pub const REMOTE_CONTROL_RELAY_URL_ENV: &str = "KIMI_CODE_REMOTE_CONTROL_RELAY_URL";
 
-const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024; // ts:40
-const MAX_HTTP_REQUEST_BYTES: usize = 10 * 1024 * 1024; // ts:41
-const HTTP_REQUEST_TIMEOUT_MS: u64 = 30_000; // ts:42
-const REGISTER_TIMEOUT_MS: u64 = 10_000; // ts:43
-const MAX_RECONNECT_DELAY_MS: u64 = 30_000; // ts:44
-const RELAY_PING_INTERVAL_MS: u64 = 30_000; // ts:45
-const RELAY_SILENCE_TIMEOUT_MS: u64 = 300_000; // ts:46
-// The TS implementation reads the relay's rejection body on a refused WS
-// upgrade (ts:47-49, 837-855). `tokio-tungstenite` surfaces the handshake
-// failure directly as an error, so this port does not parse that body; the
-// constants are retained for parity with the reference source.
-#[allow(dead_code)]
-const HANDSHAKE_REJECTION_TIMEOUT_MS: u64 = 2000; // ts:47
-#[allow(dead_code)]
-const HANDSHAKE_REJECTION_BODY_BYTES: usize = 512; // ts:48
-#[allow(dead_code)]
-const HANDSHAKE_REJECTION_TEXT_LIMIT: usize = 200; // ts:49
+const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const MAX_HTTP_REQUEST_BYTES: usize = 10 * 1024 * 1024;
+const HTTP_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const REGISTER_TIMEOUT_MS: u64 = 10_000;
+const MAX_RECONNECT_DELAY_MS: u64 = 30_000;
+const RELAY_PING_INTERVAL_MS: u64 = 30_000;
+const RELAY_SILENCE_TIMEOUT_MS: u64 = 300_000;
 
-/// Request headers stripped before forwarding to the local service. (ts:50-65)
+#[allow(dead_code)]
+const HANDSHAKE_REJECTION_TIMEOUT_MS: u64 = 2000;
+#[allow(dead_code)]
+const HANDSHAKE_REJECTION_BODY_BYTES: usize = 512;
+#[allow(dead_code)]
+const HANDSHAKE_REJECTION_TEXT_LIMIT: usize = 200;
+
 pub const BLOCKED_REQUEST_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -86,7 +55,6 @@ pub const BLOCKED_REQUEST_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-/// Response headers stripped before tunneling back to the relay. (ts:66-77)
 const BLOCKED_RESPONSE_HEADERS: &[&str] = &[
     "connection",
     "content-length",
@@ -100,42 +68,28 @@ const BLOCKED_RESPONSE_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-// ----------------------------------------------------------------------------
-// Options / handle
-// ----------------------------------------------------------------------------
-
-/// Options for [`RemoteControlRuntime::start`].
-///
-/// Mirrors the TS `RemoteControlOptions` (ts:102) minus the Node-only bits
-/// (`homeDir`, `stderr`, `onStatus` callback — status is exposed via
-/// [`RemoteControlHandle::status`] here). The device id and tokens are produced
-/// by the caller (wiring layer) and injected.
 #[derive(Clone)]
 pub struct RemoteControlOptions {
-    /// Explicit relay origin. When set it wins outright, including over the
-    /// env override (v2 `options.relayOrigin ?? resolveRemoteControl…`).
     pub relay_origin: String,
-    /// The relay origin the login region resolves to (v2 `auth.relayOrigin`).
-    /// It is the fallback the env override resolves against, so an operator
-    /// override still wins over the region default.
+
     pub region_relay_origin: String,
-    /// Stable device id (TS: `createKimiDeviceId(homeDir)`).
+
     pub device_id: String,
-    /// Human-readable device name (TS: `hostname()`).
+
     pub device_name: String,
-    /// Local loopback origin the reverse proxy forwards to, e.g. `http://127.0.0.1:3461`.
+
     pub local_base_url: String,
-    /// Bearer token used to authenticate to the local kimi service on forward. (ts:105)
+
     pub local_server_token: String,
-    /// OAuth refresh token sent to the relay for the WS upgrade.
+
     pub refresh_token: String,
-    /// `client_version` advertised in the register payload (ts: `kimi-code/${getVersion()}`).
+
     pub client_version: String,
-    /// `platform` advertised in the register payload (ts: `platform()`).
+
     pub platform: String,
-    /// Heartbeat ping interval, ms (ts:45).
+
     pub ping_interval_ms: u64,
-    /// Silence watchdog timeout, ms (ts:46).
+
     pub silence_timeout_ms: u64,
 }
 
@@ -157,15 +111,13 @@ impl Default for RemoteControlOptions {
     }
 }
 
-/// Handle returned by [`RemoteControlRuntime::start`]; owns the background task.
 pub struct RemoteControlHandle {
     device_id: String,
     device_name: String,
     url: String,
-    /// Local loopback origin this tunnel forwards to, reported as the conflict
-    /// holder's `local_origin`.
+
     local_origin: String,
-    /// Epoch milliseconds when this runtime took the local slot.
+
     started_at: u64,
     status: Arc<Mutex<RemoteControlStatusWire>>,
     shutdown: tokio_util::sync::CancellationToken,
@@ -173,52 +125,39 @@ pub struct RemoteControlHandle {
 }
 
 impl RemoteControlHandle {
-    /// Device id assigned at registration.
     pub fn device_id(&self) -> &str {
         &self.device_id
     }
 
-    /// Device name announced to the relay.
     pub fn device_name(&self) -> &str {
         &self.device_name
     }
 
-    /// Public Remote Control URL (built from `device_id` + relay origin).
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    /// Local loopback origin reported when this runtime is the conflict holder.
     pub fn local_origin(&self) -> &str {
         &self.local_origin
     }
 
-    /// Epoch milliseconds when this runtime took the local slot.
     pub fn started_at(&self) -> u64 {
         self.started_at
     }
 
-    /// Current status, serialized to the existing wire shape in `server/mod.rs`.
     pub fn status(&self) -> RemoteControlStatusWire {
         self.status.lock().unwrap().clone()
     }
 
-    /// Stop the runtime and wait for the background task to finish.
     pub async fn close(self) {
         self.shutdown.cancel();
         let _ = self._task.await;
     }
 }
 
-/// The runtime entry point. Spawns the state machine and returns a
-/// [`RemoteControlHandle`].
 pub struct RemoteControlRuntime;
 
 impl RemoteControlRuntime {
-    /// Start the Remote Control client. With no explicit `relay_origin`, the
-    /// `KIMI_CODE_REMOTE_CONTROL_RELAY_URL` env override wins, then the
-    /// region-resolved fallback — the v2 precedence
-    /// `resolveRemoteControlRelayOrigin(env, auth.relayOrigin)` (ts:33-38).
     pub fn start(options: RemoteControlOptions) -> RemoteControlHandle {
         let relay_origin = if options.relay_origin.trim().is_empty() {
             resolve_remote_control_relay_origin(&options.region_relay_origin)
@@ -257,13 +196,10 @@ impl RemoteControlRuntime {
     }
 }
 
-/// Epoch milliseconds, the `started_at` unit on the conflict wire shape.
 fn epoch_millis() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-/// Trim and validate a rename alias: 1..=50 characters after trimming, the
-/// same transform as the protocol's `renameRemoteControlDeviceRequestSchema`.
 pub fn normalize_device_alias(value: &JsonValue) -> std::result::Result<String, String> {
     let alias = value
         .as_str()
@@ -278,20 +214,12 @@ pub fn normalize_device_alias(value: &JsonValue) -> std::result::Result<String, 
     Ok(alias.to_string())
 }
 
-/// The in-process equivalent of upstream's `server/rc.json` start gate.
-///
-/// The fork runtime has a single owner (`remote_control_runtime`) and no
-/// cross-process lock, so the slot mutex is the mutual-exclusion primitive.
-/// Logout still needs a short-lived flag: it keeps a start from racing the
-/// credential wipe and the delayed teardown that follows the logout response.
 #[derive(Default)]
 pub struct RemoteControlLogoutGate {
     active: std::sync::atomic::AtomicBool,
     started_at: std::sync::atomic::AtomicU64,
 }
 
-/// Origin marker carried by a logout-held gate, mirroring upstream's
-/// `REMOTE_CONTROL_LOGOUT_GATE_ORIGIN`.
 pub const REMOTE_CONTROL_LOGOUT_GATE_ORIGIN: &str = "logout in progress";
 
 const LOGOUT_TUNNEL_TEARDOWN_DELAY_MS: u64 = 250;
@@ -301,7 +229,6 @@ impl RemoteControlLogoutGate {
         Self::default()
     }
 
-    /// Mark the gate held and return its `started_at`.
     pub fn begin(&self) -> u64 {
         let started_at = epoch_millis();
         self.started_at
@@ -315,7 +242,6 @@ impl RemoteControlLogoutGate {
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// The holder's `started_at` while the gate is held.
     pub fn active_since(&self) -> Option<u64> {
         if self.active.load(std::sync::atomic::Ordering::SeqCst) {
             Some(self.started_at.load(std::sync::atomic::Ordering::SeqCst))
@@ -325,15 +251,12 @@ impl RemoteControlLogoutGate {
     }
 }
 
-/// Remote-control cleanup the server wires into the managed Kimi logout: drop
-/// the relay session cache around the credential wipe, then stop the local
-/// tunnel after the response (upstream `registerOAuthRoutes` logout branch).
 pub struct RemoteControlLogoutCleanup {
     runtime: Arc<tokio::sync::Mutex<Option<RemoteControlHandle>>>,
     state: Arc<tokio::sync::Mutex<crate::server::RemoteControlStatusWire>>,
     devices: Arc<RemoteControlDeviceClient>,
     gate: Arc<RemoteControlLogoutGate>,
-    /// Serialises concurrent logouts, like upstream's `kimiLogoutQueue`.
+
     serial: std::sync::Mutex<()>,
 }
 
@@ -366,8 +289,6 @@ impl crate::server::oauth::RemoteControlLogoutHook for RemoteControlLogoutCleanu
         self.devices.clear_sessions();
 
         let Ok(tokio_handle) = tokio::runtime::Handle::try_current() else {
-            // No async runtime to schedule the delayed teardown on: the
-            // credential wipe already makes the cached cookie unreachable.
             self.gate.end();
             return;
         };
@@ -388,8 +309,6 @@ impl crate::server::oauth::RemoteControlLogoutHook for RemoteControlLogoutCleanu
     }
 }
 
-/// Resolve the relay origin: the `KIMI_CODE_REMOTE_CONTROL_RELAY_URL` env
-/// override, else `fallback` (ts:33-38, v2 `resolveRemoteControlRelayOrigin`).
 pub fn resolve_remote_control_relay_origin(fallback: &str) -> String {
     match std::env::var(REMOTE_CONTROL_RELAY_URL_ENV) {
         Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
@@ -398,11 +317,6 @@ pub fn resolve_remote_control_relay_origin(fallback: &str) -> String {
     }
 }
 
-// ----------------------------------------------------------------------------
-// Wire-message shapes
-// ----------------------------------------------------------------------------
-
-/// Register message sent on the management socket right after connect (ts:443-454).
 #[derive(Serialize)]
 pub struct RegisterMessage<'a> {
     #[serde(rename = "type")]
@@ -419,7 +333,6 @@ pub struct RegisterPayload<'a> {
     pub local_base_url: &'a str,
 }
 
-/// Tunneled HTTP request received on the `http` socket (ts:552-587).
 #[derive(serde::Deserialize)]
 struct TunnelHttpRequest {
     #[serde(rename = "request_id")]
@@ -432,7 +345,6 @@ struct TunnelHttpRequest {
     body_base64: String,
 }
 
-/// Tunneled HTTP response sent back on the `http` socket (ts:606-616).
 #[derive(Serialize)]
 struct TunnelHttpResponse<'a> {
     #[serde(rename = "request_id")]
@@ -445,7 +357,6 @@ struct TunnelHttpResponse<'a> {
     body_base64: String,
 }
 
-/// `open_ws_result` payload acking a stream open (ts:678-696).
 #[derive(Serialize)]
 struct OpenWsResultPayload<'a> {
     #[serde(rename = "stream_id")]
@@ -464,7 +375,6 @@ struct OpenWsResult<'a> {
     payload: OpenWsResultPayload<'a>,
 }
 
-/// Parsed raw HTTP/1.1 request (ts:89-94, 200-234).
 pub struct ParsedHttpRequest {
     pub method: String,
     pub path: String,
@@ -472,8 +382,6 @@ pub struct ParsedHttpRequest {
     pub body: Vec<u8>,
 }
 
-/// Error returned while forwarding an HTTP tunnel request; carries the HTTP
-/// status to report back to the relay.
 #[derive(Debug)]
 struct ForwardError {
     status: u16,
@@ -488,7 +396,6 @@ impl std::fmt::Display for ForwardError {
 
 impl std::error::Error for ForwardError {}
 
-/// Error raised when the relay rejects registration (ts:125, 456-459).
 #[derive(Debug)]
 struct RegistrationError(String);
 
@@ -500,11 +407,6 @@ impl std::fmt::Display for RegistrationError {
 
 impl std::error::Error for RegistrationError {}
 
-// ----------------------------------------------------------------------------
-// URL helpers
-// ----------------------------------------------------------------------------
-
-/// Build the public Remote Control URL (ts:183-198).
 pub fn build_remote_control_url(
     device_id: &str,
     session_id: Option<&str>,
@@ -529,7 +431,6 @@ pub fn build_remote_control_url(
     url.to_string()
 }
 
-/// Convert an http(s) origin + relay path into a wss/ws URL (ts:1039-1048).
 pub fn relay_websocket_url(origin: &str, path: &str) -> Result<String> {
     let mut url = Url::parse(origin).map_err(|e| anyhow!("invalid relay origin: {e}"))?;
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
@@ -545,7 +446,6 @@ pub fn relay_websocket_url(origin: &str, path: &str) -> Result<String> {
     Ok(url.to_string())
 }
 
-/// Convert a local http(s) origin + path into a ws/wss URL (ts:1050-1058).
 fn local_websocket_url(origin: &str, path: &str) -> Result<String> {
     let mut url = Url::parse(origin).map_err(|e| anyhow!("invalid local origin: {e}"))?;
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
@@ -565,29 +465,12 @@ fn pct(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
-// ----------------------------------------------------------------------------
-// Reconnect backoff (ts:430-435)
-// ----------------------------------------------------------------------------
-
-/// Exponential-backoff reconnect delay, capped at [`MAX_RECONNECT_DELAY_MS`].
-///
-/// Mirrors `Math.min(MAX_RECONNECT_DELAY_MS, 1000 * 2 ** min(attempt - 1, 5))`
-/// (ts:431-434). `reconnect_attempt` is the 1-based attempt count after a
-/// failure: attempt 1 → 1s, 2 → 2s, … 6 → 32s (clamped to 30s), 7+ → 30s.
 pub fn compute_reconnect_delay(reconnect_attempt: u32) -> u64 {
     let exp = (reconnect_attempt.saturating_sub(1)).min(5);
     let base = 1000u64.saturating_mul(1u64 << exp);
     base.min(MAX_RECONNECT_DELAY_MS)
 }
 
-// ----------------------------------------------------------------------------
-// Header filtering (ts:236-254, 957-977)
-// ----------------------------------------------------------------------------
-
-/// Filter forward request headers, dropping [`BLOCKED_REQUEST_HEADERS`] and any
-/// header named in a `Connection` directive, then re-injecting
-/// `Authorization: Bearer <server_token>` (ts:236-254). Returns name/value
-/// pairs (not the TS flat array).
 pub fn filter_forward_request_headers(
     headers: &[(String, String)],
     server_token: &str,
@@ -621,8 +504,6 @@ pub fn filter_forward_request_headers(
     out
 }
 
-/// Filter response headers before tunneling back, dropping
-/// [`BLOCKED_RESPONSE_HEADERS`] and any `Connection`-listed header (ts:957-977).
 fn filter_response_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
     let mut connection = std::collections::HashSet::new();
     for (name, value) in headers.iter() {
@@ -653,10 +534,6 @@ fn filter_response_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String,
     out
 }
 
-// ----------------------------------------------------------------------------
-// Raw HTTP request parsing (ts:200-234)
-// ----------------------------------------------------------------------------
-
 fn request_line_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
@@ -664,7 +541,6 @@ fn request_line_re() -> &'static regex::Regex {
     })
 }
 
-/// Parse a raw HTTP/1.1 request buffer into method/path/headers/body (ts:200-234).
 pub fn parse_raw_http_request(raw: &[u8]) -> Result<ParsedHttpRequest> {
     let sep = memchr::memmem::find(raw, b"\r\n\r\n")
         .ok_or_else(|| anyhow!("invalid HTTP request headers"))?;
@@ -709,11 +585,6 @@ pub fn parse_raw_http_request(raw: &[u8]) -> Result<ParsedHttpRequest> {
     })
 }
 
-// ----------------------------------------------------------------------------
-// Register message builder (ts:443-454)
-// ----------------------------------------------------------------------------
-
-/// Build the `register` management message (ts:443-454).
 pub fn build_register_message(opts: &RemoteControlOptions) -> RegisterMessage<'_> {
     RegisterMessage {
         r#type: "register",
@@ -726,10 +597,6 @@ pub fn build_register_message(opts: &RemoteControlOptions) -> RegisterMessage<'_
         },
     }
 }
-
-// ----------------------------------------------------------------------------
-// WebSocket connect (ts:747-824)
-// ----------------------------------------------------------------------------
 
 fn is_ws_protocol_token(token: &str) -> bool {
     !token.is_empty()
@@ -755,9 +622,6 @@ fn is_ws_protocol_token(token: &str) -> bool {
         })
 }
 
-/// Open a relay WebSocket, sending the bearer token via the
-/// `kimi-code.bearer.<token>` subprotocol when valid, else an `Authorization`
-/// header (ts:747-768).
 async fn connect_relay_url(
     url: &str,
     token: &str,
@@ -787,8 +651,6 @@ async fn connect_relay(
     connect_relay_url(&url, token).await
 }
 
-/// Pump outgoing messages from a channel into a WS write half until the channel
-/// closes or the socket errors.
 async fn ws_writer<S>(
     mut write: futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
     mut rx: mpsc::Receiver<Message>,
@@ -802,11 +664,6 @@ async fn ws_writer<S>(
     }
 }
 
-// ----------------------------------------------------------------------------
-// State machine
-// ----------------------------------------------------------------------------
-
-/// Shared, mutable state for one connection cycle.
 struct CycleCtx<'a> {
     opts: &'a Arc<RemoteControlOptions>,
     mgmt_tx: &'a mpsc::Sender<Message>,
@@ -818,7 +675,6 @@ struct CycleCtx<'a> {
     reconnect_immediately: &'a Arc<AtomicBool>,
 }
 
-/// Top-level reconnect loop (ts:404-437).
 async fn run_state_machine(
     opts: Arc<RemoteControlOptions>,
     status: Arc<Mutex<RemoteControlStatusWire>>,
@@ -841,9 +697,7 @@ async fn run_state_machine(
         )
         .await;
         match result {
-            Ok(()) => {
-                // Clean end (e.g. `disconnect` with server_shutting_down): reconnect.
-            }
+            Ok(()) => {}
             Err(e) => {
                 if !connected.load(Ordering::SeqCst)
                     && e.downcast_ref::<RegistrationError>().is_some()
@@ -883,9 +737,6 @@ async fn run_state_machine(
     *s = RemoteControlStatusWire::off();
 }
 
-/// One connection cycle: register → connect http tunnel → serve until a socket
-/// closes (ts:439-489). Returns `Ok(())` for a clean stop that should reconnect
-/// immediately, `Err` for a failure / drop that should back off.
 async fn serve_cycle(
     opts: &Arc<RemoteControlOptions>,
     status: &Arc<Mutex<RemoteControlStatusWire>>,
@@ -893,7 +744,6 @@ async fn serve_cycle(
     connected: &Arc<AtomicBool>,
     reconnect_immediately: &Arc<AtomicBool>,
 ) -> Result<()> {
-    // 1. Management socket + register (ts:440-463).
     let mgmt = connect_relay(&opts.relay_origin, "/v1/remote/create", &opts.refresh_token).await?;
     let (mgmt_write, mut mgmt_read) = mgmt.split();
     let (mgmt_tx, mgmt_rx) = mpsc::channel::<Message>(32);
@@ -937,7 +787,6 @@ async fn serve_cycle(
         }
     }
 
-    // 2. HTTP tunnel socket (ts:466-473).
     let http = connect_relay(
         &opts.relay_origin,
         &format!("/v1/remote/http?device_id={}", pct(&opts.device_id)),
@@ -973,7 +822,6 @@ async fn serve_cycle(
         reconnect_immediately,
     };
 
-    // 3. Serve until either socket closes or shutdown (ts:487-488).
     let mut last_activity = Instant::now();
     let mut ping_interval = tokio::time::interval(Duration::from_millis(opts.ping_interval_ms));
     let silence = Duration::from_millis(opts.silence_timeout_ms);
@@ -1022,7 +870,6 @@ async fn serve_cycle(
     }
 }
 
-/// Read the next text/binary WS message and parse it as JSON (ts:898-903).
 async fn next_json<S>(
     read: &mut futures_util::stream::SplitStream<WebSocketStream<S>>,
 ) -> Result<JsonValue>
@@ -1044,7 +891,6 @@ where
     }
 }
 
-/// Handle a management-socket message (ts:527-550).
 async fn handle_mgmt(msg: Message, ctx: &CycleCtx<'_>) -> Result<()> {
     let json = match msg {
         Message::Text(t) => serde_json::from_str::<JsonValue>(&t)?,
@@ -1132,16 +978,13 @@ async fn handle_mgmt(msg: Message, ctx: &CycleCtx<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Handle an HTTP-tunnel socket message: accumulate chunks, forward on last
-/// (ts:552-604).
 async fn handle_http(msg: Message, ctx: &CycleCtx<'_>) -> Result<()> {
     let text = match msg {
         Message::Text(t) => t,
         Message::Binary(b) => String::from_utf8_lossy(&b).to_string(),
         _ => return Ok(()),
     };
-    // Non-request frames (or malformed JSON) are ignored; only `type: "request"`
-    // tunnel messages carry a forwardable HTTP payload (ts:552-559).
+
     let parsed: TunnelHttpRequest = match serde_json::from_str::<TunnelHttpRequest>(&text) {
         Ok(v) if v.r#type == "request" => v,
         _ => return Ok(()),
@@ -1154,9 +997,6 @@ async fn handle_http(msg: Message, ctx: &CycleCtx<'_>) -> Result<()> {
         .decode(body_b64)
         .map_err(|_| anyhow!("invalid tunnel request base64"))?;
     if !is_last {
-        // N.B. the pending-bytes mutex guard must NOT be held across the
-        // `.await` below (a `std::sync::MutexGuard` is `!Send`, which would
-        // make this future non-`Send` and break `tokio::spawn`).
         let oversized = {
             let mut pending = ctx.pending.lock().unwrap();
             let entry = pending.entry(request_id.clone()).or_default();
@@ -1188,8 +1028,6 @@ async fn handle_http(msg: Message, ctx: &CycleCtx<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Forward one raw HTTP request to the local loopback service and send the
-/// response back through the tunnel (ts:589-604, 905-955).
 async fn forward_http_request(
     opts: &Arc<RemoteControlOptions>,
     raw: &[u8],
@@ -1213,7 +1051,6 @@ async fn forward_http_request(
     Ok(())
 }
 
-/// Perform the local HTTP request; on any error build an error response.
 async fn do_forward(
     opts: &Arc<RemoteControlOptions>,
     raw: &[u8],
@@ -1268,7 +1105,6 @@ async fn do_forward(
     Ok(build_http_response(status, &headers, &body))
 }
 
-/// Build a raw `HTTP/1.1` response buffer (ts:940-947).
 fn build_http_response(
     status: reqwest::StatusCode,
     headers: &[(String, String)],
@@ -1284,7 +1120,6 @@ fn build_http_response(
     out
 }
 
-/// Build an empty error response (ts:1068-1071).
 fn build_error_response(status: u16) -> Vec<u8> {
     let reason = if status == 400 {
         "Bad Request"
@@ -1335,12 +1170,6 @@ async fn send_open_ws_result(
     Ok(())
 }
 
-// ----------------------------------------------------------------------------
-// WebSocket stream bridging (ts:618-705, 995-1026)
-// ----------------------------------------------------------------------------
-
-/// Open a local WS and a relay tunnel WS for `stream_id`, bridge them, then ack
-/// with `open_ws_result` (ts:618-676).
 async fn bridge_stream(
     stream_id: String,
     path: String,
@@ -1386,8 +1215,6 @@ async fn bridge_stream(
     s.state = "device_disconnected".to_string();
 }
 
-/// Bridge two WebSocket streams in both directions until either closes or the
-/// token is cancelled (ts:995-1026).
 async fn bridge_two<A, B>(
     a: WebSocketStream<A>,
     b: WebSocketStream<B>,
@@ -1430,10 +1257,6 @@ where
     Ok(())
 }
 
-// ----------------------------------------------------------------------------
-// Device management cloud client (v2 remote-control/src/device-client.ts)
-// ----------------------------------------------------------------------------
-
 const DEVICE_REQUEST_TIMEOUT_MS: u64 = 15_000;
 const UNEXPECTED_LIST_RESPONSE: &str =
     "Remote Control device list returned an unexpected response.";
@@ -1445,8 +1268,6 @@ pub enum RemoteControlDeviceStatus {
     Offline,
 }
 
-/// The documented device fields. Unknown cloud-only fields are discarded by
-/// deserialization, matching the explicit projection in the TS client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteControlDevice {
     pub device_id: String,
@@ -1477,24 +1298,16 @@ fn deserialize_present_number<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    // `Option<Number>` alone would accept an explicit null as an absent value;
-    // upstream accepts a missing key but rejects every present non-number.
     serde_json::Number::deserialize(deserializer).map(Some)
 }
 
-/// Credential slot and relay selected from the same configured OAuth ref.
 pub struct RemoteControlDeviceAuth {
     pub relay_origin: String,
     pub storage_name: String,
-    /// The standalone Web UI's historical `kimi.json` alias is valid only when
-    /// config has no explicit slot; an explicit custom/global slot never falls
-    /// back to a different account.
+
     pub allow_managed_aliases: bool,
 }
 
-/// Relay HTTP session client. Cookies are keyed by relay and credential, and a
-/// `OnceCell` per key coalesces concurrent exchanges just like the TS promise
-/// map. A cloud 401 drops that cell, exchanges once, and retries once.
 pub struct RemoteControlDeviceClient {
     client: reqwest::Client,
     sessions: Arc<Mutex<HashMap<String, Arc<tokio::sync::OnceCell<String>>>>>,
@@ -1538,7 +1351,6 @@ impl RemoteControlDeviceClient {
         serde_json::from_value(body).map_err(|_| UNEXPECTED_LIST_RESPONSE.to_string())
     }
 
-    /// `PATCH /v1/remote/devices/{id}` with the trimmed alias (ts `renameDevice`).
     pub async fn rename_device(
         &self,
         oauth: &crate::server::oauth::OAuthManager,
@@ -1557,7 +1369,6 @@ impl RemoteControlDeviceClient {
         Ok(())
     }
 
-    /// `POST /v1/remote/devices/{id}/deactivate` (ts `deactivateDevice`).
     pub async fn deactivate_device(
         &self,
         oauth: &crate::server::oauth::OAuthManager,
@@ -1575,8 +1386,6 @@ impl RemoteControlDeviceClient {
         Ok(())
     }
 
-    /// Drop every cached relay session, so the next call exchanges again with
-    /// whatever credential is current (ts `clear`, called around logout).
     pub fn clear_sessions(&self) {
         self.sessions.lock().unwrap().clear();
     }
@@ -1774,23 +1583,18 @@ fn cloud_error_message(value: &JsonValue) -> Option<String> {
     (!message.is_empty()).then_some(message)
 }
 
-// ----------------------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn reconnect_backoff_sequence_matches_ts() {
-        // ts:431-434 — Math.min(30000, 1000 * 2 ** min(attempt-1, 5))
         assert_eq!(compute_reconnect_delay(1), 1000);
         assert_eq!(compute_reconnect_delay(2), 2000);
         assert_eq!(compute_reconnect_delay(3), 4000);
         assert_eq!(compute_reconnect_delay(4), 8000);
         assert_eq!(compute_reconnect_delay(5), 16_000);
-        assert_eq!(compute_reconnect_delay(6), 30_000); // 32_000 clamped
+        assert_eq!(compute_reconnect_delay(6), 30_000);
         assert_eq!(compute_reconnect_delay(7), 30_000);
         assert_eq!(compute_reconnect_delay(20), 30_000);
     }
@@ -1807,17 +1611,16 @@ mod tests {
         ];
         let out = filter_forward_request_headers(&headers, "tok");
 
-        // Blocked headers must be gone.
         assert!(!out.iter().any(|(k, _)| k.eq_ignore_ascii_case("cookie")));
         assert!(!out.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")));
-        // Connection-listed header removed.
+
         assert!(!out.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-foo")));
-        // Non-blocked custom header preserved.
+
         assert!(
             out.iter()
                 .any(|(k, v)| k.eq_ignore_ascii_case("x-custom") && v == "keep")
         );
-        // Exactly one Authorization, the reinjected bearer token.
+
         let auths: Vec<&String> = out
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("authorization"))
@@ -1829,7 +1632,6 @@ mod tests {
 
     #[test]
     fn register_message_shape_matches_ts() {
-        // ts:443-454
         let opts = RemoteControlOptions {
             device_id: "dev-123".to_string(),
             device_name: "my-host".to_string(),
@@ -1870,16 +1672,11 @@ mod tests {
         );
         assert_eq!(parsed.body, b"hello");
 
-        // Invalid: no header terminator.
         assert!(parse_raw_http_request(b"GET / HTTP/1.1").is_err());
-        // Invalid: double-slash path.
+
         assert!(parse_raw_http_request(b"GET //evil HTTP/1.1\r\n\r\n").is_err());
     }
 
-    /// v2 #3969 precedence: the env override wins over the region-resolved
-    /// fallback, and an explicitly passed origin wins over both (the
-    /// `options.relayOrigin ?? resolveRemoteControlRelayOrigin(env, auth…)`
-    /// shape).
     #[test]
     fn relay_origin_precedence_is_env_then_region_then_default() {
         let env = std::env::var(REMOTE_CONTROL_RELAY_URL_ENV)
@@ -1895,8 +1692,7 @@ mod tests {
             resolve_remote_control_relay_origin(REMOTE_CONTROL_RELAY_ORIGIN),
             env.unwrap_or_else(|| REMOTE_CONTROL_RELAY_ORIGIN.to_string()),
         );
-        // An empty fallback falls back to the built-in default rather than
-        // producing an origin the URL builder cannot parse.
+
         assert_eq!(
             resolve_remote_control_relay_origin("  "),
             std::env::var(REMOTE_CONTROL_RELAY_URL_ENV)
@@ -1919,8 +1715,6 @@ mod tests {
 
     #[tokio::test]
     async fn state_machine_exits_cleanly_when_shutdown_cancelled() {
-        // No network is touched: run_state_machine checks `shutdown` before the
-        // first cycle, then resets status to `off` (ts:422-425).
         let opts = Arc::new(RemoteControlOptions::default());
         let status = Arc::new(Mutex::new(RemoteControlStatusWire::off()));
         let shutdown = tokio_util::sync::CancellationToken::new();
@@ -2687,7 +2481,6 @@ mod tests {
         assert_eq!(status["state"], "off");
         assert_eq!(status["enabled"], false);
 
-        // Logging out again is a no-op and must not resurrect the tunnel.
         assert!(!server.oauth_manager().logout("kimi"));
         tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(server.remote_control_runtime.lock().await.is_none());

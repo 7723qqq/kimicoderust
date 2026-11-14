@@ -193,39 +193,15 @@ fn shell_name_from_path(path: &str) -> String {
 }
 
 /// Detect shell name and path, honoring explicit overrides and environment variables.
-pub fn detect_shell(override_shell: Option<&str>) -> (String, String) {
+pub fn detect_shell(
+    override_shell: Option<&str>,
+) -> Result<(String, String), crate::native::environment_probe::ProbeShellNotFound> {
     if let Some(explicit) = override_shell {
-        return (shell_name_from_path(explicit), explicit.to_string());
+        return Ok((shell_name_from_path(explicit), explicit.to_string()));
     }
 
-    if let Ok(env_shell) = std::env::var("KIMI_SHELL_PATH")
-        && !env_shell.is_empty()
-    {
-        return (shell_name_from_path(&env_shell), env_shell);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // The Bash tool's own resolution (`native/shell.rs`): pwsh → powershell
-        // → Git Bash → cmd. The prompt must name the shell the tool actually
-        // runs, or the model writes commands that shell cannot parse.
-        let resolved = crate::native::shell::resolve_shell(None);
-        (shell_name_from_path(&resolved.program), resolved.program)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Ok(sh) = std::env::var("SHELL")
-            && !sh.is_empty()
-        {
-            return (shell_name_from_path(&sh), sh);
-        }
-        // No `$SHELL`: name the shell the Bash tool actually runs, exactly as the
-        // Windows arm above does. A hardcoded `/bin/bash` claims a shell that need
-        // not exist — v2 falls back to `/bin/sh`.
-        let resolved = crate::native::shell::resolve_shell(None);
-        (shell_name_from_path(&resolved.program), resolved.program)
-    }
+    let info = crate::native::environment_probe::probe_host_environment_from_process()?;
+    Ok((shell_name_from_path(&info.shell_path), info.shell_path))
 }
 
 /// Generate the 2-level directory tree for the given workspace path.
@@ -245,9 +221,12 @@ pub fn generate_cwd_listing(work_dir: &Path, collapse_hidden: bool) -> String {
 }
 
 /// Gather complete environment information for the target workspace.
-pub fn collect_environment(workspace_root: &Path, override_shell: Option<&str>) -> EnvironmentInfo {
+pub fn collect_environment(
+    workspace_root: &Path,
+    override_shell: Option<&str>,
+) -> Result<EnvironmentInfo, crate::native::environment_probe::ProbeShellNotFound> {
     let os = detect_os();
-    let (shell_name, shell_path) = detect_shell(override_shell);
+    let (shell_name, shell_path) = detect_shell(override_shell)?;
     let cwd = workspace_root.display().to_string().replace('\\', "/");
     let cwd_listing = generate_cwd_listing(workspace_root, true);
     let win_notes = if os == "Windows" {
@@ -256,7 +235,7 @@ pub fn collect_environment(workspace_root: &Path, override_shell: Option<&str>) 
         String::new()
     };
 
-    EnvironmentInfo {
+    Ok(EnvironmentInfo {
         os_kind: os.to_string(),
         shell_name,
         shell_path,
@@ -264,7 +243,7 @@ pub fn collect_environment(workspace_root: &Path, override_shell: Option<&str>) 
         cwd_listing,
         windows_notes: win_notes,
         runtime_notes: render_runtime_notes(&detect_js_runtimes()),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -286,34 +265,26 @@ mod tests {
 
     #[test]
     fn test_detect_shell_override_and_name_extraction() {
-        // POSIX path
-        let (name, path) = detect_shell(Some("/bin/zsh"));
+        let (name, path) = detect_shell(Some("/bin/zsh")).unwrap();
         assert_eq!(name, "zsh");
         assert_eq!(path, "/bin/zsh");
 
-        // Windows path with .exe extension: .exe must be trimmed from shell_name
-        let (win_name, win_path) = detect_shell(Some("C:\\msys64\\usr\\bin\\bash.exe"));
+        let (win_name, win_path) = detect_shell(Some("C:\\msys64\\usr\\bin\\bash.exe")).unwrap();
         assert_eq!(win_name, "bash");
         assert_eq!(win_path, "C:\\msys64\\usr\\bin\\bash.exe");
 
-        // Plain command name with .exe
-        let (ps_name, ps_path) = detect_shell(Some("pwsh.exe"));
+        let (ps_name, ps_path) = detect_shell(Some("pwsh.exe")).unwrap();
         assert_eq!(ps_name, "pwsh");
         assert_eq!(ps_path, "pwsh.exe");
     }
 
     #[cfg(not(target_os = "windows"))]
     #[test]
-    fn posix_prompt_shell_prefers_shell_env_then_the_tool_shell() {
-        // Pins the contract, not a path: `$SHELL` still wins (that precedence is a
-        // separate, still-open question), and with no `$SHELL` the prompt names the
-        // shell `native/shell.rs` actually runs rather than a hardcoded `/bin/bash`.
-        let (name, path) = detect_shell(None);
-        let expected = match std::env::var("SHELL") {
-            Ok(sh) if !sh.is_empty() => sh,
-            _ => crate::native::shell::resolve_shell(None).program,
-        };
-        assert_eq!(path, expected);
+    fn posix_prompt_shell_follows_the_probed_environment() {
+        let (name, path) = detect_shell(None).expect("a posix host always probes");
+        let info = crate::native::environment_probe::probe_host_environment_from_process()
+            .expect("a posix host always probes");
+        assert_eq!(path, info.shell_path);
         assert_eq!(name, shell_name_from_path(&path));
     }
 
@@ -346,7 +317,7 @@ mod tests {
         let temp = tempdir().unwrap();
         std::fs::write(temp.path().join("sample.txt"), "content").unwrap();
 
-        let env = collect_environment(temp.path(), Some("/bin/bash"));
+        let env = collect_environment(temp.path(), Some("/bin/bash")).unwrap();
         assert_eq!(env.os_kind, detect_os());
         assert_eq!(env.shell_name, "bash");
         assert_eq!(env.shell_path, "/bin/bash");

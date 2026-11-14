@@ -1,9 +1,6 @@
 use super::*;
 
 impl HttpServer {
-    /// The catalog payload the routes read (v2 `getModelsDevCatalog`): the
-    /// TTL-cached upstream fetch, with the built-in snapshot ending the
-    /// fallback chain when the fetch fails with no cache to serve.
     pub(super) async fn catalog_payload(&self) -> Value {
         match self.models_dev_cache.catalog().await {
             Ok(payload) => payload,
@@ -11,8 +8,6 @@ impl HttpServer {
         }
     }
 
-    /// `GET /api/v1/catalog/providers` (v2 `listModelsDevProviders`): every
-    /// catalog entry mapped to its item.
     pub(super) async fn catalog_providers(&self) -> Value {
         let payload = self.catalog_payload().await;
         match models_dev::parse_catalog(&payload) {
@@ -21,9 +16,6 @@ impl HttpServer {
         }
     }
 
-    /// `GET /api/v1/catalog/providers/{id}` (v2 `getModelsDevProvider`): the
-    /// same entry the list route advertises — including the resolved
-    /// `base_url` — or `None` for an unknown id (the route answers 404).
     pub(super) async fn catalog_provider(&self, id: &str) -> Option<Value> {
         let payload = self.catalog_payload().await;
         let catalog = models_dev::parse_catalog(&payload).ok()?;
@@ -31,11 +23,6 @@ impl HttpServer {
         Some(models_dev::provider_item(id, entry))
     }
 
-    /// `POST /api/v1/providers:import_catalog` (v2 `importModelsDevProvider`):
-    /// write the chosen catalog entry into the config's `[providers.*]` /
-    /// `[models.*]` sections. Re-importing an id rewrites the provider entry
-    /// and its aliases from the catalog; an OAuth-managed provider is
-    /// rejected instead.
     pub(super) async fn import_catalog_provider(&self, body: &Value) -> HttpResponse {
         let invalid = |msg: String| {
             HttpResponse::json(
@@ -102,14 +89,6 @@ impl HttpServer {
             ));
         }
 
-        // The credential rides on the request (v2's body carries `api_key`;
-        // the fork also accepts `api_key_env`). A re-import keeps the stored
-        // credential when the request supplies none — v2's
-        // `reconcileProviderCredentialUpdate`, without its eager env-existence
-        // check (the fork resolves `api_key_env` at request time).
-        // The pre-import config reads the same source the write builds on
-        // (`provider_write.rs`): the staged override, else the pinned file,
-        // else discovery.
         let before = self
             .config_override
             .lock()
@@ -164,8 +143,7 @@ impl HttpServer {
                         &models_dev::model_write(target_id, model),
                     )?;
                 }
-                // v2 seeds the global default from the first imported model
-                // only when nothing is configured at all (fresh setup).
+
                 let seeded = document
                     .get("default_model")
                     .and_then(|item| item.as_str())
@@ -197,12 +175,6 @@ impl HttpServer {
         )
     }
 
-    /// `POST /api/v1/providers:import_registry` (v2 `importCustomRegistry`):
-    /// import a models.dev-shaped private registry (an `api.json` URL plus an
-    /// optional Bearer key) as configured providers. Every listed provider is
-    /// written with a `source` record so refreshes rediscover it, and
-    /// re-importing the same URL removes providers that disappeared upstream
-    /// — the URL is the registry's stable identity.
     pub(super) async fn import_registry_provider(&self, body: &Value) -> HttpResponse {
         let invalid = |msg: String| {
             HttpResponse::json(
@@ -219,9 +191,6 @@ impl HttpServer {
             return invalid("url is required for :import_registry".to_string());
         };
 
-        // The pre-import config reads the same source the write builds on
-        // (`provider_write.rs`): the staged override, else the pinned file,
-        // else discovery.
         let before = self
             .config_override
             .lock()
@@ -233,8 +202,7 @@ impl HttpServer {
                     .map(|(config, _)| config)
                     .unwrap_or_default(),
             });
-        // The key: the request's, else the one stored for the same URL (key
-        // rotation keeps the URL as the identity), else none.
+
         let stored_key = before.providers.values().find_map(|provider| {
             custom_registry::RegistrySource::from_provider(provider)
                 .filter(|source| source.url == url)
@@ -339,25 +307,19 @@ pub(super) fn format_wire_session(
     session: &crate::session::sqlite_store::SessionSummary,
     store: &SqliteSessionStore,
     engine: Option<&Arc<ServerEngine>>,
-    // The resolved default-workspace root, when the host knows it. `None`
-    // (an embedder that never resolves one) answers `is_default: false`.
+
     default_root: Option<&Path>,
 ) -> Value {
     let session_id = &session.session_id;
     let busy = engine.map(|e| e.is_busy(session_id)).unwrap_or(false);
     let history = store.load_session_history(session_id).unwrap_or_default();
     let message_count = history.len();
-    // Measured+estimated with an engine (v2 `statusSize`); the byte/4 floor is
-    // only the engine-less fallback (a route test store has no engine).
+
     let context_tokens = engine.map_or_else(
         || history.iter().map(|m| m.content.len() / 4).sum::<usize>(),
         |engine| engine.session_context_tokens(session_id) as usize,
     );
 
-    // Derive `pending_interaction` from the engine's InteractionManager
-    // when an engine is attached. v2 (sessionInteractionService) settles
-    // approvals ahead of questions, so a session that needs an approval while a
-    // question is also parked reports `approval`.
     let pending_interaction = engine
         .and_then(|e| e.interaction_manager())
         .map(|mgr| {
@@ -390,10 +352,6 @@ pub(super) fn format_wire_session(
         .and_then(|m| m.as_object().cloned())
         .unwrap_or_default();
 
-    // v2 `normalizeSessionMeta` (sessionMetadataService.ts:285-312): legacy
-    // hosts wrote `workDir` and `isCustomTitle` / `customTitle`. Map them onto
-    // the canonical `cwd` and `titleKind` on read so both shapes agree without
-    // a destructive rewrite.
     if !metadata_obj.contains_key("cwd")
         && let Some(work_dir) = metadata_obj.get("workDir").and_then(|v| v.as_str())
     {
@@ -417,8 +375,6 @@ pub(super) fn format_wire_session(
         })
         .or_else(|| legacy_custom.then(|| "custom".to_string()));
 
-    // v2 `SessionMeta.cwd` is fixed at creation, so the session column wins over
-    // anything a legacy host left in the metadata bag.
     let cwd = session
         .cwd
         .clone()
@@ -440,8 +396,7 @@ pub(super) fn format_wire_session(
     metadata_obj
         .entry("session_id".to_string())
         .or_insert_with(|| json!(session_id));
-    // Mirror the canonical session fields into the metadata bag: the wire
-    // schema carries them in both places and older clients read the bag.
+
     if let Some(kind) = &title_kind {
         metadata_obj.insert("titleKind".to_string(), json!(kind));
     }
@@ -505,11 +460,6 @@ pub(super) fn format_wire_session(
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
 
-    // Upstream #4224: `is_default` rides every workspace payload (REST and
-    // WS events) so a client can badge "the default workspace" without
-    // knowing where it resolves to. The root comes from the caller: this
-    // function is sync and config-free on purpose (nine call sites, all in
-    // async methods that already hold or can cheaply clone the config).
     let is_default = default_root
         .map(|root| {
             crate::default_workspace::is_default_root_resolved(
@@ -519,10 +469,6 @@ pub(super) fn format_wire_session(
         })
         .unwrap_or(false);
 
-    // v2 `sessionOutcomeMirrorService.reconcileAfterRestore`: when a restored
-    // session has turns but no recorded outcome (a row written before the
-    // column existed, or an interrupted write), adopt the newest turn's status.
-    // Only pay for the correction when the cheap read finds nothing.
     let mut last_turn_reason = store.last_turn_reason(session_id);
     if last_turn_reason.is_none() && message_count > 0 {
         last_turn_reason = store.reconcile_last_turn_reason(session_id).ok().flatten();
@@ -578,16 +524,15 @@ pub(super) fn format_wire_session(
         "permission_rules": [],
         "message_count": message_count,
         "last_seq": store.latest_wire_event_seq(session_id).unwrap_or(0),
-        // The engine publishes this on `session.work_changed` as it happens;
-        // persisting it as well is what lets a client that attaches later (or
-        // after a restart) still see the last outcome. Absent, not null, when a
-        // turn has not ended since activation — the wire schema marks it
-        // optional and its own doc says it is "when the session is live".
+
+
+
+
+
         "last_turn_reason": last_turn_reason
     })
 }
 
-/// The root a workspace id refers to, for the `is_default` comparison.
 fn ws_id_root(ws_id: &str, store: &SqliteSessionStore) -> Option<String> {
     store.get_workspace(ws_id).ok().flatten().map(|w| w.root)
 }

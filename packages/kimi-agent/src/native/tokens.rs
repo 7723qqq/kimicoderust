@@ -1,30 +1,3 @@
-/// Token estimation via character-based heuristic.
-///
-/// Mirrors the v2 token estimator (upstream:
-/// `agent-core-v2/src/llm-adapter/contract/tokens.ts`; the fork's retired
-/// copy lived at `agent-core-v2/src/kosong/contract/tokens.ts`):
-///   - ASCII: ~4 chars per token
-///   - Non-ASCII (CJK, emoji, etc.): ~1 char per token
-///
-/// The estimate is transient — the next LLM call returns the real count
-/// and supersedes this value. Used to keep `tokenCountWithPending`
-/// monotonic between LLM round-trips without paying for a tokenizer.
-///
-/// ## Byte-level scanning
-///
-/// Instead of decoding UTF-8 into code points (which `str::chars()` does),
-/// we scan raw bytes. In UTF-8:
-///   - Bytes `0x00..0x80` are ASCII code points (1 byte = 1 code point)
-///   - Bytes `0xC0..0xFF` are start bytes of multi-byte sequences
-///     (each code point has exactly one start byte)
-///   - Bytes `0x80..0xC0` are continuation bytes (skip)
-///
-/// This gives identical counts to iterating `char` values but is
-/// SIMD-friendly — the compiler auto-vectorizes the byte comparisons.
-/// It also matches the JS `for (const char of text)` semantics, which
-/// iterates Unicode code points.
-///
-/// Estimate token count from a single text string.
 pub fn estimate_tokens(text: &str) -> usize {
     let mut ascii = 0usize;
     let mut non_ascii = 0usize;
@@ -38,11 +11,6 @@ pub fn estimate_tokens(text: &str) -> usize {
     (ascii.div_ceil(4)) + non_ascii
 }
 
-/// Estimate token count across multiple text strings (batch mode).
-///
-/// Equivalent to `texts.iter().map(estimate_tokens).sum()` but with a
-/// single napi boundary crossing — collects all text fragments in TS
-/// and makes one Rust call instead of N calls.
 pub fn estimate_tokens_batch(texts: &[&str]) -> usize {
     let mut total = 0usize;
     for &text in texts {
@@ -51,12 +19,6 @@ pub fn estimate_tokens_batch(texts: &[&str]) -> usize {
     total
 }
 
-/// Truncate text to fit within a token budget, keeping the BEGINNING.
-///
-/// Walks bytes forward using the same ASCII/non-ASCII heuristic as
-/// `estimate_tokens`, and stops at the first code point that would
-/// push the running total over the budget. Mirrors
-/// `truncateTextToTokens` in `agent/contextMemory/compactionHandoff.ts`.
 #[cfg(test)]
 pub fn truncate_text_to_tokens(text: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
@@ -71,33 +33,19 @@ pub fn truncate_text_to_tokens(text: &str, max_tokens: usize) -> String {
         } else if b >= 0xC0 {
             non_ascii += 1;
         }
-        // Continuation bytes (0x80..0xC0) don't count as separate code points.
+
         if ascii.div_ceil(4) + non_ascii > max_tokens {
             break;
         }
         end = i + 1;
     }
-    // Keep the `end` cut point strictly on a valid UTF-8 character boundary, so
-    // a multi-byte character is never sliced in half and panics
+
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
     text[..end].to_string()
 }
 
-// NOTE: structured estimators (JSON weighting, per-tool/message rollups)
-// and the anchor tracker used to live here as unwired duplicates. The
-// canonical implementations are `crate::compaction::estimate_tokens`,
-// `estimate_tokens_for_json`, `estimate_message_tokens` and friends, which
-// operate on real `LLMMessage`s and back the engine's compaction budget.
-// Do not re-add tuple-shaped copies here; extend `compaction` instead.
-
-/// Truncate text to fit within a token budget, keeping the END.
-///
-/// Walks bytes backward, skipping UTF-8 continuation bytes to consume
-/// multi-byte sequences whole (equivalent to the JS surrogate-pair
-/// handling). Mirrors `truncateTextToTokensFromEnd` in
-/// `agent/contextMemory/compactionHandoff.ts`.
 pub fn truncate_text_to_tokens_from_end(text: &str, max_tokens: usize) -> String {
     if max_tokens == 0 {
         return String::new();
@@ -115,8 +63,6 @@ pub fn truncate_text_to_tokens_from_end(text: &str, max_tokens: usize) -> String
         } else if b >= 0xC0 {
             non_ascii += 1;
         } else {
-            // Continuation byte: part of a multi-byte sequence already counted
-            // (or about to be counted when we reach its start byte).
             continue;
         }
         if ascii.div_ceil(4) + non_ascii > max_tokens {
@@ -141,12 +87,6 @@ mod tests {
         assert_eq!(estimate_tokens("abcde"), 2);
     }
 
-    /// CJK strings below are load-bearing test data, not incidental samples:
-    /// the tokenizer charges one token per non-ASCII code point, so an ASCII
-    /// rewrite would silently stop covering the multi-byte paths these tests
-    /// exist for (counting, truncation, and the no-split boundary). Comments
-    /// quote the same literals as the assertions on purpose, to keep the two
-    /// readable side by side.
     #[test]
     fn test_cjk() {
         assert_eq!(estimate_tokens("你好"), 2);
@@ -188,8 +128,6 @@ mod tests {
 
     #[test]
     fn test_batch() {
-        // Plain ASCII: this case is about summing across fragments, not about
-        // any particular character class. CJK coverage lives in `test_cjk`.
         let texts: Vec<&str> = vec!["hello", "world", "there"];
         assert_eq!(estimate_tokens_batch(&texts), 6);
     }
@@ -205,8 +143,6 @@ mod tests {
         let texts: Vec<&str> = vec!["hello world"];
         assert_eq!(estimate_tokens_batch(&texts), 3);
     }
-
-    // ── truncate_text_to_tokens (forward) ──────────────────────────────
 
     #[test]
     fn test_truncate_forward_empty() {
@@ -225,17 +161,14 @@ mod tests {
 
     #[test]
     fn test_truncate_forward_ascii() {
-        // "hello world" = 3 tokens (11 ASCII chars / 4 = 2.75 → 3)
-        // budget=1: ceil(4/4)=1 token = 4 chars "hell"; 5th char → ceil(5/4)=2 > 1
         assert_eq!(truncate_text_to_tokens("hello world", 1), "hell");
-        // budget=2: ceil(8/4)=2 tokens = 8 chars "hello wo"; 9th char → ceil(9/4)=3 > 2
+
         assert_eq!(truncate_text_to_tokens("hello world", 2), "hello wo");
         assert_eq!(truncate_text_to_tokens("hello world", 3), "hello world");
     }
 
     #[test]
     fn test_truncate_forward_cjk() {
-        // "你好世界" = 4 tokens (each CJK char counts as 1 token)
         assert_eq!(truncate_text_to_tokens("你好世界", 1), "你");
         assert_eq!(truncate_text_to_tokens("你好世界", 2), "你好");
         assert_eq!(truncate_text_to_tokens("你好世界", 4), "你好世界");
@@ -243,30 +176,25 @@ mod tests {
 
     #[test]
     fn test_truncate_forward_mixed() {
-        // "abc你" = ceil(3/4) + 1 = 2 tokens
         assert_eq!(truncate_text_to_tokens("abc你", 1), "abc");
         assert_eq!(truncate_text_to_tokens("abc你", 2), "abc你");
     }
 
     #[test]
     fn test_truncate_forward_emoji() {
-        // "👋" = 1 token (4-byte UTF-8, 1 non-ASCII code point)
         assert_eq!(truncate_text_to_tokens("👋", 0), "");
         assert_eq!(truncate_text_to_tokens("👋", 1), "👋");
-        // "a👋b" = ceil(2/4) + 1 = 2 tokens
+
         assert_eq!(truncate_text_to_tokens("a👋b", 1), "a");
         assert_eq!(truncate_text_to_tokens("a👋b", 2), "a👋b");
     }
 
     #[test]
     fn test_truncate_forward_no_split_multibyte() {
-        // Truncation must never split a multi-byte sequence.
         let result = truncate_text_to_tokens("你好", 1);
         assert_eq!(result, "你");
         assert!(result.chars().count() == 1);
     }
-
-    // ── truncate_text_to_tokens_from_end (backward) ────────────────────
 
     #[test]
     fn test_truncate_backward_empty() {
@@ -285,7 +213,6 @@ mod tests {
 
     #[test]
     fn test_truncate_backward_ascii() {
-        // "hello world" = 3 tokens
         assert_eq!(truncate_text_to_tokens_from_end("hello world", 1), "orld");
         assert_eq!(
             truncate_text_to_tokens_from_end("hello world", 2),
@@ -299,7 +226,6 @@ mod tests {
 
     #[test]
     fn test_truncate_backward_cjk() {
-        // "你好世界" = 4 tokens
         assert_eq!(truncate_text_to_tokens_from_end("你好世界", 1), "界");
         assert_eq!(truncate_text_to_tokens_from_end("你好世界", 2), "世界");
         assert_eq!(truncate_text_to_tokens_from_end("你好世界", 4), "你好世界");
@@ -307,17 +233,15 @@ mod tests {
 
     #[test]
     fn test_truncate_backward_mixed() {
-        // "abc你" = ceil(3/4) + 1 = 2 tokens
         assert_eq!(truncate_text_to_tokens_from_end("abc你", 1), "你");
         assert_eq!(truncate_text_to_tokens_from_end("abc你", 2), "abc你");
     }
 
     #[test]
     fn test_truncate_backward_emoji() {
-        // "👋" = 1 token
         assert_eq!(truncate_text_to_tokens_from_end("👋", 0), "");
         assert_eq!(truncate_text_to_tokens_from_end("👋", 1), "👋");
-        // "a👋b" = ceil(2/4) + 1 = 2 tokens
+
         assert_eq!(truncate_text_to_tokens_from_end("a👋b", 1), "b");
         assert_eq!(truncate_text_to_tokens_from_end("a👋b", 2), "a👋b");
     }
@@ -331,8 +255,6 @@ mod tests {
 
     #[test]
     fn test_truncate_budget_respected() {
-        // Both forward and backward truncation must produce text whose
-        // estimated token count never exceeds the budget.
         let cases = [
             ("hello world", 1),
             ("hello world", 2),

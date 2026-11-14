@@ -98,6 +98,8 @@ async fn confirm_and_exit(
         question_id: format!("question_{:016x}", fastrand::u64(..)),
         turn_id: turn_id.to_string(),
         tool_call_id: tool_call_id.to_string(),
+        agent_id: None,
+        session_id: None,
         background: false,
         timeout_ms: None,
         questions: vec![AskQuestionItem {

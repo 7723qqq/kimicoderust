@@ -1,32 +1,19 @@
-//! Workspace file index — pre-scanned file metadata for fast tool predictions.
-//!
-//! Built once at workspace load time, then used by Read/Grep/etc to return
-//! instant approximate results while exact execution happens in background.
-//!
-//! The index stores per-file metadata: size, line count, and a preview
-//! (first N lines). It is read-only after construction; call `build()` to
-//! create a fresh index.
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Preview line limit (first N lines captured per file).
 const PREVIEW_LINES: usize = 5;
 
-/// File metadata stored in the index.
 #[derive(Debug, Clone)]
 pub struct FileMeta {
-    /// File size in bytes.
     pub size: u64,
-    /// Total number of lines in the file.
+
     pub line_count: u32,
-    /// Preview text (first PREVIEW_LINES lines, joined with newlines).
+
     pub preview: String,
 }
 
-/// Prediction result for a Read tool call.
 #[derive(Debug, Clone)]
 pub struct ReadPrediction {
     pub line_count: u32,
@@ -35,7 +22,6 @@ pub struct ReadPrediction {
     pub estimated_read_ms: u64,
 }
 
-/// Workspace-wide file index.
 #[derive(Debug, Clone)]
 pub struct WorkspaceIndex {
     files: Arc<HashMap<String, FileMeta>>,
@@ -43,12 +29,6 @@ pub struct WorkspaceIndex {
 }
 
 impl WorkspaceIndex {
-    /// Build a new index by scanning `root` recursively.
-    ///
-    /// Scans all files, collecting metadata and preview. Skips:
-    ///   - hidden directories (.git, node_modules, .kimi-code, .agents, etc.)
-    ///   - binary files (detected by NUL bytes in preview)
-    ///   - files larger than 10 MB (metadata only, no preview)
     pub fn build(root: &str) -> Self {
         let root_path = Path::new(root);
         let mut files = HashMap::new();
@@ -68,16 +48,13 @@ impl WorkspaceIndex {
         }
     }
 
-    /// Look up file metadata. Returns `None` if the file is not indexed.
     pub fn get(&self, path: &str) -> Option<&FileMeta> {
         self.files.get(path)
     }
 
-    /// Generate a Read prediction for the given path.
     pub fn predict_read(&self, path: &str) -> Option<ReadPrediction> {
         let meta = self.get(path)?;
 
-        // Rough estimate: ~100 MB/s sequential read, plus parsing overhead
         let estimated_read_ms = ((meta.size as f64 / 100_000.0) + 0.5) as u64;
         let estimated_read_ms = estimated_read_ms.clamp(1, 5000);
 
@@ -89,21 +66,17 @@ impl WorkspaceIndex {
         })
     }
 
-    /// Number of indexed files.
     pub fn file_count(&self) -> usize {
         self.file_count
     }
 }
 
-/// Collect metadata for a single file.
 fn collect_file_meta(path: &Path) -> FileMeta {
     let size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-    // Line count and preview — read first PREVIEW_LINES + count all lines
     let (line_count, preview) = if size == 0 {
         (0, String::new())
     } else if size > 10 * 1024 * 1024 {
-        // Skip preview for large files (> 10 MB), just count lines from header
         let header = read_first_n_bytes(path, 64 * 1024);
         let lines_in_header = header.lines().count();
         (
@@ -121,7 +94,6 @@ fn collect_file_meta(path: &Path) -> FileMeta {
     }
 }
 
-/// Read the first N bytes of a file.
 fn read_first_n_bytes(path: &Path, n: usize) -> String {
     use std::io::Read;
     if let Ok(mut file) = fs::File::open(path) {
@@ -129,7 +101,7 @@ fn read_first_n_bytes(path: &Path, n: usize) -> String {
         match file.read(&mut buf) {
             Ok(bytes_read) => {
                 buf.truncate(bytes_read);
-                // Replace NUL bytes (binary detection)
+
                 if buf.contains(&0) {
                     return String::new();
                 }
@@ -142,7 +114,6 @@ fn read_first_n_bytes(path: &Path, n: usize) -> String {
     }
 }
 
-/// Read line count and preview (first N lines).
 fn read_line_count_and_preview(path: &Path, preview_lines: usize) -> (u32, String) {
     use std::io::BufRead;
 
@@ -162,7 +133,6 @@ fn read_line_count_and_preview(path: &Path, preview_lines: usize) -> (u32, Strin
             Err(_) => break,
         };
 
-        // Check for NUL bytes (binary file marker)
         if line.contains('\0') {
             has_nul = true;
             break;
@@ -170,9 +140,6 @@ fn read_line_count_and_preview(path: &Path, preview_lines: usize) -> (u32, Strin
 
         line_count += 1;
         if preview_lines_vec.len() < preview_lines {
-            // Truncate long lines in preview. `line.len()` is the BYTE length,
-            // so the cut must land on a char boundary — slicing `&line[..200]`
-            // panics when 200 lands inside a multi-byte CJK character.
             let truncated = if line.len() > 200 {
                 format!("{}...", &line[..line.floor_char_boundary(200)])
             } else {
@@ -190,7 +157,6 @@ fn read_line_count_and_preview(path: &Path, preview_lines: usize) -> (u32, Strin
     }
 }
 
-/// Recursive directory walk, skipping hidden dirs and common noise.
 fn walk_dir(path: &Path) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
     let mut files = Vec::new();
 
@@ -218,7 +184,6 @@ fn walk_dir(path: &Path) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
 
             let name = entry.file_name().to_string_lossy().to_string();
 
-            // Skip hidden dirs and common noise
             if name.starts_with('.') && file_type.is_dir() {
                 continue;
             }
@@ -230,7 +195,6 @@ fn walk_dir(path: &Path) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
             if file_type.is_dir() {
                 stack.push(entry_path);
             } else if file_type.is_file() {
-                // Skip binary extensions
                 if is_binary_extension(&entry_path) {
                     continue;
                 }
@@ -242,7 +206,6 @@ fn walk_dir(path: &Path) -> Result<Vec<std::path::PathBuf>, std::io::Error> {
     Ok(files)
 }
 
-/// Directories to skip during indexing.
 fn is_noise_dir(name: &str) -> bool {
     matches!(
         name,
@@ -265,7 +228,6 @@ fn is_noise_dir(name: &str) -> bool {
     )
 }
 
-/// File extensions to skip (binary formats).
 fn is_binary_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -347,7 +309,6 @@ mod tests {
         let index = WorkspaceIndex::build(dir.path().to_str().unwrap());
         assert_eq!(index.file_count(), 2);
 
-        // Check first file
         let a_path = dir.path().join("a.txt");
         let a_str = a_path.to_string_lossy().to_string().replace('\\', "/");
         let meta = index.get(&a_str).unwrap();
@@ -425,8 +386,6 @@ mod tests {
 
     #[test]
     fn test_predict_read_preview_truncated() {
-        // A file with more than PREVIEW_LINES (5) lines should have its
-        // preview truncated to the first 5 lines.
         let dir = TempDir::new().unwrap();
         let content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\n";
         create_file(&dir, "big.txt", content.as_bytes());
@@ -449,14 +408,11 @@ mod tests {
 
     #[test]
     fn test_predict_read_backslash_path() {
-        // On Windows, paths may use backslashes — predict_read should
-        // still find the file if it was indexed with forward slashes.
         let dir = TempDir::new().unwrap();
         create_file(&dir, "code.rs", b"fn main() {}\n");
 
         let index = WorkspaceIndex::build(dir.path().to_str().unwrap());
-        // The index stores forward-slash paths. predict_read with a
-        // backslash path won't match — this test documents that behavior.
+
         let fwd = dir
             .path()
             .join("code.rs")
@@ -468,10 +424,8 @@ mod tests {
 
     #[test]
     fn test_predict_read_cjk_long_line_no_panic() {
-        // Regression: `&line[..200]` sliced mid-UTF-8-sequence when a preview
-        // line exceeded 200 bytes in CJK and panicked the whole napi call.
         let dir = TempDir::new().unwrap();
-        let line = "中".repeat(70); // 210 bytes, well past the 200 cut
+        let line = "中".repeat(70);
         let content = format!("{line}\n");
         create_file(&dir, "cjk.txt", content.as_bytes());
 
@@ -492,9 +446,9 @@ mod tests {
     #[test]
     fn test_predict_read_estimated_ms_bounds() {
         let dir = TempDir::new().unwrap();
-        // Small file → estimated_read_ms should be at least 1ms.
+
         create_file(&dir, "small.txt", b"hi\n");
-        // Large file (> 5MB) → estimated_read_ms should be capped at 5000ms.
+
         let big_content = vec![b'x'; 6_000_000];
         create_file(&dir, "big.bin", &big_content);
 
@@ -508,7 +462,6 @@ mod tests {
             "small file should estimate >= 1ms"
         );
 
-        // Note: big.bin may be skipped by binary detection, so check if indexed.
         let big = dir.path().join("big.bin");
         let big_str = big.to_string_lossy().to_string().replace('\\', "/");
         if let Some(pred) = index.predict_read(&big_str) {

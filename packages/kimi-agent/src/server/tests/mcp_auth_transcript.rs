@@ -1,8 +1,6 @@
 use super::super::*;
 use std::collections::HashMap;
 
-/// `mcp/auth:begin` + `:complete` drive the RFC 8628 flow and persist the
-/// credentials; `auth-statuses` reports them and `:reset` clears them.
 #[tokio::test]
 async fn test_http_mcp_auth_device_flow() {
     let (url, _hits, _shutdown) =
@@ -83,9 +81,6 @@ async fn test_http_mcp_auth_device_flow() {
     let key = crate::mcp::oauth::mcp_oauth_store_key("srv", "https://example.test/mcp").unwrap();
     assert_eq!(statuses_body["statuses"][&key]["authenticated"], true);
     assert_eq!(statuses_body["statuses"][&key]["status"], "authenticated");
-    // A usable token is required: an empty credentials dir reports no key
-    // at all, and a stored-but-unusable key must say `needs-auth` rather
-    // than a fabricated `true` (covered by the OAuth service's own tests).
 
     let reset = server
         .handle_request(&HttpRequest {
@@ -105,11 +100,6 @@ async fn test_http_mcp_auth_device_flow() {
     assert_eq!(reset_body["removed"], true);
 }
 
-/// `mcp/auth:begin-auth-code` discovers the authorization server, registers a
-/// PKCE client and returns the browser URL; the unauthenticated callback route
-/// exchanges the code and stores the grant; polling reports the outcome. The
-/// callback is the only `/api` GET that bypasses bearer auth — the single-use
-/// state is its credential.
 #[tokio::test]
 async fn test_http_mcp_auth_authorization_code_flow() {
     let (as_base, as_requests) = crate::mcp::oauth::auth_code::test_helpers::spawn_mock_as().await;
@@ -131,7 +121,6 @@ async fn test_http_mcp_auth_authorization_code_flow() {
         body: serde_json::to_vec(&body).unwrap(),
     };
 
-    // The begin route stays behind the bearer gate.
     let unauthorized = server
         .handle_request(&post(
             "/api/v1/mcp/auth:begin-auth-code",
@@ -169,7 +158,6 @@ async fn test_http_mcp_auth_authorization_code_flow() {
     assert!(authorization_url.contains("code_challenge_method=S256"));
     assert!(authorization_url.contains("resource="));
 
-    // Polling before the browser returns: still pending.
     let pending = server
         .handle_request(&HttpRequest {
             headers: std::collections::HashMap::from([(
@@ -184,7 +172,6 @@ async fn test_http_mcp_auth_authorization_code_flow() {
         .await;
     assert_eq!(pending.status, 202);
 
-    // The callback carries no bearer token; it must still be served.
     let callback = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -233,7 +220,6 @@ async fn test_http_mcp_auth_authorization_code_flow() {
         "the grant the engine would use is stored and usable"
     );
 
-    // A replayed callback state is refused (single use).
     let replay = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -245,7 +231,6 @@ async fn test_http_mcp_auth_authorization_code_flow() {
         .await;
     assert_eq!(replay.status, 400);
 
-    // Unknown flows are finished-with-error, never "still pending".
     let unknown = server
         .handle_request(&HttpRequest {
             headers: std::collections::HashMap::from([(
@@ -272,7 +257,6 @@ async fn test_http_session_events_and_projection() {
         .create_session(sid, Some("Event Stream Test"))
         .unwrap();
 
-    // 1. Publish events onto hub lane -> automatically captured by persister into wire_events
     let bus = hub.bus_for(sid);
     bus.publish(&crate::events::EngineEvent::Custom(json!({
         "type": "message.user",
@@ -283,7 +267,6 @@ async fn test_http_session_events_and_projection() {
         "content": "The capital of France is Paris."
     })));
 
-    // 2. GET /api/v1/sessions/:id/events (both /events and :events)
     let res_events_slash = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -310,7 +293,6 @@ async fn test_http_session_events_and_projection() {
         .await;
     assert_eq!(res_events_colon.status, 200);
 
-    // 3. GET /api/v1/sessions/:id/projection
     let res_proj = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -329,7 +311,6 @@ async fn test_http_session_events_and_projection() {
     assert_eq!(msgs[1]["role"], "assistant");
     assert_eq!(msgs[1]["content"], "The capital of France is Paris.");
 
-    // 4. POST /api/v1/sessions/:id/events:compact
     let res_compact = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -341,7 +322,16 @@ async fn test_http_session_events_and_projection() {
         .await;
     assert_eq!(res_compact.status, 200);
 
-    // Projection after compaction must reflect summary
+    let records = server.store.get_wire_events(sid, 0, 100).unwrap();
+    let compaction = records.last().expect("the checkpoint must be appended");
+    assert_eq!(compaction.event_type, "context.apply_compaction");
+    assert_eq!(compaction.payload["type"], "context.apply_compaction");
+    assert_eq!(compaction.payload["agentId"], "main");
+    assert_eq!(compaction.payload["summary"], "Paris geography summary");
+    assert_eq!(compaction.payload["compactedCount"], 2);
+    assert!(compaction.is_compaction);
+    assert!(compaction.is_checkpoint);
+
     let res_proj_after = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -447,8 +437,6 @@ async fn test_http_transcript_routes() {
     let ops_val: Value = serde_json::from_slice(&ops.body).unwrap();
     assert_eq!(ops_val["complete"], false);
 
-    // With a persisted journal the catch-up serves an idempotent reset
-    // batch instead of falling back to a full refresh.
     server
         .hub()
         .bus_for(sid)

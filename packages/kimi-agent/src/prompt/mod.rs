@@ -4,6 +4,7 @@
 //! AGENTS.md cascading and byte budget control, skills catalog markdown rendering,
 //! and standard role profile definitions (agent, coder, explore, plan).
 
+pub mod agent_profile_catalog;
 pub mod agents_md;
 pub mod builder;
 pub mod environment;

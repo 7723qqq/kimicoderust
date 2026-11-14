@@ -32,8 +32,9 @@ use crate::permission::PolicySnapshot;
 use crate::rpc::types::NativeLlmConfig;
 use crate::subagent::{ParentCancel, SubagentManager};
 use crate::tool_result_truncation::ToolResultTruncator;
+use crate::agent::tools::github::github_legacy::GitHubCredentials;
 use crate::tools::{
-    NativeToolset, external_hooks::HookGuard, github::GitHubCredentials, goal_guard::GoalGuard,
+    NativeToolset, external_hooks::HookGuard, goal_guard::GoalGuard,
     mode_mutex, plan_mode, spec_mode, stale_guard::StaleGate,
 };
 use crate::turn_loop::types::LLM;
@@ -60,6 +61,9 @@ pub struct EnginePipeline {
     /// drivers to pass as `RunTurnInput.permission_mode`. `None` when the
     /// spec carries no policy snapshot.
     pub permission_mode: Option<crate::permission::PermissionMode>,
+    /// `[llm_requester].request_byte_budget` (v2 `resolveLlmRequestByteBudget`):
+    /// the whole-request UTF-8 byte budget the projector checks before sending.
+    pub llm_request_byte_budget: u64,
     /// The live permission engine the native-tool wrapper evaluates each call
     /// with. Kept so an entry point can switch the mode mid-turn through
     /// [`crate::permission::PermissionEngine::set_mode`] instead of rebuilding
@@ -177,6 +181,10 @@ pub struct PipelineSpec {
     /// `[image].read_byte_budget` (v2 `resolveReadImageByteBudget`): raw-byte
     /// budget for model-initiated image reads. `None` keeps the 256KB default.
     pub image_read_byte_budget: Option<u64>,
+    /// `[llm_requester].request_byte_budget` (v2 `resolveLlmRequestByteBudget`):
+    /// whole-request UTF-8 byte budget. `None` keeps the 32 MiB default. The
+    /// projector degrades/strips media before a request that would exceed it.
+    pub llm_request_byte_budget: Option<u64>,
     /// `[image].max_edge_px` for model-initiated image reads. `None` keeps
     /// the 2000px default.
     pub image_max_edge_px: Option<u32>,
@@ -385,7 +393,10 @@ pub async fn build_engine_pipeline(
     let mut pipeline_toolset: Option<Arc<crate::tools::NativeToolset>> = None;
     let callbacks: Arc<dyn HostCallbacks> =
         match (spec.native_tools, spec.workspace_root.as_deref()) {
-            (true, Some(root)) => match NativeToolset::new(root, spec.shell_path.as_deref())
+            (true, Some(root)) => match NativeToolset::try_new(root, spec.shell_path.as_deref())
+                .map_err(|error| PipelineError {
+                    message: error.coded_message(),
+                })?
                 // The `Skill` tool resolves from the engine's scan, so it needs
                 // the same roots *and* the same scope-group policy the prompt
                 // was rendered with.
@@ -504,6 +515,7 @@ pub async fn build_engine_pipeline(
                         .with_tool_select_enabled(spec.tool_select)
                         .with_bash_auto_background(spec.background.bash_auto_background_on_timeout)
                         .with_bash_task_timeout(spec.background.bash_task_timeout_s)
+                        .with_notify_user_enabled(spec.notify_user_enabled)
                         .with_tower_max_running_tasks(spec.background.max_running_tasks)
                         .with_callbacks(base_callbacks.clone())
                         .with_tools_filter(
@@ -528,6 +540,11 @@ pub async fn build_engine_pipeline(
                     if let Some(ref session) = spec.session_id {
                         toolset = toolset.with_session_id(session);
                     }
+                    toolset = toolset.with_non_interactive(
+                        spec.policy_snapshot
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.non_interactive),
+                    );
                     // `[secondary_model]`: one ready-built LLM per pool alias.
                     // Built here (before the session LLM) because the pool only
                     // needs the alias configs; `primary` binds the session LLM
@@ -695,9 +712,9 @@ pub async fn build_engine_pipeline(
     // the turn. It stays inert until a session installs a conversation provider
     // and the host sets `KIMI_GUARDIAN=1`.
     if let Some(engine) = &permission_engine {
-        engine.set_guardian_reviewer(Arc::new(
-            crate::permission::guardian::GuardianReviewer::new(llm.clone()),
-        ));
+        engine.set_guardian_reviewer(Arc::new(crate::permission::guardian::GuardianService::new(
+            llm.clone(),
+        )));
     }
     // Subagent execution runtime (P46): spawned subagent turns run with this
     // pipeline's llm + callback chain.
@@ -760,6 +777,9 @@ pub async fn build_engine_pipeline(
         hook_guard,
         secondary_llm,
         permission_mode: spec.policy_snapshot.as_ref().map(|snapshot| snapshot.mode),
+        llm_request_byte_budget: spec
+            .llm_request_byte_budget
+            .unwrap_or(crate::config::DEFAULT_LLM_REQUEST_BYTE_BUDGET),
         permission_engine,
         skill_scan: crate::skills::SkillScanRoots {
             root: spec.workspace_root.as_deref().map(std::path::PathBuf::from),
@@ -1031,6 +1051,7 @@ mod tests {
             session_id: None,
             secondary_model: None,
             image_read_byte_budget: None,
+            llm_request_byte_budget: None,
             image_max_edge_px: None,
             model_capabilities: None,
             skill_dirs: Vec::new(),
@@ -1066,6 +1087,7 @@ mod tests {
             }],
             tools: Vec::new(),
             request_id: None,
+            max_output_tokens: None,
         }
     }
 

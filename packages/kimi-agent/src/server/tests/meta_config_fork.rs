@@ -5,7 +5,6 @@ use std::collections::HashMap;
 async fn test_http_meta_and_config_endpoints() {
     let server = HttpServer::in_memory().unwrap();
 
-    // 1. Meta endpoint
     let res_meta = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -23,7 +22,6 @@ async fn test_http_meta_and_config_endpoints() {
     assert!(val_meta["server_id"].as_str().unwrap().starts_with("srv-"));
     assert!(val_meta["started_at"].as_str().is_some());
 
-    // 2. Config endpoint
     let res_cfg = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -44,7 +42,6 @@ async fn test_http_meta_and_config_endpoints() {
     assert!(val_cfg["telemetry"].is_boolean());
     assert!(val_cfg["model_catalog"].is_object());
 
-    // 3. Config POST update
     let res_post_cfg = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -63,7 +60,6 @@ async fn test_http_meta_and_config_endpoints() {
     assert_eq!(val_post_cfg["default_model"], "test-custom-model");
     assert_eq!(val_post_cfg["yolo"], true);
 
-    // 4. Capabilities endpoint
     let res_cap = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -76,8 +72,7 @@ async fn test_http_meta_and_config_endpoints() {
     assert_eq!(res_cap.status, 200);
     let val_cap: Value = serde_json::from_slice(&res_cap.body).unwrap();
     let caps = val_cap["capabilities"].as_array().unwrap();
-    // Objects, not bare ids: the Web client filters on `supported`, so the
-    // list has to carry the same element shape as the detail route.
+
     assert!(caps.iter().any(|c| c["id"] == "task_runner"));
     assert!(caps.iter().any(|c| c["id"] == "cron_scheduler"));
     assert!(caps.iter().any(|c| c["id"] == "gui_store"));
@@ -86,8 +81,6 @@ async fn test_http_meta_and_config_endpoints() {
         "every built-in capability is compiled in"
     );
 
-    // 6b. Capability detail route: a known id is `ready`, an unknown one is
-    // a 404, and the install action honestly refuses (nothing to install).
     let res_cap_get = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -125,7 +118,6 @@ async fn test_http_meta_and_config_endpoints() {
         .await;
     assert_eq!(res_cap_install.status, 400);
 
-    // 6c. Region endpoint: resolves from env / marker / default.
     let res_region = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -143,7 +135,6 @@ async fn test_http_meta_and_config_endpoints() {
         val_region["region"]
     );
 
-    // 7. Shutdown endpoint
     let res_sd = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -157,8 +148,6 @@ async fn test_http_meta_and_config_endpoints() {
     let val_sd: Value = serde_json::from_slice(&res_sd.body).unwrap();
     assert_eq!(val_sd["status"], "shutting_down");
 
-    // 8. GUI Store endpoints
-    // setItem
     let res_set = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -174,7 +163,6 @@ async fn test_http_meta_and_config_endpoints() {
         .await;
     assert_eq!(res_set.status, 200);
 
-    // getItem
     let res_get = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -188,7 +176,6 @@ async fn test_http_meta_and_config_endpoints() {
     let val_get: Value = serde_json::from_slice(&res_get.body).unwrap();
     assert_eq!(val_get["value"], "theme_cyberpunk");
 
-    // length
     let res_len = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -202,7 +189,6 @@ async fn test_http_meta_and_config_endpoints() {
     let val_len: Value = serde_json::from_slice(&res_len.body).unwrap();
     assert_eq!(val_len["length"], 1);
 
-    // removeItem
     let res_rm = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -217,7 +203,6 @@ async fn test_http_meta_and_config_endpoints() {
         .await;
     assert_eq!(res_rm.status, 200);
 
-    // clear
     let res_clear = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -230,8 +215,6 @@ async fn test_http_meta_and_config_endpoints() {
     assert_eq!(res_clear.status, 200);
 }
 
-/// Once shutdown starts, the drain must not be extended by a prompt that
-/// arrives on an already-open connection: both prompt routes answer 503.
 #[tokio::test]
 async fn a_shutting_down_server_refuses_new_turns() {
     let server = HttpServer::in_memory().unwrap();
@@ -255,10 +238,6 @@ async fn a_shutting_down_server_refuses_new_turns() {
     }
 }
 
-/// The REST fork surface is where `turnIndex` (v2 `opts.turnIndex`) actually
-/// reaches the store. It pins three things the store tests cannot: the body
-/// field is parsed at all, a bad value is a 400 rather than a silent
-/// whole-session copy, and an out-of-range index does not create a session.
 #[tokio::test]
 async fn the_fork_route_reads_turn_index_and_rejects_a_bad_one() {
     let server = HttpServer::in_memory().unwrap();
@@ -295,7 +274,6 @@ async fn the_fork_route_reads_turn_index_and_rejects_a_bad_one() {
         }
     };
 
-    // Cutting at turn 1 keeps two of the three turns.
     let res = fork_with(json!({ "turnIndex": 1 })).await;
     assert_eq!(res.status, 200);
     let val: Value = serde_json::from_slice(&res.body).unwrap();
@@ -307,16 +285,12 @@ async fn the_fork_route_reads_turn_index_and_rejects_a_bad_one() {
         "the third turn is dropped"
     );
 
-    // A non-integer index is a client error, not a whole-session copy.
     let res = fork_with(json!({ "turnIndex": "one" })).await;
     assert_eq!(res.status, 400, "a string turnIndex must be refused");
 
-    // So is a negative one — `as_u64` cannot represent it.
     let res = fork_with(json!({ "turnIndex": -1 })).await;
     assert_eq!(res.status, 400);
 
-    // An index naming a turn the session does not have is a 400 too, and
-    // it must not leave a stray child session behind.
     let res = fork_with(json!({ "turnIndex": 99 })).await;
     assert_eq!(res.status, 400);
     let children = server.store_arc().list_children("sess-cut").unwrap();
@@ -335,7 +309,6 @@ async fn test_http_session_status_abort_and_fork() {
         .create_session("sess-test", Some("Original Session"))
         .unwrap();
 
-    // 1. Session status
     let res_status = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -350,7 +323,6 @@ async fn test_http_session_status_abort_and_fork() {
     assert_eq!(val_status["busy"], false);
     assert_eq!(val_status["permission"], "auto");
 
-    // 2. Abort when no active turn -> false
     let res_abort = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -364,7 +336,6 @@ async fn test_http_session_status_abort_and_fork() {
     let val_abort: Value = serde_json::from_slice(&res_abort.body).unwrap();
     assert_eq!(val_abort["aborted"], false);
 
-    // 3. Fork session
     let res_fork = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -374,14 +345,12 @@ async fn test_http_session_status_abort_and_fork() {
             body: serde_json::to_vec(&json!({ "title": "Forked Branch" })).unwrap(),
         })
         .await;
-    // v2 `forkSessionResponseSchema = sessionSchema`, answered 200 with the
-    // new session's own document.
+
     assert_eq!(res_fork.status, 200);
     let val_fork: Value = serde_json::from_slice(&res_fork.body).unwrap();
     let new_sid = val_fork["id"].as_str().unwrap();
     assert_eq!(val_fork["title"], "Forked Branch");
 
-    // Forked session can be queried
     let res_forked_status = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -393,7 +362,6 @@ async fn test_http_session_status_abort_and_fork() {
         .await;
     assert_eq!(res_forked_status.status, 200);
 
-    // 4. BTW side-channel start (both slash and colon syntaxes)
     let res_btw = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -426,7 +394,6 @@ async fn test_http_session_status_abort_and_fork() {
             .starts_with("agent-btw-")
     );
 
-    // 5. Missing session on status/abort/fork/btw -> 404
     let res_missing_status = server
         .handle_request(&HttpRequest {
             method: "GET".into(),

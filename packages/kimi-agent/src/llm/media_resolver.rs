@@ -1,15 +1,3 @@
-//! Media reference resolution (v2 `AgentMediaResolverService`).
-//!
-//! The host hands the engine a [`ContentBlock::MediaRef`] — a file id, not
-//! bytes. This module turns that reference into what the active model can
-//! actually take, at request time: inline base64, a provider-side `ms://`
-//! reference, or a `<image path="…">` tag when the model cannot take the
-//! media at all.
-//!
-//! Resolving here rather than inlining at the host boundary is what lets the
-//! decision follow the model, and what gives the request media budget a
-//! stable per-file identity to key on.
-
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,8 +13,6 @@ use kimi_core::types::LLMMessage;
 
 pub use kimi_core::types::ResolvedRequest;
 
-/// v2 `IMAGE_UNAVAILABLE_TEXT` / `VIDEO_UNAVAILABLE_TEXT`: what a reference
-/// becomes when its blob is gone (expired, pruned, or never stored).
 pub const IMAGE_UNAVAILABLE_TEXT: &str =
     "[image omitted: the uploaded file is no longer available]";
 pub const VIDEO_UNAVAILABLE_TEXT: &str =
@@ -34,7 +20,6 @@ pub const VIDEO_UNAVAILABLE_TEXT: &str =
 pub const AUDIO_UNAVAILABLE_TEXT: &str =
     "[audio omitted: the uploaded file is no longer available]";
 
-/// The placeholder for a reference whose bytes cannot be read.
 pub fn unavailable_text(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Image => IMAGE_UNAVAILABLE_TEXT,
@@ -43,11 +28,8 @@ pub fn unavailable_text(kind: MediaKind) -> &'static str {
     }
 }
 
-/// The `state_entries` domain the persisted upload tier lives in (v2's blob
-/// store `image-upload-cache` scope).
 pub const UPLOAD_CACHE_DOMAIN: &str = "media_upload_cache";
 
-/// v2 `escapeMediaAttribute`.
 fn escape_media_attribute(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -56,7 +38,6 @@ fn escape_media_attribute(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// v2 `buildMediaPathTag`: the tag a model reads to re-open the file itself.
 pub fn build_media_path_tag(kind: MediaKind, path: &str) -> String {
     format!(
         "<{} path=\"{}\"></{}>",
@@ -68,9 +49,6 @@ pub fn build_media_path_tag(kind: MediaKind, path: &str) -> String {
 
 pub use kimi_core::types::MediaTarget;
 
-
-/// The daemon file id a block references, with the media family the
-/// submitting part claimed.
 pub fn media_ref_of(block: &ContentBlock) -> Option<(&str, MediaKind)> {
     match block {
         ContentBlock::MediaRef { file_id, kind } => Some((file_id.as_str(), *kind)),
@@ -78,24 +56,14 @@ pub fn media_ref_of(block: &ContentBlock) -> Option<(&str, MediaKind)> {
     }
 }
 
-/// The daemon file scheme a client uses to reference an uploaded file
-/// (v2 `KIMI_FILE_SCHEME`).
 pub const KIMI_FILE_SCHEME: &str = "kimi-file://";
 
-/// The file id a `kimi-file://<id>` URL names (v2 `parseDaemonFileUrl`). A
-/// `?query` suffix is dropped: the engine's prompt intake appends the saved
-/// path there, and the id is what identifies the file.
 pub fn parse_daemon_file_url(url: &str) -> Option<&str> {
     let rest = url.strip_prefix(KIMI_FILE_SCHEME)?;
     let file_id = rest.split('?').next().unwrap_or("");
     (!file_id.is_empty()).then_some(file_id)
 }
 
-/// Rewrite `kimi-file://` URL blocks into [`ContentBlock::MediaRef`].
-///
-/// The client submits a reference as an ordinary media URL; the engine is the
-/// side that knows it is a daemon file. Converting at intake is what keeps the
-/// reference from reaching a provider as an unfetchable `kimi-file://` URL.
 pub fn normalize_media_refs(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
     blocks
         .into_iter()
@@ -117,19 +85,14 @@ pub fn normalize_media_refs(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
         .collect()
 }
 
-/// Whether any block in the list still carries an unresolved reference.
 pub fn has_media_refs(messages: &[LLMMessage]) -> bool {
     messages
         .iter()
         .any(|message| message.blocks.iter().any(|b| media_ref_of(b).is_some()))
 }
 
-/// `data:` plus `;base64,` — what an inline image's wire URL adds to its
-/// base64 payload.
 const DATA_URL_PREFIX_BYTES: usize = 13;
 
-/// The bytes one resolved block costs on the wire (v2 `inlinePartBytes`): a
-/// data URL's length, and nothing for a provider-side reference.
 fn inline_bytes(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Image {
@@ -146,10 +109,6 @@ fn inline_bytes(block: &ContentBlock) -> usize {
     }
 }
 
-/// v2 `accountHashFor`: an upload belongs to the account that made it, so the
-/// memo and the persisted upload cache are scoped by credential. Only a
-/// truncated SHA-256 of the credential enters a key — the keys are written to
-/// the session store, so the secret itself must never appear in one.
 fn account_hash(credential: Option<&str>) -> String {
     let Some(credential) = credential.map(str::trim).filter(|value| !value.is_empty()) else {
         return "no-key".to_string();
@@ -183,8 +142,6 @@ fn stable_jwt_subject(token: &str) -> Option<String> {
     None
 }
 
-/// The budget entries a history carries with no store behind it: inline
-/// payloads only, since a reference cannot be read without one.
 pub fn inline_entries(messages: &[LLMMessage]) -> Vec<Entry> {
     let mut entries = Vec::new();
     for (message_index, message) in messages.iter().enumerate() {
@@ -205,9 +162,6 @@ pub fn inline_entries(messages: &[LLMMessage]) -> Vec<Entry> {
     entries
 }
 
-/// The budget identity of a block that carries its own bytes (v2
-/// `inlineMediaBudgetEntry`): a payload with no file behind it is keyed by a
-/// hash of what it carries, so identical payloads share one budget item.
 fn inline_budget(block: &ContentBlock) -> Option<(MediaKind, usize, String)> {
     let (kind, bytes, pieces): (MediaKind, usize, Vec<&str>) = match block {
         ContentBlock::Image {
@@ -238,24 +192,13 @@ fn inline_budget(block: &ContentBlock) -> Option<(MediaKind, usize, String)> {
     Some((kind, bytes, format!("inline\0{:x}", hasher.finalize())))
 }
 
-
-/// v2 `IMAGE_MEMO_MAX_BYTES` / `IMAGE_MEMO_MAX_TOTAL_BYTES`: the bound on the
-/// inline-payload memo. An entry larger than the per-item cap is not memoized
-/// at all; the total is enforced oldest-first, like v2's `memoizeImage`.
 const INLINE_MEMO_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const INLINE_MEMO_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
-/// The bounded memo for resolved *inline* payloads (v2 `imageMemo`).
-///
-/// Inline base64 is bytes, not an identity: it is expensive to keep and
-/// re-reading the blob is always possible, so it must never join the
-/// unbounded [`MediaResolver::resolved`] map. It still has to be cached —
-/// re-encoding a multi-megabyte image on every step of a turn is worse — so
-/// this map carries v2's byte caps.
 #[derive(Default)]
 struct InlineMemo {
     entries: HashMap<String, (ContentBlock, usize)>,
-    /// Insertion order, oldest first — the eviction order.
+
     order: std::collections::VecDeque<String>,
     bytes: usize,
 }
@@ -263,8 +206,7 @@ struct InlineMemo {
 impl InlineMemo {
     fn get(&mut self, key: &str) -> Option<ContentBlock> {
         let block = self.entries.get(key)?.0.clone();
-        // Touch: v2 deletes and re-inserts on a hit, so a hot entry survives
-        // the oldest-first sweep.
+
         if let Some(position) = self.order.iter().position(|existing| existing == key) {
             self.order.remove(position);
         }
@@ -296,26 +238,15 @@ impl InlineMemo {
     }
 }
 
-/// Resolves [`ContentBlock::MediaRef`] blocks against the daemon file store.
-///
-/// One resolver serves a session: the memo it keeps is what stops a media
-/// item from being re-read — or re-uploaded — on every step of a turn.
 pub struct MediaResolver {
     store: FileStore,
-    /// Resolved blocks that are *identities* — a provider-side `ms://`
-    /// reference or a small text placeholder — keyed by the full upload
-    /// identity (v2's `media.resolved` map). Inline payloads go to
-    /// [`InlineMemo`] instead, because this map has no size bound.
+
     resolved: Mutex<HashMap<String, ContentBlock>>,
-    /// Inline payloads, bounded (v2 `imageMemo`).
+
     inline_memo: Mutex<InlineMemo>,
-    /// Providers that answered an upload with "no such route" (v2
-    /// `imageUploadUnsupported`): the resolver stops trying for them.
+
     upload_unsupported: Mutex<std::collections::HashSet<String>>,
-    /// The persisted upload tier (v2's blob-store `image-upload-cache`
-    /// scope): the full upload identity → provider file id, so a daemon
-    /// restart reuses the provider-side upload instead of repeating it.
-    /// `None` keeps the memo process-only (tests, store-less hosts).
+
     upload_cache: Option<Arc<crate::session::sqlite_store::SqliteSessionStore>>,
 }
 
@@ -326,12 +257,10 @@ impl Default for MediaResolver {
 }
 
 impl MediaResolver {
-    /// A resolver over the daemon's own file store.
     pub fn new() -> Self {
         Self::with_store(FileStore::new())
     }
 
-    /// A resolver over an explicit store (tests).
     pub fn with_store(store: FileStore) -> Self {
         Self {
             store,
@@ -342,9 +271,6 @@ impl MediaResolver {
         }
     }
 
-    /// Persist successful uploads through `store` (v2's `image-upload-cache`
-    /// scope): a later resolver over the same store reuses the provider-side
-    /// file instead of uploading again.
     pub fn with_upload_cache(
         mut self,
         store: Arc<crate::session::sqlite_store::SqliteSessionStore>,
@@ -353,10 +279,6 @@ impl MediaResolver {
         self
     }
 
-    /// Every media entry of `messages`, in message order — the reference
-    /// entries (with their saved paths) plus the inline ones. The degrade /
-    /// strip recoveries run on the *unresolved* messages, where a reference
-    /// still names its file, so this is the entry list they transform by.
     pub fn media_entries(&self, messages: &[LLMMessage]) -> Vec<Entry> {
         let mut entries = Vec::new();
         for (message_index, message) in messages.iter().enumerate() {
@@ -387,19 +309,6 @@ impl MediaResolver {
         entries
     }
 
-    /// Rewrite every reference in `messages` into a request-ready block, and
-    /// collect the media the budget must weigh.
-    ///
-    /// `credential` is the provider credential an upload would authenticate
-    /// with; `None` inlines instead. A history with neither references nor
-    /// inline media is returned borrowed, so a text-only turn costs nothing.
-    ///
-    /// `Err` carries a failure that must abort the request: a rejected upload
-    /// credential (v2 `isMediaUploadAuthError` → throw,
-    /// mediaResolverService.ts:356), or a referenced file whose metadata could
-    /// not be read — the user's login is broken, or the store failed, so the
-    /// request fails with the real reason instead of degrading the media and
-    /// letting the chat request report a different failure.
     pub async fn resolve<'a>(
         &self,
         messages: &'a [LLMMessage],
@@ -424,8 +333,7 @@ impl MediaResolver {
                             kind,
                             bytes: inline_bytes(&resolved),
                         });
-                        // The blocks before this one are carried over as they
-                        // were; only the reference is replaced.
+
                         blocks
                             .get_or_insert_with(|| message.blocks[..block_index].to_vec())
                             .push(resolved);
@@ -472,13 +380,6 @@ impl MediaResolver {
         })
     }
 
-    /// The saved path of one referenced file, for a caller that wants to show
-    /// it (v2 `displayPaths`).
-    ///
-    /// A missing file is `None`; a metadata read that failed for any other
-    /// reason is also `None` (there is no path to show), but it is logged —
-    /// this side channel must not make an unreadable index look like an
-    /// ordinary miss.
     pub fn display_path(&self, file_id: &str) -> Option<String> {
         match self.store.get(file_id) {
             Ok((_, path)) => Some(path.to_string_lossy().into_owned()),
@@ -496,12 +397,6 @@ impl MediaResolver {
         }
     }
 
-    /// The memo / upload-cache identity of one reference — v2's
-    /// `image\0fileId\0providerKey\0protocol\0baseUrl\0accountHash`
-    /// (`mediaResolverService.ts:257,396`). Everything that can change what a
-    /// provider-side id means is in it: a memo keyed only by file + provider
-    /// would hand one account's upload to another after an account or
-    /// endpoint switch.
     fn cache_key(
         file_id: &str,
         kind: MediaKind,
@@ -523,11 +418,6 @@ impl MediaResolver {
         )
     }
 
-    /// The memo identity of an inline payload. The bytes are the same for
-    /// every account, so the credential is not part of it — but the model
-    /// capabilities that decide whether the media is inlined at all are, or a
-    /// provider key shared by two models would let one model's data URL answer
-    /// the other's placeholder.
     fn inline_key(file_id: &str, kind: MediaKind, target: Option<&MediaTarget>) -> String {
         let provider_key = target
             .map(|target| target.provider_key.as_str())
@@ -565,8 +455,7 @@ impl MediaResolver {
         {
             return Ok((hit, self.display_path(file_id)));
         }
-        // The persisted upload tier (v2 `image-upload-cache`): a provider
-        // file id recorded by an earlier process answers without an upload.
+
         if let Some(provider_file_id) = self.cached_upload(&cache_key) {
             let block = reference_block(kind, &provider_file_id);
             self.resolved
@@ -580,8 +469,6 @@ impl MediaResolver {
             .await?;
         let bytes = inline_bytes(&block);
         if bytes > 0 {
-            // Base64 bytes never enter the unbounded `resolved` map; the
-            // bounded memo caps them the way v2's `imageMemo` does.
             self.inline_memo
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -595,17 +482,13 @@ impl MediaResolver {
         Ok((block, self.display_path(file_id)))
     }
 
-    /// The provider file id an earlier process uploaded this file as, for this
-    /// exact upload identity (v2's cache scope read).
     fn cached_upload(&self, cache_key: &str) -> Option<String> {
         let store = self.upload_cache.as_ref()?;
         match store.get_state(UPLOAD_CACHE_DOMAIN, cache_key) {
             Ok(value) => value
                 .and_then(|value| value.as_str().map(str::to_string))
                 .filter(|id| !id.is_empty()),
-            // A cache read failure costs one redundant upload; the request
-            // still goes out. It is not the same as "never uploaded", so it is
-            // logged instead of silently reading as a miss.
+
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -616,9 +499,6 @@ impl MediaResolver {
         }
     }
 
-    /// Record a successful upload for later processes (v2's cache scope
-    /// write). A failed write costs the next process one re-upload, so it is
-    /// logged, not propagated.
     fn remember_upload(&self, file_id: &str, cache_key: &str, provider_file_id: &str) {
         let Some(store) = self.upload_cache.as_ref() else {
             return;
@@ -643,9 +523,6 @@ impl MediaResolver {
         target: Option<&MediaTarget>,
         credential: Option<&str>,
     ) -> Result<ContentBlock, UploadError> {
-        // Only a 404 says the file is gone (the store prunes entries whose
-        // blob vanished); every other error is a read failure and must not be
-        // told to the model as "no longer available".
         let (meta, path) = match self.store.get(file_id) {
             Ok(found) => found,
             Err((404, _, _)) => {
@@ -661,8 +538,7 @@ impl MediaResolver {
             }
         };
         let path = path.to_string_lossy().into_owned();
-        // A model that cannot take this media family still gets the path: the
-        // tag is what lets it re-open the file with its own tools.
+
         if target.is_some_and(|t| !t.accepts(kind)) {
             return Ok(ContentBlock::Text {
                 text: build_media_path_tag(kind, &path),
@@ -671,10 +547,7 @@ impl MediaResolver {
         }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
-            // v2 `degradedImage(path)` (mediaResolverService.ts:224,245 →
-            // media/pathTag.ts:29-31): a read failure is not evidence the
-            // blob is gone, so keep the path for a path-based tool instead of
-            // claiming it no longer exists.
+
             Err(error) => {
                 tracing::warn!(
                     file_id,
@@ -696,8 +569,7 @@ impl MediaResolver {
         };
         let media_type = match kind {
             MediaKind::Image => {
-                let Some(sniffed) = crate::native::file_type::sniff_media_from_magic(header)
-                else {
+                let Some(sniffed) = crate::native::file_type::sniff_media_from_magic(header) else {
                     return Ok(ContentBlock::Text {
                         text: build_media_path_tag(kind, &path),
                         meta: None,
@@ -709,8 +581,7 @@ impl MediaResolver {
                         meta: None,
                     });
                 }
-                let effective =
-                    crate::llm::image_policy::normalize_image_mime(sniffed.mime_type);
+                let effective = crate::llm::image_policy::normalize_image_mime(sniffed.mime_type);
                 let provider = target
                     .map(|t| t.provider_type.as_str())
                     .filter(|value| !value.is_empty());
@@ -788,10 +659,6 @@ impl MediaResolver {
         })
     }
 
-    /// The provider-side reference for one file, when the provider takes media
-    /// that way (v2 `uploadImagePart` / `resolveVideoPart`). `Ok(None)` means
-    /// the caller inlines instead; `Err` carries a rejected credential, which
-    /// v2 throws rather than degrading (mediaResolverService.ts:356).
     async fn upload(
         &self,
         file_id: &str,
@@ -822,7 +689,7 @@ impl MediaResolver {
         let purpose = match kind {
             MediaKind::Image => "image",
             MediaKind::Video => "video",
-            // The files API has no audio purpose; audio stays inline.
+
             MediaKind::Audio => return Ok(None),
         };
         let filename = if filename.trim().is_empty() {
@@ -853,18 +720,13 @@ impl MediaResolver {
                     .insert(target.provider_key.clone());
                 Ok(None)
             }
-            // v2 `isMediaUploadAuthError` → throw: the user's login is
-            // broken, so the request fails with the upload's own error
-            // instead of degrading the media to a path tag and letting the
-            // chat request report a different failure (ROADMAP #17 ③).
+
             Err(error @ crate::llm::files_upload::UploadError::Auth(_)) => Err(error),
             Err(crate::llm::files_upload::UploadError::Other(_)) => Ok(None),
         }
     }
 }
 
-/// The `ms://<id>` block a successful upload becomes (v2 `uploadImage` /
-/// `uploadVideo`).
 fn reference_block(kind: MediaKind, id: &str) -> ContentBlock {
     let url = format!("ms://{id}");
     match kind {
@@ -910,6 +772,7 @@ mod tests {
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
             prompt_id: None,
             origin: None,
         }
@@ -1048,7 +911,10 @@ mod tests {
             provider_type: "openai".into(),
             ..accepting()
         };
-        let out = resolver.resolve(&messages, Some(&openai), None).await.unwrap();
+        let out = resolver
+            .resolve(&messages, Some(&openai), None)
+            .await
+            .unwrap();
         let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
             panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
         };
@@ -1059,7 +925,10 @@ mod tests {
             provider_type: "kimi".into(),
             ..accepting()
         };
-        let out = resolver.resolve(&messages, Some(&kimi), None).await.unwrap();
+        let out = resolver
+            .resolve(&messages, Some(&kimi), None)
+            .await
+            .unwrap();
         assert_eq!(
             out.messages[0].blocks[0],
             ContentBlock::Image {
@@ -1087,12 +956,7 @@ mod tests {
         let refreshed = token("user-1", 2);
         let other = token("user-2", 2);
         assert_eq!(
-            MediaResolver::cache_key(
-                "f_1",
-                MediaKind::Image,
-                Some(&accepting()),
-                Some(&first)
-            ),
+            MediaResolver::cache_key("f_1", MediaKind::Image, Some(&accepting()), Some(&first)),
             MediaResolver::cache_key(
                 "f_1",
                 MediaKind::Image,
@@ -1106,11 +970,6 @@ mod tests {
         );
     }
 
-    /// v2 keys its memo and its persisted upload cache by
-    /// `fileId / providerKey / protocol / baseUrl / accountHash`
-    /// (`mediaResolverService.ts:257,396`). An account or endpoint switch must
-    /// not reuse another identity's provider-side upload, and the credential
-    /// itself must never be written into a key (these keys are persisted).
     #[test]
     fn test_the_media_cache_key_separates_protocol_endpoint_and_account() {
         let target = MediaTarget {
@@ -1167,8 +1026,6 @@ mod tests {
         );
     }
 
-    /// Inline base64 is bytes, not an identity: it goes to the bounded memo,
-    /// never to the unbounded `resolved` map.
     #[tokio::test]
     async fn test_an_inline_payload_stays_out_of_the_unbounded_map() {
         let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);
@@ -1199,8 +1056,6 @@ mod tests {
         );
     }
 
-    /// v2 `IMAGE_MEMO_MAX_BYTES` / `IMAGE_MEMO_MAX_TOTAL_BYTES`: an entry above
-    /// the per-item cap is not memoized, and the total evicts oldest-first.
     #[test]
     fn test_the_inline_memo_is_bounded() {
         let mut memo = InlineMemo::default();
@@ -1280,6 +1135,7 @@ mod tests {
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
             prompt_id: None,
             origin: None,
         }];
@@ -1309,6 +1165,7 @@ mod tests {
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
             prompt_id: None,
             origin: None,
         }];
@@ -1335,8 +1192,7 @@ mod tests {
             .resolve(&first_messages, Some(&accepting()), None)
             .await
             .unwrap();
-        // The blob is gone, but the memo still answers: the file was already
-        // read once for this provider.
+
         let second_messages = [message];
         let second = resolver
             .resolve(&second_messages, Some(&accepting()), None)
@@ -1346,12 +1202,6 @@ mod tests {
         assert_eq!(first.messages[0].blocks[0], second.messages[0].blocks[0]);
     }
 
-    /// v2 keeps the upload result in the blob store's `image-upload-cache`
-    /// scope, so a daemon restart reuses the provider-side file instead of
-    /// uploading again (ROADMAP #17 ①). The fork's tier is a `state_entries`
-    /// domain keyed by the full upload identity (kind / file / provider /
-    /// protocol / endpoint / account); a fresh resolver over the same store
-    /// must answer from it without a second request.
     #[tokio::test]
     async fn an_upload_survives_a_resolver_restart_through_the_store() {
         let dir = tempfile::tempdir().unwrap();
@@ -1384,8 +1234,6 @@ mod tests {
             }
         );
 
-        // A fresh resolver (the restart) answers from the persisted tier: the
-        // same reference, and the files API saw exactly one request.
         let second = MediaResolver::with_store(files)
             .with_upload_cache(sqlite)
             .resolve(&messages, Some(&target), Some("token"))
@@ -1396,10 +1244,6 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// A mock files API that counts its requests and always answers with a
-    /// file id. It serves exactly one connection and returns: a wrong second
-    /// upload attempt is then refused, which fails the block assertion — the
-    /// counter is the diagnostic for which side went wrong.
     async fn spawn_counting_files_server(
         requests: Arc<std::sync::atomic::AtomicUsize>,
     ) -> (String, tokio::task::JoinHandle<()>) {
@@ -1425,7 +1269,6 @@ mod tests {
         (format!("http://{addr}"), server)
     }
 
-    /// A mock files API: one request, answered with `status` and `body`.
     async fn spawn_files_server(
         status: u16,
         body: &'static str,
@@ -1482,10 +1325,6 @@ mod tests {
         server.await.unwrap();
     }
 
-    /// v2 `isMediaUploadAuthError` → throw (mediaResolverService.ts:356): a
-    /// rejected credential fails the resolve with the upload's own error
-    /// instead of degrading the media to a path tag and letting the chat
-    /// request report a different failure (ROADMAP #17 ③).
     #[tokio::test]
     async fn test_a_rejected_upload_credential_fails_the_resolve() {
         let (store, file_id) = store_with("a.png", "image/png", PNG_BYTES);

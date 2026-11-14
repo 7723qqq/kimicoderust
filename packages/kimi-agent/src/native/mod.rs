@@ -9,36 +9,32 @@ pub mod catalog;
 mod compaction;
 mod edit;
 mod encoding;
+pub mod environment_probe;
 pub(crate) mod escape;
 pub(crate) mod fetch_url;
 mod file_cache;
 pub mod file_type;
-mod glob;
-mod grep;
+pub(crate) mod glob;
+pub(crate) mod grep;
 pub mod image_compress;
 pub mod image_originals;
 pub mod list_directory;
 mod llm_stream;
-/// The `#[napi]` surface of this module's tools, re-exported for the addon.
-///
-/// Named `native_tool_bindings`, not `napi_bindings`: `crate::napi_bindings`
-/// (src/napi_bindings.rs) is the much larger host/session surface, and two files
-/// with the same name under different directories is a trap — a text search for
-/// `napi_bindings` silently misses one of them.
+
 #[cfg(feature = "napi")]
 mod native_tool_bindings;
 mod output_truncate;
-pub(crate) mod path_access;
+pub(crate) use crate::tool::path_access;
 mod permission;
-mod read;
-pub(crate) mod realpath_access;
+pub(crate) mod read;
+pub(crate) use crate::tool::realpath_access;
 pub mod shell;
 pub(crate) mod shell_path_bridge;
+pub mod shell_payload;
 mod tokens;
 mod tool_access;
 pub(crate) mod tool_naming;
-/// Synchronous DuckDuckGo search. Shared by the `native_search` binding and by
-/// the workflow runtime's `search()` primitive (which takes a sync provider).
+
 pub mod web_search;
 mod workspace_index;
 mod write;
@@ -50,9 +46,6 @@ pub mod powershell;
 
 pub use list_directory::{ListDirectoryConfig, ListDirectoryResult, list_directory};
 
-/// Shared with the engine's own HTTP transport (`llm::http`) so the two paths
-/// cannot disagree about what an in-band provider error frame looks like, what a
-/// non-SSE body means, or how a captured frame is truncated for a message.
 pub(crate) use llm_stream::{
     NOT_AN_SSE_ENDPOINT_PREFIX, empty_stream_error, extract_in_band_error, truncate_for_diagnosis,
 };

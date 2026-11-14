@@ -71,6 +71,8 @@ async fn question_callback_blocks_until_ui_answers() {
         question_id: "q_1".into(),
         turn_id: "turn_1".into(),
         tool_call_id: "call_q".into(),
+        agent_id: None,
+        session_id: None,
         background: false,
         timeout_ms: None,
         questions: vec![AskQuestionItem {

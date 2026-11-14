@@ -1,0 +1,47 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/session-import. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/session-import",
+  "redEntries": [
+    {
+      "tsPath": "archive.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "claude-code.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "convert.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "discover.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "images.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "jsonl.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "render.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "rollout.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "types.ts",
+      "verdict": "unported"
+    }
+  ]
+}

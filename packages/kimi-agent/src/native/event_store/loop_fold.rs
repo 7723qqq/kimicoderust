@@ -1,20 +1,8 @@
-//! Native single-step event fold state machine (aligned with TS
-//! `agent-core-v2`'s `loopEventFold.ts`, 355 lines).
-//!
-//! Consumes the low-level event stream (step.begin, content.part, tool.call,
-//! tool.result, step.end) and strictly maintains the open-step lifecycle,
-//! vacuous-empty-content dropping, Tool-immediately-after ordering, and
-//! self-healing for an interrupted dangling tool.
-
 use super::{Message, MessageRole};
 use std::collections::HashSet;
 
-/// v2 `TOOL_INTERRUPTED_TEXT` (`contextProjector/projection.ts:394-395`).
-/// Re-exported so a replay and a live request synthesize the same sentence.
 pub const TOOL_INTERRUPTED_ON_RESUME_OUTPUT: &str = crate::llm::wire::TOOL_INTERRUPTED_TEXT;
 
-/// The low-level events a recorded single-step loop emits (aligned with TS
-/// `LoopRecordedEvent`)
 #[derive(Debug, Clone)]
 pub enum LoopRecordedEvent {
     StepBegin {
@@ -45,8 +33,6 @@ pub enum LoopRecordedEvent {
     },
 }
 
-/// The sink interface the fold writes its output to (aligned with TS
-/// `LoopEventFoldSink`)
 pub trait LoopEventFoldSink {
     fn open_assistant(&mut self);
     fn append_open_content(&mut self, text: &str);
@@ -58,7 +44,6 @@ pub trait LoopEventFoldSink {
     fn clear(&mut self);
 }
 
-/// The standard sink implementation, backed by an in-memory message list
 #[derive(Default)]
 pub struct VectorFoldSink {
     pub messages: Vec<Message>,
@@ -128,7 +113,6 @@ impl LoopEventFoldSink for VectorFoldSink {
         if let Some(last) = self.messages.last_mut()
             && last.role == MessageRole::Assistant
         {
-            // With no tool_calls at all, reset the field to None
             if let Some(arr) = last.tool_calls.as_ref().and_then(|v| v.as_array())
                 && arr.is_empty()
             {
@@ -159,7 +143,6 @@ impl LoopEventFoldSink for VectorFoldSink {
     }
 }
 
-/// Native single-step event fold state machine
 pub struct LoopEventFold<S: LoopEventFoldSink> {
     sink: S,
     open_step_uuid: Option<String>,
@@ -181,7 +164,6 @@ impl<S: LoopEventFoldSink> LoopEventFold<S> {
         }
     }
 
-    /// Release the deferred queue (aligned with TS `flushDeferred`)
     fn flush_deferred(&mut self) {
         if !self.pending.is_empty() || self.deferred.is_empty() {
             return;
@@ -191,8 +173,6 @@ impl<S: LoopEventFoldSink> LoopEventFold<S> {
         }
     }
 
-    /// Close and self-heal an interrupted dangling tool (aligned with TS
-    /// `closePending`)
     fn close_pending(&mut self) {
         if self.pending.is_empty() {
             return;
@@ -207,7 +187,6 @@ impl<S: LoopEventFoldSink> LoopEventFold<S> {
         self.flush_deferred();
     }
 
-    /// Settle the currently open step (aligned with TS `settleOpen`)
     pub fn settle_open(&mut self) {
         if self.open_step_uuid.is_none() {
             return;
@@ -221,8 +200,6 @@ impl<S: LoopEventFoldSink> LoopEventFold<S> {
         self.open_step_uuid = None;
     }
 
-    /// Whether an event for the given step is accepted (aligned with TS
-    /// `acceptsOpenStep`)
     fn accepts_open_step(&mut self, step_uuid: &str) -> bool {
         match self.open_step_uuid.as_deref() {
             None => false,
@@ -230,20 +207,14 @@ impl<S: LoopEventFoldSink> LoopEventFold<S> {
         }
     }
 
-    /// Append an externally supplied input message (a user interjection or a
-    /// system injection; aligned with TS `appendMessage`)
     pub fn append_message(&mut self, role: MessageRole, content: String) {
         if !self.pending.is_empty() {
-            // While waiting for a tool result, park the input in the deferred
-            // queue to preserve ordering
             self.deferred.push((role, content));
             return;
         }
         self.sink.push_message(role, content);
     }
 
-    /// Handle one streaming low-level recorded event (aligned with TS
-    /// `loopEvent`)
     pub fn loop_event(&mut self, event: LoopRecordedEvent) {
         match event {
             LoopRecordedEvent::StepBegin { uuid, .. } => {
@@ -254,9 +225,6 @@ impl<S: LoopEventFoldSink> LoopEventFold<S> {
                 self.open_vacuous = true;
             }
             LoopRecordedEvent::StepEnd { finish_reason, .. } => {
-                // Aligned with TS line 155: on `interrupted` or `error`,
-                // openStepUuid is kept so a later resume can pick it up — no
-                // settle is triggered here.
                 if let Some(ref r) = finish_reason
                     && (r == "interrupted" || r == "error")
                 {
@@ -305,16 +273,11 @@ impl<S: LoopEventFoldSink> LoopEventFold<S> {
         }
     }
 
-    /// Wrap up at session settle time (aligned with TS `settle` =
-    /// `settleOpen(); flushDeferred()`): inputs parked while a tool was pending
-    /// must still land after the self-healed result, or a resumed session loses
-    /// everything the user said during the last interrupted step.
     pub fn settle(&mut self) {
         self.settle_open();
         self.flush_deferred();
     }
 
-    /// Reset the state machine (aligned with TS `reset`)
     pub fn reset(&mut self) {
         self.open_step_uuid = None;
         self.open_has_tool_calls = false;
@@ -338,17 +301,14 @@ mod tests {
         let sink = VectorFoldSink::new();
         let mut fold = LoopEventFold::new(sink);
 
-        // 1. The user asks a question
         fold.append_message(MessageRole::User, "Calculate 1 + 1".into());
 
-        // 2. The step begins
         fold.loop_event(LoopRecordedEvent::StepBegin {
             uuid: "step_1".into(),
             turn_id: Some("turn_1".into()),
             step: Some(1),
         });
 
-        // 3. The model streams text plus a tool call
         fold.loop_event(LoopRecordedEvent::ContentPart {
             step_uuid: "step_1".into(),
             text: "Let me calculate.".into(),
@@ -361,10 +321,8 @@ mod tests {
             arguments: Some(r#"{"expr":"1+1"}"#.into()),
         });
 
-        // 4. The user interjects right here -> it must be deferred
         fold.append_message(MessageRole::User, "Hurry up".into());
 
-        // 5. The tool result returns
         fold.loop_event(LoopRecordedEvent::ToolResult {
             tool_call_id: "calc_call_1".into(),
             output: "2".into(),
@@ -372,7 +330,6 @@ mod tests {
             note: None,
         });
 
-        // 6. The step ends
         fold.loop_event(LoopRecordedEvent::StepEnd {
             uuid: "step_1".into(),
             finish_reason: Some("stop".into()),
@@ -391,8 +348,6 @@ mod tests {
         assert_eq!(msgs[1].content, "Let me calculate.");
         assert!(msgs[1].tool_calls.is_some());
 
-        // The key assertion: the Tool message must follow the Assistant
-        // immediately, and "Hurry up" must land after the tool result!
         assert_eq!(msgs[2].role, MessageRole::Tool);
         assert_eq!(msgs[2].tool_call_id.as_deref(), Some("calc_call_1"));
         assert_eq!(msgs[2].content, "2");
@@ -416,8 +371,7 @@ mod tests {
             arguments: None,
         });
         fold.append_message(MessageRole::User, "never mind".into());
-        // The turn is interrupted: the step stays open and the input stays
-        // deferred until settle.
+
         fold.loop_event(LoopRecordedEvent::StepEnd {
             uuid: "step_1".into(),
             finish_reason: Some("interrupted".into()),
@@ -445,7 +399,6 @@ mod tests {
             step: None,
         });
 
-        // Produces only blank placeholder content
         fold.loop_event(LoopRecordedEvent::ContentPart {
             step_uuid: "step_empty".into(),
             text: "".into(),
@@ -459,8 +412,7 @@ mod tests {
 
         fold.settle();
         let sink = fold.into_sink();
-        // A blank message with no tool call and no content is filtered out and
-        // never kept in the history
+
         assert!(sink.messages.is_empty());
     }
 
@@ -482,7 +434,6 @@ mod tests {
             arguments: Some(r#"{"cmd":"sleep 100"}"#.into()),
         });
 
-        // An unexpected interruption, or the next step starting
         fold.settle();
 
         let sink = fold.into_sink();
@@ -490,8 +441,7 @@ mod tests {
 
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, MessageRole::Assistant);
-        // The key assertion: an unresolved tool must be self-healed by
-        // synthesizing an interrupted result
+
         assert_eq!(msgs[1].role, MessageRole::Tool);
         assert_eq!(msgs[1].tool_call_id.as_deref(), Some("hang_call_1"));
         assert_eq!(msgs[1].content, TOOL_INTERRUPTED_ON_RESUME_OUTPUT);

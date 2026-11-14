@@ -1,5 +1,3 @@
-//! Single step execution within a turn.
-
 use std::time::Duration;
 
 use super::retry::RetryConfig;
@@ -7,37 +5,41 @@ use super::retry::retry_delay;
 use super::types::*;
 use crate::rpc::types::BoxFuture;
 
-/// Wrap a string error into a `Box<dyn Error + Send + Sync>` (`'static`).
 fn boxed_err(s: String) -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(std::io::Error::other(s))
 }
 
-/// What the retry layer learned from a failed attempt.
-///
-/// Carries the fields v2 attaches to `TurnStepRetrying` through
-/// `retryErrorFields` (_base/utils/retry.ts:46-52) plus the wait the provider
-/// asked for. The Rust transport reports failures as strings, so the name and
-/// status are recovered from the text rather than from a typed error.
+fn llm_request_record(
+    agent_id: &str,
+    turn_id: &str,
+    step: u32,
+    llm: &dyn LLM,
+    params: &LLMChatParams,
+    tool_select: bool,
+) -> serde_json::Value {
+    crate::session::agent_records::llm_request_record(
+        llm,
+        params,
+        crate::session::agent_records::LlmRequestSpec {
+            agent_id,
+            kind: "loop",
+            turn_step: Some(format!("{turn_id}.{}", step + 1)),
+            tool_select,
+            dropped_count: None,
+        },
+    )
+}
+
 struct RetryDecision {
-    /// v2 `RetryErrorFields.errorName`: the failure class, so a consumer can
-    /// tell a cancelled request from a throttled one without parsing prose.
     error_name: &'static str,
-    /// v2 `RetryErrorFields.errorMessage`.
+
     error_message: String,
-    /// v2 `RetryErrorFields.statusCode`; `None` when no HTTP status reached
-    /// the error (in-stream provider error, transport fault, decode failure).
+
     status_code: Option<u16>,
-    /// The wait the provider asked for, if it asked for one.
+
     wait_hint: Option<Duration>,
 }
 
-/// Classify an LLM error: decide whether to return it or continue retrying.
-///
-/// Returns the [`RetryDecision`] if the error is retryable and attempts
-/// remain, or `Err(boxed_error)` if the error should be propagated.
-///
-/// This is a standalone function (not an async block) so that the non-`Send`
-/// `Box<dyn Error>` is consumed and dropped before any `.await` in the caller.
 fn classify_llm_error(
     err: Box<dyn std::error::Error>,
     llm: &dyn LLM,
@@ -45,42 +47,24 @@ fn classify_llm_error(
     config: &RetryConfig,
     infinite_retry: bool,
 ) -> Result<RetryDecision, Box<dyn std::error::Error + Send + Sync>> {
-    // Read the provider metadata off the typed error when the transport set it
-    // (v2 keeps `retryAfterMs` / `statusCode` on the error object and every
-    // classifier reads the fields). `retry_after_hint` stays as the fallback
-    // for failures raised by paths that only have a string — the host proxy and
-    // the racing multi-LLM build their own errors.
     let typed = err.downcast_ref::<kimi_core::error::LlmError>();
     let typed_retry_after = typed.and_then(kimi_core::error::LlmError::retry_after);
     let typed_status = typed.and_then(kimi_core::error::LlmError::status_code);
     let err_str = err.to_string();
-    // `err` is dropped here (end of function scope for the parameter).
+
     if !llm.is_retryable_error(&err_str) {
-        // Same reason as the exhaustion branch below: boxing the text alone
-        // drops the status and the provider's request id, and they are the two
-        // fields every consumer reads. Return a typed error when there is
-        // anything typed to keep, the text alone otherwise.
         let status_code = typed_status.or_else(|| kimi_core::error::llm_http_status(&err_str));
         let trace_id = typed.and_then(kimi_core::error::LlmError::trace_id);
         if status_code.is_none() && trace_id.is_none() {
             return Err(boxed_err(err_str));
         }
-        // `typed`, not `attempts_exhausted`: this branch must not add the
-        // "failed after N attempts" prefix. The overflow and shape-recovery
-        // paths in `run_turn` detect a specific provider rejection by matching
-        // the message text, so a rewritten message silently disables them.
+
         return Err(Box::new(
             kimi_core::error::LlmError::typed(&err_str, status_code).with_trace_id(trace_id),
         ));
     }
-    // `KIMI_CODE_INFINITE_RETRY` retries every retryable LLM request without
-    // exhausting the budget (v2 #3240, llmRequesterService.ts). Context
-    // overflow is never retryable, so the deterministic overflow-recovery
-    // path is unaffected.
+
     if !infinite_retry && attempt >= config.max_attempts {
-        // Keep the typed channel across the wrap: the status and the provider's
-        // request id are what a consumer correlates on, and a plain text error
-        // would drop both. The rendered text is unchanged.
         let status_code = typed_status.or_else(|| kimi_core::error::llm_http_status(&err_str));
         let trace_id = typed.and_then(kimi_core::error::LlmError::trace_id);
         return Err(Box::new(
@@ -89,8 +73,7 @@ fn classify_llm_error(
         ));
     }
     let status_code = typed_status.or_else(|| kimi_core::error::llm_http_status(&err_str));
-    // v2's `errorName` is the JS error class name; the closest analogue here is
-    // the failure family the transport already encodes in the text.
+
     let error_name = if crate::llm::http::is_cancelled_error(&err_str) {
         "AbortError"
     } else if status_code.is_some() {
@@ -108,10 +91,6 @@ fn classify_llm_error(
     })
 }
 
-/// A 200 response that carries no answer — v2's `empty_response`.
-///
-/// `think_only` distinguishes v2's two shapes (`empty-response.ts:22-24`): the
-/// provider returned nothing at all, or returned reasoning and nothing else.
 struct EmptyResponse {
     think_only: bool,
 }
@@ -120,14 +99,6 @@ const EMPTY_RESPONSE_DETAIL: &str =
     "The API returned an empty response (no content, no tool calls).";
 const THINK_ONLY_RESPONSE_DETAIL: &str = "The API returned a response containing only thinking content without any text or tool calls. This usually indicates the stream was interrupted or the output token budget was exhausted during reasoning.";
 
-/// Whether the provider's finish reason is a content filter.
-///
-/// v2 carries one `filtered` value (kosong folds the six provider-specific
-/// spellings into it); this engine's turn-level mapping already accepts the
-/// wider set, so the retry guard has to use the same list or a filtered turn
-/// would be re-requested as an empty one. Mirrors
-/// `turn_stop_reason_from_finish` (run_turn.rs:197-199).
-/// Must stay the same list as `run_turn::turn_stop_reason_from_finish`.
 pub(crate) fn is_content_filtered(finish_reason: Option<&str>) -> bool {
     matches!(
         finish_reason,
@@ -145,21 +116,12 @@ pub(crate) fn is_content_filtered(finish_reason: Option<&str>) -> bool {
     )
 }
 
-/// v2 `emptyResponseError` (human/llm/empty-response.ts:33-49).
-///
-/// v2 keeps think and text parts in one `message.content` array, so its first
-/// arm (`content.length === 0`) means "no parts at all" and a think-only reply
-/// falls through to the second arm. This engine splits them: `thinking` holds
-/// the reasoning blocks and `content` the visible text. The field split is why
-/// the first arm tests **both** fields — a response carrying only `thinking`
-/// has `content == ""` in Rust while v2's equivalent had a non-empty array.
 fn empty_response_of(response: &LLMChatResponse) -> Option<EmptyResponse> {
     let has_tool_calls = !response.tool_calls.is_empty();
     if response.content.is_empty() && response.thinking.is_empty() && !has_tool_calls {
         return Some(EmptyResponse { think_only: false });
     }
-    // v2's text test trims (`part.text.trim().length > 0`), so a whitespace-only
-    // body counts as "no text" here too.
+
     let has_think = !response.thinking.is_empty();
     let has_text = !response.content.trim().is_empty();
     if has_think && !has_text && !has_tool_calls {
@@ -168,11 +130,6 @@ fn empty_response_of(response: &LLMChatResponse) -> Option<EmptyResponse> {
     None
 }
 
-/// v2 `createEmptyResponseError` (empty-response.ts:17-31) plus the
-/// `Provider: …, model: …` suffix it appends. The user-facing half of this
-/// failure is the `engine.providers.providerEmptyResponse` /
-/// `providerThinkOnlyResponse` locale string; this text is what the retry
-/// telemetry and the terminal error carry.
 fn empty_response_message(
     empty: &EmptyResponse,
     response: &LLMChatResponse,
@@ -194,20 +151,6 @@ fn empty_response_message(
     )
 }
 
-/// A successful response v2 would have turned into a retryable
-/// `empty_response`.
-///
-/// Two guards, both behavioural rather than stylistic:
-///
-/// - **Transport.** Only the native transport assembles the assistant message
-///   this check is about. On the host-proxy leg the host owns the transcript,
-///   so an empty body is a legitimate answer, and the `multi` racer already
-///   drops empty completions on its own (`llm/multi.rs::is_empty_completion`).
-///   Without this, every proxy turn would be re-requested.
-/// - **Filtering.** v2 `isRetryableError` makes `empty_response` retryable
-///   *unless* the provider filtered it (requester/retry.ts:50-51). A filtered
-///   turn is a real final answer; re-requesting it would spend the budget
-///   re-eliciting the same refusal.
 fn empty_response_retryable(response: &LLMChatResponse, llm: &dyn LLM) -> Option<EmptyResponse> {
     if llm.transport() != "native-http" {
         return None;
@@ -218,14 +161,6 @@ fn empty_response_retryable(response: &LLMChatResponse, llm: &dyn LLM) -> Option
     empty_response_of(response)
 }
 
-/// A wait the provider asked for, recovered from the error text.
-///
-/// **Fallback only.** A failure from the native HTTP transport carries the wait
-/// on [`kimi_core::error::LlmError`], which the caller reads first; this path exists
-/// for errors that are still bare strings — the host proxy and the racing
-/// multi-LLM. Retrying sooner than the provider asked is wasted: the request
-/// will be throttled again, and one exhausted retry budget is spent on requests
-/// that were always going to be rejected.
 pub(crate) fn retry_after_hint(error: &str) -> Option<Duration> {
     let marker = " (retry-after ";
     let start = error.rfind(marker)? + marker.len();
@@ -238,8 +173,6 @@ pub(crate) fn retry_after_hint(error: &str) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
-/// Pick the wait before the next attempt: the provider's request when it is
-/// longer than the plain backoff, the backoff otherwise.
 pub(crate) fn step_delay(backoff: Duration, hint: Option<Duration>) -> Duration {
     match hint {
         Some(hint) if hint > backoff => hint,
@@ -247,10 +180,6 @@ pub(crate) fn step_delay(backoff: Duration, hint: Option<Duration>) -> Duration 
     }
 }
 
-/// Execute a single LLM step with default retry configuration.
-///
-/// Convenience wrapper around `execute_loop_step_with_retry` that uses
-/// `RetryConfig::default()`.
 pub fn execute_loop_step<'a>(
     turn_id: &'a str,
     step: u32,
@@ -276,21 +205,6 @@ pub fn execute_loop_step<'a>(
     )
 }
 
-/// Execute a single LLM step: call the LLM using the current messages,
-/// return the response with any tool calls. Retries retryable errors
-/// using exponential backoff with jitter (see `retry::retry_delay`).
-///
-/// Non-retryable errors fail immediately. Retryable errors are retried up
-/// to `retry_config.max_attempts` times. Each attempt is 1-based: the
-/// first call is attempt 1, the first retry is attempt 2, etc.
-///
-/// `cancel` rides into every attempt's `LLMChatParams` so the provider
-/// transport can abort the in-flight request mid-stream (v2's AbortSignal).
-///
-/// Borrows `messages` and `tool_defs`; the owned copy an attempt needs is
-/// built at the provider boundary. The success path (the common case) hands
-/// the first copy straight through instead of cloning per attempt, so a step
-/// keeps only one history/tool-table copy rather than one per retry.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_loop_step_with_retry<'a>(
     turn_id: &'a str,
@@ -320,17 +234,12 @@ pub fn execute_loop_step_with_retry<'a>(
         max_context_tokens,
         turn_input_tokens,
         false,
+        crate::callbacks::MAIN_AGENT_ID,
+        false,
+        None,
     )
 }
 
-/// `execute_loop_step_with_retry` with an explicit projection policy.
-///
-/// v2 defaults to the lenient `project` and only switches to `projectStrict`
-/// after a provider rejects the request's structure
-/// (`contextProjectorService.ts:63`, `llmRequesterService.ts:594-601`): the
-/// strict pass drops duplicate tool calls and merges non-alternating roles, so
-/// applying it to every request would hide the very anomaly the rejection
-/// reports and change the request the provider saw first.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_loop_step_with_projection<'a>(
     turn_id: &'a str,
@@ -346,18 +255,13 @@ pub fn execute_loop_step_with_projection<'a>(
     max_context_tokens: Option<u32>,
     turn_input_tokens: Option<u32>,
     structure_strict: bool,
+    agent_id: &'a str,
+    tool_select: bool,
+    emit: Option<&'a (dyn Fn(serde_json::Value) + Send + Sync)>,
 ) -> BoxFuture<'a, Result<StepResult, Box<dyn std::error::Error + Send + Sync>>> {
     let retry_config = retry_config.clone();
     let cancel_token = cancel.cloned();
     Box::pin(async move {
-        // Snapshot the borrowed slice/tool table into shared buffers once, then
-        // every attempt (success and retry alike) clones only the `Arc`.
-        // v2 `contextProjectorService.project`: the default policy runs the
-        // lenient projection (vacuous parts removed). Only a provider that
-        // rejected the request's structure gets the strict projection, which
-        // also invents missing results, drops duplicate calls and merges
-        // non-alternating roles. The stored history keeps the anomalies; this
-        // exists only on the wire.
         let projected = if structure_strict {
             crate::llm::wire::project_strict(messages)
         } else {
@@ -371,34 +275,40 @@ pub fn execute_loop_step_with_projection<'a>(
             cancel: cancel_token.clone(),
             used_context_tokens,
             max_context_tokens,
+
+            max_output_tokens: None,
+            max_output_size: None,
         };
         let mut params = Some(build_params());
 
         let mut attempt: u32 = 0;
         let infinite_retry = crate::turn_loop::retry::infinite_retry_enabled();
-        // v2's `api_error` carries `duration_ms` — the wall-clock time the
-        // request spent failing, measured from before the first attempt.
+
         let started = std::time::Instant::now();
         let response = loop {
             attempt += 1;
-            // Match the chat result and extract only Send-safe values, so the
-            // non-Send `Box<dyn Error>` is fully consumed before the `.await`.
+
             let call_params = match params.take() {
                 Some(params) => params,
                 None => build_params(),
             };
+            if let Some(emit) = emit {
+                emit(llm_request_record(
+                    agent_id,
+                    turn_id,
+                    step,
+                    llm,
+                    &call_params,
+                    tool_select,
+                ));
+            }
             let (break_resp, return_err, retry_decision) = match llm.chat(call_params).await {
                 Ok(resp) => match empty_response_retryable(&resp, llm) {
                     None => (Some(resp), None, None),
-                    // v2 raises `empty_response` here and hands it to the same
-                    // `shouldRetry` path every transport failure takes, so the
-                    // backoff, the `TurnStepRetrying` telemetry and the cancel
-                    // race below are reused unchanged rather than reimplemented.
+
                     Some(empty) => {
                         let message = empty_response_message(&empty, &resp, llm);
                         if !infinite_retry && attempt >= retry_config.max_attempts {
-                            // It reached the retry path before running out of
-                            // budget, so v2's `retryable` is true.
                             (None, Some((boxed_err(message), true)), None)
                         } else {
                             (
@@ -415,12 +325,6 @@ pub fn execute_loop_step_with_projection<'a>(
                     }
                 },
                 Err(err) => {
-                    // v2's `retryable` classifies the *original* failure. Taken
-                    // here, before the terminal error is wrapped: the wrapper's
-                    // message does not start with `llm http status`, and every
-                    // classifier in this engine parses that prefix, so
-                    // re-deriving it from the wrapped text reports false for a
-                    // failure that was retried to exhaustion.
                     let retryable = llm.is_retryable_error(&err.to_string());
                     match classify_llm_error(err, llm, attempt, &retry_config, infinite_retry) {
                         Ok(decision) => (None, None, Some(decision)),
@@ -432,34 +336,14 @@ pub fn execute_loop_step_with_projection<'a>(
                 break resp;
             }
             if let Some((e, retryable)) = return_err {
-                // v2 `api_error` (`app/telemetry/events.ts`), fired where the
-                // call is definitively over rather than on every attempt, so the
-                // count matches the failures a user actually saw.
-                //
-                // The property names are v2's, not this engine's invention.
-                // `ApiErrorEvent` requires `error_type`, `model`, `retryable`
-                // and `duration_ms`; the rest are optional and are omitted
-                // rather than nulled, because the schema types them as
-                // numbers/strings. The transport identity (`alias`,
-                // `provider_type`, `protocol`), the turn's accumulated
-                // `input_tokens`, the numeric `turn_id` and `request_kind` are
-                // carried whenever the values exist.
-                //
-                // Deliberately NOT a property: the provider's message. v2 has no
-                // field for it — `error_type` is the classified category — and a
-                // free-text property is what a consumer cannot group on.
                 if let Some(telemetry) = telemetry {
                     let text = e.to_string();
                     let typed = e.downcast_ref::<kimi_core::error::LlmError>();
-                    // Typed first: the retry-exhausted path wraps the message
-                    // and `llm_http_status` only parses a leading
-                    // `llm http status`, so the text alone loses the status.
+
                     let status_code = typed
                         .and_then(kimi_core::error::LlmError::status_code)
                         .or_else(|| kimi_core::error::llm_http_status(&text));
-                    // v2 `error_type`: the classified category. The mapping is
-                    // the retry classifier's, so both layers group failures the
-                    // same way.
+
                     let error_type = if crate::llm::http::is_cancelled_error(&text) {
                         "AbortError"
                     } else if status_code.is_some() {
@@ -478,10 +362,6 @@ pub fn execute_loop_step_with_projection<'a>(
                         "request_kind": "turn",
                         "step_no": step,
                     });
-                    // The fields v2 declares and this fork used to omit. Every
-                    // one of them is a value the transport already knows, so a
-                    // consumer grouping errors by alias, provider or protocol
-                    // no longer has to fall back to the model id.
 
                     if let Some(alias) = llm.model_alias() {
                         payload["alias"] = serde_json::json!(alias);
@@ -502,7 +382,6 @@ pub fn execute_loop_step_with_projection<'a>(
                         payload["status_code"] = serde_json::json!(code);
                     }
                     if let Some(id) = typed.and_then(kimi_core::error::LlmError::trace_id) {
-                        // v2's property name; `trace_id` was this engine's.
                         payload["request_id"] = serde_json::json!(id);
                     }
                     telemetry(payload);
@@ -511,8 +390,7 @@ pub fn execute_loop_step_with_projection<'a>(
             }
             let decision = retry_decision.expect("a retryable failure carries its decision");
             let delay = step_delay(retry_delay(attempt, &retry_config), decision.wait_hint);
-            // v2 `TurnStepRetrying` telemetry event parity
-            // (loopService.ts:1571-1585, payload in turnEvents.ts:163).
+
             tracing::warn!(
                 turn_id = turn_id,
                 step = step,
@@ -536,16 +414,15 @@ pub fn execute_loop_step_with_projection<'a>(
                     "max_attempts": retry_config.max_attempts,
                     "infinite_retry": infinite_retry,
                     "delay_ms": delay.as_millis() as u64,
-                    // v2 carries the failure itself, not just the fact of a
-                    // retry — without these a consumer cannot tell a throttled
-                    // request from a timed-out one.
+
+
+
                     "error_name": decision.error_name,
                     "error_message": decision.error_message,
                     "status_code": decision.status_code,
                 }));
             }
-            // A cancellation landing during the backoff wait aborts the step
-            // immediately instead of sleeping out the delay (v2 #3240).
+
             match cancel {
                 Some(token) => tokio::select! {
                     _ = token.cancelled() => {
@@ -560,9 +437,8 @@ pub fn execute_loop_step_with_projection<'a>(
         let usage = response.usage.clone();
         let attempts = attempt;
         let finish_reason = response.finish_reason.clone();
-        // Reasoning blocks ride along untouched: the turn loop folds them
-        // into the assistant history so attested thinking (signature and all)
-        // round-trips on the next provider call.
+        let trace_id = llm.last_trace_id();
+
         let thinking = response.thinking.clone();
         if response.tool_calls.is_empty() {
             Ok(StepResult {
@@ -572,15 +448,12 @@ pub fn execute_loop_step_with_projection<'a>(
                 thinking,
                 attempts,
                 finish_reason,
+                trace_id,
                 timing: response.timing,
             })
         } else {
             let mut tool_calls = response.tool_calls;
-            // P61: some OpenAI-compatible gateways (MiniMax) return tool
-            // calls with an empty id; the follow-up tool result then
-            // references `""` and the provider rejects the request
-            // (2013: tool id not found). Synthesize unique ids before the
-            // calls enter the message history.
+
             for tc in &mut tool_calls {
                 if tc.id.trim().is_empty() {
                     tc.id = format!("toolu_{}", fastrand::u64(..));
@@ -593,6 +466,7 @@ pub fn execute_loop_step_with_projection<'a>(
                 thinking,
                 attempts,
                 finish_reason,
+                trace_id,
                 timing: response.timing,
             })
         }
@@ -606,7 +480,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// A test LLM that fails N times then succeeds, with configurable retryability.
     struct FlakyLlm {
         system_prompt: String,
         model_name: String,
@@ -668,11 +541,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_succeeds_after_failures() {
-        // Fails 2 times, succeeds on 3rd try. max_attempts=3 should succeed.
         let llm = FlakyLlm::new(2, true);
         let config = RetryConfig {
             max_attempts: 3,
-            base_delay_ms: 1, // fast for tests
+            base_delay_ms: 1,
             max_delay_ms: 10,
         };
         let result = execute_loop_step_with_retry(
@@ -700,7 +572,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_exhausted() {
-        // Always fails; with max_attempts=2, should give up after 2 tries.
         let llm = FlakyLlm::new(100, true);
         let config = RetryConfig {
             max_attempts: 2,
@@ -728,7 +599,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_non_retryable_fails_immediately() {
-        // Non-retryable error should fail on first attempt, no retries.
         let llm = FlakyLlm::new(100, false);
         let config = RetryConfig {
             max_attempts: 5,
@@ -754,7 +624,6 @@ mod tests {
         assert_eq!(llm.calls.load(Ordering::SeqCst), 1);
     }
 
-    /// A test LLM that always fails with a fixed status-coded error.
     struct StatusLlm {
         system_prompt: String,
         model_name: String,
@@ -791,7 +660,6 @@ mod tests {
             Some("high")
         }
         fn is_retryable_error(&self, error: &str) -> bool {
-            // The production classifier's rule: 429 is retryable.
             kimi_core::error::llm_http_status(error) == Some(429)
         }
         fn chat(
@@ -804,15 +672,6 @@ mod tests {
         }
     }
 
-    /// v2's `TurnStepRetrying` payload carries the failure itself
-    /// (`retryErrorFields`: errorName / errorMessage / statusCode), not just the
-    /// fact that a retry happened — a consumer cannot tell a throttled request
-    /// from a timed-out one without them.
-    ///
-    /// The provider's `retry-after: 7s` is the wait the backoff honours, so the
-    /// test runs on a paused clock: the runtime advances the timer instantly
-    /// instead of the suite spending seven wall-clock seconds to observe a
-    /// number the event already carries.
     #[tokio::test(start_paused = true)]
     async fn turn_step_retrying_carries_the_v2_error_fields() {
         let llm =
@@ -851,60 +710,47 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        // Two events: the backoff that was announced, then the terminal
-        // failure. `api_error` fires once, where the call is definitively over,
-        // so its count matches the failures a user saw rather than the attempts.
+
         assert_eq!(
             recorded.len(),
             2,
             "one backoff, one api_error: {recorded:?}"
         );
-        // The turn's accumulated input tokens ride the failure event
-        // (v2 `ApiErrorEvent.input_tokens`), so the test passes a value.
+
         let event = &recorded[0];
         assert_eq!(event["event"], "TurnStepRetrying");
         assert_eq!(event["step"], 3);
         assert_eq!(event["failed_attempt"], 1);
         assert_eq!(event["next_attempt"], 2);
         assert_eq!(event["max_attempts"], 2);
-        // The provider's wait wins over the 1ms backoff.
+
         assert_eq!(event["delay_ms"], 7000);
         assert_eq!(event["error_name"], "APIStatusError");
         assert_eq!(event["status_code"], 429);
-        // The terminal event keeps the last attempt's status and attempt count,
-        // which is why the exhausted path boxes a typed error instead of a
-        // bare string: `llm_http_status` only parses a leading `llm http
-        // status`, and this message is wrapped.
+
         let api_error = &recorded[1];
         assert_eq!(api_error["event"], "api_error");
-        // v2's `ApiErrorEvent` property names. `attempts` and a bare `step`
-        // were this engine's invention and are asserted absent below: a
-        // consumer written against v2 looks for `step_no`, and v2 has no
-        // field for the attempt count.
+
         assert_eq!(api_error["step_no"], 3);
         assert_eq!(api_error["status_code"], 429);
         assert_eq!(api_error["error_type"], "APIStatusError");
         assert_eq!(api_error["model"], "status");
-        // It retried before giving up, so v2's `retryable` is true.
+
         assert_eq!(api_error["retryable"], true);
         assert!(api_error["duration_ms"].is_u64());
-        // The transport's identity, so a consumer can group failures by the
-        // alias, provider and protocol the user actually selected.
+
         assert_eq!(api_error["alias"], "alias-under-test");
         assert_eq!(api_error["provider_type"], "kimi");
         assert_eq!(api_error["protocol"], "openai");
         assert_eq!(api_error["request_kind"], "turn");
         assert_eq!(api_error["turn_id"], 7);
         assert_eq!(api_error["input_tokens"], 1234);
-        // No `x-trace-id` was sent, and v2 types the property as an optional
-        // string: a null would be a type error, so it must be absent. The
-        // property is `request_id` — `trace_id` was this engine's spelling.
+
         assert!(api_error.get("request_id").is_none());
         assert!(api_error.get("trace_id").is_none());
         assert!(api_error.get("attempts").is_none());
         assert!(api_error.get("step").is_none());
-        // v2 has no property for the provider's message; the classified
-        // category is `error_type`.
+
         assert!(api_error.get("error_message").is_none());
         assert!(
             event["error_message"]
@@ -915,8 +761,6 @@ mod tests {
         );
     }
 
-    /// The failure family is reported, so a cancelled request is distinguishable
-    /// from a provider fault without reading prose.
     #[tokio::test]
     async fn turn_step_retrying_names_a_cancelled_failure() {
         let llm = StatusLlm::new("llm cancelled: request aborted");
@@ -933,8 +777,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(event);
         };
-        // `StatusLlm` only retries 429s, so this one propagates — the point is
-        // the classifier's name mapping, asserted directly.
+
         let _ = execute_loop_step_with_retry(
             "t1",
             1,
@@ -950,8 +793,7 @@ mod tests {
             None,
         )
         .await;
-        // The claim is that nothing retried, not that nothing was recorded:
-        // the terminal failure still reports itself as `api_error`.
+
         let recorded = events.lock().unwrap().clone();
         assert!(
             recorded
@@ -969,7 +811,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_retry_needed() {
-        // Succeeds on first try.
         let llm = FlakyLlm::new(0, true);
         let config = RetryConfig::default();
         let result = execute_loop_step_with_retry(
@@ -993,10 +834,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_tool_call_id_gets_synthesized() {
-        // P61: MiniMax-style gateways return tool calls with an empty id;
-        // the engine must synthesize one before the calls enter history,
-        // otherwise the follow-up tool result references "" and the
-        // provider rejects the request (2013).
         struct EmptyIdLlm;
         impl LLM for EmptyIdLlm {
             fn system_prompt(&self) -> &str {
@@ -1208,8 +1045,6 @@ mod tests {
         let with_hint = "llm http status 429 Too Many Requests: slow down (retry-after 30s)";
         assert_eq!(retry_after_hint(with_hint), Some(Duration::from_secs(30)));
 
-        // No hint, or a hint in HTTP-date form (seconds only is what the
-        // transport emits): fall back to the plain backoff.
         assert_eq!(retry_after_hint("llm http status 429: slow down"), None);
         assert_eq!(
             retry_after_hint("llm http status 429: (retry-after Wed, 21 Oct 2015 07:28:00 GMT)"),
@@ -1219,26 +1054,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_waits_at_least_as_long_as_the_provider_asks() {
-        // A provider asking for 30s must not be retried at the 1s backoff.
         assert_eq!(
             step_delay(Duration::from_secs(1), Some(Duration::from_secs(30))),
             Duration::from_secs(30)
         );
-        // And a short hint must not shorten the backoff either.
+
         assert_eq!(
             step_delay(Duration::from_secs(5), Some(Duration::from_millis(200))),
             Duration::from_secs(5)
         );
-        // No hint: the backoff stands.
+
         assert_eq!(
             step_delay(Duration::from_secs(3), None),
             Duration::from_secs(3)
         );
     }
 
-    /// Infinite retry mode (`KIMI_CODE_INFINITE_RETRY`) lifts the attempt cap
-    /// for retryable errors only; the flag is injected so the test never
-    /// touches the process environment.
     #[test]
     fn classify_llm_error_honors_infinite_retry() {
         let llm = FlakyLlm::new(100, true);
@@ -1269,7 +1100,6 @@ mod tests {
             "infinite mode must keep retrying past max_attempts"
         );
 
-        // Non-retryable errors still fail fast in infinite mode.
         let non_retryable_llm = FlakyLlm::new(100, false);
         let fatal = classify_llm_error(
             Box::new(std::io::Error::other("bad request")),
@@ -1283,8 +1113,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_aborts_during_backoff_wait() {
-        // A retryable failure with a long backoff: cancellation must end the
-        // step immediately instead of sleeping out the delay (v2 #3240).
         let llm = FlakyLlm::new(u32::MAX, true);
         let config = RetryConfig {
             max_attempts: 10,
@@ -1322,15 +1150,6 @@ mod tests {
         );
     }
 
-    // ── empty_response (v2 human/llm/empty-response.ts) ──────────────────
-    //
-    // A 200 that carries no answer used to be booked as a finished turn, so
-    // the model stopped early and nothing — log, telemetry, transcript — could
-    // tell it from a real reply. v2 raises `empty_response` and retries it
-    // (requester/retry.ts:50-51).
-
-    /// A native-transport LLM that answers `empty_times` times with an empty
-    /// body before returning a real answer.
     struct EmptyThenLlm {
         empty_times: u32,
         transport: &'static str,
@@ -1347,8 +1166,6 @@ mod tests {
         }
     }
 
-    /// A response with no visible answer, in whichever of v2's two shapes the
-    /// case under test needs.
     fn answer(content: &str, think: bool, finish: &'static str) -> LLMChatResponse {
         LLMChatResponse {
             content: content.into(),
@@ -1407,24 +1224,19 @@ mod tests {
         }
     }
 
-    /// v2 `emptyResponseError` shape: the two arms are decided by different
-    /// emptiness tests, and neither fires when a tool call is present.
     #[test]
     fn empty_response_of_matches_v2_empty_response_error() {
-        // Neither content nor tool calls — the plain empty arm.
         let empty = empty_response_of(&answer("", false, "stop")).expect("plain empty response");
         assert!(!empty.think_only);
-        // Reasoning only — the think-only arm.
+
         let think = empty_response_of(&answer("", true, "stop")).expect("think-only response");
         assert!(think.think_only);
-        // Whitespace-only content is *not* the plain empty arm (v2 tests
-        // `length === 0`), and with no reasoning it is a legitimate answer.
+
         assert!(empty_response_of(&answer("   ", false, "stop")).is_none());
-        // Real text is never empty, with or without reasoning alongside it.
+
         assert!(empty_response_of(&answer("hi", false, "stop")).is_none());
         assert!(empty_response_of(&answer("hi", true, "stop")).is_none());
 
-        // A tool call makes an otherwise empty body a real turn.
         let mut with_call = answer("", false, "tool_calls");
         with_call.tool_calls = vec![tool_call()];
         assert!(empty_response_of(&with_call).is_none());
@@ -1433,10 +1245,6 @@ mod tests {
         assert!(empty_response_of(&think_and_call).is_none());
     }
 
-    /// The content-filter arm, independent of the transport: v2 folds six
-    /// provider spellings into `filtered`, and this engine's turn-level stop
-    /// mapping accepts the wider set, so the retry guard has to use the same
-    /// list or a filtered turn is re-requested as an empty one.
     #[test]
     fn is_content_filtered_covers_the_turn_level_filter_vocabulary() {
         for filtered in [
@@ -1455,7 +1263,7 @@ mod tests {
                 "{filtered} must count as a filter stop"
             );
         }
-        // The ordinary stops, and the absent case, must not.
+
         for ordinary in ["stop", "length", "max_tokens", "tool_calls"] {
             assert!(
                 !is_content_filtered(Some(ordinary)),
@@ -1465,8 +1273,6 @@ mod tests {
         assert!(!is_content_filtered(None));
     }
 
-    /// A 200 with no answer must be retried, and the recovered attempt must
-    /// carry its content through.
     #[tokio::test]
     async fn an_empty_response_is_retried_until_the_provider_answers() {
         let llm = EmptyThenLlm::new(2, "native-http");
@@ -1495,8 +1301,6 @@ mod tests {
         assert_eq!(result.content, "a real answer");
     }
 
-    /// v2 `isRetryableError`: `empty_response` is retryable *unless* the
-    /// provider filtered the response. A filtered turn is a final answer.
     #[tokio::test]
     async fn a_content_filtered_empty_response_is_not_retried() {
         for filtered in ["content_filter", "refusal", "safety", "image_safety"] {
@@ -1567,10 +1371,6 @@ mod tests {
         }
     }
 
-    /// The host owns the transcript on the proxy leg, so an empty body there
-    /// is a legitimate answer. Without the transport guard every proxy turn
-    /// would be re-requested — and the pre-existing `FlakyLlm` suite, whose
-    /// success path *is* an empty body, would spend real backoff on it.
     #[tokio::test]
     async fn an_empty_response_on_the_host_proxy_is_left_alone() {
         let llm = EmptyThenLlm::new(u32::MAX, "host-proxy");
@@ -1599,8 +1399,6 @@ mod tests {
         assert!(result.content.is_empty());
     }
 
-    /// With the budget spent the failure must surface rather than loop: v2
-    /// propagates the `empty_response` error once `shouldRetry` says stop.
     #[tokio::test]
     async fn a_persistently_empty_response_surfaces_after_the_budget() {
         let llm = EmptyThenLlm::new(u32::MAX, "native-http");
@@ -1632,9 +1430,6 @@ mod tests {
         );
     }
 
-    /// Returns a *typed* `LlmError`, so the tests can prove the fields the
-    /// transport keeps on it survive all the way into telemetry. `StatusLlm`
-    /// returns a plain string, which exercises only the text fallback.
     struct TypedErrorLlm {
         system_prompt: String,
         model_name: String,
@@ -1649,8 +1444,6 @@ mod tests {
             &self.model_name
         }
         fn is_retryable_error(&self, _error: &str) -> bool {
-            // Never retryable: the failure is terminal on the first attempt, so
-            // the test observes exactly one `api_error` and no backoff.
             false
         }
         fn chat(
@@ -1665,10 +1458,6 @@ mod tests {
         }
     }
 
-    /// The provider's request id reaches telemetry. This is the link between the
-    /// transport keeping it on the typed error and anything actually using it:
-    /// with no consumer the field was dead, and without the typed read here
-    /// `api_error` would report it as null.
     #[tokio::test]
     async fn api_error_carries_the_provider_trace_id() {
         let llm = TypedErrorLlm {
@@ -1716,13 +1505,105 @@ mod tests {
         assert_eq!(recorded[0]["event"], "api_error");
         assert_eq!(recorded[0]["status_code"], 503);
         assert_eq!(recorded[0]["request_id"], "trace-42");
-        // v2's required set, all four present.
+
         assert_eq!(recorded[0]["error_type"], "APIStatusError");
         assert_eq!(recorded[0]["model"], "typed");
         assert_eq!(recorded[0]["retryable"], false);
         assert!(recorded[0]["duration_ms"].is_u64());
-        // The message itself is not a v2 property — the classified category is
-        // what a consumer groups on.
+
         assert!(recorded[0].get("error_message").is_none());
+    }
+
+    #[test]
+    fn an_llm_request_record_carries_the_v2_fields() {
+        let llm = FlakyLlm::new(0, false);
+        let tools = vec![ToolInfo {
+            name: "Read".into(),
+            description: "reads".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }];
+        let messages = vec![LLMMessage::user("hi")];
+        let params = LLMChatParams {
+            messages: std::sync::Arc::from(messages),
+            tools: std::sync::Arc::from(tools.clone()),
+            ..Default::default()
+        };
+        let record = llm_request_record("main", "turn-1", 1, &llm, &params, true);
+        assert_eq!(record["agent_id"], serde_json::json!("main"));
+        assert_eq!(record["kind"], serde_json::json!("loop"));
+        assert_eq!(record["provider"], serde_json::json!("custom"));
+        assert_eq!(record["model"], serde_json::json!("flaky"));
+        assert_eq!(record["toolSelect"], serde_json::json!(true));
+        assert_eq!(record["messageCount"], serde_json::json!(1));
+        assert_eq!(record["turnStep"], serde_json::json!("turn-1.2"));
+        assert_eq!(
+            record["systemPromptHash"],
+            serde_json::json!(crate::session::agent_records::sha256_hex("test"))
+        );
+        assert_eq!(
+            record["toolsHash"],
+            serde_json::json!(crate::session::agent_records::sha256_hex(
+                &crate::session::agent_records::tools_signature(&tools)
+            ))
+        );
+        assert!(record.get("modelAlias").is_none());
+        assert!(record.get("thinkingEffort").is_none());
+    }
+
+    struct ParameterLlm;
+
+    impl LLM for ParameterLlm {
+        fn system_prompt(&self) -> &str {
+            "prompt"
+        }
+        fn model_name(&self) -> &str {
+            "kimi-k2"
+        }
+        fn is_retryable_error(&self, _error: &str) -> bool {
+            false
+        }
+        fn protocol(&self) -> Option<&str> {
+            Some("openai")
+        }
+        fn request_parameters(&self) -> Option<kimi_core::types::LlmRequestParameters> {
+            Some(kimi_core::types::LlmRequestParameters {
+                temperature: Some(0.3),
+                top_p: Some(0.9),
+                beta_api: Some(true),
+                thinking_keep: Some("all".into()),
+            })
+        }
+        fn effective_max_tokens(&self, _params: &LLMChatParams) -> Option<u32> {
+            Some(4096)
+        }
+        fn chat(
+            &self,
+            _params: LLMChatParams,
+        ) -> BoxFuture<
+            '_,
+            Result<
+                crate::turn_loop::types::LLMChatResponse,
+                Box<dyn std::error::Error + Send + Sync>,
+            >,
+        > {
+            Box::pin(async { Err("not used".into()) })
+        }
+    }
+
+    #[test]
+    fn recorded_request_parameters_mirror_what_is_sent() {
+        let params = LLMChatParams {
+            messages: std::sync::Arc::from(vec![LLMMessage::user("hi")]),
+            ..Default::default()
+        };
+        let record = llm_request_record("main", "turn-1", 0, &ParameterLlm, &params, false);
+        assert_eq!(record["maxTokens"], serde_json::json!(4096));
+        assert_eq!(record["temperature"], serde_json::json!(0.3));
+        assert_eq!(record["topP"], serde_json::json!(0.9));
+        assert_eq!(record["betaApi"], serde_json::json!(true));
+        assert_eq!(record["thinkingKeep"], serde_json::json!("all"));
+        assert!(record.get("attempt").is_none());
+        assert!(record.get("projection").is_none());
+        assert!(record.get("droppedCount").is_none());
     }
 }

@@ -1,0 +1,15 @@
+pub mod archive;
+pub mod availability;
+pub mod commands;
+pub mod errors;
+pub mod github_resolver;
+pub mod manager;
+pub mod manifest;
+pub mod marketplace;
+pub mod node_fallback;
+pub mod plugin;
+pub mod plugin_events;
+pub mod plugin_service;
+pub mod source;
+pub mod store;
+pub mod types;

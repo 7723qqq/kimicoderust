@@ -280,6 +280,8 @@ mod tests {
             tasks: Vec::new(),
             notes: Vec::new(),
             blockers: Vec::new(),
+            completion_tip: None,
+            key_artifacts: None,
         }
     }
 

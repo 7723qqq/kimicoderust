@@ -1,22 +1,5 @@
-/// Glob matching helper used by MCP tool-name filtering and permission
-/// pattern checks.
-///
-/// The file-search tool that used to live here is served by the agent
-/// engine natively; what remains is the batch path-matching primitive.
-///
-/// Maximum number of matches surfaced to JS via napi constants.
 pub const MAX_MATCHES: usize = 100;
 
-/// Check if `path` matches any of the given glob patterns.
-///
-/// All patterns are compiled into a single `GlobSet` and tested in one
-/// `is_match` call, eliminating the per-pattern overhead of building and
-/// testing individual regexes.
-///
-/// Uses case-sensitive matching with `literal_separator(true)` to mirror
-/// `globToRegExp` in the fork's retired `fsSearchService.ts` (added in `83e4a0cf71`
-/// and gone with the v1 engine; upstream has no such function) — `*` does NOT
-/// cross `/`, only `**` does. This also matches ripgrep's `--glob` semantics.
 pub fn glob_matches_any(globs: &[String], path: &str) -> bool {
     if globs.is_empty() {
         return false;

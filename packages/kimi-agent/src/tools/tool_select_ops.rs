@@ -159,6 +159,20 @@ pub fn tool_select_schema_signature(tool: &ToolSelectTool) -> String {
     .unwrap_or_default()
 }
 
+pub fn tool_description_schema_signature(tool: &kimi_core::types::ToolDescription) -> String {
+    let parameters = if tool.parameters.is_null() {
+        serde_json::json!({"type": "object", "properties": {}})
+    } else {
+        tool.parameters.clone()
+    };
+    serde_json::to_string(&serde_json::json!([
+        tool.name.as_str(),
+        tool.description.as_str(),
+        crate::tools::registry::canonical_value(&parameters),
+    ]))
+    .unwrap_or_default()
+}
+
 pub fn tool_select_version_signature(tool: &ToolSelectTool) -> String {
     serde_json::to_string(&serde_json::json!([
         tool_select_schema_signature(tool),
@@ -280,7 +294,7 @@ pub fn plan_tool_select_reconcile(
     }
 }
 
-fn persist_tool_select_payload<T: Serialize>(
+pub fn persist_tool_select_payload<T: Serialize>(
     store: &crate::session::sqlite_store::SqliteSessionStore,
     session_id: &str,
     event_type: &str,
@@ -321,19 +335,21 @@ pub fn restore_tool_select_state(
     session_id: &str,
     agent_id: &str,
 ) -> Result<ToolSelectModelState, String> {
-    let count = store
-        .count_wire_events(session_id)
-        .map_err(|error| error.to_string())?;
-    let records = store
-        .get_wire_events(session_id, 0, count)
-        .map_err(|error| error.to_string())?;
+    let records = crate::session::wire_journal::restorable_session_records(store, session_id);
     let mut state = ToolSelectModelState::default();
     for record in records {
-        if record.payload.get("agentId").and_then(Value::as_str) != Some(agent_id) {
+        if record.get("agentId").and_then(Value::as_str) != Some(agent_id) {
             continue;
         }
+        let Some(event_type) = record
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
         state
-            .apply_wire_event(&record.event_type, record.payload)
+            .apply_wire_event(&event_type, record)
             .map_err(|error| error.to_string())?;
     }
     Ok(state)

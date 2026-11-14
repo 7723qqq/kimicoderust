@@ -8,10 +8,6 @@ impl HttpServer {
         req: &HttpRequest,
     ) -> HttpResponse {
         let resp = match (method, path) {
-            // v2 `registerHealthRoute` serves exactly `GET /api/v1/healthz`
-            // and answers `{ ok: true }`
-            // (`kap-server/src/routes/registerApiV1Routes.ts:221-246`; the
-            // auth bypass names the same path, `middleware/auth.ts:36`).
             ("GET", "/api/v1/healthz") => HttpResponse::ok(&json!({ "ok": true })),
             ("GET", "/api/v1/meta") => {
                 let dangerous_bypass_auth = self.auth.is_disabled();
@@ -32,8 +28,8 @@ impl HttpServer {
                     "dangerous_bypass_auth": dangerous_bypass_auth,
                     "backend": "rust",
                     "web_title": "Kimi Code",
-                    // The user's `[experimental]` flags, not a constant:
-                    // clients probe these to gate UI features.
+
+
                     "experimental_flags": self.config().await.experimental,
                 }))
             }
@@ -68,19 +64,18 @@ impl HttpServer {
                 if let Some(dm) = body.get("default_model").and_then(|v| v.as_str()) {
                     config.default_model = Some(dm.to_string());
                 }
-                // v2 folds `yolo` into the permission mode rather than keeping a
-                // separate flag: `patchConfigRequestSchema` carries both
-                // `yolo` and `default_permission_mode`, and the handler does
-                // `if (yolo === true) defaultPermissionMode = 'yolo'` then drops
-                // the key (kap-server/src/routes/config.ts:63-68). Read
-                // `default_permission_mode` first so an explicit mode wins.
+
                 let default_permission_mode =
                     body.get("default_permission_mode").and_then(|v| v.as_str());
                 let yolo_flag = body.get("yolo").and_then(|v| v.as_bool());
                 if let Some(mode) = default_permission_mode {
-                    config.default_permission_mode = Some(mode.to_string());
+                    match mode.parse::<crate::config::DefaultPermissionMode>() {
+                        Ok(mode) => config.default_permission_mode = Some(mode),
+                        Err(error) => return HttpResponse::bad_request(error),
+                    }
                 } else if yolo_flag == Some(true) {
-                    config.default_permission_mode = Some("yolo".to_string());
+                    config.default_permission_mode =
+                        Some(crate::config::DefaultPermissionMode::Yolo);
                 }
                 if yolo_flag == Some(true) {
                     config.agent.yolo = Some(true);
@@ -95,10 +90,7 @@ impl HttpServer {
                 {
                     config.default_plan_mode = Some(default_plan_mode);
                 }
-                // The Web settings panel posts the whole `patchConfigRequestSchema`
-                // and used to have all but four keys accepted with a 200 and
-                // dropped — so an experimental-feature toggle could never be
-                // persisted. Apply every section the schema declares.
+
                 if let Some(provider) = body.get("default_provider").and_then(|v| v.as_str()) {
                     config.default_provider = Some(provider.to_string());
                 }
@@ -108,9 +100,6 @@ impl HttpServer {
                     ) {
                         Ok(parsed) => config.permission = Some(parsed),
                         Err(error) => {
-                            // Never silently drop a section the user just
-                            // edited: report it so the UI can surface a form
-                            // error instead of pretending it saved.
                             return HttpResponse::bad_request(format!(
                                 "Invalid [permission] section: {error}"
                             ));
@@ -118,7 +107,10 @@ impl HttpServer {
                     }
                 }
                 if let Some(mode) = body.get("default_permission_mode").and_then(|v| v.as_str()) {
-                    config.default_permission_mode = Some(mode.to_string());
+                    match mode.parse::<crate::config::DefaultPermissionMode>() {
+                        Ok(mode) => config.default_permission_mode = Some(mode),
+                        Err(error) => return HttpResponse::bad_request(error),
+                    }
                 }
                 if let Some(thinking) = body.get("thinking") {
                     match serde_json::from_value::<crate::config::ThinkingConfig>(thinking.clone())
@@ -208,27 +200,14 @@ impl HttpServer {
                 if let Some(telemetry) = body.get("telemetry").and_then(|v| v.as_bool()) {
                     config.telemetry = Some(telemetry);
                 }
-                // A hooks write arrives already validated above; publish it to
-                // the reloadable set so the next turn uses it without a restart.
+
                 if body.get("hooks").is_some() {
                     self.hooks_source.replace(config.hooks.clone());
                 }
                 *self.config_override.lock().await = Some(config.clone());
                 HttpResponse::ok(&format_config_response(&config))
             }
-            // v2 `registerApiV1Routes` has no `/runtime` route: the only
-            // always-on system routes are healthz, meta, config, models,
-            // search and the fs family
-            // (`kap-server/src/routes/registerApiV1Routes.ts:87-217`).
-            // Static advertisement, not a probe: the list is a compile-time
-            // constant, so it does not reflect per-process availability (e.g. a
-            // build without the workflow engine still reports the same set).
-            // The detail route below answers from the same list.
-            // The bundle's `listCapabilities` feeds these straight into
-            // `capabilities.filter(c => c.supported)`, so the elements have to be
-            // the same objects the detail route serves — a bare string array made
-            // `supported` undefined and the plugin panel's capability rows
-            // rendered empty.
+
             ("GET", "/api/v1/capabilities") => {
                 let capabilities: Vec<Value> = NATIVE_CAPABILITY_IDS
                     .iter()
@@ -236,9 +215,7 @@ impl HttpServer {
                     .collect();
                 HttpResponse::ok(&json!({ "capabilities": capabilities }))
             }
-            // One capability's readiness. Native built-ins are compiled in, so
-            // a known id is genuinely `ready`; an unknown id is a 404
-            // (kap-server's `CAPABILITY_NOT_FOUND`), not a fabricated record.
+
             ("GET", p) if p.starts_with("/api/v1/capabilities/") => {
                 let id = p.trim_start_matches("/api/v1/capabilities/");
                 if NATIVE_CAPABILITY_IDS.contains(&id) {
@@ -247,9 +224,7 @@ impl HttpServer {
                     HttpResponse::not_found()
                 }
             }
-            // kap-server's install action: the native engine has nothing to
-            // install (every capability ships compiled in), so the honest
-            // answer is "unsupported", not a fake install that claims to run.
+
             ("POST", p) if p.starts_with("/api/v1/capabilities/") => HttpResponse::bad_request(
                 "CAPABILITY_UNSUPPORTED: this standalone engine ships every capability built in; there is no installer to run",
             ),
@@ -275,8 +250,7 @@ impl HttpServer {
                     .collect();
                 HttpResponse::ok(&json!({ "connections": connections }))
             }
-            // Unregistered (so a 404) on a non-loopback bind unless the server
-            // was started with `--allow-remote-shutdown`.
+
             ("POST", "/api/v1/shutdown") if self.shutdown_enabled() => {
                 self.request_shutdown();
                 HttpResponse::ok(&json!({

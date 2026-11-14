@@ -460,17 +460,22 @@ async fn reconcile_reports_the_orphan_but_never_the_live_task() {
 }
 
 #[test]
-fn background_limits_from_wire_drops_only_meaningless_zeroes() {
+fn background_limits_from_wire_keeps_a_zero_grace_and_drops_meaningless_zeroes() {
     // Unset wire values keep every built-in.
     assert_eq!(
         BackgroundLimits::from_wire(None, None, None, None, None),
         BackgroundLimits::default()
     );
-    // A zero grace period / concurrency cap is not meaningful (JSON has no
-    // way to say "unset"), so it falls back to the built-in...
+    // v2's schema allows `killGracePeriodMs: 0` and `terminateWithGrace` uses
+    // it as a real zero-width window, so an explicit zero grace is carried
+    // through; a zero concurrency cap is not meaningful (JSON has no way to
+    // say "unset") and falls back to the built-in.
     assert_eq!(
         BackgroundLimits::from_wire(Some(0), Some(0), None, None, None),
-        BackgroundLimits::default()
+        BackgroundLimits {
+            kill_grace_period_ms: Some(0),
+            ..BackgroundLimits::default()
+        }
     );
     // ...but `bash_task_timeout_s = 0` is a real value meaning "no
     // timeout", and a concurrency cap wider than `u32` is discarded.
@@ -500,7 +505,7 @@ fn background_limits_from_wire_drops_only_meaningless_zeroes() {
 }
 
 #[tokio::test]
-async fn lifecycle_events_carry_the_session_and_both_vocabularies() {
+async fn lifecycle_events_carry_the_session_and_the_v2_task_record() {
     let (_tmp, runner) = runner();
     let events: CapturedEvents = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -525,22 +530,23 @@ async fn lifecycle_events_carry_the_session_and_both_vocabularies() {
         )
         .unwrap();
 
-    // Spawn announces created + started on the task's session lane.
-    let (created_session, created) = events.lock().unwrap()[0].clone();
-    assert_eq!(created_session.as_deref(), Some("sess-9"));
-    assert_eq!(created["type"], "event.task.created");
-    assert_eq!(created["task"]["id"], "task-ev");
-    assert_eq!(created["task"]["session_id"], "sess-9");
-    assert_eq!(created["task"]["kind"], "subagent");
-    assert_eq!(created["task"]["status"], "running");
-    assert_eq!(created["task"]["subagent_type"], "research");
-    assert_eq!(created["task"]["run_in_background"], true);
-    let (started_session, started) = events.lock().unwrap()[1].clone();
+    // Spawn announces `task.started` on the task's session lane.
+    let (started_session, started) = events.lock().unwrap()[0].clone();
     assert_eq!(started_session.as_deref(), Some("sess-9"));
-    assert_eq!(started["type"], "background.task.started");
-    assert_eq!(started["task_id"], "task-ev");
+    assert_eq!(started["type"], "task.started");
+    assert_eq!(started["info"]["taskId"], "task-ev");
+    assert_eq!(started["info"]["kind"], "agent");
+    assert_eq!(started["info"]["status"], "running");
+    assert_eq!(
+        started["info"]["description"],
+        "Subagent research: investigate"
+    );
+    assert_eq!(started["info"]["subagentType"], "research");
+    assert_eq!(started["info"]["detached"], true);
+    assert!(started["info"]["startedAt"].is_u64());
+    assert!(started["info"]["endedAt"].is_null());
 
-    // Settling announces completed + terminated with the output facts.
+    // Settling announces `task.terminated` with the terminal info and tail.
     assert!(
         matches!(
             runner.wait("task-ev", 2000).await,
@@ -548,19 +554,15 @@ async fn lifecycle_events_carry_the_session_and_both_vocabularies() {
         ),
         "the task must settle for the assertion below"
     );
-    {
-        let lock = events.lock().unwrap();
-        let completed = &lock[2].1;
-        assert_eq!(completed["type"], "event.task.completed");
-        assert_eq!(completed["task_id"], "task-ev");
-        assert_eq!(completed["status"], "completed");
-        assert_eq!(completed["output_preview"], "done");
-        assert_eq!(completed["output_bytes"], 4);
-        let terminated = &lock[3].1;
-        assert_eq!(terminated["type"], "background.task.terminated");
-        assert_eq!(terminated["task_id"], "task-ev");
-        assert_eq!(terminated["status"], "completed");
-    }
+    let lock = events.lock().unwrap();
+    assert_eq!(lock.len(), 2, "spawn + settle, no legacy vocabulary");
+    let (terminated_session, terminated) = lock[1].clone();
+    assert_eq!(terminated_session.as_deref(), Some("sess-9"));
+    assert_eq!(terminated["type"], "task.terminated");
+    assert_eq!(terminated["info"]["taskId"], "task-ev");
+    assert_eq!(terminated["info"]["status"], "completed");
+    assert!(terminated["info"]["endedAt"].is_u64());
+    assert_eq!(terminated["outputTail"], "done");
 }
 
 #[tokio::test]
@@ -604,12 +606,13 @@ async fn emit_progress_reports_on_the_running_tasks_lane() {
     let lock = events.lock().unwrap();
     let progress: Vec<_> = lock
         .iter()
-        .filter(|(_, event)| event["type"] == "event.task.progress")
+        .filter(|(_, event)| event["type"] == "task.output")
         .collect();
     assert_eq!(progress.len(), 1, "unknown task must not emit");
     assert_eq!(progress[0].0.as_deref(), Some("sess-prog"));
-    assert_eq!(progress[0].1["task_id"], "task-prog");
-    assert_eq!(progress[0].1["output_chunk"], "hello ");
+    assert_eq!(progress[0].1["taskId"], "task-prog");
+    assert_eq!(progress[0].1["chunk"], "hello ");
+    assert_eq!(progress[0].1["outputSizeBytes"], 6);
     assert_eq!(progress[0].1["stream"], "stdout");
 }
 
@@ -748,8 +751,10 @@ async fn metaless_spawns_route_to_the_global_lane() {
         .unwrap();
     let (session, created) = events.lock().unwrap()[0].clone();
     assert_eq!(session, None, "no meta → no session → global lane");
-    assert_eq!(created["task"]["session_id"], Value::Null);
-    assert_eq!(created["task"]["kind"], "tool");
+    assert_eq!(created["type"], "task.started");
+    assert_eq!(created["info"]["taskId"], "task-none");
+    assert_eq!(created["info"]["kind"], "process");
+    assert_eq!(runner.entry("task-none").unwrap()["kind"], "tool");
 }
 
 #[tokio::test]
@@ -1348,11 +1353,10 @@ async fn settle_stays_silent_when_the_host_reports_the_session_dead() {
 
     // The entry still settled (the state bridge mirror is unaffected).
     assert_eq!(runner.entry("task-gone").unwrap()["status"], "completed");
-    // ...but neither terminal vocabulary fired, and no completion was
+    // ...but no terminal event fired, and no completion was
     // queued for a drain that will never come.
     let settled = |ty: &str| events.lock().unwrap().iter().any(|(_, e)| e["type"] == ty);
-    assert!(!settled("event.task.completed"));
-    assert!(!settled("background.task.terminated"));
+    assert!(!settled("task.terminated"));
     assert!(
         runner
             .take_pending_notifications(Some("sess-gone"))
@@ -1362,7 +1366,7 @@ async fn settle_stays_silent_when_the_host_reports_the_session_dead() {
 }
 
 /// The gate is a per-session rule, not a global kill switch: a live
-/// session's settle still fires both vocabularies and queues its
+/// session's settle still fires `task.terminated` and queues its
 /// notification, while a dead session's settle goes silent. Spawn-time
 /// facts are not gated — the task did start; only its terminal effects
 /// depend on whether anyone is left to receive them.
@@ -1413,12 +1417,10 @@ async fn liveness_gate_is_per_session() {
             .iter()
             .any(|(s, e)| s.as_deref() == Some(lane) && e["type"] == ty)
     };
-    assert!(settled("sess-alive", "event.task.completed"));
-    assert!(settled("sess-alive", "background.task.terminated"));
-    assert!(!settled("sess-dead", "event.task.completed"));
-    assert!(!settled("sess-dead", "background.task.terminated"));
+    assert!(settled("sess-alive", "task.terminated"));
+    assert!(!settled("sess-dead", "task.terminated"));
     assert!(
-        settled("sess-dead", "event.task.created"),
+        settled("sess-dead", "task.started"),
         "spawn facts are not gated — only the settle path is"
     );
     assert_eq!(runner.pending_notification_count(Some("sess-alive")), 1);
@@ -1511,9 +1513,182 @@ fn task_status_as_str_matches_the_host_contract() {
 /// it must land on `Completed`, never on a guess.
 #[test]
 fn a_bare_string_outcome_settles_as_completed() {
-    let (status, output) = TaskOutcome::from("output".to_string()).settle();
+    let (status, output, exit_code) = TaskOutcome::from("output".to_string()).settle();
     assert_eq!(status, TaskStatus::Completed);
     assert_eq!(output.as_deref(), Some("output"));
+    assert_eq!(exit_code, None);
+}
+
+/// v2 `ProcessTask.start`: the exit code decides the settlement, and the real
+/// code rides into `task.terminated`'s `info.exitCode`.
+#[tokio::test]
+async fn a_process_task_carries_command_pid_and_exit_code() {
+    let (_tmp, runner) = runner();
+    let events: CapturedEvents = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    runner.set_event_sink(Arc::new(move |session, event| {
+        sink.lock()
+            .unwrap()
+            .push((session.map(str::to_string), event));
+    }));
+
+    runner
+        .spawn_process_task(
+            TaskSpawnMeta {
+                session_id: Some("sess-proc"),
+                kind: "bash",
+                subagent_type: None,
+                agent_id: None,
+                timeout_ms: None,
+            },
+            "exit 3",
+            Some(4321),
+            Some("call-bash-1"),
+            "task-proc".into(),
+            "job".into(),
+            async {
+                TaskOutcome::Process {
+                    output: "boom".into(),
+                    exit_code: Some(3),
+                }
+            },
+        )
+        .unwrap();
+
+    let started = {
+        let lock = events.lock().unwrap();
+        lock[0].1.clone()
+    };
+    assert_eq!(started["type"], "task.started");
+    assert_eq!(started["info"]["kind"], "process");
+    assert_eq!(started["info"]["command"], "exit 3");
+    assert_eq!(started["info"]["pid"], 4321);
+    assert_eq!(started["info"]["parentToolCallId"], "call-bash-1");
+    assert!(started["info"]["exitCode"].is_null());
+
+    assert!(matches!(
+        runner.wait("task-proc", 2000).await,
+        TaskWaitResult::Completed(_)
+    ));
+    let terminated = {
+        let lock = events.lock().unwrap();
+        lock[1].1.clone()
+    };
+    assert_eq!(terminated["type"], "task.terminated");
+    assert_eq!(terminated["info"]["status"], "failed");
+    assert_eq!(terminated["info"]["exitCode"], 3);
+    assert_eq!(terminated["info"]["command"], "exit 3");
+}
+
+/// A foreground command promoted to a task keeps the output it printed before
+/// the promotion: v2 registers the process and its output sink at spawn, so a
+/// timeout detach must not hide the pre-detach text from `TaskOutput`.
+#[tokio::test]
+async fn a_promoted_process_task_keeps_the_output_it_already_printed() {
+    let (_tmp, runner) = runner();
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    runner
+        .spawn_promoted_process_task(
+            TaskSpawnMeta {
+                session_id: Some("sess-promoted"),
+                kind: "bash",
+                subagent_type: None,
+                agent_id: None,
+                timeout_ms: None,
+            },
+            "long job",
+            None,
+            Some("call-bash-2"),
+            "task-promoted".into(),
+            "job".into(),
+            "before detach\n".into(),
+            async move {
+                let _ = released.await;
+                TaskOutcome::Process {
+                    output: "after detach\n".into(),
+                    exit_code: Some(0),
+                }
+            },
+        )
+        .unwrap();
+
+    let running = runner.read_output_tail("task-promoted", 1024).unwrap();
+    assert_eq!(String::from_utf8_lossy(&running.data), "before detach\n");
+
+    let _ = release.send(());
+    assert!(matches!(
+        runner.wait("task-promoted", 2000).await,
+        TaskWaitResult::Completed(_)
+    ));
+    let settled = runner.read_output_tail("task-promoted", 1024).unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&settled.data),
+        "before detach\nafter detach\n"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_task_carries_parent_call_model_and_thinking_effort() {
+    let (_tmp, runner) = runner();
+    let events: CapturedEvents = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    runner.set_event_sink(Arc::new(move |session, event| {
+        sink.lock()
+            .unwrap()
+            .push((session.map(str::to_string), event));
+    }));
+
+    runner
+        .spawn_agent_task_with_meta(
+            TaskSpawnMeta {
+                session_id: Some("sess-agent"),
+                kind: "subagent",
+                subagent_type: Some("explore"),
+                agent_id: Some("agent-1"),
+                timeout_ms: None,
+            },
+            TaskAgentInfo {
+                parent_tool_call_id: Some("call-agent-1"),
+                model: Some("kimi-k2"),
+                thinking_effort: Some("high"),
+            },
+            "task-agent".into(),
+            "Subagent explore: audit".into(),
+            async { TaskOutcome::Completed("done".into()) },
+        )
+        .unwrap();
+
+    let started = {
+        let lock = events.lock().unwrap();
+        lock[0].1.clone()
+    };
+    assert_eq!(started["type"], "task.started");
+    assert_eq!(started["info"]["kind"], "agent");
+    assert_eq!(started["info"]["parentToolCallId"], "call-agent-1");
+    assert_eq!(started["info"]["model"], "kimi-k2");
+    assert_eq!(started["info"]["thinkingEffort"], "high");
+
+    let entry = runner.entry("task-agent").expect("the entry survives");
+    assert_eq!(entry["parent_tool_call_id"], "call-agent-1");
+    assert_eq!(entry["model"], "kimi-k2");
+    assert_eq!(entry["thinking_effort"], "high");
+
+    assert!(matches!(
+        runner.wait("task-agent", 2000).await,
+        TaskWaitResult::Completed(_)
+    ));
+}
+
+#[test]
+fn a_zero_exit_code_process_task_settles_as_completed() {
+    let (status, output, exit_code) = TaskOutcome::Process {
+        output: "ok".into(),
+        exit_code: Some(0),
+    }
+    .settle();
+    assert_eq!(status, TaskStatus::Completed);
+    assert_eq!(output.as_deref(), Some("ok"));
+    assert_eq!(exit_code, Some(0));
 }
 
 /// The bug this whole change exists for: a task whose work failed used to
@@ -1682,4 +1857,41 @@ async fn a_malformed_task_domain_is_not_overwritten_by_a_settle() {
         original,
         "the mirror must not replace a malformed task domain"
     );
+}
+
+#[tokio::test]
+async fn question_tasks_carry_their_dialog_metadata() {
+    let (_tmp, runner) = runner();
+    runner
+        .spawn_question_task(
+            Some("sess-q"),
+            "question-aaaaaaaa".to_string(),
+            "Which one?".to_string(),
+            2,
+            Some("call_1"),
+            async { TaskOutcome::Completed("{}".to_string()) },
+        )
+        .unwrap();
+    let wire = runner.entry("question-aaaaaaaa").unwrap();
+    assert_eq!(wire["kind"], json!("question"));
+    assert_eq!(wire["questionCount"], json!(2));
+    assert_eq!(wire["toolCallId"], json!("call_1"));
+
+    runner
+        .spawn_task_with_meta(
+            TaskSpawnMeta {
+                session_id: Some("sess-q"),
+                kind: "bash",
+                subagent_type: None,
+                agent_id: None,
+                timeout_ms: None,
+            },
+            "bash-aaaaaaaa".to_string(),
+            "echo hi".to_string(),
+            async { TaskOutcome::Completed("hi".to_string()) },
+        )
+        .unwrap();
+    let wire = runner.entry("bash-aaaaaaaa").unwrap();
+    assert!(wire.get("questionCount").is_none());
+    assert!(wire.get("toolCallId").is_none());
 }

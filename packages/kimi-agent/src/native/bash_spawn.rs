@@ -1,14 +1,3 @@
-//! Managed bash processes — spawn / wait / kill / dispose lifecycle.
-//!
-//! Implements the `nativeBashSpawn` family: a process is spawned from a full
-//! argv (no shell detection — the caller passes the shell as `argv[0]`), its
-//! stdout/stderr are streamed to the host as incremental UTF-8 events, and the
-//! process tree can be killed on demand or on wall-clock timeout.
-//!
-//! The napi layer (`napi_bindings.rs`) only adapts the event callback to a
-//! ThreadsafeFunction; all logic here is plain Rust so it is unit-testable
-//! without a Node runtime.
-
 use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
@@ -18,13 +7,10 @@ use std::time::{Duration, Instant};
 
 use crate::native::bash::kill_process_tree;
 
-/// Interval between exit-status polls.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(10);
-/// Bound on how long the watcher keeps polling after a timeout kill before
-/// it gives up and reports `-1` (a failed kill would otherwise spin forever).
+
 const POST_KILL_EXIT_GRACE: Duration = Duration::from_secs(5);
-/// Bound on how long the watcher waits for the pipe readers to drain after
-/// the child exits, so every output event precedes the `exit` event.
+
 const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,9 +18,7 @@ pub enum BashSpawnEventKind {
     Stdout,
     Stderr,
     Exit,
-    /// Reserved for the wire contract; the native side reports spawn failures
-    /// by throwing synchronously so the host can fall back, so this variant
-    /// is never emitted here.
+
     #[allow(dead_code)]
     Error,
 }
@@ -59,7 +43,6 @@ pub struct BashSpawnEvent {
     pub error: Option<String>,
 }
 
-/// Final exit verdict, cached in the registry when the child settles.
 #[derive(Debug, Clone)]
 pub struct BashExitOutcome {
     pub exit_code: i32,
@@ -86,10 +69,6 @@ fn take_registry_entry(id: u32) -> Option<ManagedBash> {
     registry().remove(&id)
 }
 
-/// Spawn a process from a full argv (argv[0] is the program, no shell
-/// detection), close its stdin, and stream stdout/stderr to `on_event`.
-/// Returns `(handle id, pid)`. A spawn failure returns `Err` so the host can
-/// fall back to its own spawn path.
 pub fn spawn_managed(
     argv: &[String],
     cwd: Option<&str>,
@@ -113,7 +92,7 @@ pub fn spawn_managed(
             cmd.env(key, value);
         }
     }
-    // Own process group so a timeout/kill takes the whole tree down.
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -121,10 +100,8 @@ pub fn spawn_managed(
     }
     #[cfg(windows)]
     {
-        // v2 `windowsHide: true` — a managed child must not flash a console
-        // window when the host has none.
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        cmd.creation_flags(0x08000000);
     }
 
     let mut child = cmd
@@ -169,9 +146,6 @@ fn mpsc_channel() -> (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>
     std::sync::mpsc::channel()
 }
 
-/// Watch the child until it exits (killing the tree on wall-clock timeout),
-/// cache the exit outcome for `wait_managed`, then emit the `exit` event
-/// after the pipe readers drained (bounded) so output ordering holds.
 fn watch_process(
     id: u32,
     timeout_ms: Option<i64>,
@@ -187,7 +161,7 @@ fn watch_process(
             let mut reg = registry();
             match reg.get_mut(&id) {
                 Some(entry) => entry.child.try_wait(),
-                // Handle disposed while running: the watcher just retires.
+
                 None => return,
             }
         };
@@ -234,9 +208,6 @@ fn watch_process(
         entry.exit = Some(outcome.clone());
     }
 
-    // Give the pipe readers a bounded window so all stdout/stderr events are
-    // enqueued before the exit event (a backgrounded grandchild holding the
-    // pipe must not hang the exit delivery — same trade-off as bash_exec).
     let drain_deadline = Instant::now() + PIPE_DRAIN_GRACE;
     for rx in [&stdout_done, &stderr_done] {
         let remaining = drain_deadline.saturating_duration_since(Instant::now());
@@ -252,20 +223,15 @@ fn watch_process(
     });
 }
 
-/// Cached exit verdict of a managed process, or `None` while running or when
-/// the handle is unknown/disposed.
 pub fn exit_snapshot(id: u32) -> Option<BashExitOutcome> {
     let reg = registry();
     reg.get(&id).and_then(|entry| entry.exit.clone())
 }
 
-/// Whether a handle is currently registered (spawned, not yet disposed).
 pub fn is_managed(id: u32) -> bool {
     registry().contains_key(&id)
 }
 
-/// Kill the process tree of a managed process. `false` when the handle is
-/// unknown (never spawned, already exited and disposed, or disposed).
 pub fn kill_managed(id: u32) -> bool {
     let mut reg = registry();
     match reg.get_mut(&id) {
@@ -277,8 +243,6 @@ pub fn kill_managed(id: u32) -> bool {
     }
 }
 
-/// Drop a managed handle, killing the process tree first if it is still
-/// running. `false` when the handle is unknown.
 pub fn dispose_managed(id: u32) -> bool {
     match take_registry_entry(id) {
         Some(mut entry) => {
@@ -291,9 +255,6 @@ pub fn dispose_managed(id: u32) -> bool {
     }
 }
 
-/// Incremental UTF-8 decoder: decodes complete sequences per read chunk and
-/// holds back the trailing incomplete sequence, so multi-byte characters are
-/// never split across event payloads.
 struct Utf8StreamDecoder {
     pending: Vec<u8>,
 }
@@ -316,7 +277,6 @@ impl Utf8StreamDecoder {
         text
     }
 
-    /// Decode whatever is left (incomplete tail) lossily at end of stream.
     fn finish(&mut self) -> String {
         let text = String::from_utf8_lossy(&self.pending).to_string();
         self.pending.clear();
@@ -387,9 +347,6 @@ mod tests {
 
     fn platform_sleep_command(seconds: u32) -> Vec<String> {
         if cfg!(windows) {
-            // `timeout` refuses redirected stdin; ping is the reliable sleeper.
-            // Pin ping through `%SystemRoot%`: cmd's PATH lookup silently fails
-            // when the inherited PATH is too long.
             vec![
                 "cmd".to_string(),
                 "/c".to_string(),
@@ -403,7 +360,6 @@ mod tests {
         }
     }
 
-    /// Collects events into a shared vec and signals when the exit arrives.
     struct EventCollector {
         events: Arc<Mutex<Vec<BashSpawnEvent>>>,
         exit_rx: mpsc::Receiver<()>,
@@ -467,7 +423,7 @@ mod tests {
             .filter_map(|e| e.data.clone())
             .collect();
         assert!(stdout.contains("hello"), "stdout events: {stdout:?}");
-        // All output events precede the exit event in the event list.
+
         let exit_pos = events
             .iter()
             .position(|e| e.kind == BashSpawnEventKind::Exit)
@@ -482,13 +438,11 @@ mod tests {
         let exit = events[exit_pos].clone();
         assert_eq!(exit.exit_code, Some(0));
 
-        // wait_managed resolves with the cached outcome.
         let outcome = exit_snapshot(id).expect("exit must be cached");
         assert_eq!(outcome.exit_code, 0);
         assert!(!outcome.timed_out);
         assert!(outcome.error.is_none());
 
-        // Cleanup.
         assert!(dispose_managed(id));
     }
 
@@ -538,8 +492,7 @@ mod tests {
             .find(|e| e.kind == BashSpawnEventKind::Exit)
             .expect("exit event must be emitted");
         assert!(exit.exit_code.is_some());
-        // Timely kill: the exit event must have arrived well before the 30 s
-        // sleep would have ended.
+
         let outcome = exit_snapshot(id).expect("exit must be cached");
         assert!(outcome.timed_out, "outcome: {outcome:?}");
         assert!(dispose_managed(id));
@@ -584,8 +537,7 @@ mod tests {
         assert!(dispose_managed(id));
         assert!(!dispose_managed(id), "second dispose is a no-op");
         assert!(!kill_managed(id), "handle is gone after dispose");
-        // The watcher thread retires without emitting an exit event; give it
-        // a moment and make sure nothing panics.
+
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -662,7 +614,7 @@ mod tests {
     fn test_utf8_decoder_splits_multibyte_across_chunks() {
         let mut decoder = Utf8StreamDecoder::new();
         let bytes = "中文输出".as_bytes();
-        // Split inside the first multi-byte sequence.
+
         let head = decoder.push(&bytes[..2]);
         assert!(head.is_empty(), "incomplete sequence must be held back");
         let rest = decoder.push(&bytes[2..]);
@@ -674,7 +626,7 @@ mod tests {
     #[test]
     fn test_utf8_decoder_finish_lossy() {
         let mut decoder = Utf8StreamDecoder::new();
-        let head = decoder.push(&[0xe4, 0xb8]); // incomplete 中
+        let head = decoder.push(&[0xe4, 0xb8]);
         assert!(head.is_empty());
         let tail = decoder.finish();
         assert!(!tail.is_empty(), "incomplete tail is decoded lossily");

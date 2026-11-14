@@ -609,7 +609,7 @@ impl McpClient {
     pub async fn probe_liveness(&self) -> bool {
         match self.ping().await {
             Ok(()) => true,
-            Err(McpError::JsonRpc { .. }) => true,
+            Err(error @ McpError::JsonRpc { .. }) => !error.is_request_timeout(),
             Err(_) => false,
         }
     }
@@ -736,7 +736,10 @@ impl McpClient {
                 match tokio::time::timeout(wait, rx).await {
                     Ok(Ok(val)) => {
                         if let Some(err) = val.get("error") {
-                            return Err(McpError::json_rpc(format!("MCP error: {err}")));
+                            return Err(McpError::json_rpc(
+                                err.get("code").and_then(serde_json::Value::as_i64),
+                                format!("MCP error: {err}"),
+                            ));
                         }
                         Ok(val.get("result").cloned().unwrap_or(Value::Null))
                     }
@@ -828,7 +831,7 @@ impl McpClient {
             .cloned()
             .unwrap_or_else(|| Value::Array(Vec::new()));
         serde_json::from_value(tools_val)
-            .map_err(|e| McpError::transport(format!("Failed to parse tools list: {e}")))
+            .map_err(|e| McpError::Protocol(format!("Failed to parse tools list: {e}")))
     }
 
     /// Call an MCP tool (`tools/call`).
@@ -855,8 +858,7 @@ impl McpClient {
         });
 
         let res = self.send_request("tools/call", params).await?;
-        serde_json::from_value(res)
-            .map_err(|e| McpError::transport(format!("Failed to parse tool call result: {e}")))
+        to_mcp_tool_result(res)
     }
 }
 

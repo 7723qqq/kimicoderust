@@ -113,6 +113,9 @@ pub fn build_request_for_model(
     for m in messages {
         match m.role.as_str() {
             "system" => {
+                if m.content.is_empty() && m.blocks.is_empty() {
+                    continue;
+                }
                 if !system.is_empty() {
                     system.push_str("\n\n");
                 }
@@ -933,6 +936,7 @@ mod tests {
                     args_parse_error: None,
                 }],
                 tool_call_id: None,
+                tools: Vec::new(),
             },
             WireMessage {
                 role: "tool".into(),
@@ -940,6 +944,7 @@ mod tests {
                 blocks: vec![],
                 tool_calls: vec![],
                 tool_call_id: Some("call_abc_123".into()),
+                tools: Vec::new(),
             },
         ];
 
@@ -990,6 +995,7 @@ mod tests {
                     args_parse_error: None,
                 }],
                 tool_call_id: None,
+                tools: Vec::new(),
             },
             WireMessage {
                 role: "tool".into(),
@@ -1007,6 +1013,7 @@ mod tests {
                 ],
                 tool_calls: vec![],
                 tool_call_id: Some("call_abc_123".into()),
+                tools: Vec::new(),
             },
         ];
 

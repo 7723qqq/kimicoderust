@@ -24,6 +24,7 @@ async fn fork_inherits_conversation_history_and_runs_natively() {
                 args_parse_error: None,
             }],
             tool_call_id: None,
+            tools: Vec::new(),
             prompt_id: None,
             origin: None,
         },

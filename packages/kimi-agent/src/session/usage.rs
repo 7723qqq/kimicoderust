@@ -1,16 +1,3 @@
-//! Durable per-session token usage, ported from v2's usage agent model
-//! (`agent-core-v2/src/session/usage/usageAgentModel.ts`).
-//!
-//! v2 keeps `byModel` in a durable agent model fed by `UsageRecord` events,
-//! derives `total` as the sum of every model bucket, and tracks the current
-//! turn separately. The Rust engine has no agent-state layer, so the buckets
-//! live in the session store's state domain (`domain = "usage"`, `key = the
-//! session id`), which is the same seam `agent_config` and `metadata` use.
-//!
-//! The wire shape is v2's `UsageStatus` in camelCase (`byModel`, `total`,
-//! `currentTurn`), with each bucket carrying the four `TokenUsage` counters
-//! (`inputOther`, `output`, `inputCacheRead`, `inputCacheCreation`).
-
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -20,12 +7,8 @@ use serde_json::Value;
 use crate::rpc::types::TokenUsage;
 use crate::session::sqlite_store::SqliteSessionStore;
 
-/// The state domain the buckets live in (`agent_config` / `metadata` precedent).
 const USAGE_DOMAIN: &str = "usage";
 
-/// A persisted usage document that parses as JSON but not as this module's
-/// shape. Reported rather than defaulted: a default written back over the row
-/// would reset the session's cumulative counters.
 #[derive(Debug)]
 struct UsageShapeError {
     session_id: String,
@@ -48,7 +31,6 @@ impl std::error::Error for UsageShapeError {
     }
 }
 
-/// One model's (or the session's) four token counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageCounters {
@@ -87,7 +69,6 @@ impl UsageCounters {
     }
 }
 
-/// The persisted half: model buckets plus the most recent turn's counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedUsage {
@@ -95,20 +76,17 @@ struct PersistedUsage {
     by_model: BTreeMap<String, UsageCounters>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     current_turn: Option<UsageCounters>,
-    /// The slice of `by_model` spent on compaction requests. A separate bucket
-    /// keeps `byModel` billable in full while per-turn statistics can subtract
-    /// the compaction work instead of diluting it into chat turns.
+
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     compaction_by_model: BTreeMap<String, UsageCounters>,
 }
 
-/// v2 `UsageStatus`: the model buckets, their sum, and the current turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageStatus {
     pub by_model: BTreeMap<String, UsageCounters>,
     pub total: UsageCounters,
     pub current_turn: Option<UsageCounters>,
-    /// The compaction share of [`Self::by_model`] / [`Self::total`].
+
     pub compaction_by_model: BTreeMap<String, UsageCounters>,
     pub compaction_total: UsageCounters,
 }
@@ -132,11 +110,6 @@ impl UsageStatus {
         }
     }
 
-    /// Fold one finished turn into the model's bucket (v2
-    /// `UsageAgentModel.record`): the bucket and the total grow, and the turn
-    /// becomes `currentTurn`. v2 records every turn, including a zero-usage
-    /// one — the bucket entry and `currentTurn` must still be created, so a
-    /// caller can tell "a turn ran" from "no turn ran".
     pub fn record(&mut self, model: &str, usage: &TokenUsage) {
         let counters = UsageCounters::from_token_usage(usage);
         self.by_model
@@ -147,10 +120,6 @@ impl UsageStatus {
         self.current_turn = Some(counters);
     }
 
-    /// Fold a compaction request into the model's bucket while tagging it as
-    /// compaction work. It counts toward `by_model` / `total` (v2 records every
-    /// request there), but not toward `currentTurn` — a compaction is not a
-    /// chat turn.
     pub fn record_compaction(&mut self, model: &str, usage: &TokenUsage) {
         let counters = UsageCounters::from_token_usage(usage);
         self.by_model
@@ -165,9 +134,6 @@ impl UsageStatus {
         self.compaction_total.add(counters);
     }
 
-    /// Rebuild a status from the wire snapshot (`byModel` + `currentTurn`;
-    /// `total` is re-derived so a stale serialized total cannot disagree with
-    /// the buckets).
     pub fn from_json(value: &Value) -> Self {
         let by_model = value
             .get("byModel")
@@ -204,15 +170,12 @@ impl UsageStatus {
         }
     }
 
-    /// Parse the JSON snapshot the host persists across handle builds.
     pub fn from_json_str(raw: &str) -> Self {
         serde_json::from_str::<Value>(raw)
             .map(|value| Self::from_json(&value))
             .unwrap_or_default()
     }
 
-    /// The `AgentStatusUpdated.usage` payload, or `None` when nothing has been
-    /// recorded (v2's status is empty until the first `UsageRecord`).
     pub fn to_json(&self) -> Option<Value> {
         if self.by_model.is_empty() && self.current_turn.is_none() {
             return None;
@@ -244,9 +207,6 @@ impl UsageStatus {
     }
 }
 
-/// Read the persisted buckets. Only an absent row is empty (`None`); a failed
-/// read is returned to the caller, because a default here would be written back
-/// over the row and reset the session's cumulative counters.
 fn load(store: &SqliteSessionStore, session_id: &str) -> Result<PersistedUsage, rusqlite::Error> {
     let Some(value) = store.get_state(USAGE_DOMAIN, session_id)? else {
         return Ok(PersistedUsage::default());
@@ -263,10 +223,6 @@ fn load(store: &SqliteSessionStore, session_id: &str) -> Result<PersistedUsage, 
     })
 }
 
-/// Fold one finished turn's usage into the session's model bucket and refresh
-/// `currentTurn`. v2 records zero-usage turns too, so the bucket entry and
-/// `currentTurn` are created even when every counter is zero — "a turn ran"
-/// stays observable.
 pub fn record_turn(
     store: &SqliteSessionStore,
     session_id: &str,
@@ -286,10 +242,6 @@ pub fn record_turn(
     store.put_state(USAGE_DOMAIN, session_id, &value)
 }
 
-/// Fold one compaction request's usage into the session's model bucket. It
-/// grows `byModel` / `total` (the billable totals) and the compaction slice,
-/// but leaves `currentTurn` alone — a compaction must not look like a chat
-/// turn to per-turn statistics.
 pub fn record_compaction(
     store: &SqliteSessionStore,
     session_id: &str,
@@ -313,13 +265,7 @@ pub fn record_compaction(
     store.put_state(USAGE_DOMAIN, session_id, &value)
 }
 
-/// Read the session's usage status. Sessions written before this module existed
-/// have per-turn usage in the `turns` table but no buckets; reconstruct them
-/// against `fallback_model` (the session's configured model) so an upgraded
-/// session does not report zero forever. The buckets win once they exist.
 pub fn status(store: &SqliteSessionStore, session_id: &str, fallback_model: &str) -> UsageStatus {
-    // Read-only path: a failed read must not rewrite anything, so falling back
-    // to the empty snapshot here loses nothing (unlike `record_turn`).
     let persisted = load(store, session_id).unwrap_or_default();
     if !persisted.by_model.is_empty() || persisted.current_turn.is_some() {
         return UsageStatus::from_persisted(persisted);
@@ -328,7 +274,14 @@ pub fn status(store: &SqliteSessionStore, session_id: &str, fallback_model: &str
     let mut total = UsageCounters::default();
     let mut current_turn = None;
     if let Ok(turns) = store.list_turns(session_id) {
+        let active = crate::session::wire_journal::active_turn_numbers(store, session_id);
         for turn in &turns {
+            if active
+                .as_ref()
+                .is_some_and(|active| !active.contains(&(turn.turn_number as i64)))
+            {
+                continue;
+            }
             if let Some(usage) = &turn.usage {
                 let counters = UsageCounters::from_token_usage(usage);
                 total.add(counters);
@@ -404,9 +357,6 @@ mod tests {
 
     #[test]
     fn a_zero_usage_turn_still_creates_the_bucket_and_current_turn() {
-        // v2 `UsageAgentModel.record` runs for every turn, zero usage included:
-        // `byModel[model]` exists and `currentTurn` is set. Skipping zero hid
-        // "a turn ran with no billable usage" from the status readers.
         let store = SqliteSessionStore::in_memory().unwrap();
         store.create_session("sess-zero", None).unwrap();
         record_turn(&store, "sess-zero", "model-a", &usage(0, 0)).unwrap();
@@ -492,9 +442,6 @@ mod tests {
             .unwrap()
         };
 
-        // Blob storage makes the typed `value` read fail while the row stays
-        // writable — exactly the "read errors, write succeeds" case that used
-        // to reset the counters and overwrite the row.
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute(
@@ -526,8 +473,6 @@ mod tests {
             "a failed read must not overwrite the row with a zeroed snapshot"
         );
 
-        // Restoring the intact payload proves the counter survived the failed
-        // turn: the write-back never ran.
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute(
@@ -544,7 +489,6 @@ mod tests {
             "the failed turn must not reset the accumulated counters"
         );
 
-        // A successful read resumes accumulation instead of starting over.
         record_turn(&store, "sess-read-error", "model-a", &usage(5, 1)).unwrap();
         assert_eq!(
             status(&store, "sess-read-error", "model-a")

@@ -146,6 +146,7 @@ impl NativeToolset {
         sandbox: &Sandbox,
         bridge: &ShellPathBridge,
         args: &Value,
+        event_log: bool,
     ) -> Option<ExecutableToolResult> {
         let Some(path) = args.get("path").and_then(Value::as_str) else {
             return Some(err_result(
@@ -631,6 +632,11 @@ impl NativeToolset {
                     "If the answer may be further on, continue with Next Read or find the section with Grep instead of answering from this page alone.".into(),
                 );
             }
+        }
+        if event_log {
+            parts.push(
+                "Kimi Code agent event log: read one record at a time (n_lines=1); follow Next Read for the rest of a longer record or extract fields with Bash.".into(),
+            );
         }
         if style == line_endings::LineEndingStyle::Mixed {
             parts.push(

@@ -754,6 +754,16 @@ export function resolveImageLimits(config: {
   return { readByteBudget, maxEdgePx };
 }
 
+/** Whole-request UTF-8 byte budget for the projector (env > config). */
+export function resolveLlmRequestByteBudget(config: {
+  llmRequester?: { requestByteBudget?: number };
+}): number | undefined {
+  return (
+    positiveInt(process.env['KIMI_LLM_REQUEST_BYTE_BUDGET']) ??
+    config.llmRequester?.requestByteBudget
+  );
+}
+
 /** `[background]` knobs the Rust engine applies to its task runner + Bash tool. */
 export interface BackgroundLimits {
   /** `[background].kill_grace_period_ms`: cooperative-stop grace. */

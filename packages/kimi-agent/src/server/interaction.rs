@@ -1,9 +1,3 @@
-//! In-memory interaction manager for interactive questions and tool execution
-//! approvals in the standalone HTTP/WS server.
-//!
-//! Mirrors kap-server's `ISessionQuestionService` and `ISessionApprovalService`,
-//! bridging async engine callbacks to HTTP REST endpoints and WebSocket events.
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -26,55 +20,34 @@ struct ActiveQuestion {
 
 struct ActiveApproval {
     session_id: String,
-    /// The turn whose tool call is blocked on this approval (v2 interaction tag
-    /// `turnId`). Kept so a finished turn can sweep its own leftovers without
-    /// touching a concurrent turn's pending prompts.
+
     turn_id: String,
     tool_name: String,
     tool_call_id: String,
     arguments: Value,
     action: String,
-    /// Why the engine is asking, already in the host's locale. `None` when the
-    /// engine has no policy-specific explanation; kept so a late-joining
-    /// client listing pending approvals sees the same text the original
-    /// `event.approval.requested` carried.
+
     reason: Option<String>,
-    /// The user's own ask rule that fired, when one did. Kept for the same
-    /// reason as `reason`: without it a client that reconnects and lists
-    /// pending approvals cannot offer "for this session" on that approval,
-    /// because it never learns what would be remembered.
+
     session_approval_rule: Option<String>,
     created_at_iso: String,
     tx: oneshot::Sender<PermissionDecision>,
 }
 
-/// Thread-safe manager for pending interactions within active sessions.
 #[derive(Default)]
 pub struct InteractionManager {
     questions: Mutex<HashMap<String, ActiveQuestion>>,
     approvals: Mutex<HashMap<String, ActiveApproval>>,
     hub: Mutex<Option<Arc<crate::server::hub::EventHub>>>,
-    /// Optional activity notifier: an interaction starting or stopping to
-    /// block the session moves the engine's `awaiting_approval` phase. The
-    /// engine installs it whenever a manager attaches (it owns the activity
-    /// registry), so the closure never captures the manager back.
+
     activity_notifier: Mutex<Option<crate::server::activity::ActivityNotifier>>,
 }
 
-/// One interaction lifecycle signal for the activity tracker.
-/// Re-exported from [`crate::server::activity`], where the phase fold lives.
 pub use crate::server::activity::ActivitySignal;
 
-/// How long a pending approval may sit unanswered before it expires (the
-/// blocked call is denied). 24h matches upstream kap-server's
-/// `APPROVAL_EXPIRY_MS` (`routes/approvals.ts`), which also publishes it as
-/// `expires_at` on the request.
 const APPROVAL_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
 impl InteractionManager {
-    /// Deny and retire every approval older than [`APPROVAL_TTL_MS`],
-    /// announcing each as `event.approval.expired`. Swept lazily on the
-    /// approval access paths — an unanswered approval cannot leak forever.
     fn sweep_expired_approvals(&self) {
         self.sweep_expired_before(chrono::Utc::now());
     }
@@ -146,8 +119,6 @@ impl InteractionManager {
         }
     }
 
-    /// Install the activity notifier (the engine does this when a manager
-    /// attaches). See [`ActivitySignal`].
     pub fn set_activity_notifier(&self, notifier: crate::server::activity::ActivityNotifier) {
         *self
             .activity_notifier
@@ -155,7 +126,6 @@ impl InteractionManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(notifier);
     }
 
-    /// Fire the activity notifier, if one is installed.
     fn notify_activity(&self, session_id: &str, signal: ActivitySignal) {
         if let Some(notifier) = self
             .activity_notifier
@@ -167,7 +137,6 @@ impl InteractionManager {
         }
     }
 
-    /// Register a pending interactive question from the engine turn loop.
     pub fn register_question(
         &self,
         session_id: &str,
@@ -194,8 +163,6 @@ impl InteractionManager {
             lock.insert(qid.clone(), active);
         }
 
-        // kimi-web vocabulary (`event.question.requested`): the question
-        // blocks the session until answered or dismissed.
         let wire_questions: Vec<Value> = req
             .questions
             .iter()
@@ -252,7 +219,6 @@ impl InteractionManager {
         rx
     }
 
-    /// List all currently pending questions for a session.
     pub fn list_questions(&self, session_id: &str) -> Vec<Value> {
         let lock = self
             .questions
@@ -307,14 +273,6 @@ impl InteractionManager {
         items
     }
 
-    /// The interaction kind currently blocking the session, in the
-    /// kap-server `SessionPendingInteraction` vocabulary.
-    ///
-    /// v2 `sessionActivityService.ts:267-271` settles **approval before
-    /// question**. An approval gates tool execution, so while both are parked
-    /// the session is effectively waiting to run, not waiting for an answer;
-    /// reporting `question` would mislabel the state and let the UI hide the
-    /// approval behind a question card.
     pub fn pending_interaction_kind(&self, session_id: &str) -> Option<&'static str> {
         if self
             .approvals
@@ -337,7 +295,6 @@ impl InteractionManager {
         None
     }
 
-    /// Resolve a pending question with human answers.
     pub fn resolve_question(
         &self,
         question_id: &str,
@@ -382,7 +339,6 @@ impl InteractionManager {
         }
     }
 
-    /// Dismiss a pending question without answering.
     pub fn dismiss_question(&self, question_id: &str) -> bool {
         let active = {
             let mut lock = self
@@ -422,7 +378,46 @@ impl InteractionManager {
         }
     }
 
-    /// Register a pending permission approval request.
+    pub fn cancel_question(&self, question_id: &str, reason: &str) -> bool {
+        let active = {
+            let mut lock = self
+                .questions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            lock.remove(question_id)
+        };
+        if let Some(q) = active {
+            let resp = AskQuestionResponse {
+                answers: HashMap::new(),
+                method: None,
+                note: None,
+                cancelled: Some(true),
+                reason: Some(reason.to_string()),
+            };
+            self.publish_event(
+                &q.session_id,
+                crate::events::EngineEvent::Custom(json!({
+                    "type": "event.question.dismissed",
+                    "question_id": question_id,
+                    "reason": reason,
+                    "dismissed_at": chrono::Utc::now().to_rfc3339(),
+                })),
+            );
+            self.publish_event(
+                &q.session_id,
+                crate::events::EngineEvent::SessionStatusChanged {
+                    status: "running".into(),
+                    previous_status: "awaiting_question".into(),
+                },
+            );
+            self.notify_activity(&q.session_id, ActivitySignal::Resolved);
+            let _ = q.tx.send(resp);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn register_approval(
         &self,
         session_id: &str,
@@ -455,9 +450,6 @@ impl InteractionManager {
             lock.insert(approval_id.clone(), active);
         }
 
-        // kimi-web vocabulary (`event.approval.requested`): the shape the
-        // Web client's `toAppApprovalRequest` folds (snake_case, with the
-        // display form of the tool input).
         let mut payload = json!({
             "type": "event.approval.requested",
             "approval_id": approval_id,
@@ -467,20 +459,17 @@ impl InteractionManager {
             "action": action,
             "tool_input_display": req.arguments,
             "created_at": now_iso,
-            // The TTL surfaced on the wire (upstream `expires_at`), so a
-            // client can show its own countdown instead of guessing.
+
+
             "expires_at": (chrono::DateTime::parse_from_rfc3339(&now_iso)
                 .map(|t| (t + chrono::Duration::milliseconds(APPROVAL_TTL_MS)).to_rfc3339())
                 .unwrap_or_else(|_| now_iso)),
         });
-        // Only present when the engine actually has an explanation, so the wire
-        // stays unchanged for the policies that carry none.
+
         if let Some(reason) = &req.reason {
             payload["reason"] = json!(reason);
         }
-        // The candidate for "approve for this session": the user's own ask rule
-        // that fired. Absent whenever no such rule did, so a client can tell
-        // "remembering this is possible" from "there is nothing to remember".
+
         if let Some(rule) = &req.session_approval_rule {
             payload["session_approval_rule"] = json!(rule);
         }
@@ -503,7 +492,6 @@ impl InteractionManager {
         (approval_id, rx)
     }
 
-    /// List all currently pending tool approvals for a session.
     pub fn list_approvals(&self, session_id: &str) -> Vec<Value> {
         self.sweep_expired_approvals();
         let lock = self
@@ -522,13 +510,11 @@ impl InteractionManager {
                     "tool_input_display": a.arguments,
                     "created_at": a.created_at_iso,
                 });
-                // Same conditional as the requested event: a late joiner listing
-                // pending approvals must see the explanation the original event
-                // carried, and nothing extra when there was none.
+
                 if let Some(reason) = &a.reason {
                     item["reason"] = json!(reason);
                 }
-                // Mirrored like `reason`, and for the same late-joiner reason.
+
                 if let Some(rule) = &a.session_approval_rule {
                     item["session_approval_rule"] = json!(rule);
                 }
@@ -544,7 +530,6 @@ impl InteractionManager {
         items
     }
 
-    /// Resolve a pending tool approval (approved or rejected).
     pub fn resolve_approval(
         &self,
         approval_id: &str,
@@ -590,14 +575,6 @@ impl InteractionManager {
         }
     }
 
-    /// Cancel every interaction a finished turn left pending (v2
-    /// `cancelInteractionsForTurn`, `interactionWiring.ts:35-51`).
-    ///
-    /// A turn only returns after its tool calls do, so an entry still tagged
-    /// with a finished turn is one nobody will await again: left in the maps it
-    /// keeps a reconnecting client listing a phantom approval and leaks the
-    /// blocked receiver. Scoped by `(session, turn)`, so a concurrent turn in
-    /// the same session keeps its own prompts. Returns how many were swept.
     pub fn cancel_turn(&self, session_id: &str, turn_id: &str, reason: &str) -> usize {
         let mut cancelled = 0;
         let mut q_lock = self
@@ -641,7 +618,6 @@ impl InteractionManager {
         cancelled
     }
 
-    /// Cancel all pending interactions when a session is aborted, deleted, or turns complete.
     pub fn cancel_session(&self, session_id: &str) {
         let mut q_lock = self
             .questions
@@ -693,6 +669,8 @@ mod tests {
             question_id: "q_test_1".into(),
             turn_id: "turn-1".into(),
             tool_call_id: "call_abc".into(),
+            agent_id: None,
+            session_id: None,
             background: false,
             timeout_ms: None,
             questions: vec![AskQuestionItem {
@@ -723,7 +701,6 @@ mod tests {
         assert_eq!(list[0]["questions"][0]["options"][0]["label"], "Vanilla");
         assert_eq!(list[0]["questions"][0]["options"][1]["label"], "Chocolate");
 
-        // Resolving non-existent question returns false
         assert!(!manager.resolve_question("q_non_existent", HashMap::new(), None));
 
         let mut answers = HashMap::new();
@@ -737,7 +714,6 @@ mod tests {
         assert_eq!(resp.method.as_deref(), Some("click"));
         assert!(resp.cancelled.is_none());
 
-        // After resolving, list is empty
         assert!(manager.list_questions("sess-1").is_empty());
     }
 
@@ -764,6 +740,8 @@ mod tests {
                 question_id: "q_sig".into(),
                 turn_id: "turn-sig".into(),
                 tool_call_id: "call_sig".into(),
+                agent_id: None,
+                session_id: None,
                 background: false,
                 timeout_ms: None,
                 questions: vec![],
@@ -813,6 +791,8 @@ mod tests {
                 question_id: "q_kind".into(),
                 turn_id: "turn-kind".into(),
                 tool_call_id: "call_kind".into(),
+                agent_id: None,
+                session_id: None,
                 background: false,
                 timeout_ms: None,
                 questions: vec![AskQuestionItem {
@@ -827,7 +807,7 @@ mod tests {
             },
         );
         assert_eq!(manager.pending_interaction_kind("sess-1"), Some("question"));
-        // Another session is not blocked by this one's question.
+
         assert_eq!(manager.pending_interaction_kind("sess-2"), None);
 
         assert!(manager.resolve_question("q_kind", HashMap::new(), None));
@@ -862,20 +842,19 @@ mod tests {
             question_id: "q_to_dismiss".into(),
             turn_id: "turn-d".into(),
             tool_call_id: "call_d".into(),
+            agent_id: None,
+            session_id: None,
             background: false,
             timeout_ms: None,
             questions: vec![],
         };
         let mut rx = manager.register_question("sess-d", req);
 
-        // Consume registration events
         let _ = sub.recv().await.unwrap();
         let _ = sub.recv().await.unwrap();
 
-        // Dismiss non-existent returns false
         assert!(!manager.dismiss_question("q_non_existent"));
 
-        // Dismiss existing question
         assert!(manager.dismiss_question("q_to_dismiss"));
         let resp = rx.try_recv().unwrap();
         assert!(resp.answers.is_empty());
@@ -884,7 +863,6 @@ mod tests {
             Some("User dismissed the question without answering.")
         );
 
-        // Verify dismissal event broadcast
         let ev_dismissed = sub.recv().await.unwrap();
         assert_eq!(ev_dismissed.event.event_type(), "event.question.dismissed");
         assert_eq!(
@@ -904,7 +882,6 @@ mod tests {
     async fn test_approval_registration_and_allow_and_deny() {
         let manager = InteractionManager::new();
 
-        // 1. Approval: allowed = true
         let req_allow = PermissionCheckRequest {
             tool_name: "Read".into(),
             session_approval_rule: None,
@@ -927,7 +904,6 @@ mod tests {
         assert!(decision_allow.is_allow());
         assert_eq!(decision_allow.decision, "allow");
 
-        // 2. Approval: allowed = false (deny with reason)
         let req_deny = PermissionCheckRequest {
             tool_name: "Bash".into(),
             session_approval_rule: None,
@@ -939,7 +915,6 @@ mod tests {
         let (aid_deny, mut rx_deny) =
             manager.register_approval("sess-appr", req_deny, "execute bash command");
 
-        // Resolving non-existent approval returns false
         assert!(!manager.resolve_approval("appr_non_existent", true, None));
 
         assert!(manager.resolve_approval(&aid_deny, false, Some("Forbidden by policy".into())));
@@ -955,11 +930,12 @@ mod tests {
     async fn test_cancel_session_interaction_isolation() {
         let manager = InteractionManager::new();
 
-        // Register in session A
         let q_a = AskQuestionRequest {
             question_id: "q_sess_a".into(),
             turn_id: "t_a".into(),
             tool_call_id: "c_a".into(),
+            agent_id: None,
+            session_id: None,
             background: false,
             timeout_ms: None,
             questions: vec![],
@@ -976,11 +952,12 @@ mod tests {
         };
         let (_aid_a, mut rx_appr_a) = manager.register_approval("sess-A", appr_a, "action A");
 
-        // Register in session B
         let q_b = AskQuestionRequest {
             question_id: "q_sess_b".into(),
             turn_id: "t_b".into(),
             tool_call_id: "c_b".into(),
+            agent_id: None,
+            session_id: None,
             background: false,
             timeout_ms: None,
             questions: vec![],
@@ -997,20 +974,16 @@ mod tests {
         };
         let (_aid_b, mut rx_appr_b) = manager.register_approval("sess-B", appr_b, "action B");
 
-        // Cancel session A only
         manager.cancel_session("sess-A");
 
-        // Session A question cancelled
         let resp_a = rx_q_a.try_recv().unwrap();
         assert_eq!(resp_a.cancelled, Some(true));
         assert_eq!(resp_a.reason.as_deref(), Some("session_aborted"));
 
-        // Session A approval denied
         let decision_a = rx_appr_a.try_recv().unwrap();
         assert!(!decision_a.is_allow());
         assert_eq!(decision_a.reason.as_deref(), Some("Session aborted"));
 
-        // Session B question and approval still active and untouched
         assert!(rx_q_b.try_recv().is_err());
         assert!(rx_appr_b.try_recv().is_err());
         assert_eq!(manager.list_questions("sess-B").len(), 1);
@@ -1019,9 +992,6 @@ mod tests {
         assert!(manager.list_approvals("sess-A").is_empty());
     }
 
-    /// A finished turn sweeps only its own leftovers: the same session's other
-    /// turn keeps its pending question and approval (v2
-    /// `cancelInteractionsForTurn` scopes by `turnId`).
     #[tokio::test]
     async fn test_cancel_turn_interaction_isolation() {
         let manager = InteractionManager::new();
@@ -1029,6 +999,8 @@ mod tests {
             question_id: id.into(),
             turn_id: turn.into(),
             tool_call_id: format!("c_{id}"),
+            agent_id: None,
+            session_id: None,
             background: false,
             timeout_ms: None,
             questions: vec![],
@@ -1058,13 +1030,11 @@ mod tests {
         assert!(!decision.is_allow());
         assert_eq!(decision.reason.as_deref(), Some("Turn ended"));
 
-        // The still-running turn keeps its interaction.
         assert!(rx_q_live.try_recv().is_err());
         assert!(rx_appr_live.try_recv().is_err());
         assert_eq!(manager.list_questions("sess-1").len(), 1);
         assert_eq!(manager.list_approvals("sess-1").len(), 1);
 
-        // Idempotent: nothing left to sweep.
         assert_eq!(manager.cancel_turn("sess-1", "turn-done", "turn_ended"), 0);
     }
 
@@ -1075,12 +1045,12 @@ mod tests {
 
         let mut sub = hub.attach();
 
-        // 1. Register question -> broadcasts event.question.requested &
-        // awaiting_question
         let q_req = AskQuestionRequest {
             question_id: "q_hub_1".into(),
             turn_id: "turn-1".into(),
             tool_call_id: "call_hub".into(),
+            agent_id: None,
+            session_id: None,
             background: false,
             timeout_ms: None,
             questions: vec![],
@@ -1094,7 +1064,6 @@ mod tests {
         let ev2 = sub.recv().await.unwrap();
         assert_eq!(ev2.event.event_type(), "event.session.status_changed");
 
-        // 2. Resolve question -> broadcasts event.question.answered & running
         assert!(manager.resolve_question("q_hub_1", HashMap::new(), None));
 
         let ev3 = sub.recv().await.unwrap();

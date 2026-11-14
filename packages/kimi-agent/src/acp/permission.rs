@@ -20,7 +20,7 @@ use crate::rpc::types::{
     AskQuestionRequest, AskQuestionResponse, BoxFuture, LlmChatRequest, LlmChatResponse,
     PermissionCheckRequest, PermissionDecision, ToolExecuteRequest, ToolExecuteResponse,
 };
-use crate::tools::ask_user_question::QUESTION_DISMISSED_MESSAGE;
+use crate::agent::tools::ask_user_question::ask_user_question_tool::QUESTION_DISMISSED_MESSAGE;
 
 /// Canonical option ids (v2 `approval.ts:8-10`).
 pub const APPROVE_ONCE_OPTION_ID: &str = "approve_once";
@@ -116,7 +116,7 @@ async fn run_bash_on_terminal(
     // (`NativeToolset::new` falls back to `resolve_shell(None)`), so the
     // client's terminal runs the flavor this session is configured for
     // instead of a hardcoded `sh -c` / `cmd /C`.
-    let shell = crate::native::shell::resolve_shell(None);
+    let shell = crate::native::shell::resolve_shell(None).map_err(|error| error.coded_message())?;
     let mut args = shell.args_prefix();
     args.push(command.clone());
     // The tool's own `cwd` wins; otherwise the command runs in the session's
@@ -864,7 +864,7 @@ mod tests {
                 .any(|entry| entry["name"] == "GIT_TERMINAL_PROMPT" && entry["value"] == "0")
         );
         // The shell is the engine's resolved one, not a hardcoded `sh -c`.
-        let shell = crate::native::shell::resolve_shell(None);
+        let shell = crate::native::shell::resolve_shell(None).expect("a shell resolves");
         assert_eq!(create_params["command"], shell.program);
         assert_eq!(
             create_params["args"].as_array().unwrap().len(),
@@ -979,6 +979,8 @@ mod tests {
             question_id: "qid".into(),
             turn_id: "t".into(),
             tool_call_id: "c".into(),
+            agent_id: None,
+            session_id: None,
             background: false,
             timeout_ms: None,
             questions: vec![crate::rpc::types::AskQuestionItem {

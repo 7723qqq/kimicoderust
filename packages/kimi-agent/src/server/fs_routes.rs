@@ -1,8 +1,3 @@
-//! Advanced filesystem and git routes for native Kimi Agent server.
-//!
-//! Provides handlers for `fs:git_status`, `fs:diff`, `fs:stat`, `fs:stat_many`,
-//! `fs:mkdir`, `fs:list`, and `fs:read`, adhering to kap-server REST conventions.
-
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,7 +5,6 @@ use std::path::{Path, PathBuf};
 use crate::server::router::HttpResponse;
 use crate::session::sqlite_store::SqliteSessionStore;
 
-/// Resolve effective workspace root path for a given session.
 pub fn resolve_session_workdir(store: &SqliteSessionStore, session_id: &str) -> Option<PathBuf> {
     let session = store.get_session(session_id).ok().flatten()?;
     if let Some(ref ws_id) = session.workspace_id
@@ -26,14 +20,10 @@ pub fn resolve_session_workdir(store: &SqliteSessionStore, session_id: &str) -> 
     std::env::current_dir().ok()
 }
 
-/// Helper to sanitize and resolve a path relative to workspace root, preventing directory traversal escapes.
 pub fn resolve_safe_path(work_dir: &Path, rel_path: &str) -> Result<PathBuf, HttpResponse> {
     resolve_safe_path_typed(work_dir, rel_path).map_err(|err| err.into_response())
 }
 
-/// The typed form of [`resolve_safe_path`]'s failure, so batch callers
-/// (`fs:list_many`) can tell a path escape (fails the whole call, v2
-/// `FS_PATH_ESCAPES`) apart from an ordinary per-path failure.
 enum FsPathError {
     Escapes,
     NotDirectory(String),
@@ -56,7 +46,7 @@ fn resolve_safe_path_typed(work_dir: &Path, rel_path: &str) -> Result<PathBuf, F
         .trim_start_matches('/')
         .trim_start_matches('\\');
     let candidate = work_dir.join(trimmed);
-    // If the path exists, canonicalize both and ensure work_dir prefix
+
     if candidate.exists() {
         let canon_work = work_dir
             .canonicalize()
@@ -69,14 +59,10 @@ fn resolve_safe_path_typed(work_dir: &Path, rel_path: &str) -> Result<PathBuf, F
         }
         Ok(canon_cand)
     } else {
-        // If not existing yet (e.g. for mkdir), check normalized components
         resolve_lexical(work_dir, rel_path)
     }
 }
 
-/// Lexical containment only (no canonicalize, no symlink resolution): v2's
-/// `resolveWithin(input, allowExternalSymlinks = true)` skips the
-/// realpath-roots check, so a symlink pointing outside the workspace resolves.
 fn resolve_lexical(work_dir: &Path, rel_path: &str) -> Result<PathBuf, FsPathError> {
     let trimmed = rel_path
         .trim()
@@ -100,9 +86,6 @@ fn resolve_lexical(work_dir: &Path, rel_path: &str) -> Result<PathBuf, FsPathErr
     Ok(work_dir.join(trimmed))
 }
 
-/// `resolve_safe_path` with the v2 `allow_external_symlinks` switch: when set,
-/// the symlink-escape (realpath) check is skipped and only the lexical `..`
-/// rule applies.
 pub fn resolve_safe_path_with_symlinks(
     work_dir: &Path,
     rel_path: &str,
@@ -116,9 +99,6 @@ pub fn resolve_safe_path_with_symlinks(
     resolved.map_err(|err| err.into_response())
 }
 
-/// v2 `realpathExistingPrefix`: canonicalize the longest existing prefix and
-/// reattach the non-existing tail, capping the walk at 256 levels. A path
-/// whose ancestors never resolve comes back as given.
 fn realpath_existing_prefix(abs: &Path) -> Result<PathBuf, std::io::Error> {
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut current = abs.to_path_buf();
@@ -132,7 +112,6 @@ fn realpath_existing_prefix(abs: &Path) -> Result<PathBuf, std::io::Error> {
                 return Ok(out);
             }
             Err(e) => {
-                // v2 rethrows anything but a missing path.
                 if e.kind() != std::io::ErrorKind::NotFound {
                     return Err(e);
                 }
@@ -153,8 +132,6 @@ fn realpath_existing_prefix(abs: &Path) -> Result<PathBuf, std::io::Error> {
     Ok(abs.to_path_buf())
 }
 
-/// v2 `pathHasSymlink`: true when the path itself or any ancestor up to the
-/// filesystem root is a symlink.
 fn path_has_symlink(abs: &Path) -> bool {
     let mut current = abs;
     loop {
@@ -173,10 +150,6 @@ fn path_has_symlink(abs: &Path) -> bool {
     }
 }
 
-/// v2 `symlinkDirectoryTarget`: stat follows the link; without
-/// `allow_external` the resolved real path must stay inside the workspace's
-/// real roots or the link is treated as a plain (non-directory) symlink.
-/// Returns `(is_directory, real_path)`.
 fn symlink_directory_target(
     base: &Path,
     rel_path: &str,
@@ -200,19 +173,11 @@ fn symlink_directory_target(
     (true, Some(real))
 }
 
-/// Format file entry object adhering to FsEntry schema.
-///
-/// Lstat-based (v2 `buildFsEntry` takes the lstat): a symlink reports
-/// `kind: "symlink"` with the link's own size instead of being silently
-/// resolved to its target's type — the previous `metadata()` (follow-links)
-/// form could never produce the schema's `symlink` kind.
 pub fn file_to_fs_entry(work_dir: &Path, full_path: &Path) -> Result<Value, std::io::Error> {
     let metadata = std::fs::symlink_metadata(full_path)?;
     Ok(fs_entry_from_metadata(work_dir, full_path, &metadata))
 }
 
-/// Build the FsEntry JSON from an already-taken lstat, so a directory walk
-/// stats each child exactly once.
 fn fs_entry_from_metadata(
     work_dir: &Path,
     full_path: &Path,
@@ -282,8 +247,6 @@ fn fs_entry_from_metadata(
     entry
 }
 
-/// Handle `fs:git_status` (or `fs:gitStatus`).
-/// Parsed fields of a `git status --porcelain=v2 -z` output blob.
 struct GitStatusFields {
     branch: String,
     ahead: u64,
@@ -291,15 +254,6 @@ struct GitStatusFields {
     entries: HashMap<String, Value>,
 }
 
-/// Parse the `-z` porcelain=v2 records. NUL-terminated output keeps paths with
-/// spaces, quotes, and non-ASCII characters verbatim — line-oriented parsing
-/// combined with git's core.quotePath C-quoting mangled such paths into bogus
-/// quoted directory segments (upstream #3415).
-///
-/// `path_prefix` (from `git rev-parse --show-prefix` when scoped to a
-/// sub-root) is stripped so entry keys stay relative to the requested root
-/// (v2 `parsePorcelain`'s prefix step); `filter` keeps only exact path hits
-/// (v2's `pathFilter`).
 fn parse_git_status_z(
     text: &str,
     filter: Option<&std::collections::HashSet<String>>,
@@ -343,8 +297,7 @@ fn parse_git_status_z(
                 continue;
             }
             let status = git_status_record_status(record);
-            // v2 shape: `entries` maps the path straight to the status string
-            // (`fsGitStatusResponseSchema` is a record of fsGitStatusSchema).
+
             entries.insert(wire_path, json!(status));
         }
     }
@@ -357,15 +310,12 @@ fn parse_git_status_z(
     }
 }
 
-/// The path carried by a porcelain=v2 change record (`1`/`2`/`u`/`?`).
 fn git_status_record_path(record: &str) -> Option<String> {
     if record.starts_with('1') {
-        // "1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>"
         let parts: Vec<&str> = record.split(' ').collect();
         return (parts.len() >= 9).then(|| parts[8..].join(" "));
     }
     if record.starts_with('2') {
-        // Rename: "2 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <X><score> <path>".
         let parts: Vec<&str> = record.split(' ').collect();
         return (parts.len() >= 10).then(|| parts[9..].join(" "));
     }
@@ -373,14 +323,12 @@ fn git_status_record_path(record: &str) -> Option<String> {
         return Some(path.trim().to_string());
     }
     if record.starts_with('u') {
-        // "u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>"
         let parts: Vec<&str> = record.split(' ').collect();
         return (parts.len() >= 11).then(|| parts[10..].join(" "));
     }
     None
 }
 
-/// The `fsGitStatusSchema` value of a porcelain=v2 change record.
 fn git_status_record_status(record: &str) -> &'static str {
     if record.starts_with('?') {
         return "untracked";
@@ -417,9 +365,6 @@ static PULL_REQUEST_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<PathBuf, CachedPullRequest>>,
 > = std::sync::OnceLock::new();
 
-/// Read the PR associated with the checkout's current branch. `gh pr view`
-/// also owns the detached-HEAD, missing-remote, non-PR-branch and auth failure
-/// cases: every non-zero exit or invalid payload is the wire's nullable miss.
 fn read_pull_request(cwd: &Path) -> Value {
     let cache = PULL_REQUEST_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let now = std::time::Instant::now();
@@ -452,9 +397,6 @@ fn read_pull_request(cwd: &Path) -> Value {
     value
 }
 
-/// The synchronous HTTP handlers cannot await tokio's child output. Drain
-/// stdout on a reader thread while polling the child so a full pipe cannot
-/// deadlock the five-second deadline.
 fn spawn_pull_request_lookup(cwd: &Path) -> Option<Vec<u8>> {
     use std::io::Read as _;
     use std::process::Stdio;
@@ -533,7 +475,6 @@ fn parse_pull_request(stdout: &[u8]) -> Option<Value> {
     Some(json!({ "number": number, "state": state, "url": url }))
 }
 
-/// The `fsGitStatusResponse.data` fields one `git status` run produces.
 struct GitStatusCore {
     branch: String,
     ahead: u64,
@@ -543,10 +484,6 @@ struct GitStatusCore {
     deletions: usize,
 }
 
-/// Run git status (and numstat) at `cwd`. `scope_to_cwd` mirrors v2's
-/// `scopeToCwd` (`git status -- .` plus `--show-prefix` stripping);
-/// `path_filter` mirrors v2's exact-match `pathFilter`. `None` when git is
-/// unavailable or `cwd` is not inside a work tree.
 fn git_status_at(
     cwd: &Path,
     path_filter: Option<&std::collections::HashSet<String>>,
@@ -597,7 +534,6 @@ fn git_status_at(
         entries,
     } = parse_git_status_z(&text, path_filter, path_prefix.as_str());
 
-    // v2 runs numstat only when the status is dirty and HEAD exists.
     let mut additions = 0;
     let mut deletions = 0;
     let dirty = text
@@ -613,7 +549,6 @@ fn git_status_at(
         if head_ok {
             let mut diff_args = vec!["diff", "--numstat", "HEAD", "--"];
             if let Some(filter) = path_filter {
-                // v2 sorts the filter paths for a deterministic argv.
                 let mut sorted_filter: Vec<&str> = filter.iter().map(String::as_str).collect();
                 sorted_filter.sort_unstable();
                 diff_args.extend(sorted_filter);
@@ -666,8 +601,6 @@ impl GitStatusCore {
     }
 }
 
-/// The empty-but-successful payload the fork answers when git is unavailable
-/// or the directory is not a repo (pre-existing wire contract, kept).
 fn empty_git_status_wire() -> Value {
     json!({
         "branch": "",
@@ -680,7 +613,6 @@ fn empty_git_status_wire() -> Value {
     })
 }
 
-/// v2 `fsGitStatusRequestSchema` fields.
 struct GitStatusParams {
     root: Option<String>,
     paths: Option<Vec<String>>,
@@ -738,10 +670,6 @@ fn parse_git_status_params(body: &Value) -> Result<GitStatusParams, HttpResponse
     })
 }
 
-/// v2 `resolveGitRoot`: default the session workdir; a given `root` must
-/// resolve inside the workspace and be a directory. The answer is always
-/// canonicalized so path filters and the diff scoper share one path frame
-/// (Windows `\\?\` verbatim prefixes included).
 fn resolve_git_root(work_dir: &Path, root: Option<&str>) -> Result<PathBuf, HttpResponse> {
     match root {
         None => Ok(work_dir
@@ -759,8 +687,6 @@ fn resolve_git_root(work_dir: &Path, root: Option<&str>) -> Result<PathBuf, Http
     }
 }
 
-/// Resolve `paths` against the git root the way v2's `gitStatus` does:
-/// relative inputs join the root, and the result must not escape it.
 fn git_status_path_filter(
     cwd: &Path,
     paths: &[String],
@@ -814,7 +740,6 @@ pub fn handle_git_status(work_dir: &Path, body: &Value) -> HttpResponse {
     }
 }
 
-/// The per-root outcome of a batched git query (v2 `toGitBatchError`).
 fn git_batch_entry(result: Result<Value, HttpResponse>) -> (Option<Value>, Option<Value>) {
     match result {
         Ok(v) => (Some(v), None),
@@ -823,15 +748,12 @@ fn git_batch_entry(result: Result<Value, HttpResponse>) -> (Option<Value>, Optio
                 .ok()
                 .and_then(|v| v.get("error").and_then(|e| e.as_str().map(str::to_string)))
                 .unwrap_or_else(|| "git query failed".to_string());
-            // `resolve_git_root` rejects a non-directory root; a non-repo
-            // answers the fork's empty shape instead of 40908 (see
-            // handle_git_status), so batch errors are validation-class.
+
             (None, Some(json!({ "code": 40001, "msg": msg })))
         }
     }
 }
 
-/// Run one folder-scoped git status, keeping the `Result` split batch needs.
 fn git_status_for_root(
     work_dir: &Path,
     root: &str,
@@ -851,10 +773,6 @@ fn git_status_for_root(
     })
 }
 
-/// Handle `fs:git_status:batch` (v2 `fsGitStatusBatchRequestSchema`):
-/// `{ roots: 1..=32, include_pull_request? }` → per-root results/errors.
-/// Upstream caps the fan-out at two concurrent workers; the fork's spawn-per-
-/// query is synchronous, so the results/errors maps are identical either way.
 pub fn handle_git_status_batch(work_dir: &Path, body: &Value) -> HttpResponse {
     let roots = match parse_batch_roots(body) {
         Ok(r) => r,
@@ -878,7 +796,6 @@ pub fn handle_git_status_batch(work_dir: &Path, body: &Value) -> HttpResponse {
     HttpResponse::ok(&json!({ "results": results, "errors": errors }))
 }
 
-/// v2 dedupes `roots` and caps the batch at 32.
 fn parse_batch_roots(body: &Value) -> Result<Vec<String>, HttpResponse> {
     let Some(arr) = body.get("roots").and_then(|v| v.as_array()) else {
         return Err(HttpResponse::bad_request(
@@ -909,7 +826,6 @@ fn parse_batch_roots(body: &Value) -> Result<Vec<String>, HttpResponse> {
     Ok(roots)
 }
 
-/// Handle `fs:pull_request` (v2 `fsPullRequestRequestSchema`).
 pub fn handle_pull_request(work_dir: &Path, body: &Value) -> HttpResponse {
     let root = body.get("root").and_then(|v| v.as_str());
     match resolve_git_root(work_dir, root) {
@@ -918,7 +834,6 @@ pub fn handle_pull_request(work_dir: &Path, body: &Value) -> HttpResponse {
     }
 }
 
-/// Handle `fs:pull_request:batch` (v2 `fsPullRequestBatchRequestSchema`).
 pub fn handle_pull_request_batch(work_dir: &Path, body: &Value) -> HttpResponse {
     let roots = match parse_batch_roots(body) {
         Ok(r) => r,
@@ -942,7 +857,6 @@ pub fn handle_pull_request_batch(work_dir: &Path, body: &Value) -> HttpResponse 
     HttpResponse::ok(&json!({ "results": results, "errors": errors }))
 }
 
-/// Handle `fs:diff` (v2 `fsDiffRequestSchema`: `path` + optional `root`).
 pub fn handle_diff(work_dir: &Path, body: &Value) -> HttpResponse {
     let rel_path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
@@ -950,7 +864,6 @@ pub fn handle_diff(work_dir: &Path, body: &Value) -> HttpResponse {
     };
     let root = body.get("root").and_then(|v| v.as_str());
 
-    // v2 resolves `path` against the scoped git root and rejects escapes.
     let cwd = match resolve_git_root(work_dir, root) {
         Ok(c) => c,
         Err(resp) => return resp,
@@ -969,7 +882,6 @@ pub fn handle_diff(work_dir: &Path, body: &Value) -> HttpResponse {
         return HttpResponse::bad_request(format!("path \"{rel_path}\" escapes git root"));
     }
 
-    // 1. Try git diff HEAD -- <path>
     let output = std::process::Command::new("git")
         .args(["diff", "HEAD", "--", scoped_rel.as_str()])
         .current_dir(&cwd)
@@ -987,7 +899,6 @@ pub fn handle_diff(work_dir: &Path, body: &Value) -> HttpResponse {
         }));
     }
 
-    // 2. If git diff was empty or file is untracked, synthesize diff if file exists
     if target_path.is_file()
         && let Ok(content) = std::fs::read_to_string(&target_path)
     {
@@ -1012,7 +923,6 @@ pub fn handle_diff(work_dir: &Path, body: &Value) -> HttpResponse {
     }))
 }
 
-/// Handle `fs:stat`.
 pub fn handle_stat(work_dir: &Path, body: &Value) -> HttpResponse {
     let rel_path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
@@ -1034,7 +944,6 @@ pub fn handle_stat(work_dir: &Path, body: &Value) -> HttpResponse {
     }
 }
 
-/// Handle `fs:stat_many` (or `fs:statMany`).
 pub fn handle_stat_many(work_dir: &Path, body: &Value) -> HttpResponse {
     let paths = match body.get("paths").and_then(|v| v.as_array()) {
         Some(arr) => arr,
@@ -1058,7 +967,6 @@ pub fn handle_stat_many(work_dir: &Path, body: &Value) -> HttpResponse {
     HttpResponse::ok(&json!({ "entries": entries }))
 }
 
-/// Handle `fs:mkdir`.
 pub fn handle_mkdir(work_dir: &Path, body: &Value) -> HttpResponse {
     let rel_path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
@@ -1090,10 +998,6 @@ pub fn handle_mkdir(work_dir: &Path, body: &Value) -> HttpResponse {
     }
 }
 
-/// v2 `fsListSortSchema` (`packages/protocol/src/rest/fs.ts`). Upstream's
-/// `mtime_desc` / `size_desc` are placeholders that compare by name
-/// (`sortChildren` in v2 `workspaceFs/fsService.ts`), so they deliberately
-/// fall back to the name order here as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ListSort {
     TypeFirst,
@@ -1103,9 +1007,6 @@ enum ListSort {
     SizeDesc,
 }
 
-/// A glob list that keeps its raw patterns next to the compiled matchers:
-/// `glob_can_match_below` needs the raw segments (v2 `picomatch.scan`), while
-/// whole-path matching uses the compiled form.
 #[derive(Debug, Default, Clone)]
 struct GlobList {
     raw: Vec<String>,
@@ -1117,14 +1018,11 @@ impl GlobList {
         self.matchers.is_empty()
     }
 
-    /// v2 `matchesAnyGlob`: whole-path match, empty patterns never match.
     fn matches(&self, rel: &str) -> bool {
         self.matchers.iter().any(|m| m.is_match(rel))
     }
 }
 
-/// The filter/sort fields shared by `fs:list` and `fs:list_many` (v2
-/// `fsListRequestSchema` / `fsListManyRequestSchema`).
 #[derive(Debug, Clone)]
 struct ListFilters {
     depth: usize,
@@ -1134,9 +1032,7 @@ struct ListFilters {
     exclude_globs: Vec<globset::GlobMatcher>,
     allow_ignored_globs: GlobList,
     sort: ListSort,
-    /// Accepted and deliberately inert: upstream declares the field but no
-    /// code path attaches per-entry `git_status` (`include_git_status` grep
-    /// on upstream/main lands only in schemas and forwarding).
+
     #[allow(dead_code)]
     include_git_status: bool,
 }
@@ -1156,8 +1052,6 @@ impl Default for ListFilters {
     }
 }
 
-/// Parse the shared list fields, mirroring the zod ranges (`depth` 1..=10,
-/// `limit` 1..=1000); violations are 400 like any other bad field here.
 fn parse_list_filters(body: &Value) -> Result<ListFilters, HttpResponse> {
     let mut filters = ListFilters::default();
     if let Some(v) = body.get("depth") {
@@ -1214,14 +1108,11 @@ fn parse_list_filters(body: &Value) -> Result<ListFilters, HttpResponse> {
                     "Field 'exclude_globs' must be an array of strings",
                 ));
             };
-            // Empty patterns never match (v2 `matchesAnyGlob` filters them out
-            // because picomatch throws on empty input).
+
             if pattern.is_empty() {
                 continue;
             }
-            // `literal_separator(true)` pins picomatch's `*`/`?` never crossing
-            // `/`; globset has no dotfile or negation concept, matching
-            // picomatch's `{ dot: true, nonegate: true }` options.
+
             let glob = globset::GlobBuilder::new(pattern)
                 .literal_separator(true)
                 .build()
@@ -1287,10 +1178,6 @@ fn parse_list_filters(body: &Value) -> Result<ListFilters, HttpResponse> {
     Ok(filters)
 }
 
-/// The v2 gitignore matcher (`matcherFor`): the workspace root's `.gitignore`
-/// plus a built-in `.git/` rule. The handlers are stateless per request, so
-/// the matcher is built per call rather than cached per root — one extra file
-/// read per listing, and `.gitignore` edits are always picked up.
 fn gitignore_matcher(work_dir: &Path) -> ignore::gitignore::Gitignore {
     let mut builder = ignore::gitignore::GitignoreBuilder::new(work_dir);
     let _ = builder.add_line(None, ".git/");
@@ -1300,17 +1187,12 @@ fn gitignore_matcher(work_dir: &Path) -> ignore::gitignore::Gitignore {
         .unwrap_or_else(|_| ignore::gitignore::Gitignore::empty())
 }
 
-/// Case-insensitive primary order with a case-sensitive tiebreak — the
-/// closest stable approximation of v2's `localeCompare` for ASCII names.
 fn cmp_entry_name(a: &str, b: &str) -> std::cmp::Ordering {
     a.to_lowercase()
         .cmp(&b.to_lowercase())
         .then_with(|| a.cmp(b))
 }
 
-/// Split a glob into path segments without cutting through brace groups
-/// (v2 uses `picomatch.scan`; a `{a/b,c}` group keeps its slash inside one
-/// segment here, and the caller answers conservatively for such segments).
 fn scan_glob_segments(glob: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut depth = 0usize;
@@ -1333,10 +1215,6 @@ fn scan_glob_segments(glob: &str) -> Vec<String> {
     parts
 }
 
-/// v2 `globSegmentsMatchPrefix`: dynamic-programming check whether the glob
-/// can match a path *below* `rel` — i.e. `rel_segments` is a viable prefix of
-/// a glob match. `**` consumes zero or more segments; an empty segment (from
-/// consecutive separators) matches nothing, as upstream pins.
 fn glob_segments_match_prefix(glob_segments: &[String], rel_segments: &[&str]) -> bool {
     let g = glob_segments.len();
     let r = rel_segments.len();
@@ -1371,9 +1249,6 @@ fn glob_segments_match_prefix(glob_segments: &[String], rel_segments: &[&str]) -
     dp[0] == 1
 }
 
-/// v2 `globCanMatchBelow`: can any of the globs match a path underneath
-/// `rel`? Used to keep an ignored directory alive when it might be the
-/// ancestor of an `allow_ignored_globs` match.
 fn glob_can_match_below(rel: &str, globs: &[String]) -> bool {
     let rel_segments: Vec<&str> = rel.split('/').collect();
     for g in globs {
@@ -1381,9 +1256,7 @@ fn glob_can_match_below(rel: &str, globs: &[String]) -> bool {
             continue;
         }
         let parts = scan_glob_segments(g);
-        // A segment that still embeds a separator comes from a brace/extglob
-        // construct the splitter cannot see through — v2 answers
-        // conservatively (visible) for those too.
+
         if parts.iter().any(|p| p.contains('/')) {
             return true;
         }
@@ -1394,10 +1267,6 @@ fn glob_can_match_below(rel: &str, globs: &[String]) -> bool {
     false
 }
 
-/// v2 `hasAllowedDescendant`: probe an ignored directory for an actual
-/// `allow_ignored_globs` match underneath. Budgets are shared across one
-/// `fs:list` request (`visited`), and exhaustion fails *open* (keeps the
-/// directory), matching upstream's cap semantics.
 #[allow(clippy::too_many_arguments)]
 fn probe_allowed_descendant(
     base: &Path,
@@ -1434,8 +1303,7 @@ fn probe_allowed_descendant(
         if globs.matches(&child_rel) {
             return true;
         }
-        // v2 (from #4457 on): a symlink's directory-ness inside the probe is
-        // resolved through the same policy-checked target lookup.
+
         let is_dir = match std::fs::symlink_metadata(dir_entry.path()) {
             Ok(md) if md.is_symlink() => {
                 symlink_directory_target(base, &child_rel, allow_external_symlinks, real_roots).0
@@ -1463,38 +1331,23 @@ fn probe_allowed_descendant(
     false
 }
 
-/// One directory level of a listing walk, after filtering but before sorting.
 struct ListChild {
     name: String,
     rel_path: String,
-    /// Directory-ness after symlink resolution (v2 `Child.isDirectory`).
+
     is_dir: bool,
     is_symlink: bool,
-    /// The resolved real path for a symlinked directory (loop detection).
+
     real_path: Option<PathBuf>,
     entry: Value,
 }
 
-/// The result of one [`list_dir_core`] walk: v2's `{ items, children_by_path?,
-/// truncated }` before the HTTP shape is assembled around it.
 struct ListOutcome {
     items: Vec<Value>,
     children_by_path: serde_json::Map<String, Value>,
     truncated: bool,
 }
 
-/// The shared `fs:list` walk (v2 `WorkspaceFsService.list`): BFS from the
-/// resolved root, filtered by `show_hidden` / gitignore / `exclude_globs`,
-/// sorted per level, top-level `items` capped at `limit` (deeper buckets are
-/// not capped), `children_by_path` filled for expanded non-root levels.
-///
-/// Symlinked directories expand in place: without `allow_external_symlinks`
-/// only links whose real target stays inside the workspace resolve (v2
-/// `symlinkDirectoryTarget`), with it any directory target does. Entries
-/// reached through a symlink share a separate 10,000-entry budget (v2
-/// `LIST_TOTAL_ENTRY_BUDGET`) whose exhaustion sets `truncated` and stops
-/// further symlinked subtrees; ordinary recursion is not budgeted. Ancestor
-/// real-paths pin the walk against symlink loops.
 #[allow(clippy::too_many_lines)]
 fn list_dir_core(
     work_dir: &Path,
@@ -1502,10 +1355,6 @@ fn list_dir_core(
     filters: &ListFilters,
     allow_external_symlinks: bool,
 ) -> Result<ListOutcome, FsPathError> {
-    // With external symlinks allowed, v2 resolves lexically (the realpath
-    // check is skipped), so the whole walk stays in the raw work_dir frame;
-    // otherwise the canonicalized resolver and frame keep symlink escapes
-    // rejected (and the Windows `\\?\` prefix consistent).
     let (target, frame_root) = if allow_external_symlinks {
         (resolve_lexical(work_dir, rel_path)?, work_dir.to_path_buf())
     } else {
@@ -1515,8 +1364,7 @@ fn list_dir_core(
             .map_err(|e| FsPathError::Internal(format!("Cannot canonicalize work dir: {e}")))?;
         (target, canon_work)
     };
-    // The listed root itself follows symlinks (v2 stats the top with
-    // follow-semantics), so a symlinked root still lists.
+
     if !target.is_dir() {
         return Err(FsPathError::NotDirectory(format!(
             "Target path is not a directory: {rel_path}"
@@ -1526,8 +1374,7 @@ fn list_dir_core(
     let gitignore = filters
         .follow_gitignore
         .then(|| gitignore_matcher(&frame_root));
-    // v2 `realRoots()`: the real path of the workspace root (the fork has no
-    // additional workspace dirs).
+
     let real_roots =
         vec![realpath_existing_prefix(&frame_root).unwrap_or_else(|_| frame_root.clone())];
 
@@ -1542,9 +1389,9 @@ fn list_dir_core(
     struct QueueEntry {
         rel_path: String,
         depth_remaining: usize,
-        /// Real paths of every ancestor level (v2 loop guard).
+
         ancestors: Vec<PathBuf>,
-        /// Whether this subtree was reached through a symlink (budget scope).
+
         via_symlink: bool,
     }
 
@@ -1558,9 +1405,9 @@ fn list_dir_core(
     let mut items: Vec<Value> = Vec::new();
     let mut children_by_path: serde_json::Map<String, Value> = serde_json::Map::new();
     let mut truncated = false;
-    // Shared across the whole request (v2 keeps one probe budget per list).
+
     let mut probe_visited = 0usize;
-    // v2 `LIST_TOTAL_ENTRY_BUDGET`: caps only symlink-reached entries.
+
     const LIST_TOTAL_ENTRY_BUDGET: usize = 10_000;
     let mut symlink_entries = 0usize;
     let mut budget_exhausted = false;
@@ -1576,8 +1423,7 @@ fn list_dir_core(
         };
         let read_dir = match std::fs::read_dir(&dir_abs) {
             Ok(rd) => rd,
-            // v2 rethrows the root's own readdir failure and skips deeper
-            // unreadable levels.
+
             Err(e) if entry.rel_path == root_rel => {
                 return Err(FsPathError::Internal(format!(
                     "Failed to read directory: {e}"
@@ -1599,20 +1445,11 @@ fn list_dir_core(
             };
             let mut ancestor_of_allowed = false;
             if let Some(ig) = &gitignore {
-                // v2 `ignores(childRel) || ignores(childRel + '/')`: the npm
-                // `ignore` package is parent-aware (a child of an ignored
-                // directory is ignored), and checks both kind forms because
-                // the kind is not known yet — mirrored with
-                // `matched_path_or_any_parents` in both is_dir forms.
                 if ig
                     .matched_path_or_any_parents(&child_rel, false)
                     .is_ignore()
                     || ig.matched_path_or_any_parents(&child_rel, true).is_ignore()
                 {
-                    // v2 `allow_ignored_globs`: an ignored entry stays visible
-                    // when it matches outright, and an ignored *directory*
-                    // stays when it might be the ancestor of a match (probed
-                    // below after the lstat confirms the kind).
                     if filters.allow_ignored_globs.is_empty() {
                         continue;
                     }
@@ -1631,8 +1468,7 @@ fn list_dir_core(
             let Ok(metadata) = std::fs::symlink_metadata(&child_abs) else {
                 continue;
             };
-            // v2: a symlink's directory-ness comes from its (policy-checked)
-            // target, not the lstat.
+
             let mut is_dir = metadata.is_dir();
             let mut real_path: Option<PathBuf> = None;
             if metadata.is_symlink() {
@@ -1665,8 +1501,6 @@ fn list_dir_core(
             }
             let mut fs_entry = fs_entry_from_metadata(&frame_root, &child_abs, &metadata);
             if metadata.is_symlink() && is_dir {
-                // v2 marks a symlink whose target is a directory so the file
-                // tree can render it as an expandable directory.
                 fs_entry["is_directory"] = json!(true);
             }
             children.push(ListChild {
@@ -1703,8 +1537,7 @@ fn list_dir_core(
                 truncated = true;
                 break;
             }
-            // v2's symlink budget is checked per child before it is emitted;
-            // ordinary (non-symlink-reached) listings are never capped.
+
             if entry.via_symlink && symlink_entries >= LIST_TOTAL_ENTRY_BUDGET {
                 truncated = true;
                 budget_exhausted = true;
@@ -1750,7 +1583,6 @@ fn list_dir_core(
     })
 }
 
-/// Handle `fs:list`.
 pub fn handle_list(work_dir: &Path, body: &Value) -> HttpResponse {
     let rel_path = body
         .get("path")
@@ -1761,8 +1593,7 @@ pub fn handle_list(work_dir: &Path, body: &Value) -> HttpResponse {
         Ok(f) => f,
         Err(resp) => return resp,
     };
-    // v2 `fsListRequestSchema.allow_external_symlinks` (not present on
-    // `fs:list_many`'s schema upstream, so it is parsed here only).
+
     let allow_external_symlinks = body
         .get("allow_external_symlinks")
         .and_then(|v| v.as_bool())
@@ -1784,11 +1615,6 @@ pub fn handle_list(work_dir: &Path, body: &Value) -> HttpResponse {
     }
 }
 
-/// Handle `fs:list_many` (or `fs:listMany`).
-///
-/// v2 `WorkspaceFsService.listMany`: each path lists independently; a path
-/// that fails lands in `partial_errors` (no `results` key for it), a truncated
-/// one is echoed in `truncated_paths`, and a path escape fails the whole call.
 pub fn handle_list_many(work_dir: &Path, body: &Value) -> HttpResponse {
     let paths = match body.get("paths").and_then(|v| v.as_array()) {
         Some(p) => p,
@@ -1815,8 +1641,6 @@ pub fn handle_list_many(work_dir: &Path, body: &Value) -> HttpResponse {
             }
             Err(FsPathError::Escapes) => return FsPathError::Escapes.into_response(),
             Err(FsPathError::NotDirectory(msg)) | Err(FsPathError::Internal(msg)) => {
-                // 40409 covers both "missing" and "not a directory" here (v2
-                // `FS_PATH_NOT_FOUND` answers both for a list target).
                 partial_errors.insert(rel_path.to_string(), json!({ "code": 40409, "msg": msg }));
             }
         }
@@ -1832,15 +1656,12 @@ pub fn handle_list_many(work_dir: &Path, body: &Value) -> HttpResponse {
     HttpResponse::ok(&out)
 }
 
-/// Handle `fs:read`.
 pub fn handle_read(work_dir: &Path, body: &Value) -> HttpResponse {
     let rel_path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
         _ => return HttpResponse::bad_request("Field 'path' is required"),
     };
 
-    // v2 `fsReadRequestSchema.allow_external_symlinks`: allow reading through
-    // symlinks whose targets live outside the workspace.
     let allow_external_symlinks = body
         .get("allow_external_symlinks")
         .and_then(|v| v.as_bool())
@@ -1904,9 +1725,6 @@ pub fn handle_read(work_dir: &Path, body: &Value) -> HttpResponse {
     }))
 }
 
-/// Character offsets in `path` where `query` matched, as UTF-16 code-unit
-/// indices — the frame the Web UI and the VS Code mention picker highlight in
-/// (`match_positions` on the wire). Empty when the query is empty or absent.
 fn match_positions(path: &str, query: &str) -> Vec<usize> {
     if query.is_empty() {
         return Vec::new();
@@ -1931,10 +1749,6 @@ fn match_positions(path: &str, query: &str) -> Vec<usize> {
     Vec::new()
 }
 
-/// Search `work_dir` for paths matching `query`, returning `(items, truncated)`.
-///
-/// Shared by the `fs:search` / `fs::suggest` HTTP routes and the `fs_suggest`
-/// napi export, so the host and the Web UI see one ranking and one match frame.
 pub fn search_files(work_dir: &Path, query: &str, limit: usize) -> (Vec<Value>, bool) {
     let mut items = Vec::new();
     if query.is_empty() {
@@ -2041,7 +1855,6 @@ pub fn search_files(work_dir: &Path, query: &str, limit: usize) -> (Vec<Value>, 
     (items, truncated)
 }
 
-/// Handle `fs:search`.
 pub fn handle_search(work_dir: &Path, body: &Value) -> HttpResponse {
     let query = body
         .get("query")
@@ -2056,7 +1869,6 @@ pub fn handle_search(work_dir: &Path, body: &Value) -> HttpResponse {
     }))
 }
 
-/// Handle `fs:grep`.
 pub fn handle_grep(work_dir: &Path, body: &Value) -> HttpResponse {
     let pattern = match body.get("pattern").and_then(|v| v.as_str()) {
         Some(p) if !p.is_empty() => p,
@@ -2145,9 +1957,6 @@ pub fn handle_grep(work_dir: &Path, body: &Value) -> HttpResponse {
     }))
 }
 
-/// Handle `fs:open`: launch the resolved file in the user's editor (or the
-/// platform opener) and report the real outcome. Previously this discarded the
-/// resolved path and answered `{"opened": true}` without launching anything.
 pub fn handle_open(work_dir: &Path, body: &Value) -> HttpResponse {
     let rel_path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
@@ -2164,7 +1973,6 @@ pub fn handle_open(work_dir: &Path, body: &Value) -> HttpResponse {
     }
 }
 
-/// Handle `fs:reveal`: select the resolved file in the platform file manager.
 pub fn handle_reveal(work_dir: &Path, body: &Value) -> HttpResponse {
     let rel_path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
@@ -2180,8 +1988,6 @@ pub fn handle_reveal(work_dir: &Path, body: &Value) -> HttpResponse {
     }
 }
 
-/// Handle `fs:open-in`: open the resolved path in the requested app
-/// (v2 `OpenInAppId`: finder / cursor / vscode / iterm / terminal).
 pub fn handle_open_in(work_dir: &Path, body: &Value) -> HttpResponse {
     let rel_path = match body.get("path").and_then(|v| v.as_str()) {
         Some(p) if !p.trim().is_empty() => p.trim(),
@@ -2202,8 +2008,6 @@ pub fn handle_open_in(work_dir: &Path, body: &Value) -> HttpResponse {
     }
 }
 
-/// The `fs:open-in` app ids available on this machine (v2
-/// `getAvailableOpenInApps`).
 pub fn handle_open_in_apps(_body: &Value) -> HttpResponse {
     let apps: Vec<&str> = crate::server::file_launch::OPEN_IN_APP_IDS
         .iter()
@@ -2213,9 +2017,6 @@ pub fn handle_open_in_apps(_body: &Value) -> HttpResponse {
     HttpResponse::ok(&json!({ "apps": apps }))
 }
 
-/// Content-Type for a served file, from its extension. Deliberately small:
-/// the caller (web UI) renders text itself, and `application/octet-stream` is
-/// the honest fallback for everything the map does not know.
 fn content_type_for(path: &Path) -> &'static str {
     match path
         .extension()
@@ -2238,13 +2039,6 @@ fn content_type_for(path: &Path) -> &'static str {
     }
 }
 
-/// Handle `fs::content` — serve the raw bytes of a host file by **absolute**
-/// path (kap-server `fsContentQuerySchema`): `path` is required and must be
-/// absolute, the response is raw bytes with an ETag, `If-None-Match` yields a
-/// 304, and a single `Range: bytes=a-b` request yields a 206 slice.
-///
-/// Like `fs:home` / `fs:browse` this is a whole-host surface by design; the
-/// bearer auth at the HTTP layer is what gates it.
 pub fn handle_fs_content(
     query_path: Option<&str>,
     if_none_match: Option<&str>,
@@ -2287,9 +2081,6 @@ pub fn handle_fs_content(
         return HttpResponse::internal_error(format!("failed to read {raw_path}"));
     };
 
-    // Single-range request (`bytes=a-b`, `bytes=a-`, `bytes=-suffix`). Anything
-    // else (multiple ranges, units other than bytes) is served in full, which
-    // is what a client that ignores 206 semantics expects anyway.
     let range = range
         .filter(|r| r.starts_with("bytes="))
         .and_then(|r| r["bytes=".len()..].split(',').next().map(str::to_string));
@@ -2335,8 +2126,6 @@ mod tests {
 
     #[test]
     fn test_parse_git_status_z_verbatim_paths() {
-        // Real git -z output: every record, header records included, is
-        // NUL-terminated with no LF separators.
         let raw = concat!(
             "# branch.oid 1234\0",
             "# branch.head main\0",
@@ -2350,7 +2139,7 @@ mod tests {
         assert_eq!(parsed.branch, "main");
         assert_eq!(parsed.ahead, 1);
         assert_eq!(parsed.behind, 2);
-        // v2 wire shape: path → status string (`record<path, fsGitStatusSchema>`).
+
         assert_eq!(
             parsed.entries["src/main.rs"], "modified",
             "ordinary modification is classified"
@@ -2369,7 +2158,7 @@ mod tests {
             parsed.entries.contains_key("冲突.txt"),
             "unmerged path stays verbatim"
         );
-        // `conflicted`, not the fork's earlier off-enum `conflict`.
+
         assert_eq!(parsed.entries["冲突.txt"], "conflicted");
     }
 
@@ -2380,12 +2169,11 @@ mod tests {
             "1 .M N... 100644 100644 100644 <hH> <hI> pkg/a.ts\0",
             "1 .M N... 100644 100644 100644 <hH> <hI> other/b.ts\0",
         );
-        // Folder-scoped to `pkg/`: keys come back relative to the root.
+
         let parsed = parse_git_status_z(raw, None, "pkg/");
         assert!(parsed.entries.contains_key("a.ts"));
         assert!(!parsed.entries.contains_key("pkg/a.ts"));
 
-        // Exact-match path filter (v2 `pathFilter`), applied after stripping.
         let filter = std::collections::HashSet::from(["a.ts".to_string()]);
         let parsed = parse_git_status_z(raw, Some(&filter), "pkg/");
         assert_eq!(parsed.entries.len(), 1);
@@ -2412,11 +2200,9 @@ mod tests {
         let sub_file = root.join("hello.txt");
         std::fs::write(&sub_file, "world").unwrap();
 
-        // Normal path resolves
         let safe = resolve_safe_path(root, "hello.txt").unwrap();
         assert_eq!(safe, sub_file.canonicalize().unwrap());
 
-        // Escape path rejected
         assert!(resolve_safe_path(root, "../outside.txt").is_err());
     }
 
@@ -2435,9 +2221,6 @@ mod tests {
         assert_eq!(entry["is_binary"], false);
     }
 
-    // --- F0: fs:list filtering baseline (v2 fsListRequestSchema semantics) ---
-
-    /// Collect the `name`s of a list response's top-level items.
     fn list_names(res: &HttpResponse) -> Vec<String> {
         assert_eq!(res.status, 200);
         let json: Value = serde_json::from_slice(&res.body).unwrap();
@@ -2495,8 +2278,6 @@ mod tests {
         std::fs::write(root.path().join(".git").join("HEAD"), "ref").unwrap();
         std::fs::write(root.path().join("visible.txt"), "v").unwrap();
 
-        // v2 pins `.git/` into the matcher, so the repository internals stay
-        // hidden even when dotfiles are explicitly requested.
         assert_eq!(
             list_names(&handle_list(root.path(), &json!({ "show_hidden": true }))),
             vec!["visible.txt"]
@@ -2517,7 +2298,6 @@ mod tests {
         std::fs::create_dir(root.path().join("sub")).unwrap();
         std::fs::write(root.path().join("sub/c.log"), "c").unwrap();
 
-        // `*.log` does not cross `/` (picomatch semantics via literal_separator).
         assert_eq!(
             list_names(&handle_list(
                 root.path(),
@@ -2551,7 +2331,7 @@ mod tests {
         let bucket = deep["children_by_path"]["sub"].as_array().unwrap();
         assert_eq!(bucket.len(), 1);
         assert_eq!(bucket[0]["path"], "sub/inner.txt");
-        // The grandchild level is not expanded further at depth 2.
+
         assert!(deep["children_by_path"].get("sub/inner.txt").is_none());
     }
 
@@ -2572,8 +2352,7 @@ mod tests {
         .unwrap();
         assert_eq!(res["items"].as_array().unwrap().len(), 2);
         assert_eq!(res["truncated"], true);
-        // Deeper buckets are not capped by `limit` (v2 checks the cap only on
-        // the top level).
+
         assert_eq!(res["children_by_path"]["sub"].as_array().unwrap().len(), 3);
     }
 
@@ -2594,7 +2373,7 @@ mod tests {
             names(json!({ "sort": "name_desc" })),
             vec!["zeta", "B.txt", "a.txt"]
         );
-        // v2's mtime_desc/size_desc are name-ordered placeholders.
+
         assert_eq!(
             names(json!({ "sort": "mtime_desc" })),
             vec!["a.txt", "B.txt", "zeta"]
@@ -2653,7 +2432,6 @@ mod tests {
         assert_eq!(kinds["linkdir"], "symlink");
         assert_eq!(kinds["realdir"], "directory");
 
-        // A symlinked directory is not descended into even at depth > 1.
         let deep: Value =
             serde_json::from_slice(&handle_list(root.path(), &json!({ "depth": 3 })).body).unwrap();
         assert!(deep.get("children_by_path").is_none());
@@ -2665,7 +2443,6 @@ mod tests {
         std::fs::create_dir(root.path().join("ok")).unwrap();
         std::fs::write(root.path().join("ok/f.txt"), "f").unwrap();
 
-        // Missing path lands in partial_errors and gets no `results` key (v2).
         let res: Value = serde_json::from_slice(
             &handle_list_many(root.path(), &json!({ "paths": ["ok", "missing"] })).body,
         )
@@ -2674,17 +2451,12 @@ mod tests {
         assert!(res["results"].get("missing").is_none());
         assert_eq!(res["partial_errors"]["missing"]["code"], 40409);
 
-        // A path escape fails the whole call (v2 rethrows FS_PATH_ESCAPES).
         assert_eq!(
             handle_list_many(root.path(), &json!({ "paths": ["ok", "../escape"] })).status,
             400
         );
     }
 
-    // --- F1: allow_ignored_globs (v2 #4058) ---
-
-    /// A temp workspace whose `.gitignore` ignores `ignored.txt`, the whole
-    /// `ignored-dir/` directory, and the dotfile `.secret`.
     fn ignored_fixture() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2714,8 +2486,7 @@ mod tests {
     #[test]
     fn allow_ignored_globs_keeps_ancestor_dirs_reachable() {
         let root = ignored_fixture();
-        // The ignored directory itself matches no glob, but stays as the
-        // ancestor of `ignored-dir/keep.txt`; the probe hides its sibling.
+
         let res: Value = serde_json::from_slice(
             &handle_list(
                 root.path(),
@@ -2743,8 +2514,7 @@ mod tests {
     #[test]
     fn allow_ignored_globs_matches_across_wildcard_segments() {
         let root = ignored_fixture();
-        // `ignored-*/keep.txt`: the wildcard segment must not sever the
-        // ancestor check (v2 #4058 follow-up fix).
+
         let res: Value = serde_json::from_slice(
             &handle_list(
                 root.path(),
@@ -2765,8 +2535,7 @@ mod tests {
     #[test]
     fn allow_ignored_globs_drops_ancestors_without_matching_descendant() {
         let root = ignored_fixture();
-        // `ignored-dir/` can never be an ancestor of `nope/keep.txt`, and the
-        // probe finds no match inside it either.
+
         let names = list_names(&handle_list(
             root.path(),
             &json!({ "depth": 2, "allow_ignored_globs": ["nope/keep.txt"] }),
@@ -2777,8 +2546,7 @@ mod tests {
     #[test]
     fn allow_ignored_globs_drops_file_prefix_ancestors() {
         let root = ignored_fixture();
-        // `ignored.txt` is a *file* prefix of the glob — v2 keeps ancestors
-        // only when they are directories.
+
         let names = list_names(&handle_list(
             root.path(),
             &json!({ "allow_ignored_globs": ["ignored.txt/keep.txt"] }),
@@ -2789,7 +2557,7 @@ mod tests {
     #[test]
     fn allow_ignored_globs_dot_paths_still_require_show_hidden() {
         let root = ignored_fixture();
-        // Documented upstream: allowing a dot-path needs show_hidden too.
+
         let names = list_names(&handle_list(
             root.path(),
             &json!({ "allow_ignored_globs": [".secret"] }),
@@ -2815,7 +2583,7 @@ mod tests {
     #[test]
     fn glob_can_match_below_prefix_semantics() {
         let globs = |g: &str| vec![g.to_string()];
-        // Direct prefix chains.
+
         assert!(glob_can_match_below(
             "ignored-dir",
             &globs("ignored-dir/keep.txt")
@@ -2829,40 +2597,31 @@ mod tests {
             &globs("ignored-*/keep.txt")
         ));
         assert!(glob_can_match_below("a", &globs("a/**/b")));
-        // `**` may consume zero segments, so `a` is a valid ancestor of
-        // `a/**/xxb` (the match could be `a/xxb`). The segment-boundary fix
-        // upstream landed on *whole-path* matching, pinned below.
+
         assert!(glob_can_match_below("a", &globs("a/**/xxb")));
         assert!(!glob_can_match_below("axxb", &globs("a/**/b")));
-        // A file-prefix is "below-able" here; the directory-only drop happens
-        // at the lstat check in the walk.
+
         assert!(glob_can_match_below(
             "ignored.txt",
             &globs("ignored.txt/keep.txt")
         ));
-        // No relation at all.
+
         assert!(!glob_can_match_below(
             "other",
             &globs("ignored-dir/keep.txt")
         ));
-        // Empty segments (consecutive separators) match no path segment — but
-        // the ancestor query still answers conservatively true when the
-        // prefix itself matched (upstream's DP behaves the same: `dp[gi][r]`
-        // is 1 regardless of what the remaining segments look like).
+
         assert!(glob_can_match_below("a", &globs("a//b")));
         assert!(!glob_can_match_below("a", &globs("b//a")));
-        // A brace group embedding a slash answers conservatively.
+
         assert!(glob_can_match_below("x", &globs("{a/b,c}/keep.txt")));
-        // Mid-segment `**` is an ordinary within-segment wildcard, not a
-        // globstar: `foo**/keep.txt` opens only `foo*` directories.
+
         assert!(glob_can_match_below("foox", &globs("foo**/keep.txt")));
         assert!(!glob_can_match_below("foo", &globs("bar**/keep.txt")));
     }
 
     #[test]
     fn glob_list_whole_path_segment_boundaries() {
-        // v2 #4058's glob fix on the whole-path matcher: `a/**/b` must not
-        // match `a/xxb`, but matches across real segment boundaries.
         let mut list = GlobList::default();
         let glob = globset::GlobBuilder::new("a/**/b")
             .literal_separator(true)
@@ -2874,7 +2633,7 @@ mod tests {
         assert!(list.matches("a/x/b"));
         assert!(!list.matches("a/xxb"));
         assert!(!list.matches("ab"));
-        // A leading `!` is a literal character (picomatch `nonegate: true`).
+
         let mut bang = GlobList::default();
         let glob = globset::GlobBuilder::new("!foo")
             .literal_separator(true)
@@ -2886,11 +2645,6 @@ mod tests {
         assert!(!bang.matches("bar"));
     }
 
-    // --- F2: allow_external_symlinks (v2 #4457) ---
-
-    /// Workspace with `realdir/inner.txt` plus symlinks: `linkdir` → realdir,
-    /// `extlink` → an external directory with `secret.txt`, `loop` → the
-    /// workspace root. Returns (workspace, external) tempdirs.
     #[cfg(unix)]
     fn symlink_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
@@ -2919,7 +2673,7 @@ mod tests {
             .iter()
             .find(|i| i["name"] == "linkdir")
             .unwrap();
-        // kind stays `symlink`; `is_directory` carries the resolved shape.
+
         assert_eq!(linkdir["kind"], "symlink");
         assert_eq!(linkdir["is_directory"], true);
         let bucket = res["children_by_path"]["linkdir"].as_array().unwrap();
@@ -2930,8 +2684,7 @@ mod tests {
     #[test]
     fn list_external_symlink_policy() {
         let (root, _ext) = symlink_fixture();
-        // Default: the external link is demoted to a plain symlink entry and
-        // never expanded.
+
         let res: Value =
             serde_json::from_slice(&handle_list(root.path(), &json!({ "depth": 2 })).body).unwrap();
         let extlink = res["items"]
@@ -2944,7 +2697,6 @@ mod tests {
         assert!(extlink.get("is_directory").is_none());
         assert!(res["children_by_path"].get("extlink").is_none());
 
-        // With the flag the same link expands and is marked.
         let res: Value = serde_json::from_slice(
             &handle_list(
                 root.path(),
@@ -2968,8 +2720,7 @@ mod tests {
     #[test]
     fn list_external_symlink_root_path_requires_the_flag() {
         let (root, _ext) = symlink_fixture();
-        // Listing through an external link escapes the workspace: rejected
-        // without the flag (the canonicalize prefix check), allowed with it.
+
         assert_eq!(
             handle_list(root.path(), &json!({ "path": "extlink" })).status,
             400
@@ -2987,17 +2738,14 @@ mod tests {
     #[test]
     fn list_symlink_loop_terminates_via_ancestor_guard() {
         let (root, _ext) = symlink_fixture();
-        // `loop` points back at the root; without the ancestor real-path
-        // guard this walk would never finish.
+
         let res = handle_list(
             root.path(),
             &json!({ "depth": 10, "allow_external_symlinks": true }),
         );
         assert_eq!(res.status, 200);
         let json: Value = serde_json::from_slice(&res.body).unwrap();
-        // `loop` points back at the root; its real path is already an
-        // ancestor, so it is listed as an entry but never queued — no
-        // `children_by_path["loop"]` bucket exists and the walk terminates.
+
         assert!(json["children_by_path"].get("loop").is_none());
     }
 
@@ -3022,7 +2770,7 @@ mod tests {
     #[test]
     fn resolve_with_symlinks_lexical_escape_still_rejected() {
         let root = tempfile::tempdir().unwrap();
-        // `..` segments are rejected regardless of the flag.
+
         assert!(
             crate::server::fs_routes::resolve_safe_path_with_symlinks(
                 root.path(),
@@ -3033,10 +2781,6 @@ mod tests {
         );
     }
 
-    // --- F3: folder-scoped git status (v2 #4527) ---
-
-    /// A real git repo: committed `pkg/committed.txt`, then dirty changes in
-    /// `pkg/` (modified + untracked) and at the root (untracked).
     fn git_repo_fixture() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -3054,7 +2798,7 @@ mod tests {
         std::fs::write(root.path().join("pkg/committed.txt"), "v1\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "init"]);
-        // Dirty the tree: one tracked modification and untracked files.
+
         std::fs::write(root.path().join("pkg/committed.txt"), "v1\nv2\n").unwrap();
         std::fs::write(root.path().join("pkg/new.txt"), "new\n").unwrap();
         std::fs::write(root.path().join("root-new.txt"), "root\n").unwrap();
@@ -3070,7 +2814,7 @@ mod tests {
         );
         assert_eq!(res.status, 200);
         let json: Value = serde_json::from_slice(&res.body).unwrap();
-        // Entry keys are relative to the scoped root (v2 prefix stripping).
+
         assert_eq!(json["entries"]["committed.txt"], "modified");
         assert_eq!(json["entries"]["new.txt"], "untracked");
         assert!(
@@ -3078,7 +2822,7 @@ mod tests {
             "the root-level change stays out of the scoped query: {:?}",
             json["entries"]
         );
-        // numstat scoped to `.`: only the pkg modification counts.
+
         assert_eq!(json["additions"], 1);
         assert_eq!(json["deletions"], 0);
         assert_eq!(json["branch"], "main");
@@ -3096,7 +2840,6 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries["pkg/committed.txt"], "modified");
 
-        // Paths resolve against the scoped root when `root` is given.
         let res = handle_git_status(
             root.path(),
             &json!({ "root": "pkg", "paths": ["new.txt"], "include_pull_request": false }),
@@ -3138,7 +2881,7 @@ mod tests {
         );
         assert_eq!(res.status, 200);
         let json: Value = serde_json::from_slice(&res.body).unwrap();
-        // v2 dedupes roots; `pkg` appears once.
+
         assert_eq!(json["results"].as_object().unwrap().len(), 1);
         assert_eq!(
             json["results"]["pkg"]["entries"]["committed.txt"],
@@ -3163,7 +2906,6 @@ mod tests {
         let json: Value = serde_json::from_slice(&res.body).unwrap();
         assert!(json["diff"].as_str().unwrap().contains("+v2"));
 
-        // An escaping path is rejected under a scoped root.
         assert_eq!(
             handle_diff(
                 root.path(),
@@ -3176,13 +2918,11 @@ mod tests {
 
     #[test]
     fn match_positions_frames_the_hit_in_the_path() {
-        // Offsets index the whole path, in UTF-16 code units — the frame the
-        // VS Code mention picker highlights in.
         assert_eq!(match_positions("src/app.ts", "app"), vec![4, 5, 6]);
         assert_eq!(match_positions("src/app.ts", "APP"), vec![4, 5, 6]);
         assert_eq!(match_positions("src/app.ts", "zzz"), Vec::<usize>::new());
         assert_eq!(match_positions("src/app.ts", ""), Vec::<usize>::new());
-        // A non-BMP char before the hit shifts the offsets by two units.
+
         assert_eq!(match_positions("a😀b.ts", "b"), vec![3]);
     }
 
@@ -3193,14 +2933,12 @@ mod tests {
         std::fs::write(root.join("alpha.txt"), "a").unwrap();
         std::fs::write(root.join("beta.txt"), "b").unwrap();
 
-        // No git repo here, so the walk fallback answers.
         let (items, truncated) = search_files(root, "alpha", 50);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["path"], "alpha.txt");
         assert_eq!(items[0]["match_positions"], json!([0, 1, 2, 3, 4]));
         assert!(!truncated);
 
-        // The empty query lists the directory and reports the cap as truncation.
         let (items, truncated) = search_files(root, "", 1);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["match_positions"], json!([]));
@@ -3212,22 +2950,18 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
 
-        // 1. mkdir
         let mkdir_res = handle_mkdir(root, &json!({ "path": "src/subdir", "recursive": true }));
         assert_eq!(mkdir_res.status, 201);
 
-        // 2. write a file
         let file_path = root.join("src/subdir/test.txt");
         std::fs::write(&file_path, "Hello Kimi!").unwrap();
 
-        // 3. stat
         let stat_res = handle_stat(root, &json!({ "path": "src/subdir/test.txt" }));
         assert_eq!(stat_res.status, 200);
         let stat_json: Value = serde_json::from_slice(&stat_res.body).unwrap();
         assert_eq!(stat_json["name"], "test.txt");
         assert_eq!(stat_json["size"], 11);
 
-        // 4. stat_many
         let stat_many_res = handle_stat_many(
             root,
             &json!({ "paths": ["src/subdir/test.txt", "nonexistent.txt"] }),
@@ -3237,7 +2971,6 @@ mod tests {
         assert!(stat_many_json["entries"]["src/subdir/test.txt"].is_object());
         assert!(stat_many_json["entries"]["nonexistent.txt"].is_null());
 
-        // 5. read
         let read_res = handle_read(root, &json!({ "path": "src/subdir/test.txt" }));
         assert_eq!(read_res.status, 200);
         let read_json: Value = serde_json::from_slice(&read_res.body).unwrap();
@@ -3245,7 +2978,6 @@ mod tests {
         assert_eq!(read_json["size"], 11);
         assert_eq!(read_json["truncated"], false);
 
-        // 6. list & list_many
         let list_res = handle_list(root, &json!({ "path": "src/subdir" }));
         assert_eq!(list_res.status, 200);
         let list_json: Value = serde_json::from_slice(&list_res.body).unwrap();
@@ -3262,7 +2994,6 @@ mod tests {
             1
         );
 
-        // 7. search
         let search_res = handle_search(root, &json!({ "query": "test" }));
         assert_eq!(search_res.status, 200);
         let search_json: Value = serde_json::from_slice(&search_res.body).unwrap();
@@ -3274,13 +3005,11 @@ mod tests {
         assert_eq!(items[0]["size"], 11);
         assert_eq!(search_json["truncated"], false);
 
-        // 8. diff
         let diff_res = handle_diff(root, &json!({ "path": "src/subdir/test.txt" }));
         assert_eq!(diff_res.status, 200);
         let diff_json: Value = serde_json::from_slice(&diff_res.body).unwrap();
         assert!(diff_json["diff"].as_str().unwrap().contains("+Hello Kimi!"));
 
-        // 9. git_status returns standard structure
         let git_res = handle_git_status(root, &json!({ "include_pull_request": false }));
         assert_eq!(git_res.status, 200);
         let git_json: Value = serde_json::from_slice(&git_res.body).unwrap();
@@ -3289,7 +3018,6 @@ mod tests {
         assert_eq!(git_json["behind"], 0);
         assert!(git_json["entries"].is_object());
 
-        // 10. open & reveal
         let open_res = handle_open(root, &json!({ "path": "src/subdir/test.txt" }));
         assert_eq!(open_res.status, 200);
         let open_val: Value = serde_json::from_slice(&open_res.body).unwrap();
@@ -3300,11 +3028,9 @@ mod tests {
         let reveal_val: Value = serde_json::from_slice(&reveal_res.body).unwrap();
         assert_eq!(reveal_val["revealed"], true);
 
-        // Required path validation on open and reveal
         assert_eq!(handle_open(root, &json!({})).status, 400);
         assert_eq!(handle_reveal(root, &json!({})).status, 400);
 
-        // 11. grep handler
         assert_eq!(handle_grep(root, &json!({})).status, 400);
         assert_eq!(handle_grep(root, &json!({ "pattern": "" })).status, 400);
         let grep_res = handle_grep(root, &json!({ "pattern": "Hello" }));
@@ -3313,7 +3039,6 @@ mod tests {
         assert!(grep_json["files"].is_array());
         assert_eq!(grep_json["truncated"], false);
 
-        // 12. read error cases
         assert_eq!(handle_read(root, &json!({})).status, 400);
         assert_eq!(
             handle_read(root, &json!({ "path": "../outside.txt" })).status,

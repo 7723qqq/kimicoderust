@@ -1,32 +1,13 @@
-//! Session idle reclaim (v2 `kap-server/src/services/sessionIdleReaper.ts` +
-//! `app/sessionManager/sessionManagerService.ts:286-334`).
-//!
-//! A session that has been idle for longer than the configured timeout is
-//! released: its in-memory scope is closed, and a later request resumes it from
-//! persistence. The reaper never closes a session that is still doing work —
-//! a running turn, a pending interaction, or an agent with cron work keeps the
-//! session retained.
-//!
-//! The control seam is a trait so the policy (what "idle" and "retained" mean)
-//! lives with the thing that owns the scopes, while the scheduling, the
-//! single-flight guard and the environment parsing live here.
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// v2 `SESSION_IDLE_RECLAIM_ENV`.
 pub const SESSION_IDLE_RECLAIM_ENV: &str = "KIMI_CODE_SESSION_IDLE_RECLAIM_MS";
 
-/// v2 `DEFAULT_SESSION_IDLE_RECLAIM_MS`: 30 minutes.
 pub const DEFAULT_SESSION_IDLE_RECLAIM_MS: i64 = 30 * 60 * 1000;
 
-/// v2 `SWEEP_INTERVAL_MS`.
 pub const SESSION_IDLE_SWEEP_INTERVAL_MS: u64 = 60_000;
 
-/// v2 `resolveSessionIdleReclaimMs`: absent or blank means the default, `0`
-/// disables reclaim, and anything that is not a non-negative integer is a
-/// configuration error (not a silent fallback).
 pub fn resolve_session_idle_reclaim_ms(raw: Option<&str>) -> Result<i64, String> {
     let Some(raw) = raw else {
         return Ok(DEFAULT_SESSION_IDLE_RECLAIM_MS);
@@ -45,28 +26,17 @@ pub fn resolve_session_idle_reclaim_ms(raw: Option<&str>) -> Result<i64, String>
     Ok(parsed)
 }
 
-/// [`resolve_session_idle_reclaim_ms`] over the process environment.
 pub fn resolve_session_idle_reclaim_ms_from_env() -> Result<i64, String> {
     let raw = std::env::var(SESSION_IDLE_RECLAIM_ENV).ok();
     resolve_session_idle_reclaim_ms(raw.as_deref())
 }
 
-/// The session-scope operations the reaper needs. Implemented by whatever owns
-/// live session scopes; the reaper itself is storage-agnostic.
 pub trait IdleSessionControl: Send + Sync {
-    /// Every live session and when it was last active (epoch millis).
     fn list_sessions_by_activity(&self) -> Vec<(String, i64)>;
 
-    /// Close the session if it is still idle and not retained.
-    ///
-    /// Implementations must re-check activity under the same serialization
-    /// that guards `close` (v2 `retained` + `closeIfIdle` run inside
-    /// `serializeLifecycle`), and must give up when the session lock is held by
-    /// another process. Returns whether the session was closed.
     fn close_if_idle(&self, session_id: &str, idle_timeout_ms: i64) -> bool;
 }
 
-/// v2 `SessionIdleReaper`: a periodic sweep with a single in-flight run.
 pub struct SessionIdleReaper<C: IdleSessionControl> {
     control: Arc<C>,
     idle_timeout_ms: i64,
@@ -86,23 +56,15 @@ impl<C: IdleSessionControl + 'static> SessionIdleReaper<C> {
         }
     }
 
-    /// Override the sweep cadence (tests use milliseconds, not a minute).
     pub fn with_sweep_interval(mut self, interval: Duration) -> Self {
         self.sweep_interval = interval;
         self
     }
 
-    /// Whether the reaper is enabled: a timeout of `0` disables reclaim
-    /// (v2 `start` returns early for a non-positive timeout).
     pub fn enabled(&self) -> bool {
         self.idle_timeout_ms > 0 && !self.closed.load(Ordering::SeqCst)
     }
 
-    /// One sweep. Returns the number of sessions closed.
-    ///
-    /// Overlapping sweeps collapse into the first one (v2 `inFlight`), so a
-    /// slow close cannot make the next tick queue a second close of the same
-    /// session.
     pub fn sweep(&self) -> usize {
         if !self.enabled() {
             return 0;
@@ -119,8 +81,7 @@ impl<C: IdleSessionControl + 'static> SessionIdleReaper<C> {
             if self.closed.load(Ordering::SeqCst) {
                 break;
             }
-            // Cheap pre-check; `close_if_idle` re-checks under its lifecycle
-            // serialization because activity can resume between the two.
+
             if now_millis() - last_active_at < self.idle_timeout_ms {
                 continue;
             }
@@ -136,7 +97,6 @@ impl<C: IdleSessionControl + 'static> SessionIdleReaper<C> {
         closed
     }
 
-    /// Run sweeps until [`Self::close`]. Returns immediately when disabled.
     pub async fn run(self: Arc<Self>) {
         if !self.enabled() {
             return;
@@ -153,8 +113,6 @@ impl<C: IdleSessionControl + 'static> SessionIdleReaper<C> {
         }
     }
 
-    /// Stop the loop. A sweep already running finishes first (v2 `close`
-    /// awaits `inFlight`).
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         while self.in_flight.load(Ordering::SeqCst) {

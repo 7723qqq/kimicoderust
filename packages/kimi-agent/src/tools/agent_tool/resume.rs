@@ -147,6 +147,7 @@ pub(super) async fn execute_resume(
             run_resume_in_background(
                 manager,
                 runtime.callbacks.clone(),
+                runtime.llm.clone(),
                 task_runner,
                 resume_id,
                 &profile_name,
@@ -278,6 +279,7 @@ pub(super) async fn execute_resume(
 pub(super) async fn run_resume_in_background(
     manager: &Arc<SubagentManager>,
     callbacks: Arc<dyn crate::callbacks::HostCallbacks>,
+    default_llm: Arc<dyn crate::turn_loop::types::LLM>,
     task_runner: Option<Arc<crate::storage::TaskRunner>>,
     resume_id: &str,
     profile_name: &str,
@@ -338,13 +340,24 @@ pub(super) async fn run_resume_in_background(
             .filter(|session| !session.is_empty());
 
         let task_id = format!("task_{}", fastrand::u64(..));
-        let registered = runner.spawn_task_with_meta(
+        let task_llm = manager
+            .instance_llm_of(resume_id)
+            .await
+            .unwrap_or(default_llm);
+        let model = task_llm.model_alias().map(str::to_string);
+        let thinking_effort = task_llm.thinking_effort().map(str::to_string);
+        let registered = runner.spawn_agent_task_with_meta(
             crate::storage::TaskSpawnMeta {
                 session_id: session_id.as_deref(),
                 kind: "subagent",
                 subagent_type: Some(&profile),
                 agent_id: Some(resume_id),
                 timeout_ms: None,
+            },
+            crate::storage::TaskAgentInfo {
+                parent_tool_call_id: tool_call_id,
+                model: model.as_deref(),
+                thinking_effort: thinking_effort.as_deref(),
             },
             task_id.clone(),
             format!("Resume {profile}: {prompt}"),

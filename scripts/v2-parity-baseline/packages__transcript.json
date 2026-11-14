@@ -1,0 +1,87 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/transcript. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/transcript",
+  "redEntries": [
+    {
+      "tsPath": "contract/events.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contract/mediaRef.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contract/origin.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contract/projections.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contract/promptContent.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contract/schema.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "granularity/filterOps.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "granularity/grade.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "history/foldFacts.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "history/foldPrompts.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "history/groupTurns.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "model/frame.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "model/ids.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "model/item.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "ops/apply.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "ops/operation.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "projector/wireProjector.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "store/agentTranscript.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "store/transcriptStore.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "view/registry.ts",
+      "verdict": "partial"
+    }
+  ]
+}

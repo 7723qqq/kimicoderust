@@ -137,6 +137,9 @@ pub fn set_swarm_mode(
             }
             callbacks.emit_event(swarm_mode_enter_event(agent_id, trigger));
             callbacks.emit_event(swarm_mode_status_event(agent_id, true));
+            crate::features::helloWorld::agent::helloWorldService::HelloWorldService::exit(
+                callbacks, agent_id,
+            );
             true
         }
         None => {

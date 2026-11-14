@@ -24,26 +24,12 @@ impl HttpServer {
                 let id = body
                     .get("id")
                     .or_else(|| body.get("name"))
-                    // The official Web bundle's `installPlugin` posts the
-                    // catalog entry's `source` under a `source` key;
-                    // `install_plugin_from` already matches a catalog `source`
-                    // as well as an id, so reading it here is all that was
-                    // missing — the request used to 400 as "Missing plugin id".
                     .or_else(|| body.get("source"))
                     .and_then(|v| v.as_str());
                 let Some(id) = id else {
                     return HttpResponse::bad_request("Missing plugin id");
                 };
-                // Install from a catalog id, a catalog `source`, a local root,
-                // or a remote archive URL. A remote source is downloaded here,
-                // so the recorded install has content behind it; an unknown id
-                // is a 404, and the recorded version comes from the catalog or
-                // the archive's own manifest, never from a hardcoded literal.
-                // Install from a catalog id, a catalog `source`, a local root,
-                // or a remote archive URL. A remote source is downloaded here,
-                // so the recorded install has content behind it; an unknown id
-                // is a 404, and the recorded version comes from the catalog or
-                // the archive's own manifest, never from a hardcoded literal.
+
                 match self.plugin_manager.install_plugin_from(id) {
                     Ok(Some((id, info))) => {
                         self.publish_plugin_changed("install", &id);
@@ -76,16 +62,7 @@ impl HttpServer {
                     Ok(s) => s,
                     Err(_) => return HttpResponse::bad_request("Invalid UTF-8 payload"),
                 };
-                // Attach the server engine when one is configured: a bare
-                // per-request AcpServer has no model and no auth state, so
-                // every session method but `initialize` used to fail with
-                // -32000 and every notification was dropped. Uses the shared
-                // (factory-preserving) constructor: the host-factory slot is
-                // engine-global and must keep pointing at the dedicated stdio
-                // ACP server. No notification sink is set on purpose — plain
-                // HTTP request/response has no channel for server-push
-                // `session/update`s; the final result still travels in the
-                // JSON-RPC response.
+
                 let acp_server = match &self.engine {
                     Some(engine) => crate::acp::AcpServer::with_shared_engine(
                         self.store.clone(),
@@ -120,14 +97,10 @@ impl HttpServer {
                 };
 
                 match action {
-                    // `Ok(false)` = unknown plugin id: neither installed nor in
-                    // the catalog. Answer 404 rather than recording a fake entry.
                     "enable" => match self.plugin_manager.set_plugin_enabled(id, true) {
                         Ok(true) => {
                             self.publish_plugin_changed("enable", id);
-                            // v2 #3963: the toggle reports the resulting
-                            // enabled set, so telemetry can attribute later
-                            // turns to the plugins that were loaded.
+
                             self.emit_session_telemetry(
                                 "plugin_toggle",
                                 json!({
@@ -199,10 +172,7 @@ impl HttpServer {
             ("DELETE", "/api/v1/oauth/login") => {
                 let provider = req.query_param("provider").unwrap_or_else(|| "kimi".into());
                 let cancelled = self.oauth_manager.cancel_login(&provider);
-                // The bundle's `cancelOAuthLogin` reads `status` alongside
-                // `cancelled`; the terminal status of a cancelled flow is
-                // `cancelled` when it really was, and the flow's own status
-                // otherwise (nothing to cancel).
+
                 let status = if cancelled {
                     "cancelled".to_string()
                 } else {
@@ -222,12 +192,7 @@ impl HttpServer {
                     .get("provider")
                     .and_then(|v| v.as_str())
                     .unwrap_or("kimi");
-                // Wire shape is the protocol's `oauthLogoutResponseSchema`
-                // (`{ logged_out: true, provider }`, v2 `authService.ts:258`):
-                // always the literal — the nothing-to-drop case is a no-op
-                // success upstream. The manager's internal "was anything
-                // dropped" bool stays off the wire; the shipped Web bundle
-                // reads `logged_out` (snake_case).
+
                 let _ = self.oauth_manager.logout(provider);
                 HttpResponse::ok(&json!({ "logged_out": true, "provider": provider }))
             }
@@ -235,11 +200,7 @@ impl HttpServer {
                 let provider = req.query_param("provider").unwrap_or_else(|| "kimi".into());
                 HttpResponse::ok(&self.oauth_manager.get_usage(&provider).await)
             }
-            // Resolve the client region (mainland-cn/global), mirroring v2
-            // `resolveKimiRegion`'s precedence: env host > configured host/key >
-            // install-channel marker > default. The standalone server does not
-            // persist an oauth ref of its own, so the configured pair is `None`
-            // here — env and the marker still decide.
+
             ("GET", "/api/v1/oauth/region") => {
                 let env_host = std::env::var("KIMI_CODE_OAUTH_HOST")
                     .ok()

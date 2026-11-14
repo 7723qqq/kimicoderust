@@ -1,29 +1,56 @@
 use super::*;
 
+use crate::features::operationLog::operationService;
+
 const RETRIEVAL_MIN_TOOLS: usize = 20;
 
 const RETRIEVAL_TOP_K: usize = 10;
 
 impl NativeToolset {
     pub fn new(workspace_root: &str, shell_path: Option<&str>) -> Option<Self> {
-        let root = std::fs::canonicalize(workspace_root).ok()?;
+        Self::try_new(workspace_root, shell_path).ok().flatten()
+    }
+
+    pub fn try_new(
+        workspace_root: &str,
+        shell_path: Option<&str>,
+    ) -> Result<Option<Self>, crate::native::environment_probe::ProbeShellNotFound> {
+        let Some(root) = std::fs::canonicalize(workspace_root).ok() else {
+            return Ok(None);
+        };
         if !root.is_dir() {
-            return None;
+            return Ok(None);
         }
         let shell = if cfg!(windows) {
             shell_path
                 .map(str::to_string)
                 .filter(|s| !s.trim().is_empty())
-                .or_else(|| Some(crate::native::shell::resolve_shell(None).program))
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    crate::native::shell::resolve_shell(None).map(|shell| shell.program)
+                })?
         } else {
-            Some(
-                shell_path
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("bash")
-                    .to_string(),
-            )
+            shell_path
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("bash")
+                .to_string()
         };
-        Some(Self {
+        let shell = Some(shell);
+        let git_memory = crate::tools::memory_store::memory_base().map(|base| {
+            Arc::new(crate::tools::git_memory::GitMemoryService::new(
+                root.clone(),
+                base,
+            ))
+        });
+        let file_memory = git_memory.clone().map(|service| {
+            service as Arc<dyn crate::agent::tools::file_memory::FileMemoryProvider>
+        });
+        let operation_log = operationService::AgentOperationService::new(
+            root.to_string_lossy(),
+            "",
+            "main",
+        );
+        Ok(Some(Self {
             root,
             extra_roots: Vec::new(),
             skill_dirs: Vec::new(),
@@ -46,12 +73,20 @@ impl NativeToolset {
             caller_agent_id: None,
             permission_mode: None,
             session_id: None,
+            non_interactive: false,
             task_runner: None,
             tower_wake_runtime: Arc::new(std::sync::Mutex::new(None)),
             file_history: Arc::new(std::sync::Mutex::new(None)),
+            operation_log,
+            file_memory,
+            git_memory,
             session_store: Arc::new(std::sync::Mutex::new(None)),
             turn_id: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            llm_trace_id: Arc::new(std::sync::Mutex::new(None)),
             loaded_tools: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            tool_select_pending_loaded: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             selection_failures: Arc::new(std::sync::Mutex::new(Default::default())),
             tool_select_state: Arc::new(std::sync::Mutex::new(Default::default())),
             tool_select_reconcile: Arc::new(tokio::sync::Mutex::new(())),
@@ -71,8 +106,14 @@ impl NativeToolset {
             bash_auto_background: true,
             bash_task_timeout_s: None,
             tower_max_running_tasks: None,
+            notify_user_enabled: true,
             provider: None,
-        })
+            memory_graph: Arc::new(std::sync::Mutex::new(None)),
+        }))
+    }
+
+    pub fn git_memory_service(&self) -> Option<Arc<crate::tools::git_memory::GitMemoryService>> {
+        self.git_memory.clone()
     }
 
     pub fn with_skill_scan(
@@ -101,9 +142,15 @@ impl NativeToolset {
     }
 
     pub fn skill_listing_outcome(&self) -> crate::primitives::read::ReadOutcome<String> {
-        self.skill_scan_roots()
-            .catalog_outcome()
-            .map(|skills| crate::prompt::skills_renderer::render_skills_markdown(&skills))
+        let scan = self.skill_scan_roots();
+        let roots = scan.scanned_roots();
+        scan.catalog_outcome()
+            .map(|skills| {
+                crate::prompt::skills_renderer::render_skills_markdown_with_roots(
+                    &skills,
+                    &roots,
+                )
+            })
     }
 
     pub fn session_id(&self) -> Option<&str> {
@@ -240,18 +287,20 @@ impl NativeToolset {
         let mut persisted_seq = None;
         if let Some((store, session_id)) = &persistence {
             if let Some(event) = &plan.initialized {
-                persisted_seq = Some(
-                    crate::tools::tool_select_ops::persist_tool_select_initialized(
-                        store, session_id, event,
-                    )?,
-                );
+                persisted_seq = Some(self.persist_tool_select_event(
+                    store,
+                    session_id,
+                    crate::tools::tool_select_ops::TOOL_SELECT_INITIALIZED,
+                    event,
+                )?);
             }
             if let Some(event) = &plan.changed {
-                persisted_seq = Some(
-                    crate::tools::tool_select_ops::persist_tool_select_tools_changed(
-                        store, session_id, event,
-                    )?,
-                );
+                persisted_seq = Some(self.persist_tool_select_event(
+                    store,
+                    session_id,
+                    crate::tools::tool_select_ops::TOOL_SELECT_TOOLS_CHANGED,
+                    event,
+                )?);
             }
         }
         if let (Some(seq), Some(listener)) = (
@@ -283,6 +332,26 @@ impl NativeToolset {
         Ok(plan)
     }
 
+    fn persist_tool_select_event<T: serde::Serialize>(
+        &self,
+        store: &std::sync::Arc<crate::session::sqlite_store::SqliteSessionStore>,
+        session_id: &str,
+        event_type: &str,
+        event: &T,
+    ) -> Result<u64, String> {
+        if let Some(callbacks) = self.callbacks.as_ref() {
+            let mut payload = serde_json::to_value(event).map_err(|error| error.to_string())?;
+            payload["type"] = serde_json::json!(event_type);
+            callbacks.emit_event(payload);
+            return store
+                .latest_wire_event_seq(session_id)
+                .map_err(|error| error.to_string());
+        }
+        crate::tools::tool_select_ops::persist_tool_select_payload(
+            store, session_id, event_type, event,
+        )
+    }
+
     pub fn take_tool_update_pending_reminders(&self) -> Vec<String> {
         std::mem::take(
             &mut *self
@@ -310,7 +379,103 @@ impl NativeToolset {
     }
 
     pub fn seed_loaded_tools_from_history(&self, history: &[crate::turn_loop::types::LLMMessage]) {
-        let _ = history;
+        let state = self
+            .tool_select_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let current = if state.initial.is_some() {
+            state.current
+        } else {
+            Vec::new()
+        };
+        let mut loaded: std::collections::HashSet<String> =
+            crate::tools::tool_select_state::collect_loaded_dynamic_tools(history, &current)
+                .into_keys()
+                .collect();
+        loaded.extend(
+            self.tool_select_pending_loaded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .iter()
+                .cloned(),
+        );
+        *self
+            .loaded_tools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = loaded;
+    }
+
+    pub fn drain_pending_tool_schemas(&self) -> Option<Vec<kimi_core::types::ToolDescription>> {
+        if !self.supports_dynamic_tool_loading() {
+            return None;
+        }
+        let mut pending = self
+            .tool_select_pending_loaded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if pending.is_empty() {
+            return None;
+        }
+        let state = self
+            .tool_select_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let mut names: Vec<String> = pending.iter().cloned().collect();
+        names.sort();
+        let deferred_infos = self
+            .mcp_manager
+            .as_ref()
+            .map(|mcp| mcp.deferred_tool_infos_blocking())
+            .unwrap_or_default();
+        let mut tools = Vec::new();
+        for name in names {
+            let description =
+                if let Some(tool) = state.current.iter().find(|tool| tool.name == name) {
+                    Some(kimi_core::types::ToolDescription {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        parameters: tool.parameters.clone(),
+                        deferred: None,
+                    })
+                } else {
+                    deferred_infos
+                        .iter()
+                        .find(|(tool_name, _, _)| tool_name == &name)
+                        .map(|(tool_name, description, parameters)| {
+                            kimi_core::types::ToolDescription {
+                                name: tool_name.clone(),
+                                description: description.clone(),
+                                parameters: parameters.clone(),
+                                deferred: None,
+                            }
+                        })
+                };
+            let Some(tool) = description else {
+                continue;
+            };
+            pending.remove(&name);
+            tools.push(tool);
+        }
+        if tools.is_empty() {
+            return None;
+        }
+        let mut loaded = self
+            .loaded_tools
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for tool in &tools {
+            loaded.insert(tool.name.clone());
+        }
+        Some(tools)
+    }
+
+    pub fn clear_pending_tool_schemas(&self) {
+        self.tool_select_pending_loaded
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
     }
 
     pub fn is_dynamic_tool_loaded(&self, name: &str) -> bool {
@@ -765,6 +930,12 @@ impl NativeToolset {
     }
 
     #[must_use]
+    pub fn with_notify_user_enabled(mut self, enabled: bool) -> Self {
+        self.notify_user_enabled = enabled;
+        self
+    }
+
+    #[must_use]
     pub fn with_tower_max_running_tasks(mut self, max_running_tasks: Option<u32>) -> Self {
         self.tower_max_running_tasks = max_running_tasks.filter(|value| *value > 0);
         self
@@ -816,7 +987,7 @@ impl NativeToolset {
 
     pub fn bind_tower_wake_runtime(
         &self,
-        runtime: Arc<crate::tools::tower::wake::TowerWakeRuntime>,
+        runtime: Arc<crate::features::tower::wake::TowerWakeRuntime>,
     ) -> crate::session::wake::WakeReplayHandler {
         *self
             .tower_wake_runtime
@@ -833,12 +1004,12 @@ impl NativeToolset {
         &self,
         driver: Arc<dyn crate::session::wake::TowerWakeDriver>,
     ) -> crate::session::wake::WakeReplayHandler {
-        self.bind_tower_wake_runtime(crate::tools::tower::wake::TowerWakeRuntime::new(driver))
+        self.bind_tower_wake_runtime(crate::features::tower::wake::TowerWakeRuntime::new(driver))
     }
 
     pub(crate) fn tower_wake_runtime(
         &self,
-    ) -> Option<Arc<crate::tools::tower::wake::TowerWakeRuntime>> {
+    ) -> Option<Arc<crate::features::tower::wake::TowerWakeRuntime>> {
         self.tower_wake_runtime
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -865,6 +1036,11 @@ impl NativeToolset {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_non_interactive(mut self, non_interactive: bool) -> Self {
+        self.non_interactive = non_interactive;
         self
     }
 
@@ -901,6 +1077,17 @@ impl NativeToolset {
             .store(turn_id, std::sync::atomic::Ordering::SeqCst);
     }
 
+    pub fn set_llm_trace_id(&self, trace_id: Option<String>) {
+        *self.llm_trace_id.lock().unwrap_or_else(|e| e.into_inner()) = trace_id;
+    }
+
+    pub fn llm_trace_id(&self) -> Option<String> {
+        self.llm_trace_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     #[must_use]
     pub fn with_session_store(
         self,
@@ -928,6 +1115,16 @@ impl NativeToolset {
 
     pub(super) fn effective_turn_id(&self) -> usize {
         self.turn_id.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn operation_log_service(
+        &self,
+        agent_id: &str,
+    ) -> operationService::AgentOperationService {
+        self.operation_log.clone().with_identity(
+            self.session_id.clone().unwrap_or_default(),
+            agent_id.to_string(),
+        )
     }
 
     pub(super) fn effective_caller_agent_id(&self) -> String {
@@ -984,14 +1181,9 @@ impl NativeToolset {
             tools.retain(|tool| tool.name != crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME);
             return tools;
         }
-        let loaded = self
-            .loaded_tools
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         tools.retain(|tool| {
             tool.name == crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME
                 || !deferred.contains(&tool.name)
-                || loaded.contains(&tool.name)
         });
         if tools
             .iter()
@@ -1060,10 +1252,25 @@ impl NativeToolset {
             );
         }
         capable.sort_by(|left, right| left.name.cmp(&right.name));
-        let loaded = self
-            .loaded_tools
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        // v2 `shapeToolsForDisclosure` keeps a dynamically loadable entry once
+        // it is loaded (or queued for loading): the deferred filter below drops
+        // everything else. Without this the model is told a tool was loaded but
+        // the next request's table omits its definition again.
+        let loaded = {
+            let mut loaded = self
+                .loaded_tools
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            loaded.extend(
+                self.tool_select_pending_loaded
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .cloned(),
+            );
+            loaded
+        };
         let is_dynamic = |tool: &ToolSelectTool| {
             tool.disclosure == Some(crate::tools::registry::ToolDisclosure::Deferred)
                 || (tool.origin == ToolSelectOrigin::Runtime
@@ -1189,7 +1396,10 @@ impl NativeToolset {
         self
     }
 
-    pub fn with_github_credentials(mut self, credentials: github::GitHubCredentials) -> Self {
+    pub fn with_github_credentials(
+        mut self,
+        credentials: crate::agent::tools::github::github_legacy::GitHubCredentials,
+    ) -> Self {
         self.github_credentials = Some(credentials);
         self
     }
@@ -1203,7 +1413,9 @@ impl NativeToolset {
         self.tools_filter.as_ref()
     }
 
-    pub fn github_credentials(&self) -> Option<&github::GitHubCredentials> {
+    pub fn github_credentials(
+        &self,
+    ) -> Option<&crate::agent::tools::github::github_legacy::GitHubCredentials> {
         self.github_credentials.as_ref()
     }
 

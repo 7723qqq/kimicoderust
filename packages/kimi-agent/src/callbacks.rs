@@ -15,7 +15,7 @@ use crate::rpc::types::{
     PermissionDecision, StateReadRequest, StateReadResponse, StateWriteRequest, StateWriteResponse,
     ToolExecuteRequest, ToolExecuteResponse,
 };
-use crate::turn_loop::types::{GoalContext, LLMMessage};
+use crate::turn_loop::types::{ContentBlock, GoalContext, LLMMessage};
 
 /// Sentinel returned by [`HostCallbacks::checkpoint`] when the host has no
 /// checkpoint support — the trait default, or a napi host that never wired the
@@ -93,6 +93,10 @@ pub trait HostCallbacks: Send + Sync {
     ) -> BoxFuture<'static, Result<AskQuestionResponse, String>> {
         let _ = request;
         Box::pin(async { Err("host does not support interactive questions".into()) })
+    }
+
+    fn cancel_question(&self, question_id: &str, reason: &str) {
+        let _ = (question_id, reason);
     }
 
     /// Read host-owned durable state (state-bridge class tools). The host
@@ -960,10 +964,11 @@ impl HostCallbacks for NativeToolCallbacks {
                 }
             }
             let decision = if let Some(ref engine) = this.permission_engine {
-                let mut verdict = engine.evaluate_for_agent(
+                let mut verdict = engine.evaluate_for_agent_with_accesses(
                     &request.agent_id,
                     &request.tool_name,
                     &request.arguments,
+                    &resolution.accesses,
                 );
                 // v2 `GuardianReview` (`policies/guardian-review.ts`) runs in
                 // front of `YoloModeApprove`, so it only ever sees a call the
@@ -1309,8 +1314,10 @@ impl HostCallbacks for NativeToolCallbacks {
             // their pre-images before the write lands. Fail-open: a failure
             // or unwired host skips the snapshot. At this point every deny
             // gate (veto / plan / permission / hook / stale) has passed.
+            let operation_log_enabled =
+                crate::features::operationLog::operationService::operation_log_enabled();
             let checkpoint_paths = checkpoint_write_paths(&resolution.accesses);
-            if !checkpoint_paths.is_empty() {
+            if !operation_log_enabled && !checkpoint_paths.is_empty() {
                 let _ = this
                     .inner
                     .checkpoint(CheckpointRequest {
@@ -1366,7 +1373,7 @@ impl HostCallbacks for NativeToolCallbacks {
                     // can detect manual edits. Fire-and-forget: a failure
                     // leaves the group with an unresolvable after-state,
                     // which restore treats as a conflict, not data loss.
-                    if !checkpoint_paths.is_empty() {
+                    if !operation_log_enabled && !checkpoint_paths.is_empty() {
                         let _ = this
                             .inner
                             .checkpoint(CheckpointRequest {
@@ -1410,6 +1417,10 @@ impl HostCallbacks for NativeToolCallbacks {
                             })
                             .await;
                     }
+                    let spill_exempt = request.tool_name.eq_ignore_ascii_case("read");
+                    let has_media = result.parts.iter().any(|part| {
+                        !matches!(part, ContentBlock::Text { .. } | ContentBlock::Think { .. })
+                    });
                     let spill = result.spill;
                     let raw = ToolExecuteResponse {
                         delivery: result.delivery,
@@ -1425,13 +1436,14 @@ impl HostCallbacks for NativeToolCallbacks {
                     let finalized = match this.truncator.as_ref() {
                         Some(truncator) => {
                             let f = truncator.truncate_call(
-                                &request.arguments,
                                 crate::tool_result_truncation::TruncationRequest {
                                     tool_name: &request.tool_name,
                                     tool_call_id: &request.tool_call_id,
                                     content: &raw.content,
                                     is_error: raw.is_error,
                                     note: raw.note.as_deref(),
+                                    spill_exempt,
+                                    has_media,
                                     spill: spill.as_ref(),
                                 },
                             );
@@ -1462,6 +1474,14 @@ impl HostCallbacks for NativeToolCallbacks {
                         "is_error": finalized.is_error,
                         "note": finalized.note,
                     }));
+                    crate::features::helloWorld::agent::helloWorldService::HelloWorldService::observe_tool_round(
+                        this.inner.as_ref(),
+                        &request.agent_id,
+                        &request.tool_name,
+                        Some(&request.arguments),
+                        true,
+                        finalized.is_error,
+                    );
                     Ok(finalized)
                 }
                 // Sandbox escape or unrecognized argument shape — the host
@@ -1507,6 +1527,14 @@ impl HostCallbacks for NativeToolCallbacks {
                     if let Some(gate) = &this.stale_guard {
                         gate.observe(&request.tool_name, &request.arguments, response.is_error);
                     }
+                    crate::features::helloWorld::agent::helloWorldService::HelloWorldService::observe_tool_round(
+                        this.inner.as_ref(),
+                        &request.agent_id,
+                        &request.tool_name,
+                        Some(&request.arguments),
+                        true,
+                        response.is_error,
+                    );
                     Ok(response)
                 }
             }

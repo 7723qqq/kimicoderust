@@ -1,15 +1,3 @@
-//! Tool scheduling — parallel and serial execution of tool calls with
-//! resource conflict detection.
-//!
-//! Corresponds to `packages/agent-core-v2/src/agent/toolExecutor/toolScheduler.ts`.
-//!
-//! The scheduler groups tool calls into non-conflicting batches:
-//!   - Tasks with non-conflicting resource accesses run in the same batch
-//!     (parallel execution).
-//!   - Tasks with conflicting resource accesses are placed in separate
-//!     batches (serial execution).
-//!   - Within each batch, tasks are independent and safe to parallelise.
-
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,43 +8,25 @@ use crate::turn_loop::types::{
     write_file_access, write_tree_access,
 };
 
-/// A scheduled tool call with its resource accesses.
 #[derive(Debug, Clone)]
 pub struct ScheduledToolCall {
     pub tool_call: ToolCall,
     pub accesses: ToolAccesses,
 }
 
-/// Groups tool calls into non-conflicting batches.
-///
-/// Returns `Vec<Vec<ScheduledToolCall>>` where each inner vec is a batch
-/// of tool calls that can safely execute in parallel. Batches must be
-/// executed sequentially (batch 0 → batch 1 → …).
-///
-/// Flattening the batches reproduces the input order exactly; callers rely on
-/// that to pair each result with its originating tool call.
-///
-/// When all access lists are empty (no access info available), falls back
-/// to a single batch containing all calls (parallel-safe by default).
 #[tracing::instrument(name = "schedule_tool_calls", skip_all, fields(call_count = tool_calls.len()))]
 pub fn schedule_tool_calls(tool_calls: Vec<ScheduledToolCall>) -> Vec<Vec<ScheduledToolCall>> {
     if tool_calls.is_empty() {
         return vec![];
     }
 
-    // Fast path: if none have any accesses, all are parallel-safe.
     let all_empty = tool_calls.iter().all(|t| t.accesses.is_empty());
     if all_empty {
         return vec![tool_calls];
     }
 
     let mut batches: Vec<Vec<ScheduledToolCall>> = Vec::new();
-    // Lowest batch a call may join. Raising it monotonically keeps batch
-    // indices non-decreasing across calls, which is what makes flattening the
-    // batches reproduce the input order. Callers pair results with the input
-    // tool calls by position, and plain first-fit placement lets a later call
-    // backfill an earlier batch — `[write a, write a, write b]` came back as
-    // `[0, 2, 1]` — which attaches results to the wrong `tool_call_id`.
+
     let mut floor = 0;
 
     for call in tool_calls {
@@ -80,40 +50,16 @@ pub fn schedule_tool_calls(tool_calls: Vec<ScheduledToolCall>) -> Vec<Vec<Schedu
     batches
 }
 
-/// Output message for tools skipped after a previous tool stops the turn or batch (v2 toolExecutorService.ts:450).
 pub const SKIPPED_TOOL_OUTPUT: &str = "Tool skipped because a previous tool call stopped the turn.";
 
-/// Execute all scheduled tool calls in order, respecting conflict boundaries.
-///
-/// Calls from the same batch run concurrently; batches run serially, so
-/// conflicting calls (e.g. two writes to the same file) never overlap.
-/// Results are returned in the original call order (batches are flattened
-/// back to a single Vec).
-/// The outcome of one scheduled batch round: the results in call order plus
-/// the per-call wall-clock durations (index-aligned with `results`).
-///
-/// Durations mirror v2 `ToolExecutionResult.durationMs` (upstream #3966):
-/// measured around the tool call itself, `None` for results the scheduler
-/// synthesizes without executing anything (skipped after a stop-turn, a
-/// failed join, a transport error).
 #[derive(Debug, Clone)]
 pub struct ScheduledToolOutcome {
     pub results: Vec<ExecutableToolResult>,
     pub durations_ms: Vec<Option<u64>>,
-    /// The turn was cancelled mid-batch: every call that did not finish
-    /// carries an `abortedToolOutput` error result (v2 `raceWithAbortGrace`)
-    /// so the assistant's tool calls stay paired with results in history.
+
     pub cancelled: bool,
 }
 
-///
-/// `cancellation` is polled between calls: a turn that is cancelled mid-batch
-/// stops launching work instead of running the batch out.
-///
-/// `run_count` carries v2's `stopBatchAfterThis` prediction
-/// (`toolExecutorService.ts:203-221`): calls after the predicted stop never
-/// execute and settle with [`SKIPPED_TOOL_OUTPUT`], while the call that
-/// triggered it still runs. `None` runs the whole list.
 #[tracing::instrument(name = "execute_scheduled", skip_all, fields(batch_size = scheduled.len()))]
 pub async fn execute_scheduled<F, Fut>(
     cancellation: Option<&Arc<AtomicBool>>,
@@ -152,10 +98,6 @@ where
         .collect();
     for batch in batches {
         if is_cancelled(cancellation) {
-            // v2 `abortedToolOutput`: every call that never ran still gets an
-            // error result, so the assistant's tool calls stay paired in
-            // history and the model reads a deliberate user action — not a
-            // system failure to retry.
             for scheduled in batch {
                 all_results.push(ExecutableToolResult {
                     spill: None,
@@ -198,8 +140,6 @@ where
             let tc = scheduled.tool_call;
             let execute_fn = execute_fn.clone();
             handles.push(tokio::spawn(async move {
-                // v2 runs the whole batch through `Promise.allSettled`
-                // (`toolExecutorService.ts:494-503`) with no concurrency limit.
                 let started = std::time::Instant::now();
                 let result = execute_fn(tc).await;
                 result.map(|result| (result, started.elapsed().as_millis() as u64))
@@ -210,12 +150,6 @@ where
         let mut grace_deadline: Option<std::time::Instant> = None;
         let mut pending = handles.into_iter();
         'collect: for mut handle in pending.by_ref() {
-            // Await with cancellation ticks instead of awaiting blindly: one
-            // hung tool used to pin this loop, so user cancellation landed
-            // only after that tool's full duration. Aborting drops the task's
-            // future (a spawned OS child outlives it — only the Rust side is
-            // reclaimed). Fast tools resolve on the first poll; the tick only
-            // bounds the worst case.
             let (joined, won_race) =
                 match join_with_abort_grace(&mut handle, cancellation, &mut grace_deadline).await {
                     GraceJoin::Abandoned => {
@@ -225,16 +159,9 @@ where
                     GraceJoin::Settled(joined) => (joined, false),
                     GraceJoin::WonRace(joined) => (joined, true),
                 };
-            // A result that landed inside the grace window is the one v2's
-            // race picked, so the cancellation that opened the window must not
-            // discard it.
+
             let cancelled_now = !won_race && is_cancelled(cancellation);
             if won_race {
-                // The turn is still cancelled, though. The user's Ctrl-C stops
-                // the turn; letting one call's result win the race does not
-                // un-cancel it, and reporting `cancelled: false` here would let
-                // the loop start another round. Set the flag without breaking,
-                // so the rest of the batch still races the same deadline.
                 failure = Some("turn cancelled".to_string());
             }
             match joined {
@@ -250,10 +177,6 @@ where
                     all_durations.push(Some(duration_ms));
                 }
                 Ok(Err(e)) => {
-                    // A single call failing (transport/execution) must not
-                    // abort the batch: completed siblings are kept and the
-                    // failing call surfaces as an error result the model can
-                    // react to. Only a cancellation aborts the round.
                     if cancelled_now {
                         failure = Some("turn cancelled".to_string());
                         break;
@@ -289,14 +212,7 @@ where
                 }
             }
         }
-        // Dropping a JoinHandle does not cancel its task, so whatever the loop
-        // left behind would keep running — writing files and executing shell
-        // commands for a turn that has already failed.
-        //
-        // v2 arms `raceWithAbortGrace` on **every** in-flight call when the
-        // signal fires, and they all share that one instant — so the rest of
-        // the batch races the deadline already opened above rather than each
-        // getting 2 s in turn.
+
         match grace_deadline {
             Some(deadline) => {
                 for mut handle in pending {
@@ -335,7 +251,7 @@ where
                             });
                             all_durations.push(None);
                         }
-                        // No grace left, or the call never finished inside it.
+
                         GraceJoin::Settled(_) | GraceJoin::Abandoned => {
                             all_results.push(ExecutableToolResult {
                                 spill: None,
@@ -359,11 +275,6 @@ where
             }
         }
 
-        // A cancellation mid-collect leaves calls without results. v2
-        // (`raceWithAbortGrace` + `abortedToolOutput`) settles every in-flight
-        // call with an error result after a 2 s grace; the pairing requirement
-        // is the same — fill the gaps so the model reads one deliberate user
-        // action per interrupted call, not a silent hole.
         if failure.is_some() {
             while all_results.len() < total_calls {
                 let index = all_results.len();
@@ -396,9 +307,6 @@ where
     })
 }
 
-/// v2 `prepareSkippedToolCall` (`toolExecutorService.ts:448-457`): calls after
-/// a predicted `stopBatchAfterThis` never execute and carry the skipped text,
-/// so the model sees one deliberate stop instead of silently missing results.
 fn push_skipped(
     skipped: &[ScheduledToolCall],
     results: &mut Vec<ExecutableToolResult>,
@@ -419,53 +327,26 @@ fn push_skipped(
     }
 }
 
-/// v2 `abortedToolOutput` (toolExecutorService.ts:938-943): the cancellation
-/// reason the Rust engine carries is always the engine's own flag — the
-/// user-vs-host distinction does not travel with it — so the user-cancellation
-/// text is the one this engine can emit.
 fn aborted_tool_output(tool_name: &str) -> String {
     format!(
         "The user manually interrupted \"{tool_name}\" (and anything else running at the same time). This was a deliberate user action, not a system error, timeout, or capacity limit. Do not retry automatically or guess at the cause — wait for the user's next instruction."
     )
 }
 
-/// v2 `ABORT_GRACE_MS` (`toolExecutorService.ts:57`).
-///
-/// This is a **race**, not a delay: v2 wraps every in-flight call in
-/// `raceWithAbortGrace` (`:946-980`), which arms a timer at the moment the
-/// abort signal fires and resolves to a synthetic `abortedToolOutput` only if
-/// the call has not finished by then. A result landing inside the window wins,
-/// so a tool that was 100 ms from done is not reported to the model as
-/// something the user interrupted.
 const ABORT_GRACE_MS: u64 = 2_000;
 
-/// The window as a [`Duration`]. Mirrors `retry.rs`, which keeps its delays as
-/// `*_MS` constants and converts at the use site, so a test can read the real
-/// number instead of a copy of it.
 fn abort_grace() -> std::time::Duration {
     std::time::Duration::from_millis(ABORT_GRACE_MS)
 }
 
-/// What awaiting one in-flight call produced, once the abort grace is in play.
 enum GraceJoin<T> {
-    /// It finished before any cancellation was noticed — the ordinary path.
     Settled(Result<T, tokio::task::JoinError>),
-    /// It finished *inside* the grace window. v2's `Promise.race` has already
-    /// decided that this result wins over the synthetic aborted output, so the
-    /// caller must not discard it for the very cancellation that opened the
-    /// window.
+
     WonRace(Result<T, tokio::task::JoinError>),
-    /// The window closed with the call still running. It has been aborted, and
-    /// [`aborted_tool_output`] is what the model sees.
+
     Abandoned,
 }
 
-/// Await one in-flight call, applying v2's abort grace on cancellation.
-///
-/// `deadline` is created the first time a cancellation is seen and then reused
-/// for every call in the batch, because v2 arms one timer per call *at the
-/// signal* — they share that instant. Granting 2 s to each call in turn would
-/// let a large batch run for 2 s × batch_size after the user pressed Ctrl-C.
 async fn join_with_abort_grace<T>(
     handle: &mut tokio::task::JoinHandle<T>,
     cancellation: Option<&Arc<AtomicBool>>,
@@ -490,7 +371,6 @@ async fn join_with_abort_grace<T>(
     }
 }
 
-/// Race one call against the batch's shared grace deadline.
 async fn join_until<T>(
     handle: &mut tokio::task::JoinHandle<T>,
     deadline: std::time::Instant,
@@ -516,18 +396,6 @@ fn is_cancelled(cancellation: Option<&Arc<AtomicBool>>) -> bool {
     cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
-/// Infer the resource accesses of a tool call from its name and arguments.
-///
-/// Mirrors the v2 executor rule `execution.accesses ?? ToolAccesses.all()`
-/// (toolExecutorService.ts:435-443): a tool that declares accesses gets
-/// exactly those (`read` → readFile, `write` → writeFile, `edit` →
-/// readWriteFile, `grep` / `glob` / list → search tree, fetch_url /
-/// web_search / github / agent → none), and every tool WITHOUT a
-/// declaration — bash included — conflicts with everything, running in a
-/// batch of its own. `ToolAccesses::all` conflicts with any access set
-/// (toolContract.ts:206-210), so an undeclared tool never runs concurrently.
-/// The host applies its own full permission + conflict layer on execution
-/// anyway; this inference serializes the same pairs the v2 scheduler would.
 pub fn infer_tool_accesses(tool_name: &str, args: &serde_json::Value) -> ToolAccesses {
     let name = tool_name.to_ascii_lowercase();
     let path = args.get("path").and_then(|p| p.as_str());
@@ -547,25 +415,17 @@ pub fn infer_tool_accesses(tool_name: &str, args: &serde_json::Value) -> ToolAcc
         "grep" | "glob" | "listdirectory" | "list_directory" => {
             path.map(read_tree_access).into_iter().collect()
         }
-        // v2 declares `ToolAccesses.none()` on these (fetchUrlTool.ts:36,
-        // webSearchTool.ts:33, github-tools.ts:56, agentTool.ts:241) —
-        // parallel-safe against every other tool.
+
         "fetchurl" | "fetch_url" | "websearch" | "web_search" | "agent" => vec![],
-        _ if crate::tools::github::is_github_tool(tool_name) => vec![],
-        // A shell command mutates arbitrarily and v2 leaves its accesses
-        // undeclared (bashTool.ts:139-157), so it falls into the `all`
-        // bucket below and runs as the sole tool call of its step.
+        _ if crate::agent::tools::github::github_legacy::is_github_tool(tool_name) => vec![],
+
         "bash" => vec![all_access()],
-        // AgentSwarm runs batch subagents concurrently across the workspace,
-        // and per v2 spec must be the sole tool call in the response.
+
         "agentswarm" | "agent_swarm" => vec![all_access()],
         "towermerge" | "tower_merge" | "towerteardown" | "tower_teardown" => {
             vec![write_tree_access("/")]
         }
-        // v2 fallback for undeclared accesses (toolExecutorService.ts:437):
-        // MCP tools, ask-user-question, task/todo/goal/plan/cron/skill,
-        // knowledge, team, lsp, select_tools, subagent tools — everything
-        // without a declaration conflicts with everything.
+
         _ => vec![all_access()],
     }
 }
@@ -834,7 +694,6 @@ mod tests {
 
     #[test]
     fn test_mixed_conflict_and_non_conflict() {
-        // Two writes to different files + one write to same file as first
         let calls = vec![
             ScheduledToolCall {
                 tool_call: ToolCall {
@@ -868,10 +727,10 @@ mod tests {
             },
         ];
         let batches = schedule_tool_calls(calls);
-        // 1 and 2 are non-conflicting, 3 conflicts with 1
+
         assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].len(), 2); // batch 0: 1, 2
-        assert_eq!(batches[1].len(), 1); // batch 1: 3
+        assert_eq!(batches[0].len(), 2);
+        assert_eq!(batches[1].len(), 1);
     }
 
     #[test]
@@ -903,7 +762,7 @@ mod tests {
             },
         ];
         let batches = schedule_tool_calls(calls);
-        // Search is read-only, read is read-only → no conflict
+
         assert_eq!(batches.len(), 1);
     }
 
@@ -936,7 +795,7 @@ mod tests {
             },
         ];
         let batches = schedule_tool_calls(calls);
-        // Write conflicts with everything that reads
+
         assert_eq!(batches.len(), 2);
     }
 
@@ -979,13 +838,12 @@ mod tests {
             },
         ];
         let batches = schedule_tool_calls(calls);
-        // ReadWrite conflicts with both read and write
+
         assert_eq!(batches.len(), 3);
     }
 
     #[test]
     fn test_windows_path_normalization() {
-        // Windows paths with backslashes should be normalized
         let calls = vec![
             ScheduledToolCall {
                 tool_call: ToolCall {
@@ -1014,7 +872,6 @@ mod tests {
 
     #[test]
     fn test_multiple_accesses_per_tool() {
-        // One tool with multiple accesses
         let calls = vec![
             ScheduledToolCall {
                 tool_call: ToolCall {
@@ -1038,7 +895,7 @@ mod tests {
             },
         ];
         let batches = schedule_tool_calls(calls);
-        // Tool 1 reads /a.txt, Tool 2 writes /a.txt → conflict
+
         assert_eq!(batches.len(), 2);
     }
 
@@ -1077,10 +934,10 @@ mod tests {
             },
         ];
         let batches = schedule_tool_calls(calls);
-        // all() blocks everything, but r and w don't block each other (different paths)
+
         assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].len(), 1); // [all]
-        assert_eq!(batches[1].len(), 2); // [r, w]
+        assert_eq!(batches[0].len(), 1);
+        assert_eq!(batches[1].len(), 2);
     }
 
     #[test]
@@ -1139,8 +996,6 @@ mod tests {
         assert_eq!(batches[0].len(), 3);
     }
 
-    // ── infer_tool_accesses tests ──────────────────────────────────────
-
     #[test]
     fn test_infer_read() {
         let accesses = infer_tool_accesses("read", &serde_json::json!({"path": "/a.txt"}));
@@ -1176,9 +1031,6 @@ mod tests {
 
     #[test]
     fn test_infer_bash_conflicts_with_everything() {
-        // v2 bash declares no accesses (bashTool.ts:139-157), so the
-        // executor fallback makes it conflict with everything — including
-        // read-only tools it could safely run beside.
         let accesses = infer_tool_accesses("Bash", &serde_json::json!({"command": "echo hi"}));
         assert_eq!(accesses, vec![all_access()]);
         assert!(tool_accesses_conflict(
@@ -1193,9 +1045,6 @@ mod tests {
 
     #[test]
     fn test_infer_undeclared_tool_conflicts_with_everything() {
-        // The v2 fallback `execution.accesses ?? ToolAccesses.all()`
-        // (toolExecutorService.ts:437): a tool with no declaration — here an
-        // MCP-style name — conflicts with any other tool, even read-only.
         let accesses = infer_tool_accesses("mcp__server__tool", &serde_json::json!({"x": 1}));
         assert_eq!(accesses, vec![all_access()]);
         assert!(tool_accesses_conflict(
@@ -1210,10 +1059,6 @@ mod tests {
 
     #[test]
     fn test_infer_declared_none_tools_stay_parallel_safe() {
-        // v2 declares ToolAccesses.none() on these (fetchUrlTool.ts:36,
-        // webSearchTool.ts:33, github-tools.ts:56, agentTool.ts:241): empty
-        // accesses conflict with nothing — a github call must still run
-        // beside a Write after the undeclared-tool fallback inversion.
         for name in ["FetchURL", "WebSearch", "GitHubGetRepo", "Agent"] {
             let accesses = infer_tool_accesses(name, &serde_json::json!({}));
             assert!(
@@ -1233,10 +1078,6 @@ mod tests {
         assert!(accesses.is_empty());
     }
 
-    // ── execute_scheduled concurrency/serialization tests ──────────────
-
-    /// Conflicting writes to the same file must not overlap: the second
-    /// call only starts after the first finishes.
     #[tokio::test]
     async fn test_execute_scheduled_conflicting_writes_serialized() {
         use std::sync::Arc;
@@ -1302,14 +1143,8 @@ mod tests {
         );
     }
 
-    /// Flattening the batches must reproduce the input order: callers pair
-    /// each result with `tool_calls[i]`, and a reorder attaches a result to
-    /// the wrong `tool_call_id`.
     #[tokio::test]
     async fn test_execute_scheduled_preserves_call_order() {
-        // [write a, write a, write b]: the second call conflicts with the
-        // first, so it lands in a later batch — and the third must not
-        // backfill the first batch ahead of it.
         let scheduled = vec![
             ScheduledToolCall {
                 tool_call: ToolCall {
@@ -1366,8 +1201,6 @@ mod tests {
         );
     }
 
-    /// A cancelled turn must stop launching work rather than running the
-    /// batch out.
     #[tokio::test]
     async fn test_execute_scheduled_stops_on_cancellation() {
         let cancel = Arc::new(AtomicBool::new(true));
@@ -1393,8 +1226,7 @@ mod tests {
                 display: None,
             })
         };
-        // v2 `abortedToolOutput`: the cancelled call settles with an error
-        // result (never executes), and the outcome carries the cancelled flag.
+
         let outcome = execute_scheduled(Some(&cancel), scheduled, executor, None)
             .await
             .expect("a cancelled turn settles, it does not error the batch");
@@ -1409,9 +1241,6 @@ mod tests {
         );
     }
 
-    /// A hung tool must not pin cancellation: the collector races each task
-    /// against cancel ticks, so the turn fails fast instead of after the
-    /// tool's full duration.
     #[tokio::test]
     async fn test_execute_scheduled_hung_tool_does_not_block_cancel() {
         let scheduled = vec![ScheduledToolCall {
@@ -1455,8 +1284,6 @@ mod tests {
         );
     }
 
-    // ── abort grace (v2 raceWithAbortGrace) ──────────────────────────────
-
     fn ok_result(content: &str) -> ExecutableToolResult {
         ExecutableToolResult {
             spill: None,
@@ -1483,10 +1310,6 @@ mod tests {
         }]
     }
 
-    /// The defect this closes: a tool that was milliseconds from finishing when
-    /// the user pressed Ctrl-C used to be reported to the model as something the
-    /// user interrupted, and its result was thrown away. v2's race lets a
-    /// result landing inside the window win.
     #[tokio::test]
     async fn a_tool_finishing_inside_the_grace_keeps_its_real_result() {
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1495,7 +1318,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
             canceller.store(true, Ordering::Relaxed);
         });
-        // Lands ~200 ms after the cancel, comfortably inside the 2 s window.
+
         let executor = move |_tc: ToolCall| async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             Ok(ok_result("the real answer"))
@@ -1516,9 +1339,6 @@ mod tests {
         );
     }
 
-    /// Past the window, the abort stands — that is the other half of the race.
-    /// The wait is the real 2 s, because a shorter one would not test the
-    /// constant v2 actually specifies.
     #[tokio::test]
     async fn a_tool_overrunning_the_grace_is_replaced_by_the_abort_output() {
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1556,12 +1376,8 @@ mod tests {
         );
     }
 
-    /// v2 arms one timer per call **at the signal**, so every in-flight call
-    /// shares that instant. Granting 2 s to each in turn would let a large
-    /// batch keep running long after the user gave up on it.
     #[tokio::test]
     async fn the_grace_deadline_is_shared_across_the_batch() {
-        // Two different files: concurrent, so they share one batch.
         let scheduled = vec![
             ScheduledToolCall {
                 tool_call: ToolCall {
@@ -1616,8 +1432,6 @@ mod tests {
         );
     }
 
-    /// A single failing call must not abort the batch: its error surfaces as an
-    /// error-marked result while sibling results are preserved.
     #[tokio::test]
     async fn test_execute_scheduled_single_failure_keeps_siblings() {
         let scheduled = vec![
@@ -1669,7 +1483,6 @@ mod tests {
         assert_eq!(results[1].content, "ok-2");
     }
 
-    /// Non-conflicting calls must run concurrently (max active > 1).
     #[tokio::test]
     async fn test_execute_scheduled_non_conflicting_parallel() {
         use std::sync::Arc;
@@ -1744,7 +1557,6 @@ mod tests {
         );
     }
 
-    /// Empty schedule yields an empty result.
     #[tokio::test]
     async fn test_execute_scheduled_empty() {
         let results = execute_scheduled(
@@ -1770,7 +1582,6 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    /// Results preserve the original call order regardless of batching.
     #[tokio::test]
     async fn test_execute_scheduled_preserves_order_across_batches() {
         let scheduled = vec![
@@ -1829,9 +1640,6 @@ mod tests {
         assert_eq!(ids, vec!["1", "2", "3"]);
     }
 
-    /// v2 `stopBatchAfterThis` (`toolExecutorService.ts:203-221`): calls
-    /// positioned after the predicted stop never execute and settle with the
-    /// skipped text, while the call that predicted it still runs.
     #[tokio::test]
     async fn test_execute_scheduled_predicted_stop_skips_the_tail() {
         let scheduled = vec![
@@ -1900,9 +1708,6 @@ mod tests {
         assert_eq!(results[2].content, SKIPPED_TOOL_OUTPUT);
     }
 
-    /// Upstream #3966: every executed call carries its wall-clock duration,
-    /// index-aligned with the results; a call the scheduler skips without
-    /// executing carries `None`.
     #[tokio::test]
     async fn test_execute_scheduled_records_durations_per_call() {
         let scheduled = vec![
@@ -1971,7 +1776,6 @@ mod tests {
         );
     }
 
-    /// Stop turn/batch on an earlier conflicting batch must skip later batches with v2 message.
     #[tokio::test]
     async fn test_execute_scheduled_stop_batch_skips_later_batches() {
         let scheduled = vec![
@@ -2035,7 +1839,6 @@ mod tests {
         assert!(results[0].stop_turn);
         assert!(!results[0].is_error);
 
-        // Tool 2 was skipped because tool 1 in earlier batch stopped the turn/batch
         assert_eq!(results[1].content, SKIPPED_TOOL_OUTPUT);
         assert!(results[1].is_error);
     }

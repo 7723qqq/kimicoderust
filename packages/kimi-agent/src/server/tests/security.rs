@@ -43,15 +43,12 @@ async fn debug_routes_need_the_flag_and_a_loopback_bind() {
         body: Vec::new(),
     };
 
-    // Off by default: the reflection surface is not a product route.
     let off = HttpServer::in_memory().unwrap();
     assert_eq!(off.handle_request(&request()).await.status, 404);
 
-    // Asked for, on loopback: mounted.
     let on = HttpServer::in_memory().unwrap().with_debug_endpoints(true);
     assert_eq!(on.handle_request(&request()).await.status, 200);
 
-    // Asked for, but reachable from the network: still not mounted.
     let remote = HttpServer::in_memory()
         .unwrap()
         .with_debug_endpoints(true)
@@ -106,8 +103,6 @@ async fn a_host_outside_the_allowlist_is_refused_before_the_credential() {
         }
     };
 
-    // `/health` answers unauthenticated, so a 403 here can only come from
-    // the host guard.
     assert_eq!(
         server
             .handle_request(&with_host(Some("127.0.0.1:58627")))
@@ -131,7 +126,6 @@ async fn a_host_outside_the_allowlist_is_refused_before_the_credential() {
     assert!(body.contains("--allowed-host"), "{body}");
     assert!(body.contains("KIMI_CODE_ALLOWED_HOSTS"), "{body}");
 
-    // A missing `Host` is refused too: HTTP/1.1 requires it.
     assert_eq!(server.handle_request(&with_host(None)).await.status, 403);
 }
 

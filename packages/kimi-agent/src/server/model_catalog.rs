@@ -1,28 +1,14 @@
-//! Config-driven model / provider catalog and the auth readiness summary
-//! (v2 `packages/kosong/src/catalog.ts` +
-//! `packages/agent-core-v2/src/app/authLegacy/authLegacyService.ts`).
-//!
-//! The standalone server has no JS host, so the REST surface projects the
-//! same `config.toml` the engine loads into the shapes `packages/protocol`
-//! declares. Declared values only: provider-profile defaults (capabilities,
-//! efforts) are not derived here, and `status: "error"` waits for the
-//! provider-refresh cache.
-
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::config::KimiConfig;
 
-/// The managed Kimi Code OAuth provider (`KIMI_CODE_PROVIDER_NAME`).
 pub const MANAGED_PROVIDER_NAME: &str = "managed:kimi-code";
 
 pub(crate) fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-/// The protocol a provider type speaks, mirroring v2 `resolveModelProtocol`'s
-/// known set. A missing type defaults to `openai`, like the catalog's own
-/// `type ?? 'openai'`.
 fn protocol_for(provider_type: Option<&str>) -> Option<&'static str> {
     match provider_type
         .unwrap_or("openai")
@@ -32,7 +18,7 @@ fn protocol_for(provider_type: Option<&str>) -> Option<&'static str> {
         "kimi" | "openai" | "openai_responses" => Some("openai"),
         "anthropic" => Some("anthropic"),
         "google-genai" | "vertexai" => Some("google-genai"),
-        // Not an HTTP protocol: the engine bridges to the local `agy` CLI.
+
         "antigravity" => Some("antigravity"),
         _ => None,
     }
@@ -51,14 +37,11 @@ struct ModelItem<'a> {
     support_efforts: Option<&'a Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_effort: Option<&'a str>,
-    /// Explicit adaptive-thinking support (v2 #3785 surfaces
-    /// `adaptiveThinking` on the assembled catalog model).
+
     #[serde(skip_serializing_if = "Option::is_none")]
     adaptive_thinking: Option<bool>,
 }
 
-/// Every `[models.*]` alias mapped to `ModelCatalogItem` (v2
-/// `IModelCatalog.listModels`).
 pub fn models(config: &KimiConfig) -> Value {
     let items: Vec<ModelItem<'_>> = config
         .models
@@ -99,9 +82,6 @@ struct ProviderItem<'a> {
     models: Vec<&'a str>,
 }
 
-/// One `[providers.*]` entry mapped to `ProviderCatalogItem` (v2
-/// `toProtocolProvider`), with the credential state deciding `connected` vs
-/// `unconfigured`. `None` when the provider is not configured.
 pub fn provider_item(
     config: &KimiConfig,
     provider_id: &str,
@@ -140,7 +120,6 @@ pub fn provider_item(
     serde_json::to_value(item).ok()
 }
 
-/// Every `[providers.*]` entry (v2 `IModelCatalog.listProviders`).
 pub fn providers(config: &KimiConfig, has_cached_token: &dyn Fn(&str) -> bool) -> Value {
     let items: Vec<Value> = config
         .providers
@@ -163,9 +142,6 @@ struct AuthSummary {
     managed_provider: Option<ManagedProvider>,
 }
 
-/// `GET /api/v1/auth` (v2 `IAuthLegacyService.get`): structural model
-/// readiness, the configured provider count, and the managed provider's
-/// sign-in state.
 pub fn auth_summary(config: &KimiConfig, has_cached_token: &dyn Fn(&str) -> bool) -> Value {
     let managed_provider = config
         .providers
@@ -186,10 +162,6 @@ pub fn auth_summary(config: &KimiConfig, has_cached_token: &dyn Fn(&str) -> bool
     serde_json::to_value(summary).unwrap_or_else(|_| json!({}))
 }
 
-/// v2 `resolveModelForReady`: the default alias exists, its provider (or the
-/// flat model-id prefix) resolves to a configured provider, the wire model
-/// name and a positive context size are declared, and the provider type maps
-/// to a known protocol.
 fn models_ready(config: &KimiConfig) -> bool {
     let Some(default_model) = non_empty(config.default_model.as_deref()) else {
         return false;
@@ -280,8 +252,6 @@ max_context_size = 200000
         assert_eq!(k3["default_effort"], "high");
         assert_eq!(k3["adaptive_thinking"], true);
 
-        // The second alias has no display_name and declares no capabilities;
-        // both fall back to the wire model name / stay omitted.
         let fast = items
             .iter()
             .find(|item| item["model"] == "kimi-code/fast")
@@ -307,7 +277,6 @@ max_context_size = 200000
         assert!(kimi_models.contains(&json!("kimi-code/k3")));
         assert!(kimi_models.contains(&json!("kimi-code/fast")));
 
-        // The managed provider is OAuth-authenticated through its cached token.
         let managed = items
             .iter()
             .find(|item| item["id"] == MANAGED_PROVIDER_NAME)
@@ -345,7 +314,6 @@ api_key = "sk-test"
             json!(null)
         );
 
-        // A model whose provider is missing is not ready either.
         let provider_missing = KimiConfig::from_str(
             r#"
 default_model = "k3"

@@ -11,11 +11,6 @@ impl HttpServer {
         let resp = match (method, path) {
             ("GET", "/api/v1/sessions") => match self.store.list_sessions() {
                 Ok(sessions) => {
-                    // v2 `sessionsListQueryCoercion`
-                    // (kap-server/src/routes/sessions.ts:101-136) is the contract:
-                    // page_size (default 20, max 100), busy, include_archive,
-                    // exclude_empty, archived_only, workspace_id. The response is
-                    // `pageResponseSchema(sessionSchema)` — `{items, has_more}`.
                     let flag = |name: &str| -> Option<bool> {
                         req.query_param(name).map(|v| v == "true" || v == "1")
                     };
@@ -32,9 +27,6 @@ impl HttpServer {
                     let items: Vec<Value> = sessions
                         .iter()
                         .filter(|s| {
-                            // `archived_only` and `include_archive` are mutually
-                            // exclusive upstream; the default hides archived
-                            // sessions.
                             if archived_only {
                                 if !s.archived {
                                     return false;
@@ -75,8 +67,7 @@ impl HttpServer {
                         .collect();
                     let total = items.len();
                     let page: Vec<Value> = items.into_iter().take(page_size).collect();
-                    // `sessions` stays for the in-tree clients that predate the
-                    // paged contract.
+
                     HttpResponse::ok(&json!({
                         "items": page,
                         "has_more": total > page_size,
@@ -85,12 +76,12 @@ impl HttpServer {
                 }
                 Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
             },
-            // Workspaces endpoints
+
             ("GET", "/api/v1/workspaces") => match self.store.list_workspaces() {
                 Ok(items) => HttpResponse::ok(&json!({ "items": items })),
                 Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
             },
-            // FS endpoints (workspace-agnostic folder browser for Web UI / Desktop)
+
             ("GET", "/api/v1/fs:home") => {
                 let home_path = std::env::var("USERPROFILE")
                     .or_else(|_| std::env::var("HOME"))
@@ -109,10 +100,7 @@ impl HttpServer {
                     "recent_roots": recent_roots,
                 }))
             }
-            // v2 writes this as `/fs::browse`, which is the literal path
-            // `/fs:browse` (`::` escapes the colon in Fastify route syntax,
-            // `kap-server/src/routes/workspaceFs.ts:71`); the Web bundle calls
-            // the literal path.
+
             ("GET", "/api/v1/fs:browse") => {
                 let default_home = std::env::var("USERPROFILE")
                     .or_else(|_| std::env::var("HOME"))
@@ -193,10 +181,7 @@ impl HttpServer {
                     "entries": entries,
                 }))
             }
-            // Raw file content by absolute path (kap-server `fsContent`): ETag
-            // revalidation and a single `Range` slice, everything else served
-            // in full. Auth is the bearer check at the HTTP layer — same trust
-            // level as `fs:browse`, which also walks the whole host.
+
             ("GET", "/api/v1/fs:content") => crate::server::fs_routes::handle_fs_content(
                 req.query_param("path").as_deref(),
                 req.header("if-none-match"),
@@ -218,8 +203,7 @@ impl HttpServer {
                 let role = body.get("role").and_then(|v| v.as_str());
                 let page_size =
                     body.get("page_size").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
-                // Opaque cursor: the message offset encoded as a decimal
-                // string. Absent/null means the first page.
+
                 let offset = match body.get("page_token") {
                     None | Some(Value::Null) => 0usize,
                     Some(Value::String(s)) if s.trim().is_empty() => 0usize,
@@ -238,7 +222,6 @@ impl HttpServer {
                     }
                 };
 
-                // Fetch one past the page to know whether a next page exists.
                 let mut hits = match self.store.search_messages(
                     query,
                     session_id,
@@ -277,8 +260,7 @@ impl HttpServer {
                     "source": "sqlite"
                 }))
             }
-            // v2 `/workspace/fs::search` is the literal `/workspace/fs:search`
-            // (`::` escapes the colon, `kap-server/src/routes/fs.ts:383`).
+
             ("POST", "/api/v1/workspace/fs:search") => {
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(v) => v,

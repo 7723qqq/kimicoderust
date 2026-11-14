@@ -1,17 +1,5 @@
-//! Web-facing event aliases — the translation seam between the engine's
-//! internal event names (the TUI/napi transcript contract, which must not
-//! move) and the kimi-web WS vocabulary (`event.tool.*`, mappers.ts).
-//!
-//! [`web_event_aliases`] is applied where engine events reach the server's
-//! event bus (see `CountingCallbacks::emit_event`): every alias is published
-//! *alongside* the original event, so both vocabularies stay live. A private
-//! bus without listeners pays nothing.
-
 use serde_json::{Value, json};
 
-/// The kimi-web wire event names this server emits on the `/api/v1/ws` lane.
-/// Pinned against `ws-event-contract.json` (see the test below) so a rename on
-/// either side fails loudly instead of silently dropping UI updates.
 pub const SERVER_WEB_EVENT_TYPES: &[&str] = &[
     "event.session.created",
     "event.session.updated",
@@ -42,15 +30,11 @@ pub const SERVER_WEB_EVENT_TYPES: &[&str] = &[
     "event.model_catalog.changed",
 ];
 
-/// The engine event types this module aliases. Anything else passes through
-/// unaliased.
 pub fn web_event_aliases(event: &Value) -> Vec<Value> {
     let Some(kind) = event.get("type").and_then(|v| v.as_str()) else {
         return Vec::new();
     };
     match kind {
-        // Live bash output: the Web client folds `message` chunks into the
-        // tool card (mappers.ts `event.tool.progress`).
         "tool.native.progress" => {
             let Some(tool_call_id) = event.get("tool_call_id").cloned() else {
                 return Vec::new();
@@ -61,9 +45,7 @@ pub fn web_event_aliases(event: &Value) -> Vec<Value> {
                 "message": event.get("text").cloned().unwrap_or(Value::Null),
             })]
         }
-        // A native tool result: one output chunk carrying the whole result,
-        // then the completion marker. `stream` spells the output channel the
-        // Web client's tool card renders under.
+
         "tool.native" => {
             let Some(tool_call_id) = event.get("tool_call_id").cloned() else {
                 return Vec::new();

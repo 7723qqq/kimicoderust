@@ -1,26 +1,17 @@
-//! LLM proxy implementation that forwards chat requests to the JS host
-//! via the [`HostCallbacks`] trait (abstracting over stdio JSON-RPC and
-//! napi-rs ThreadsafeFunction transports).
-
 use std::sync::Arc;
 
 use crate::callbacks::HostCallbacks;
 use crate::rpc::types::{self, LlmChatMessage};
 use kimi_core::types::*;
 
-/// An LLM implementation that proxies requests to the JS host via
-/// [`HostCallbacks::llm_chat`].
 pub struct HostLlmProxy {
     system_prompt: String,
     model_name: String,
     callbacks: Option<Arc<dyn HostCallbacks>>,
-    /// Set when this call is one of several racing providers, so the host can
-    /// be told to drop it once another provider wins.
+
     request_id: Option<String>,
-    /// The turn's tool-call-id ledger. The host streams this transport, so the
-    /// engine only normalizes the calls the host returns.
-    tool_call_ids:
-        std::sync::Mutex<Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>>>,
+
+    tool_call_ids: std::sync::Mutex<Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>>>,
 }
 
 impl HostLlmProxy {
@@ -44,8 +35,6 @@ impl HostLlmProxy {
         self
     }
 
-    /// Legacy: accept an RPC server and wrap it in
-    /// [`crate::callbacks::RpcHostCallbacks`].
     pub fn with_server(self, server: Arc<crate::rpc::server::RpcServer>) -> Self {
         let cb = Arc::new(crate::callbacks::RpcHostCallbacks { server });
         self.with_callbacks(cb)
@@ -70,24 +59,13 @@ impl LLM for HostLlmProxy {
     }
 
     fn is_retryable_error(&self, error: &str) -> bool {
-        // A status-coded failure is classified **by its code, never by body
-        // text**: scanning the body for keywords would retry a 400 whose
-        // message merely contains "connection", or a 401 mentioning a session
-        // timeout — requests that can never succeed however often they repeat.
         if crate::llm::http::is_cancelled_error(error) {
             return false;
         }
         if let Some(code) = kimi_core::error::llm_http_status(error) {
-            // The policy itself is `http::is_retryable_status_code`, shared with
-            // the native transport: the two must not drift, because a divergence
-            // silently changes the retry budget the user actually experiences.
-            // An unparseable code classifies as non-retryable.
             return crate::llm::http::is_retryable_status_code(code);
         }
-        // No status code: a transport-level failure. The keyword list is this
-        // transport's own — a host renders these as raw strings ("socket hang
-        // up"), where the native path matches the `llm transport error ` prefix
-        // it stamps. Only the status-code policy above is shared.
+
         const RETRYABLE: &[&str] = &[
             "status 429",
             "overloaded",
@@ -121,35 +99,7 @@ impl LLM for HostLlmProxy {
                 return Err("HostLlmProxy: callbacks not set".into());
             };
 
-            // Convert messages
-            let messages: Vec<LlmChatMessage> = params
-                .messages
-                .iter()
-                .map(|m| LlmChatMessage {
-                    role: m.role.clone(),
-                    content: m.content.clone(),
-                    blocks: m.blocks.clone(),
-                })
-                .collect();
-
-            // Convert tools
-            let tools: Vec<types::ToolDef> = params
-                .tools
-                .iter()
-                .map(|t| types::ToolDef {
-                    name: t.name.clone(),
-                    description: t.description.clone(),
-                    input_schema: t.input_schema.clone(),
-                })
-                .collect();
-
-            let request = types::LlmChatRequest {
-                system_prompt,
-                model_name,
-                messages,
-                tools,
-                request_id,
-            };
+            let request = chat_request(system_prompt, model_name, request_id, &params);
 
             let response = callbacks.llm_chat(request).await.map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> {
@@ -157,10 +107,6 @@ impl LLM for HostLlmProxy {
                 },
             )?;
 
-            // Convert to turn_loop types. Tool-call extras (e.g. Gemini
-            // thoughtSignature) and reasoning blocks must round-trip: both
-            // were dropped here, breaking multi-turn tool use and losing
-            // provider attestation signatures on the host-proxy path.
             let tool_calls: Vec<ToolCall> = response
                 .tool_calls
                 .into_iter()
@@ -190,9 +136,6 @@ impl LLM for HostLlmProxy {
                 timing: None,
             };
 
-            // The host streamed this request, so the engine never saw the
-            // fragments: normalize the calls the host returned against the
-            // turn's ledger instead, keeping what enters history unique.
             let ledger = self
                 .tool_call_ids
                 .lock()
@@ -209,9 +152,86 @@ impl LLM for HostLlmProxy {
     }
 }
 
+/// Project engine-side chat parameters onto the host wire request.
+///
+/// Kept separate from [`HostLlmProxy::chat`] so the mapping (including the
+/// per-request output cap) is testable without a host callback object.
+fn chat_request(
+    system_prompt: String,
+    model_name: String,
+    request_id: Option<String>,
+    params: &LLMChatParams,
+) -> types::LlmChatRequest {
+    let messages: Vec<LlmChatMessage> = params
+        .messages
+        .iter()
+        .map(|m| LlmChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+            blocks: m.blocks.clone(),
+        })
+        .collect();
+
+    let tools: Vec<types::ToolDef> = params
+        .tools
+        .iter()
+        .map(|t| types::ToolDef {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            input_schema: t.input_schema.clone(),
+        })
+        .collect();
+
+    types::LlmChatRequest {
+        system_prompt,
+        model_name,
+        messages,
+        tools,
+        request_id,
+        max_output_tokens: params.effective_max_output_tokens(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn params(max_output_tokens: Option<u32>) -> LLMChatParams {
+        LLMChatParams {
+            messages: Arc::from([]),
+            tools: Arc::from([]),
+            cancel: None,
+            used_context_tokens: None,
+            max_context_tokens: None,
+            max_output_tokens,
+            max_output_size: None,
+        }
+    }
+
+    #[test]
+    fn the_host_proxy_forwards_the_per_request_output_cap() {
+        let request = chat_request(
+            "sys".into(),
+            "model".into(),
+            Some("req-1".into()),
+            &params(Some(4096)),
+        );
+
+        assert_eq!(request.max_output_tokens, Some(4096));
+        assert_eq!(request.request_id.as_deref(), Some("req-1"));
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["max_output_tokens"], 4096);
+    }
+
+    #[test]
+    fn an_absent_cap_is_not_serialized() {
+        let request = chat_request("sys".into(), "model".into(), None, &params(None));
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json.get("max_output_tokens").is_none());
+        let decoded: types::LlmChatRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.max_output_tokens, None);
+    }
 
     fn proxy() -> HostLlmProxy {
         HostLlmProxy::new(String::new(), String::new())
@@ -220,14 +240,14 @@ mod tests {
     #[test]
     fn status_coded_failures_follow_the_v2_retryable_set() {
         let p = proxy();
-        // v2 RETRYABLE_STATUS_CODES plus the fork's 425.
+
         for code in [408, 409, 425, 429, 500, 502, 503, 504, 529] {
             assert!(
                 p.is_retryable_error(&format!("llm http status {code}: boom")),
                 "status {code} must be retryable"
             );
         }
-        // Explicit list, not "all of 5xx": these can never succeed.
+
         for code in [400, 401, 402, 403, 404, 422, 501, 505, 511] {
             assert!(
                 !p.is_retryable_error(&format!("llm http status {code}: boom")),
@@ -239,8 +259,7 @@ mod tests {
     #[test]
     fn a_body_mentioning_a_transport_word_does_not_make_a_client_error_retryable() {
         let p = proxy();
-        // The regression this guards: keyword matching used to retry these,
-        // burning the whole retry budget on requests that can never succeed.
+
         assert!(!p.is_retryable_error("llm http status 400: invalid connection parameter"));
         assert!(
             !p.is_retryable_error("llm http status 401: your session timed out, please reconnect")
@@ -259,9 +278,7 @@ mod tests {
     #[test]
     fn cancellation_is_never_retryable() {
         let p = proxy();
-        // Built from the transport's own spelling so this cannot drift; a
-        // cancelled request that also mentions a transport word must still
-        // not be retried.
+
         assert!(!p.is_retryable_error("llm cancelled: request aborted"));
         assert!(!p.is_retryable_error("llm cancelled: request aborted (connection reset by peer)"));
     }

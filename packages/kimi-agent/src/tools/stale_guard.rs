@@ -220,7 +220,11 @@ mod tests {
     use std::time::Duration;
 
     fn bridge() -> ShellPathBridge {
-        ShellPathBridge::new(&crate::native::shell::resolve_shell(None).program)
+        ShellPathBridge::new(
+            &crate::native::shell::resolve_shell(None)
+                .expect("a shell resolves")
+                .program,
+        )
     }
 
     fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {

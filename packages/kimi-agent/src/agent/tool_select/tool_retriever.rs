@@ -1,0 +1,193 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
+
+const K1: f64 = 1.2;
+const B: f64 = 0.75;
+const MAX_QUERY_TOKENS: usize = 256;
+const MAX_DOCUMENT_TOKENS: usize = 512;
+const MAX_PARAMETER_NAMES: usize = 32;
+const MIN_SCORE_RATIO: f64 = 0.15;
+
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "for", "from", "in", "is", "it", "its",
+    "of", "on", "or", "that", "the", "these", "this", "those", "to", "tool", "tools", "use",
+    "using", "with", "you", "your",
+];
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolSearchEntry {
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub parameter_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolSearchHit {
+    pub name: String,
+    pub description: String,
+    pub score: f64,
+}
+
+pub fn rank_tools_by_query(
+    entries: &[ToolSearchEntry],
+    query: &str,
+    limit: usize,
+) -> Vec<ToolSearchHit> {
+    let safe_limit = limit.clamp(1, 50);
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let first_n = |count: usize| -> Vec<ToolSearchHit> {
+        entries
+            .iter()
+            .take(count)
+            .map(|entry| ToolSearchHit {
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                score: 0.0,
+            })
+            .collect()
+    };
+    if query.trim().is_empty() {
+        return first_n(safe_limit);
+    }
+    let query_tokens: Vec<String> = tokenize(query)
+        .into_iter()
+        .filter(|term| !is_stopword(term))
+        .take(MAX_QUERY_TOKENS)
+        .collect();
+    if query_tokens.is_empty() {
+        return first_n(safe_limit);
+    }
+
+    let documents: Vec<Vec<String>> = entries
+        .iter()
+        .map(|entry| {
+            document_tokens(entry)
+                .into_iter()
+                .take(MAX_DOCUMENT_TOKENS)
+                .collect()
+        })
+        .collect();
+
+    let mut document_frequency: HashMap<&str, usize> = HashMap::new();
+    for tokens in &documents {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for term in tokens {
+            if seen.insert(term.as_str()) {
+                *document_frequency.entry(term.as_str()).or_default() += 1;
+            }
+        }
+    }
+    let document_count = documents.len() as f64;
+    let average_length =
+        documents.iter().map(Vec::len).sum::<usize>() as f64 / document_count.max(1.0);
+
+    let mut query_frequency: indexmap::IndexMap<&str, f64> = indexmap::IndexMap::new();
+    for term in &query_tokens {
+        *query_frequency.entry(term.as_str()).or_default() += 1.0;
+    }
+
+    let mut hits: Vec<ToolSearchHit> = Vec::new();
+    for (index, tokens) in documents.iter().enumerate() {
+        let mut term_frequency: HashMap<&str, f64> = HashMap::new();
+        for term in tokens {
+            *term_frequency.entry(term.as_str()).or_default() += 1.0;
+        }
+        let mut score = 0.0;
+        for (term, query_count) in &query_frequency {
+            let frequency = term_frequency.get(term).copied().unwrap_or(0.0);
+            if frequency == 0.0 {
+                continue;
+            }
+            let containing = document_frequency.get(term).copied().unwrap_or(0) as f64;
+            let idf = (1.0 + (document_count - containing + 0.5) / (containing + 0.5)).ln();
+            let denominator =
+                frequency + K1 * (1.0 - B + B * tokens.len() as f64 / average_length.max(1.0));
+            score += (idf * (frequency * (K1 + 1.0))) / denominator * query_count;
+        }
+        if score > 0.0 {
+            let entry = &entries[index];
+            hits.push(ToolSearchHit {
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                score,
+            });
+        }
+    }
+
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let Some(best) = hits.first().map(|hit| hit.score) else {
+        return Vec::new();
+    };
+    hits.into_iter()
+        .filter(|hit| hit.score >= best * MIN_SCORE_RATIO)
+        .take(safe_limit)
+        .collect()
+}
+
+fn document_tokens(entry: &ToolSearchEntry) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for part in [
+        entry.name.as_str(),
+        entry.name.as_str(),
+        entry.description.as_str(),
+        entry.source.as_str(),
+    ] {
+        tokens.extend(tokenize(part));
+    }
+    for parameter in entry.parameter_names.iter().take(MAX_PARAMETER_NAMES) {
+        tokens.extend(tokenize(parameter));
+    }
+    tokens
+        .into_iter()
+        .filter(|term| !is_stopword(term))
+        .collect()
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    let normalized = icu_normalizer::ComposingNormalizer::new_nfkc()
+        .normalize(text)
+        .into_owned()
+        .to_lowercase();
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    for ch in normalized.chars() {
+        if ch.is_alphanumeric() {
+            word.push(ch);
+        } else {
+            push_word(&mut word, &mut tokens);
+        }
+    }
+    push_word(&mut word, &mut tokens);
+    tokens
+}
+
+fn push_word(word: &mut String, tokens: &mut Vec<String>) {
+    if word.is_empty() {
+        return;
+    }
+    tokens.push(word.clone());
+    if word.chars().any(is_cjk_ideograph) {
+        let units: Vec<u16> = word.encode_utf16().collect();
+        for index in 0..units.len().saturating_sub(1) {
+            tokens.push(String::from_utf16_lossy(&units[index..index + 2]));
+        }
+    }
+    word.clear();
+}
+
+fn is_cjk_ideograph(ch: char) -> bool {
+    ('\u{3400}'..='\u{9FFF}').contains(&ch)
+}
+
+fn is_stopword(term: &str) -> bool {
+    STOPWORDS.contains(&term)
+}

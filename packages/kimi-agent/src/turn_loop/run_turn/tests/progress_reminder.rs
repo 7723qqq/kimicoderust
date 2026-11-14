@@ -2,10 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// v2 `ProgressTrackerService` (`agent/progressTrack/progressTrackerService.ts`):
-/// after `EBM_BLIND_MUTATION_THRESHOLD` successful writes that nothing could
-/// have verified, the next request carries the "run a verification command"
-/// reminder — once, and only from the point the threshold was crossed.
 #[tokio::test]
 async fn three_unverified_writes_arm_the_verification_reminder() {
     struct BlindWriteLlm {
@@ -87,6 +83,7 @@ async fn three_unverified_writes_arm_the_verification_reminder() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-progress-reminder".into(),
@@ -127,8 +124,6 @@ async fn three_unverified_writes_arm_the_verification_reminder() {
     );
 }
 
-/// A verification command resets the debt: two writes, one test run, then a
-/// third write must not reach the threshold.
 #[tokio::test]
 async fn a_verification_command_keeps_the_reminder_silent() {
     struct VerifiedLlm {
@@ -180,9 +175,7 @@ async fn a_verification_command_keeps_the_reminder_silent() {
                         usage: TokenUsage::default(),
                         timing: None,
                     }),
-                    // `cargo test` is a verification command and clears the
-                    // debt (the call runs as a standalone step: bash takes the
-                    // whole step).
+
                     1 => Ok(LLMChatResponse {
                         content: String::new(),
                         thinking: vec![],
@@ -244,6 +237,7 @@ async fn a_verification_command_keeps_the_reminder_silent() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-progress-verified".into(),
@@ -281,12 +275,6 @@ async fn a_verification_command_keeps_the_reminder_silent() {
     );
 }
 
-/// v2 gates the reminder on `ebmInjectedThisTurn`
-/// (`progressTrackerService.ts:71-75`): the flag is set once and reset only by
-/// `turn.started`, so writing more unverified files after the threshold was
-/// crossed must not queue the reminder again. `blind` stays at or above the
-/// threshold, so an arm-per-write gate would put the reminder on every
-/// following request.
 #[tokio::test]
 async fn the_verification_reminder_is_injected_once_per_turn() {
     struct SteadyWriteLlm {
@@ -314,9 +302,6 @@ async fn the_verification_reminder_is_injected_once_per_turn() {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(params.messages.to_vec());
             Box::pin(async move {
-                // Four single-write steps: the third crosses the threshold and
-                // the fourth stays past it, which is what a repeatable arm would
-                // turn into a second injection.
                 if call < 4 {
                     Ok(LLMChatResponse {
                         content: String::new(),
@@ -369,6 +354,7 @@ async fn the_verification_reminder_is_injected_once_per_turn() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-progress-reminder-once".into(),
@@ -399,11 +385,7 @@ async fn the_verification_reminder_is_injected_once_per_turn() {
     let recorded = requests.lock().unwrap_or_else(|e| e.into_inner()).clone();
     assert_eq!(recorded.len(), 5, "four tool steps, then the closing step");
     let reminder = crate::turn_loop::progress_track::EBM_REMINDER;
-    // An injection is pushed onto the turn history (`run_turn`'s
-    // `messages.push(injection_message_named(..))`), so every later request
-    // still carries the copy the crossing request added. What must not grow is
-    // the number of copies: a repeatable arm would add a second one to request
-    // 4.
+
     let copies = |messages: &Vec<LLMMessage>| {
         messages
             .iter()

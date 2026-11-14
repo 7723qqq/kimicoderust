@@ -1,9 +1,3 @@
-//! FetchUrl — HTTP fetcher with SSRF protection and HTML content extraction.
-//!
-//! Designed to run on a blocking thread (via `tokio::task::spawn_blocking`) so
-//! the Node event loop stays responsive. The entire fetch + extract pipeline
-//! happens in Rust without touching libuv.
-
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
@@ -13,11 +7,9 @@ use std::time::Duration;
 use scraper::{Html, Selector};
 use url::Url;
 
-// ── Configuration ────────────────────────────────────────────────────────────
-
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
-const DEFAULT_MAX_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+const DEFAULT_MAX_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_REDIRECTS: u32 = 10;
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
@@ -45,12 +37,10 @@ impl Default for FetchUrlConfig {
 
 pub struct FetchUrlResult {
     pub content: String,
-    pub kind: String, // "passthrough" | "extracted"
+    pub kind: String,
     pub status: u16,
     pub error: Option<String>,
 }
-
-// ── Public entry point ───────────────────────────────────────────────────────
 
 pub fn fetch_url(config: &FetchUrlConfig) -> FetchUrlResult {
     match fetch_url_inner(config) {
@@ -73,7 +63,7 @@ fn fetch_url_inner(config: &FetchUrlConfig) -> Result<FetchUrlResult, String> {
         .timeout_connect(timeout)
         .timeout_read(timeout)
         .timeout_write(timeout)
-        .redirects(0) // We handle redirects manually for per-hop SSRF checks
+        .redirects(0)
         .resolver(pinned.resolver())
         .user_agent(&config.user_agent)
         .build();
@@ -81,12 +71,10 @@ fn fetch_url_inner(config: &FetchUrlConfig) -> Result<FetchUrlResult, String> {
     let mut redirects: u32 = 0;
 
     loop {
-        // SSRF check on every hop; resolves and pins the host in one step.
         validate_url(&current_url, config.allow_private, &pinned)?;
 
         let response = agent.get(&current_url).call().map_err(|e| match e {
             ureq::Error::Status(code, resp) => {
-                // For redirects, we handle them below
                 if is_redirect(code) {
                     return format!("__redirect__:{}", resp.header("location").unwrap_or(""));
                 }
@@ -99,7 +87,6 @@ fn fetch_url_inner(config: &FetchUrlConfig) -> Result<FetchUrlResult, String> {
             Ok(resp) => {
                 let status = resp.status();
 
-                // Check content-length before reading body
                 if let Some(cl) = resp.header("content-length")
                     && let Ok(len) = cl.parse::<usize>()
                     && len > config.max_bytes
@@ -110,10 +97,8 @@ fn fetch_url_inner(config: &FetchUrlConfig) -> Result<FetchUrlResult, String> {
                     ));
                 }
 
-                // Extract content type before consuming the response
                 let content_type = resp.header("content-type").unwrap_or("").to_lowercase();
 
-                // Read body with size limit (consumes resp)
                 let body = read_body_limited(resp, config.max_bytes)?;
 
                 let (content, kind) = if content_type.starts_with("text/plain")
@@ -121,7 +106,6 @@ fn fetch_url_inner(config: &FetchUrlConfig) -> Result<FetchUrlResult, String> {
                 {
                     (body, "passthrough".to_string())
                 } else {
-                    // Assume HTML — extract main content
                     let extracted = extract_html_content(&body);
                     (extracted, "extracted".to_string())
                 };
@@ -146,7 +130,7 @@ fn fetch_url_inner(config: &FetchUrlConfig) -> Result<FetchUrlResult, String> {
                             config.max_redirects
                         ));
                     }
-                    // Resolve relative redirect
+
                     current_url = resolve_redirect(&current_url, location)?;
                     continue;
                 }
@@ -156,15 +140,6 @@ fn fetch_url_inner(config: &FetchUrlConfig) -> Result<FetchUrlResult, String> {
     }
 }
 
-// ── SSRF Protection ──────────────────────────────────────────────────────────
-
-/// Host→address pin table consulted by the custom resolver below.
-///
-/// Every hop is resolved and validated exactly once here; the connection then
-/// reuses these pinned addresses via ureq's resolver, so a DNS-rebinding
-/// attacker cannot swap the address between the validation step and the
-/// actual connect (the same defence the TS fallback path in
-/// `local-fetch-url.ts` applies by connecting to the address it checked).
 pub(crate) struct PinnedHosts {
     entries: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>>,
 }
@@ -181,8 +156,6 @@ impl PinnedHosts {
         self.entries.lock().unwrap().insert(key, addrs);
     }
 
-    /// The resolver handed to ureq: only hosts pinned by a prior validated
-    /// resolution may ever be connected to. Any other lookup fails hard.
     pub(crate) fn resolver(
         &self,
     ) -> impl Fn(&str) -> io::Result<Vec<SocketAddr>> + Send + Sync + 'static {
@@ -221,8 +194,6 @@ pub(crate) fn validate_url(
         .ok_or_else(|| "URL has no host".to_string())?;
     let port = parsed.port_or_known_default().unwrap_or(80);
 
-    // Resolve exactly once, then pin: the connection must reuse these
-    // addresses, never re-resolve the name at connect time.
     let addrs: Vec<SocketAddr> = format!("{host}:{port}")
         .to_socket_addrs()
         .map_err(|e| format!("Cannot resolve host \"{host}\": {e}"))?
@@ -233,13 +204,11 @@ pub(crate) fn validate_url(
         return Ok(());
     }
 
-    // Check for localhost aliases
     let host_lower = host.to_lowercase();
     if host_lower == "localhost" || host_lower.ends_with(".localhost") {
         return Err(format!("Refusing to fetch private host: \"{host}\""));
     }
 
-    // Try parsing as IP literal first
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_ip(ip) {
             return Err(format!("Refusing to fetch private address: \"{host}\""));
@@ -248,7 +217,6 @@ pub(crate) fn validate_url(
         return Ok(());
     }
 
-    // Hostname: every resolved address must be public.
     if addrs.is_empty() {
         return Err(format!("Cannot resolve host \"{host}\": no addresses"));
     }
@@ -274,31 +242,31 @@ fn is_private_ip(ip: IpAddr) -> bool {
 
 fn is_private_ipv4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
-    // 0.0.0.0/8 — "this network"
+
     if octets[0] == 0 {
         return true;
     }
-    // 10.0.0.0/8
+
     if octets[0] == 10 {
         return true;
     }
-    // 100.64.0.0/10 — CGNAT
+
     if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
         return true;
     }
-    // 127.0.0.0/8 — loopback
+
     if octets[0] == 127 {
         return true;
     }
-    // 169.254.0.0/16 — link-local / cloud metadata
+
     if octets[0] == 169 && octets[1] == 254 {
         return true;
     }
-    // 172.16.0.0/12
+
     if octets[0] == 172 && (octets[1] & 0xF0) == 16 {
         return true;
     }
-    // 192.168.0.0/16
+
     if octets[0] == 192 && octets[1] == 168 {
         return true;
     }
@@ -306,24 +274,23 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_private_ipv6(ip: Ipv6Addr) -> bool {
-    // :: (unspecified)
     if ip.is_unspecified() {
         return true;
     }
-    // ::1 (loopback)
+
     if ip == Ipv6Addr::LOCALHOST {
         return true;
     }
     let segments = ip.segments();
-    // fc00::/7 — ULA
+
     if (segments[0] & 0xFE00) == 0xFC00 {
         return true;
     }
-    // fe80::/10 — link-local
+
     if (segments[0] & 0xFFC0) == 0xFE80 {
         return true;
     }
-    // IPv4-mapped IPv6 (::ffff:x.x.x.x) — check the embedded IPv4
+
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_private_ipv4(v4);
     }
@@ -341,8 +308,6 @@ pub(crate) fn resolve_redirect(base_url: &str, location: &str) -> Result<String,
         .map_err(|e| format!("Invalid redirect location: {e}"))?;
     Ok(resolved.to_string())
 }
-
-// ── Body reading ─────────────────────────────────────────────────────────────
 
 fn read_body_limited(resp: ureq::Response, max_bytes: usize) -> Result<String, String> {
     let mut buf = Vec::with_capacity(max_bytes.min(64 * 1024));
@@ -365,26 +330,14 @@ fn read_body_limited(resp: ureq::Response, max_bytes: usize) -> Result<String, S
     String::from_utf8(buf).map_err(|_| "Response body is not valid UTF-8.".to_string())
 }
 
-// ── HTML Content Extraction ──────────────────────────────────────────────────
-
-/// Extract the main textual content from an HTML page.
-///
-/// Strategy:
-/// 1. Parse HTML with `scraper`
-/// 2. Extract `<title>` text
-/// 3. Try `<article>`, then `<main>`, then `<body>` as the content container
-/// 4. Remove noise elements (script, style, nav, header, footer, aside)
-/// 5. Collapse whitespace and return clean text
 pub fn extract_html_content(html: &str) -> String {
     let document = Html::parse_document(html);
 
-    // Extract title
     let title = selector("title")
         .and_then(|sel| document.select(&sel).next())
         .map(|el| clean_text(&el.text().collect::<String>()))
         .unwrap_or_default();
 
-    // Try content containers in priority order
     let content = try_extract_container(&document, "article")
         .or_else(|| try_extract_container(&document, "main"))
         .or_else(|| try_extract_container(&document, "body"))
@@ -405,7 +358,6 @@ fn try_extract_container(document: &Html, tag: &str) -> Option<String> {
     let sel = selector(tag)?;
     let element = document.select(&sel).next()?;
 
-    // Collect text, skipping noise elements
     let noise_tags: &[&str] = &[
         "script", "style", "nav", "header", "footer", "aside", "noscript",
     ];
@@ -455,9 +407,8 @@ fn selector(s: &str) -> Option<Selector> {
 }
 
 fn clean_text(text: &str) -> String {
-    // Collapse runs of whitespace into single spaces, trim
     let mut result = String::with_capacity(text.len());
-    let mut prev_ws = true; // start as true to trim leading whitespace
+    let mut prev_ws = true;
     for ch in text.chars() {
         if ch.is_whitespace() {
             if !prev_ws {
@@ -469,14 +420,12 @@ fn clean_text(text: &str) -> String {
             prev_ws = false;
         }
     }
-    // Trim trailing space
+
     if result.ends_with(' ') {
         result.pop();
     }
     result
 }
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -491,7 +440,7 @@ mod tests {
         assert!(is_private_ipv4(Ipv4Addr::new(169, 254, 169, 254)));
         assert!(is_private_ipv4(Ipv4Addr::new(100, 64, 0, 1)));
         assert!(is_private_ipv4(Ipv4Addr::new(0, 0, 0, 0)));
-        // Public
+
         assert!(!is_private_ipv4(Ipv4Addr::new(8, 8, 8, 8)));
         assert!(!is_private_ipv4(Ipv4Addr::new(1, 1, 1, 1)));
         assert!(!is_private_ipv4(Ipv4Addr::new(203, 0, 113, 1)));
@@ -501,11 +450,11 @@ mod tests {
     fn test_private_ipv6() {
         assert!(is_private_ipv6(Ipv6Addr::UNSPECIFIED));
         assert!(is_private_ipv6(Ipv6Addr::LOCALHOST));
-        // ULA
+
         assert!(is_private_ipv6("fd00::1".parse().unwrap()));
-        // Link-local
+
         assert!(is_private_ipv6("fe80::1".parse().unwrap()));
-        // Public
+
         assert!(!is_private_ipv6("2001:db8::1".parse().unwrap()));
     }
 
@@ -525,7 +474,7 @@ mod tests {
         let pinned = PinnedHosts::new();
         assert!(validate_url("https://example.com/page", false, &pinned).is_ok());
         assert!(validate_url("http://8.8.8.8/dns", false, &pinned).is_ok());
-        // Public URLs are pinned so the connection reuses the checked address.
+
         assert!(validate_url("http://8.8.8.8/dns", false, &pinned).is_ok());
         let resolver = pinned.resolver();
         assert!(!resolver("8.8.8.8:80").unwrap().is_empty());
@@ -536,16 +485,13 @@ mod tests {
         let pinned = PinnedHosts::new();
         assert!(validate_url("http://127.0.0.1/secret", true, &pinned).is_ok());
         assert!(validate_url("http://192.168.1.1/router", true, &pinned).is_ok());
-        // Even the private-allowed path pins the resolved address.
+
         let resolver = pinned.resolver();
         assert!(!resolver("127.0.0.1:80").unwrap().is_empty());
     }
 
     #[test]
     fn test_pinned_resolver_refuses_unknown_hosts() {
-        // The whole point of pinning: the connection layer must never be able
-        // to look up a host that was not validated — DNS rebinding relies on
-        // a second resolution at connect time.
         let pinned = PinnedHosts::new();
         let resolver = pinned.resolver();
         assert!(resolver("attacker.example:443").is_err());
@@ -556,7 +502,7 @@ mod tests {
             resolver("pinned.example:443").unwrap()[0],
             "1.2.3.4:443".parse().unwrap()
         );
-        // A different port on the same host is still refused.
+
         assert!(resolver("pinned.example:80").is_err());
     }
 

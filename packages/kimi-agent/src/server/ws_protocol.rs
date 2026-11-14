@@ -1,25 +1,3 @@
-//! The kap-server `/api/v1/ws` control frames: what the server sends on its own
-//! initiative, and how an inbound frame is read.
-//!
-//! Field names, key order and the numeric codes mirror
-//! `packages/kap-server/src/transport/ws/v1/protocol.ts` and `wsConnectionV1.ts`
-//! so a client written against one server speaks to the other without a branch:
-//!
-//! - `server_hello` goes out immediately after the 101, before the client has
-//!   said anything;
-//! - `ping` carries a `nonce` and is a JSON text frame, not an RFC 6455 Ping;
-//! - `ack` answers a request by `id` with `code: 0` for success;
-//! - a refused `client_hello` credential is `code: 40112` (`AUTH_TOKEN_UNAUTHORIZED`)
-//!   followed by a close — kap-server's own `wsConnectionV1.authorize`.
-//!
-//! `subscribe` / `unsubscribe` / `subscribe_v2` / `unsubscribe_v2` are parsed and
-//! acked; `abort` is the one inbound frame that ends a turn. Prompts are
-//! submitted over REST (`POST /sessions/{id}/prompts`), so there is no inbound
-//! prompt frame. Top-level `resync_required` epoch-change frames have no
-//! server-side trigger yet: the epoch never changes mid-connection here, and
-//! cursor mismatches are reported through the ack's `resync_required` array per
-//! the v1 contract.
-
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -28,21 +6,14 @@ use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-/// `WS_PROTOCOL_VERSION` in kap-server's `protocol/ws-control.ts`.
 pub const WS_PROTOCOL_VERSION: u32 = 2;
 
-/// kap-server's `DEFAULT_HEARTBEAT_INTERVAL_MS`.
 pub const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(10);
 
-/// The ack code kap-server answers a refused `client_hello` credential with.
-/// Distinct from the HTTP 401's `40101`: this one travels in a WS frame.
 pub const WS_AUTH_ERROR_CODE: u32 = 40112;
 
-/// Success, as kap-server spells it in every accepted ack.
 pub const ACK_OK: u32 = 0;
 
-/// An ISO-8601 UTC timestamp with millisecond precision and a trailing `Z`,
-/// byte-for-byte the shape JavaScript's `Date#toISOString()` produces.
 pub fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -92,9 +63,6 @@ fn control<T: Serialize>(kind: &'static str, payload: T) -> Result<Vec<u8>, serd
     })
 }
 
-/// The greeting every kap-server connection receives before it has said
-/// anything. `capabilities` reports the truth: neither batching nor compression
-/// is offered by either server today.
 pub fn server_hello(
     connection_id: &str,
     heartbeat: Duration,
@@ -143,14 +111,6 @@ struct Envelope<'a> {
     payload: Value,
 }
 
-/// The numeric `turnId` the streaming payloads carry.
-///
-/// A main turn numbers itself (`"2"`), but a subagent turn's id is
-/// `subturn-<n>` (`subagent/manager.rs`, every `run_one` / `spawn_and_run`
-/// entry), so the trailing number is what identifies it on the wire. An id
-/// with no numeric tail used to collapse into a silent `1`, which made every
-/// subagent delta claim turn 1; that is reported instead of guessed, and
-/// encoded as `0` (`u64::default`) so the failure is visible in the frame.
 fn numeric_turn_id(turn_id: &str) -> u64 {
     let tail = turn_id.rsplit_once('-').map_or(turn_id, |(_, tail)| tail);
     let parsed = tail.parse::<u64>();
@@ -163,14 +123,6 @@ fn numeric_turn_id(turn_id: &str) -> u64 {
     parsed.unwrap_or_default()
 }
 
-/// Encode one lane event into the kap-server envelope. Identifiers are passed
-/// explicitly so the hub can cache the bytes per event and hand the same
-/// buffer to every connection instead of re-serializing per subscriber.
-///
-/// `seq` is consecutive within `(session_id, epoch)`, so a client that reconnects
-/// can tell a continued stream from a restarted one. `volatile` and `offset` are
-/// kap-server's transcript-frame fields and are absent here because this server
-/// has no transcript stream to carry them.
 pub fn encode_envelope(
     session_id: &str,
     epoch: &str,
@@ -180,9 +132,6 @@ pub fn encode_envelope(
     let mut payload = serde_json::to_value(event)?;
     let mut kind = event.event_type().to_string();
 
-    // Terminal frames are contract-shaped top-level controls
-    // (ws-control.ts:418-441), not wrapped Custom events: the payload narrows
-    // to the contract's `data` / `exit_code` field.
     if let crate::events::EngineEvent::Custom(value) = event {
         let inner = value.get("type").and_then(Value::as_str).unwrap_or("");
         match inner {
@@ -201,7 +150,6 @@ pub fn encode_envelope(
         }
     }
 
-    // Map legacy coarse-grained LlmDelta into standard frontend typewriter streaming events
     if let crate::events::EngineEvent::LlmDelta {
         agent_id,
         turn_id,
@@ -231,7 +179,6 @@ pub fn encode_envelope(
             });
         }
     } else if let Value::Object(map) = &mut payload {
-        // `EngineEvent` carries its name as an internal tag; the envelope owns it.
         map.remove("type");
     }
 
@@ -245,12 +192,10 @@ pub fn encode_envelope(
     })
 }
 
-/// Convenience wrapper for callers that already hold a [`SequencedEvent`].
 pub fn event_envelope(event: &SequencedEvent) -> Result<Vec<u8>, serde_json::Error> {
     encode_envelope(&event.session_id, &event.epoch, event.seq, &event.event)
 }
 
-/// The `client_hello` ack body with session subscription outcomes and cursors.
 pub fn client_hello_ack(
     accepted_subscriptions: &[String],
     resync_required: &[String],
@@ -263,7 +208,6 @@ pub fn client_hello_ack(
     })
 }
 
-/// The `subscribe` ack body.
 pub fn subscribe_ack(
     accepted: &[String],
     not_found: &[String],
@@ -278,7 +222,6 @@ pub fn subscribe_ack(
     })
 }
 
-/// The `unsubscribe` ack body.
 pub fn unsubscribe_ack(
     accepted: &[String],
     not_found: &[String],
@@ -291,12 +234,6 @@ pub fn unsubscribe_ack(
     })
 }
 
-/// The `subscribe_v2` ack body (upstream `onSubscribeV2`,
-/// `wsConnectionV1.ts`): which session was accepted or not found, whether a
-/// resync is required, and the server-side cursor per accepted session —
-/// upstream's declared `subscribeAckPayloadSchema`. The fork's earlier
-/// `{session_id, agents, not_found}` shape matched no reference; the shipped
-/// bundle ignores acks, so aligning costs no consumer.
 pub fn subscribe_v2_ack(session_id: &str, accepted: bool, cursor_seq: u64) -> Value {
     serde_json::json!({
         "accepted": if accepted { vec![session_id.to_string()] } else { Vec::<String>::new() },
@@ -310,7 +247,6 @@ pub fn subscribe_v2_ack(session_id: &str, accepted: bool, cursor_seq: u64) -> Va
     })
 }
 
-/// The `unsubscribe_v2` ack body (upstream `onUnsubscribeV2`).
 pub fn unsubscribe_v2_ack(session_id: &str) -> Value {
     serde_json::json!({
         "accepted": [session_id],
@@ -319,8 +255,6 @@ pub fn unsubscribe_v2_ack(session_id: &str) -> Value {
     })
 }
 
-/// A `transcript.reset` baseline frame (one per attached agent): the caller
-/// supplies the reconstructed `AgentTranscriptSnapshot`.
 pub fn transcript_reset_frame(
     session_id: &str,
     agent_id: &str,
@@ -338,7 +272,6 @@ pub fn transcript_reset_frame(
     }))
 }
 
-/// A `transcript.ops` incremental frame (one op batch for one agent).
 pub fn transcript_ops_frame(
     session_id: &str,
     agent_id: &str,
@@ -357,83 +290,72 @@ pub fn transcript_ops_frame(
     }))
 }
 
-/// A cursor specification presented in inbound subscription frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorSpec {
     pub seq: u64,
     pub epoch: Option<String>,
 }
 
-/// What an inbound data frame asked for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Inbound {
-    /// kap-server's `authorize()` reads a credential from `payload.token`. The
-    /// `id` echoes back into the ack.
     ClientHello {
         id: String,
         token: Option<String>,
         subscriptions: Vec<String>,
         cursors: HashMap<String, CursorSpec>,
     },
-    /// Subscribe to a list of sessions.
+
     Subscribe {
         id: String,
         session_ids: Vec<String>,
         cursors: HashMap<String, CursorSpec>,
     },
-    /// Unsubscribe from a list of sessions.
+
     Unsubscribe {
         id: String,
         session_ids: Vec<String>,
     },
-    /// Subscribe to per-agent transcript streams for one session (the
-    /// `subscribe_v2` control frame). `transcript` maps an agent id (or `*`)
-    /// to a grade (`off` / `turn` / `block` / `delta`).
+
     SubscribeV2 {
         id: String,
         session_id: String,
         transcript: HashMap<String, String>,
         transcript_since: HashMap<String, u64>,
     },
-    /// Detach transcript streams; omitting `agent_ids` detaches the whole
-    /// session.
+
     UnsubscribeV2 {
         id: String,
         session_id: String,
         agent_ids: Vec<String>,
     },
-    /// Abort the active turn of a session (kap-server's `abort` frame:
-    /// `payload: { session_id, prompt_id }`, `ws-control.ts`). Prompts are
-    /// submitted over REST, so this is the only inbound frame that ends a turn.
+
     Abort {
         id: String,
         session_id: String,
-        /// The prompt the client means to abort. Kap-server requires it;
-        /// the fork engine cancels by session, so it is carried through for
-        /// the ack and not used to select the turn.
+
         prompt_id: String,
     },
-    /// Attach to a terminal in a session.
+
     TerminalAttach {
         id: String,
         session_id: String,
         terminal_id: String,
         since_seq: Option<u64>,
     },
-    /// Detach from a terminal in a session.
+
     TerminalDetach {
         id: String,
         session_id: String,
         terminal_id: String,
     },
-    /// Send input to a terminal.
+
     TerminalInput {
         id: String,
         session_id: String,
         terminal_id: String,
         data: String,
     },
-    /// Resize a terminal dimensions.
+
     TerminalResize {
         id: String,
         session_id: String,
@@ -441,19 +363,15 @@ pub enum Inbound {
         cols: u32,
         rows: u32,
     },
-    /// Close/kill a terminal.
+
     TerminalClose {
         id: String,
         session_id: String,
         terminal_id: String,
     },
-    /// The reply to our `ping`. Liveness is already proved by any inbound frame,
-    /// so there is nothing to record.
+
     Pong,
-    /// Anything else — an unparseable frame, a frame with no `type`, a
-    /// subscription frame whose layer does not exist yet. kap-server's
-    /// `onMessage` returns without a word for the first two, so silence here is
-    /// parity rather than a gap.
+
     Unknown,
 }
 
@@ -717,8 +635,6 @@ pub fn parse_inbound(raw: &[u8]) -> Inbound {
     }
 }
 
-/// Top-level `error` frame (ws-control.ts:404-412): sent for protocol-level
-/// failures that are not tied to a session event stream.
 pub fn error_frame(code: i64, msg: &str, fatal: bool, request_id: Option<&str>) -> Value {
     serde_json::json!({
         "type": "error",
@@ -756,8 +672,7 @@ mod tests {
         assert_eq!(frame["payload"]["heartbeat_ms"], 10_000);
         assert_eq!(frame["payload"]["capabilities"]["event_batching"], false);
         assert_eq!(frame["payload"]["capabilities"]["compression"], false);
-        // v2 `serverHelloPayloadSchema` (`kap-server/src/protocol/ws-control.ts:50-58`)
-        // has no buffer-size field: the broadcaster does not bound its queue.
+
         assert!(frame["payload"].get("max_event_buffer_size").is_none());
     }
 
@@ -819,7 +734,6 @@ mod tests {
     fn streaming_delta_events_map_to_standard_frontend_formats() {
         use crate::events::EngineEvent;
 
-        // 1. Native AssistantDelta
         let event_native = SequencedEvent::new(
             std::sync::Arc::from("sess-delta"),
             std::sync::Arc::from("epoch-1"),
@@ -837,7 +751,6 @@ mod tests {
         assert_eq!(frame1["payload"]["delta"], "Hello world");
         assert_eq!(frame1["payload"]["agent_id"], "main");
 
-        // 2. Transformed LlmDelta text
         let event_transformed = SequencedEvent::new(
             std::sync::Arc::from("sess-delta"),
             std::sync::Arc::from("epoch-1"),
@@ -855,7 +768,6 @@ mod tests {
         assert_eq!(frame2["payload"]["delta"], " Streaming chunk");
         assert_eq!(frame2["payload"]["turnId"], 2);
 
-        // 3. Transformed ThinkingDelta
         let event_thinking = SequencedEvent::new(
             std::sync::Arc::from("sess-delta"),
             std::sync::Arc::from("epoch-1"),
@@ -873,9 +785,6 @@ mod tests {
         assert_eq!(frame3["payload"]["delta"], "Let me consider...");
     }
 
-    /// A subagent's streaming events name *it*: the projection used to
-    /// hardcode `agentId: "main"` and to fold every `subturn-<n>` into turn
-    /// `1`, so a subagent's answer streamed into the main agent's card.
     #[test]
     fn a_subagents_streaming_event_keeps_its_agent_and_its_turn_number() {
         use crate::events::EngineEvent;
@@ -898,8 +807,6 @@ mod tests {
         assert_eq!(frame["payload"]["delta"], " Subagent chunk");
     }
 
-    /// An id with no numeric tail is reported, not guessed: the old silent
-    /// `unwrap_or(1)` made every malformed id indistinguishable from turn 1.
     #[test]
     fn a_turn_id_without_a_numeric_tail_encodes_as_zero() {
         assert_eq!(numeric_turn_id("2"), 2);
@@ -908,11 +815,6 @@ mod tests {
         assert_eq!(numeric_turn_id("subturn"), 0);
     }
 
-    /// The `subscribe_v2` / `unsubscribe_v2` acks carry upstream's
-    /// `subscribeAckPayloadSchema` shape (`accepted` / `not_found` /
-    /// `resync_required` / `cursors`), not the fork's earlier invented
-    /// `{session_id, agents, not_found}` — the shipped bundle ignores acks, so
-    /// the reference shape costs no consumer (ROADMAP §7.5).
     #[test]
     fn transcript_subscription_acks_use_the_upstream_shape() {
         let accepted = subscribe_v2_ack("sess-a", true, 42);
@@ -985,9 +887,7 @@ mod tests {
                 prompt_id: "p1".into(),
             }
         );
-        // An inbound `prompt` / `cancel` frame is not part of the v1 vocabulary
-        // (prompts go over REST; the abort frame is `abort`), so it stays
-        // unknown rather than driving a turn.
+
         assert_eq!(
             parse_inbound(
                 br#"{"type":"prompt","id":"p1","payload":{"session_id":"sess-1","prompt":"hello"}}"#
@@ -1072,8 +972,6 @@ mod tests {
             }
         );
 
-        // No credential at all, and a non-string one, both mean "nothing was
-        // presented": kap-server's authorize() returns early on both.
         let empty = br#"{"type":"client_hello","id":"c2","payload":{}}"#;
         assert_eq!(
             parse_inbound(empty),
@@ -1098,7 +996,6 @@ mod tests {
 
     #[test]
     fn test_ack_payload_constructors() {
-        // 1. client_hello_ack
         let mut cursors = HashMap::new();
         cursors.insert(
             "s1".into(),
@@ -1109,22 +1006,18 @@ mod tests {
         assert_eq!(val_hello["resync_required"], json!(["s2"]));
         assert_eq!(val_hello["cursors"]["s1"]["seq"], 10);
 
-        // 2. subscribe_ack
         let val_sub = subscribe_ack(&["s1".into()], &["missing".into()], &[], &cursors);
         assert_eq!(val_sub["accepted"], json!(["s1"]));
         assert_eq!(val_sub["not_found"], json!(["missing"]));
         assert_eq!(val_sub["resync_required"], json!([]));
         assert_eq!(val_sub["cursors"]["s1"]["seq"], 10);
 
-        // 3. unsubscribe_ack
         let val_unsub = unsubscribe_ack(&["s1".into()], &["s_err".into()], &[]);
         assert_eq!(val_unsub["accepted"], json!(["s1"]));
         assert_eq!(val_unsub["not_found"], json!(["s_err"]));
         assert_eq!(val_unsub["resync_required"], json!([]));
     }
 
-    /// The top-level `error` frame carries the contract payload
-    /// (ws-control.ts:404-412).
     #[test]
     fn error_frame_carries_code_msg_fatal() {
         let frame = error_frame(40414, "terminal not found", false, Some("req-9"));
@@ -1135,8 +1028,6 @@ mod tests {
         assert_eq!(frame["payload"]["request_id"], "req-9");
     }
 
-    /// Terminal Custom events map onto the contract's top-level
-    /// terminal_output / terminal_exit frames (ws-control.ts:418-441).
     #[test]
     fn terminal_custom_events_map_to_contract_frames() {
         let out = SequencedEvent::new(

@@ -128,7 +128,8 @@ async fn main() -> anyhow::Result<()> {
                     &workspace,
                     config.extra_skill_dirs_paths(),
                     config.resolve_merge_all_available_skills(),
-                );
+                )
+                .map_err(|error| anyhow::anyhow!(error.coded_message()))?;
             let model_capabilities = native.capabilities.clone();
             let model_alias = native.alias.clone();
             let model_name = native.model.clone();
@@ -179,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
                 rust_self_contained: true,
                 shell_path: Some(
                     kimi_agent::native::shell::resolve_shell(config.shell.preference.as_deref())
+                        .map_err(|error| anyhow::anyhow!(error.coded_message()))?
                         .program,
                 ),
                 // ACP is a product entry like `--serve`: the user's `[permission]`
@@ -208,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
                 agent_tool_veto: None,
                 tools_veto: None,
                 image_read_byte_budget: config.resolve_image_read_byte_budget(),
+                llm_request_byte_budget: Some(config.resolve_llm_request_byte_budget()),
                 image_max_edge_px: config.resolve_image_max_edge_px(),
                 model_capabilities,
                 skill_dirs: config.extra_skill_dirs_paths(),
@@ -339,6 +342,7 @@ async fn main() -> anyhow::Result<()> {
             let previous_turn_aborted = false;
 
             let run_input = RunTurnInput {
+                llm_request_byte_budget: pipeline.llm_request_byte_budget,
                 agent_id: kimi_agent::callbacks::MAIN_AGENT_ID.to_string(),
                 max_attempts: input.max_attempts,
                 turn_id: turn_id.clone(),
@@ -472,6 +476,7 @@ async fn main() -> anyhow::Result<()> {
                     max_attempts: input.max_attempts,
                     max_context_tokens: input.max_context_tokens,
                     compaction_max_attempts: None,
+                    llm_request_byte_budget: pipeline.llm_request_byte_budget,
                     permission_mode: input.policy_snapshot.as_ref().map(|snapshot| snapshot.mode),
                     tool_defs: tool_defs_provider,
                     goal: goal_provider,
@@ -507,7 +512,7 @@ async fn main() -> anyhow::Result<()> {
                     ));
                     let handler = toolset.bind_tower_wake_driver(driver);
                     session.set_wake_replay_handler(
-                        kimi_agent::tools::tower::wake::TOWER_INBOX_WAKE_VARIANT,
+                        kimi_agent::features::tower::wake::TOWER_INBOX_WAKE_VARIANT,
                         handler,
                     );
                 }
@@ -1119,6 +1124,10 @@ async fn build_engine_pipeline(
     // *unset* wall-clock timeout means "no timeout" in print mode — the
     // settle phase waits for background work instead of the clock killing it.
     let print_mode = params.print_background_mode.is_some();
+    let mut policy_snapshot = params.policy_snapshot.clone();
+    if print_mode && let Some(snapshot) = policy_snapshot.as_mut() {
+        snapshot.non_interactive = true;
+    }
     let spec = PipelineSpec {
         system_prompt: params.system_prompt.clone(),
         model_name: params.model_name.clone(),
@@ -1138,7 +1147,7 @@ async fn build_engine_pipeline(
         extra_roots: params.additional_dirs.clone(),
         rust_self_contained: params.rust_self_contained,
         shell_path: params.shell_path.clone(),
-        policy_snapshot: params.policy_snapshot.clone(),
+        policy_snapshot: policy_snapshot.clone(),
         github_token: params.github_token.clone(),
         github_base_url: params.github_base_url.clone(),
         subagent_timeout_ms: kimi_agent::pipeline::print_timeout_default(
@@ -1163,6 +1172,7 @@ async fn build_engine_pipeline(
         session_id: params.session_id.clone(),
         secondary_model: params.secondary_model.clone(),
         image_read_byte_budget: params.image_read_byte_budget,
+        llm_request_byte_budget: params.request_byte_budget,
         image_max_edge_px: params.image_max_edge_px,
         model_capabilities: params.model_capabilities.clone(),
         skill_dirs: Vec::new(),
@@ -1348,7 +1358,8 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
         &workspace,
         config.extra_skill_dirs_paths(),
         config.resolve_merge_all_available_skills(),
-    );
+    )
+    .map_err(|error| anyhow::anyhow!(error.coded_message()))?;
     let providers: Vec<PipelineProvider> = match multi_llm {
         Some(racers) => racers
             .into_iter()
@@ -1408,7 +1419,9 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
         // than mid-turn.
         rust_self_contained: true,
         shell_path: Some(
-            kimi_agent::native::shell::resolve_shell(config.shell.preference.as_deref()).program,
+            kimi_agent::native::shell::resolve_shell(config.shell.preference.as_deref())
+                .map_err(|error| anyhow::anyhow!(error.coded_message()))?
+                .program,
         ),
         policy_snapshot: Some(config.build_policy_snapshot(Some(workspace.clone()))),
         github_token: config.github.token.clone(),
@@ -1434,6 +1447,7 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
             .extract_secondary_model_pool(cli.model.as_deref())
             .map_err(|error| anyhow::anyhow!("{error}"))?,
         image_read_byte_budget: config.resolve_image_read_byte_budget(),
+        llm_request_byte_budget: Some(config.resolve_llm_request_byte_budget()),
         image_max_edge_px: config.resolve_image_max_edge_px(),
         model_capabilities,
         skill_dirs: config.extra_skill_dirs_paths(),
@@ -1700,6 +1714,7 @@ fn wire_message_to_llm(m: Message) -> LLMMessage {
         tool_call_id: m.tool_call_id,
         prompt_id: None,
         origin: None,
+        tools: Vec::new(),
     }
 }
 
@@ -1803,6 +1818,7 @@ async fn run_self_test() -> anyhow::Result<()> {
     }];
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: kimi_agent::callbacks::MAIN_AGENT_ID.to_string(),
         max_attempts: None,
         turn_id: "test-turn-1".into(),

@@ -15,6 +15,7 @@ async fn test_run_turn_no_tool_calls() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-1".into(),
@@ -46,10 +47,6 @@ async fn test_run_turn_no_tool_calls() {
     assert_eq!(turn.steps, 1);
 }
 
-/// The swarm gate must refuse a model response that mixes `AgentSwarm`
-/// with another tool *before* either call executes, and the refusal has
-/// to reach the model as the tool result so it can retry with a legal
-/// batch (v2 `AgentSwarmService.onBeforeExecuteTool`).
 #[tokio::test]
 async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
     let agent_id = "swarm-veto-active-agent";
@@ -61,7 +58,6 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
         system_prompt: "You are helpful.".into(),
         model_name: "test-model".into(),
         steps: vec![
-            // Step 1: the illegal batch — a swarm plus a sibling tool.
             (
                 vec![
                     ToolCall {
@@ -81,11 +77,6 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
                 ],
                 "tool_calls",
             ),
-            // Step 2: after reading the refusal, answered in text. A
-            // *compliant* AgentSwarm is deliberately not scripted here:
-            // clearing the gate would make this test drive the whole
-            // subagent stack (and the stdio round-trip that stalls it),
-            // which `swarm_tool.rs` already covers on its own.
             (vec![], "stop"),
         ],
     };
@@ -94,6 +85,7 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: agent_id.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-swarm-veto".into(),
@@ -122,7 +114,6 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
     let result = run_turn(input, &callbacks).await;
     let turn = result.expect("the refusal resolves as a normal turn");
 
-    // Every call in the vetoed batch carries the refusal — neither one ran.
     let refusals: Vec<_> = turn
         .messages
         .iter()
@@ -141,9 +132,6 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
         "the refusal is linked to the call it refuses"
     );
 
-    // The turn did not die on the veto: the model got another step and
-    // answered from it. Ending the turn on the refusal (what this used to
-    // do) would have left the user a dead end on a recoverable mistake.
     assert_eq!(
         turn.steps, 2,
         "veto then answer — the veto must not end the turn"
@@ -154,12 +142,6 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
 
 #[tokio::test]
 async fn a_call_with_unusable_arguments_is_answered_not_executed() {
-    // v2 `preflightToolCall` (`toolExecutorService.ts`): a call whose payload
-    // did not decode, or decoded to something that is not an object, is neither
-    // executed with a fabricated `{}` nor dropped. The assistant message keeps
-    // its `tool_use` — a strict provider rejects a `tool_use` with no matching
-    // `tool_result` — and the call is answered with the reason, which is the
-    // only thing that lets the model correct itself.
     let llm = SequencedLlm {
         system_prompt: "You are helpful.".into(),
         model_name: "test-model".into(),
@@ -194,6 +176,7 @@ async fn a_call_with_unusable_arguments_is_answered_not_executed() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-unusable-args".into(),
@@ -332,6 +315,7 @@ async fn a_mixed_batch_runs_other_tools_while_swarm_mode_is_off() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: agent_id.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-swarm-veto-inactive".into(),
@@ -382,9 +366,6 @@ async fn a_mixed_batch_runs_other_tools_while_swarm_mode_is_off() {
     registry.exit(agent_id);
 }
 
-/// A model that never complies must not spin: the step budget is the same
-/// bound v2 relies on, and running out of it fails the turn as
-/// `max_steps` rather than answering as if the work had been done.
 #[tokio::test]
 async fn a_model_that_never_complies_runs_out_of_steps() {
     let agent_id = "swarm-veto-retry-agent";
@@ -421,6 +402,7 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: agent_id.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-swarm-veto-loop".into(),
@@ -455,8 +437,7 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
         LoopTurnStopReason::MaxSteps,
         "a model that never complies fails the turn, it does not fake success"
     );
-    // v2 closes the step it began (loopService.ts:2201 emitStepInterrupted →
-    // failMachineStep): the budget ran out with a step in flight.
+
     let interruptions: Vec<serde_json::Value> = events
         .lock()
         .unwrap()
@@ -472,10 +453,6 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
     registry.exit(agent_id);
 }
 
-/// A provider failure closes the step it opened (v2 `failMachineStep`,
-/// loopService.ts:2160-2171): the turn fails, and exactly one
-/// `llm.step.interrupted{reason:"error"}` names the step and the message so
-/// the host's step display does not keep a dead step "streaming".
 #[tokio::test]
 async fn an_llm_error_closes_the_step_it_began() {
     struct FailingLlm;
@@ -506,6 +483,7 @@ async fn an_llm_error_closes_the_step_it_began() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-llm-error".into(),
@@ -565,13 +543,6 @@ async fn an_llm_error_closes_the_step_it_began() {
     );
 }
 
-/// The interruption reminder must survive the `run_turn_continued`
-/// wrapper: its first iteration *is* a fresh turn's head, so the caller's
-/// `previous_turn_aborted` has to reach the injection registry there.
-/// The wrapper used to rebuild every iteration with `false`, which made
-/// the reminder unreachable from every production entry point (they all
-/// route through it) while the reminder module's own unit tests stayed
-/// green.
 #[tokio::test]
 async fn test_previous_turn_aborted_reaches_the_interruption_reminder() {
     let llm = PredictTestLlm {
@@ -585,6 +556,7 @@ async fn test_previous_turn_aborted_reaches_the_interruption_reminder() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: true,
         turn_id: "test-turn-interruption-reminder".into(),
@@ -626,11 +598,6 @@ async fn test_previous_turn_aborted_reaches_the_interruption_reminder() {
     );
 }
 
-/// The stale-todo reminder must reach a real turn: ten assistant steps
-/// after the last `TodoList` write, the main agent's next step carries the
-/// v2 reminder while the list still has an open item. This pins the run_turn
-/// wiring (main-agent gate, tool-active gate, state read) rather than the
-/// module's own unit tests.
 #[tokio::test]
 async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
     let llm = PredictTestLlm {
@@ -642,9 +609,7 @@ async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
 
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
-    // Overwrite the no-op state_read (a HashMap insert, so this wins) and
-    // answer the todo domain with a list that still has an open item — the
-    // reminder stays silent for an empty or all-done list.
+
     RpcServer::register_arc(&server, types::methods::HOST_STATE_READ, |params| {
         Box::pin(async move {
             let value = if params.get("domain").and_then(|v| v.as_str()) == Some("todo") {
@@ -679,6 +644,7 @@ async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
     messages.push(LLMMessage::new("user", "Continue"));
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-todo-reminder".into(),
@@ -713,8 +679,6 @@ async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
     );
 }
 
-/// v2 registers the todo reminder only for `MAIN_AGENT_ID`; a subagent
-/// running the same stale history must not receive it.
 #[tokio::test]
 async fn test_todo_stale_reminder_is_main_agent_only() {
     let llm = PredictTestLlm {
@@ -747,6 +711,7 @@ async fn test_todo_stale_reminder_is_main_agent_only() {
     messages.push(LLMMessage::new("user", "Continue"));
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: "subagent-1".into(),
         previous_turn_aborted: false,
         turn_id: "test-turn-todo-reminder-subagent".into(),
@@ -777,9 +742,6 @@ async fn test_todo_stale_reminder_is_main_agent_only() {
     );
 }
 
-/// Turn-lifecycle hooks (`UserPromptSubmit` / `PreCompact`) ride
-/// `RunTurnInput.hook_guard`. A prompt hook without block/append output only
-/// observes, so a turn carrying one completes exactly like one without.
 #[tokio::test]
 async fn test_turn_lifecycle_hooks_do_not_disturb_turn() {
     let llm = PredictTestLlm {
@@ -806,6 +768,7 @@ async fn test_turn_lifecycle_hooks_do_not_disturb_turn() {
     ]));
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-hooks".into(),
@@ -894,6 +857,7 @@ fn prompt_hook_input<'a>(
     turn_id: &str,
 ) -> RunTurnInput<'a> {
     RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: turn_id.into(),
@@ -1191,9 +1155,6 @@ async fn user_prompt_submit_nonzero_exit_and_timeout_allow_without_appending() {
     assert_prompt_hook_part(&prompt.blocks[0], "still allowed");
 }
 
-/// A text-finished turn trips a matching Stop hook: the veto text rides
-/// `TurnResult.stop_hook_continuation` while the turn itself still ends
-/// `EndTurn` — the host owns the re-prompt.
 #[tokio::test]
 async fn test_stop_hook_veto_surfaces_continuation() {
     let llm = PredictTestLlm {
@@ -1207,6 +1168,7 @@ async fn test_stop_hook_veto_surfaces_continuation() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-stop-veto".into(),
@@ -1237,7 +1199,6 @@ async fn test_stop_hook_veto_surfaces_continuation() {
     assert_eq!(turn.stop_hook_continuation.as_deref(), Some("keep going"));
 }
 
-/// An allowing Stop hook (exit 0, plain stdout) leaves the turn alone.
 #[tokio::test]
 async fn test_stop_hook_allow_leaves_no_continuation() {
     let llm = PredictTestLlm {
@@ -1262,6 +1223,7 @@ async fn test_stop_hook_allow_leaves_no_continuation() {
     ]));
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-stop-allow".into(),
@@ -1292,12 +1254,6 @@ async fn test_stop_hook_allow_leaves_no_continuation() {
     assert_eq!(turn.stop_hook_continuation, None);
 }
 
-/// Drive a text-finished turn whose only response carries
-/// `finish_reason`, with the vetoing [`stop_hook_guard`] installed, and
-/// hand back the stop reason plus whatever the Stop hook contributed.
-/// A veto text on `stop_hook_continuation` is the dispatch marker: the
-/// engine never self-continues, so the text only lands there when the
-/// hook actually ran.
 async fn stop_hook_outcome(
     turn_id: &str,
     finish_reason: &str,
@@ -1309,6 +1265,7 @@ async fn stop_hook_outcome(
     let callbacks = rpc_callbacks(Arc::new(RpcServer::new()));
     let turn = run_turn(
         RunTurnInput {
+            llm_request_byte_budget: u64::MAX,
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
             previous_turn_aborted: false,
             turn_id: turn_id.to_string(),
@@ -1340,13 +1297,6 @@ async fn stop_hook_outcome(
     (turn.stop_reason, turn.stop_hook_continuation.clone())
 }
 
-/// A filtered finish skips the Stop-hook dispatch, and the guard has to
-/// recognise the *whole* filter vocabulary for that to hold: v2 latches
-/// `ProviderFilteredError` after `runAfterStep` and ignores
-/// `hookStopTurn` (`loopService.ts:877-882`), so a veto must not turn a
-/// Filtered turn into a continuation. The canonical `filtered` is the one
-/// v2 carries; a single-value guard naming only OpenAI's `content_filter`
-/// let it fall through to a continuation.
 #[tokio::test]
 async fn every_filter_spelling_skips_the_stop_hook_dispatch() {
     for filtered in [
@@ -1373,8 +1323,6 @@ async fn every_filter_spelling_skips_the_stop_hook_dispatch() {
     }
 }
 
-/// The opposite drift: the ordinary finishes still dispatch the Stop hook,
-/// so the filter guard cannot be widened into "always skip".
 #[tokio::test]
 async fn an_ordinary_finish_still_dispatches_the_stop_hook() {
     for (finish_reason, expected) in [
@@ -1399,10 +1347,6 @@ async fn an_ordinary_finish_still_dispatches_the_stop_hook() {
     }
 }
 
-/// `run_turn_continued` consumes a Stop veto inside the turn: the veto
-/// text re-prompts the model under the same turn id, steps and token
-/// usage accumulate across the iterations, and the returned continuation
-/// is always consumed (`None`).
 #[tokio::test]
 async fn test_run_turn_continued_consumes_stop_veto() {
     let llm = PredictTestLlm {
@@ -1416,6 +1360,7 @@ async fn test_run_turn_continued_consumes_stop_veto() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-continued".into(),
@@ -1444,7 +1389,7 @@ async fn test_run_turn_continued_consumes_stop_veto() {
     let turn = run_turn_continued(input, &callbacks).await.unwrap();
     assert!(matches!(turn.stop_reason, LoopTurnStopReason::EndTurn));
     assert_eq!(turn.stop_hook_continuation, None);
-    // Two text finishes ran (PredictTestLlm reports 15 tokens each).
+
     assert_eq!(turn.steps, 2);
     assert_eq!(turn.usage.input_tokens, 20);
     assert_eq!(turn.usage.output_tokens, 10);
@@ -1453,11 +1398,6 @@ async fn test_run_turn_continued_consumes_stop_veto() {
     assert!(texts.iter().any(|t| t.contains("keep going")));
 }
 
-/// A model that keeps requesting tools until the step budget runs out
-/// must end the turn as `MaxSteps` (v2 `MaxStepsExceededError`,
-/// loopService.ts:841-843 → failed + interrupt_reason `max_steps`), not
-/// as an indistinguishable `EndTurn` completion. Without the
-/// exhaustion mapping this turn reported `EndTurn`.
 #[tokio::test]
 async fn test_max_steps_exhaustion_reports_max_steps() {
     let llm = PredictTestLlm {
@@ -1489,6 +1429,7 @@ async fn test_max_steps_exhaustion_reports_max_steps() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-max-steps-exhaustion".into(),
@@ -1519,10 +1460,6 @@ async fn test_max_steps_exhaustion_reports_max_steps() {
     assert_eq!(turn.steps, 2);
 }
 
-/// v2 `loopService.ts:1047-1050`: the step cap applies only when it is a
-/// positive number. An explicit `0` — and an unset cap, which the engine
-/// spells the same way — means "no cap". Clamping it to one step (the old
-/// `max(1)`) failed every tool-bearing turn at the first call.
 #[tokio::test]
 async fn a_zero_step_cap_does_not_limit_the_turn() {
     fn call(id: &str, path: &str) -> ToolCall {
@@ -1559,6 +1496,7 @@ async fn a_zero_step_cap_does_not_limit_the_turn() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-zero-step-cap".into(),

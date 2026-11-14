@@ -1,14 +1,3 @@
-//! The server's live implementation of [`IdleSessionControl`] (v2
-//! `sessionManagerService.closeIfIdle` / `retained`, `sessionManagerService.ts:286-334`).
-//!
-//! The scheduling and the environment parsing live in
-//! [`crate::session::idle_reclaim`]; this file supplies what only the server
-//! knows: which sessions exist, which are still doing work, and what a closed
-//! session leaves behind. A closed session keeps no runtime in this engine —
-//! every route reads the store on demand — so "closing" means dropping the
-//! event lane and recording the reclaim, which the next resume reports as
-//! `'reclaimed'`.
-
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -28,8 +17,7 @@ pub struct ServerIdleControl {
     pub(super) engine: Option<Arc<ServerEngine>>,
     pub(super) cron: Arc<tokio::sync::Mutex<CronScheduler>>,
     pub(super) interaction: Arc<InteractionManager>,
-    /// Sessions the reaper closed, shared with the server so a resume can
-    /// report (and clear) the reason.
+
     pub(super) reclaimed: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -43,8 +31,6 @@ impl IdleSessionControl for ServerIdleControl {
             .list_sessions()
             .unwrap_or_default()
             .into_iter()
-            // An archived session is already closed by intent, and one the
-            // reaper already reclaimed has no runtime left to release.
             .filter(|session| {
                 !session.archived
                     && session.archived_at.is_none()
@@ -64,17 +50,11 @@ impl IdleSessionControl for ServerIdleControl {
                 return true;
             }
         }
-        // v2 re-checks `retained` under the lifecycle serialization; here the
-        // bus/lane and the engine's turn table are the same authority, so this
-        // check is the re-check.
+
         if self.is_retained(session_id) {
             return false;
         }
         if let Some(engine) = &self.engine {
-            // The reclaim closes the session scope. The next resume opens a
-            // fresh one, whose first read is the truth — v2's `resume` after
-            // `close`. Dropping the watermark makes that explicit so a journal
-            // written while the session was closed does not read as stale.
             engine.forget_journal_head(session_id);
         }
         self.hub.evict_lane(session_id);
@@ -82,8 +62,7 @@ impl IdleSessionControl for ServerIdleControl {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(session_id.to_string());
-        // v2 marks the summary reclaimed; this engine's equivalent surface is
-        // the event stream, so hosts learn about it here.
+
         self.hub
             .bus_for("global")
             .publish(&EngineEvent::Custom(json!({
@@ -95,8 +74,6 @@ impl IdleSessionControl for ServerIdleControl {
 }
 
 impl ServerIdleControl {
-    /// v2 `retained`: a running turn, a parked interaction, or a cron schedule
-    /// that can fire into the session keeps it open.
     pub fn is_retained(&self, session_id: &str) -> bool {
         if self
             .engine
@@ -115,13 +92,11 @@ impl ServerIdleControl {
                 .list_entries()
                 .iter()
                 .any(|entry| entry.session_id.as_deref() == Some(session_id)),
-            // A scheduler mid-tick is about to fire something: retain now and
-            // let the next sweep decide.
+
             Err(_) => true,
         }
     }
 
-    /// Whether the idle reaper closed this session, consuming the marker.
     pub fn take_reclaimed(&self, session_id: &str) -> bool {
         self.reclaimed
             .lock()
@@ -129,7 +104,6 @@ impl ServerIdleControl {
             .remove(session_id)
     }
 
-    /// Forget the reclaim marker without resuming (archive / delete).
     pub fn clear_reclaimed(&self, session_id: &str) {
         self.reclaimed
             .lock()
@@ -138,14 +112,6 @@ impl ServerIdleControl {
     }
 }
 
-/// Remove the on-disk state directory a deleted session owns — undo snapshots,
-/// wake state and per-session logs.
-///
-/// The session rows live in SQLite and cascade with the session; this directory
-/// does not, so a delete that skips it leaves the files behind while still
-/// reporting success. Callers must abort the delete when this fails: saying
-/// "deleted" while the snapshots survive is the failure mode this guards
-/// against. A directory that is already gone is clean, not an error.
 pub(crate) fn remove_session_state_dir(
     store: &SqliteSessionStore,
     session_id: &str,
@@ -174,10 +140,6 @@ pub(crate) fn remove_session_state_dir(
 }
 
 impl crate::server::HttpServer {
-    /// The daemon's idle sweeper (v2 `sessionIdleReaper`). Built on first use
-    /// because it needs the engine, which `with_engine` installs after
-    /// construction. An invalid `KIMI_CODE_SESSION_IDLE_RECLAIM_MS` disables
-    /// the sweeper instead of guessing a timeout.
     pub fn idle_reaper(&self) -> Arc<SessionIdleReaper<ServerIdleControl>> {
         self.idle_reaper
             .get_or_init(|| {
@@ -203,13 +165,10 @@ impl crate::server::HttpServer {
             .clone()
     }
 
-    /// Release every session whose idle grace elapsed. Returns how many were
-    /// reclaimed.
     pub fn sweep_idle_sessions(&self) -> usize {
         self.idle_reaper().sweep()
     }
 
-    /// Whether the idle reaper closed this session, consuming the marker.
     pub fn take_reclaimed(&self, session_id: &str) -> bool {
         self.reclaimed
             .lock()
@@ -217,7 +176,6 @@ impl crate::server::HttpServer {
             .remove(session_id)
     }
 
-    /// Drop the reclaim marker without resuming (archive / delete).
     pub fn clear_reclaimed(&self, session_id: &str) {
         self.reclaimed
             .lock()
@@ -225,8 +183,6 @@ impl crate::server::HttpServer {
             .remove(session_id);
     }
 
-    /// The per-session resume slot (v2 `serializeLifecycle(id)`): two resumes
-    /// of the same session run one after the other, never interleaved.
     pub(crate) fn resume_slot(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut slots = self
             .resume_slots
@@ -239,7 +195,6 @@ impl crate::server::HttpServer {
         )
     }
 
-    /// Register a pre-delete cleanup hook (v2 `onWillDeleteSession`).
     pub fn register_session_cleanup_hook(&self, hook: crate::server::SessionCleanupHook) {
         self.session_cleanup_hooks
             .lock()
@@ -247,8 +202,6 @@ impl crate::server::HttpServer {
             .push(hook);
     }
 
-    /// Run every cleanup hook in registration order; the first failure aborts,
-    /// so the caller must not delete the rows.
     pub(crate) fn run_session_cleanup_hooks(&self, session_id: &str) -> Result<(), String> {
         let hooks = self
             .session_cleanup_hooks

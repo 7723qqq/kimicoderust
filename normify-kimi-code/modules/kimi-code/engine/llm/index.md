@@ -10,9 +10,9 @@ description:
   en: >
       Model protocol adapters: Anthropic, OpenAI Responses, Google GenAI and the shared HTTP layer.
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.303Z"
-fingerprint: 3e992f52e6f47d3685e1b06908550b0c01da7e6e61add1b8284b518d81ef35a2
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-11T19:20:38.919Z"
+fingerprint: 62ad462649c8fa95bd47705941b37717a90be453083fb04fd91ab18fbf81becb
 source:
   - path: "packages/kimi-agent/src/llm/anthropic.rs"
   - path: "packages/kimi-agent/src/llm/openai_responses.rs"

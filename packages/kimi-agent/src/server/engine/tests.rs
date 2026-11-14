@@ -2,6 +2,108 @@ use super::*;
 use crate::rpc::types::StateReadRequest;
 use crate::turn_loop::types::{LLMChatParams, LLMChatResponse};
 
+#[test]
+fn recorded_permission_mode_wins_over_config_and_metadata() {
+    use crate::permission::PermissionMode;
+    let metadata = serde_json::json!({"permission_mode": "yolo"});
+    assert_eq!(
+        super::resolve_permission_mode(
+            PermissionMode::Manual,
+            Some(PermissionMode::Auto),
+            false,
+            &metadata,
+        ),
+        PermissionMode::Auto
+    );
+    assert_eq!(
+        super::resolve_permission_mode(PermissionMode::Manual, None, false, &metadata),
+        PermissionMode::Yolo
+    );
+    assert_eq!(
+        super::resolve_permission_mode(PermissionMode::Manual, None, true, &metadata),
+        PermissionMode::Auto
+    );
+    assert_eq!(
+        super::resolve_permission_mode(PermissionMode::Yolo, None, true, &metadata),
+        PermissionMode::Yolo
+    );
+    assert_eq!(
+        super::resolve_permission_mode(
+            PermissionMode::Manual,
+            None,
+            false,
+            &serde_json::json!({"yolo": true}),
+        ),
+        PermissionMode::Yolo
+    );
+}
+
+#[tokio::test]
+async fn a_durable_permission_record_outranks_the_snapshot_and_metadata_in_a_real_session() {
+    use crate::agent::permission_mode::permission_mode_ops::{record_mode, recorded_mode};
+    use crate::callbacks::MAIN_AGENT_ID;
+    use crate::permission::PermissionMode;
+
+    let mut spec = spec();
+    spec.policy_snapshot = Some(crate::permission::PolicySnapshot {
+        mode: PermissionMode::Yolo,
+        ..Default::default()
+    });
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let engine = ServerEngine::new(spec, Arc::new(EventHub::new()), store.clone());
+    engine.store().create_session("sess-mode", None).unwrap();
+    engine
+        .store()
+        .put_session_metadata("sess-mode", &serde_json::json!({"permission_mode": "auto"}))
+        .unwrap();
+
+    let snapshot_mode = |snapshot: &Option<crate::permission::PolicySnapshot>| {
+        snapshot
+            .as_ref()
+            .expect("every session spec carries a policy snapshot")
+            .mode
+    };
+
+    assert_eq!(
+        snapshot_mode(&engine.session_spec("sess-mode").await.policy_snapshot),
+        PermissionMode::Yolo,
+        "without a durable record the policy snapshot still decides"
+    );
+
+    assert!(
+        record_mode(
+            engine.store().as_ref(),
+            "sess-mode",
+            MAIN_AGENT_ID,
+            PermissionMode::Manual,
+            1,
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        recorded_mode(engine.store().as_ref(), "sess-mode", MAIN_AGENT_ID),
+        Some(PermissionMode::Manual)
+    );
+    assert_eq!(
+        snapshot_mode(&engine.session_spec("sess-mode").await.policy_snapshot),
+        PermissionMode::Manual,
+        "the durable record outranks both the snapshot and the metadata"
+    );
+
+    record_mode(
+        engine.store().as_ref(),
+        "sess-mode",
+        MAIN_AGENT_ID,
+        PermissionMode::Auto,
+        2,
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot_mode(&engine.session_spec("sess-mode").await.policy_snapshot),
+        PermissionMode::Auto
+    );
+}
+
 fn spec() -> PipelineSpec {
     PipelineSpec {
         system_prompt: "sys".into(),
@@ -30,6 +132,7 @@ fn spec() -> PipelineSpec {
         session_id: None,
         secondary_model: None,
         image_read_byte_budget: None,
+        llm_request_byte_budget: None,
         image_max_edge_px: None,
         model_capabilities: None,
         skill_dirs: Vec::new(),
@@ -71,9 +174,6 @@ async fn session_spec_publishes_the_session_roots_to_the_agent_manager() {
         .create_session_with_workspace("sess-roots", None, Some(&workspace_row.id))
         .unwrap();
 
-    // The turn's roots are the session's live workspace: workdir plus the
-    // directories this session may touch. A missing extra root is dropped, the
-    // same way the toolset drops it.
     engine.session_spec("sess-roots").await;
     let manager = engine.subagent_manager();
     let first = manager
@@ -91,7 +191,6 @@ async fn session_spec_publishes_the_session_roots_to_the_agent_manager() {
             .contains(&std::fs::canonicalize(&extra).unwrap())
     );
 
-    // The next turn resolves the same set, so nothing is republished.
     engine.session_spec("sess-roots").await;
     assert_eq!(
         manager
@@ -243,19 +342,10 @@ fn tower_wake_runtime_is_shared_per_session_and_isolated_across_sessions() {
     assert!(!Arc::ptr_eq(&first_runtime, &other_runtime));
 }
 
-/// The status line's `contextTokens` used to be `content.len() / 4`, which
-/// charges a quarter token per **byte** and therefore reads low on any
-/// non-ASCII text — ~25% low on CJK (3 UTF-8 bytes per character), so the
-/// gauge drifted low exactly in the sessions filling up. It also truncated:
-/// 43 ASCII chars gave 10, not 11.
-///
-/// Both halves are pinned. ASCII moves by at most one token per message
-/// (rounding, always upward). CJK is the substantive fix: 100 characters
-/// must count as 100 tokens, where the byte shortcut said 75.
 #[test]
 fn context_tokens_count_cjk_per_character_and_leave_ascii_alone() {
     let est = crate::compaction::estimate_tokens;
-    let ascii = "the quick brown fox jumps over the lazy dog"; // 43 chars
+    let ascii = "the quick brown fox jumps over the lazy dog";
     assert_eq!(ascii.len(), 43);
     assert_eq!(
         est(ascii) as usize,
@@ -267,7 +357,6 @@ fn context_tokens_count_cjk_per_character_and_leave_ascii_alone() {
         "the ASCII difference is rounding only, never the 25% the CJK case had"
     );
 
-    // 100 CJK chars = 300 UTF-8 bytes. Old: 300/4 = 75. New: 100.
     let cjk = "中".repeat(100);
     assert_eq!(cjk.len(), 300, "3 UTF-8 bytes per CJK char");
     assert_eq!(
@@ -281,9 +370,6 @@ fn context_tokens_count_cjk_per_character_and_leave_ascii_alone() {
         "the old shortcut under-reported by 25%, which is the bug"
     );
 
-    // Mixed content: per-character totals, not a byte average. Note this is
-    // NOT `est(cjk) + est(ascii)` — the ASCII chars are contiguous here, so
-    // one `div_ceil` covers the whole run rather than one per fragment.
     let mixed = format!("{cjk}hello");
     assert_eq!(
         est(&mixed) as usize,
@@ -296,8 +382,6 @@ fn context_tokens_count_cjk_per_character_and_leave_ascii_alone() {
     );
 }
 
-/// The idle clock is the gate's input, so it has to be per session and has to
-/// advance only when a turn actually produced output.
 #[tokio::test]
 async fn the_assistant_idle_clock_is_per_session_and_starts_empty() {
     let engine = engine();
@@ -322,9 +406,6 @@ async fn the_assistant_idle_clock_is_per_session_and_starts_empty() {
     );
 }
 
-/// The window lookup backs micro compaction's fullness gate. An unknown
-/// model must read as "no window" rather than as zero — the gate treats an
-/// absent window as full, and a zero would invert that.
 #[tokio::test]
 async fn the_context_window_is_unknown_for_a_model_with_no_size() {
     let engine = engine();
@@ -362,9 +443,6 @@ model = "kimi-k2"
     );
 }
 
-/// The `[experimental].micro_compaction` flag gates the wiring: off/unset
-/// yields no config (the transform never runs), `true`/non-`false` strings
-/// enable it.
 #[tokio::test]
 async fn micro_compaction_flag_reads_the_experimental_map() {
     let with_flag = |value: Option<crate::config::ExperimentalValue>| {
@@ -413,9 +491,6 @@ async fn micro_compaction_flag_reads_the_experimental_map() {
     );
 }
 
-/// The `[experimental].thinking_repeat_guard` flag drives the guard the
-/// same way: unset yields no flag (the caller defaults it to on),
-/// `true`/non-`false` strings enable it, `false` disables it.
 #[tokio::test]
 async fn thinking_guard_flag_reads_the_experimental_map() {
     let with_flag = |value: Option<crate::config::ExperimentalValue>| {
@@ -471,10 +546,6 @@ async fn thinking_guard_flag_reads_the_experimental_map() {
     );
 }
 
-/// The `[experimental].memory_filing` flag gates the background filing
-/// pass the same way: unset/off yields no flag, `true`/non-`false`
-/// strings enable it. The env override is resolved on top of this, so the
-/// config path is asserted on its own.
 #[tokio::test]
 async fn memory_filing_flag_reads_the_experimental_map() {
     let with_flag = |value: Option<crate::config::ExperimentalValue>| {
@@ -603,9 +674,6 @@ model = "gpt-x"
     assert_eq!(native.api_key, "k");
 }
 
-/// An env-bound provider keeps its credential channel through the server
-/// engine's resolution: the transport reads the named variable at request
-/// time, so dropping it here would send every request with an empty key.
 #[tokio::test]
 async fn session_model_keeps_the_env_bound_credential_channel() {
     let engine = engine();
@@ -636,9 +704,6 @@ model = "gpt-x"
     );
 }
 
-/// `llm_for_model` resolves the named alias through the same chain a turn
-/// uses, and reports an unresolvable one as `None` instead of a transport
-/// error — the debug surface's ping turns that into an honest failure.
 #[tokio::test]
 async fn llm_for_model_resolves_a_named_alias_and_refuses_an_unknown_one() {
     let engine = engine();
@@ -704,6 +769,7 @@ async fn the_absent_host_refuses_instead_of_waiting() {
             messages: Vec::new(),
             tools: Vec::new(),
             request_id: None,
+            max_output_tokens: None,
         })
         .await
         .unwrap_err();
@@ -734,7 +800,6 @@ async fn the_absent_host_refuses_instead_of_waiting() {
         .unwrap();
     assert_eq!(verdict.decision, "deny");
 
-    // Legs left on the trait's defaults must also answer, not hang.
     assert!(host.list_tools().await.is_err());
     assert!(host.goal().await.is_err());
     assert!(
@@ -772,14 +837,12 @@ async fn a_turn_on_a_foreign_held_session_is_refused_as_occupied() {
         .store()
         .create_session("sess-occupied-engine", Some("occupied test"))
         .unwrap();
-    // A second service on the same directory stands in for another process.
+
     let foreign = crate::session::lock::SessionLockService::new(
         crate::session::lock::SESSION_LOCKS.lock_dir().to_path_buf(),
     );
     foreign.hold("sess-occupied-engine").unwrap();
-    // A real foreign hold carries a foreign pid. A same-pid file is this
-    // process's own leftover and is reclaimable by design, so rewrite the
-    // payload to look like the other host it is standing in for.
+
     let lock_path = foreign.lock_dir().join("sess-occupied-engine.lock");
     let mut holder: crate::session::lock::SessionLockHolder =
         serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap();
@@ -798,10 +861,9 @@ async fn a_turn_on_a_foreign_held_session_is_refused_as_occupied() {
         ),
         other => panic!("expected Occupied, got {other:?}"),
     }
-    // The refused turn left no trace: no busy marker, no history.
+
     assert!(!engine.is_busy("sess-occupied-engine"));
 
-    // Once the foreign holder lets go, the next turn claims the session.
     foreign.release("sess-occupied-engine");
     engine
         .run_turn_on(&ScriptedLlm, "sess-occupied-engine", 1, Vec::new(), "hello")
@@ -824,8 +886,7 @@ async fn a_turn_runs_persists_and_reports_its_transport() {
 
     assert_eq!(report.steps, 1);
     assert_eq!(report.stop_reason, "EndTurn");
-    // Counting-wrapper figures are zero on this path: no pipeline was built,
-    // so nothing was counted. Asserting it keeps the seam honest.
+
     assert_eq!(report.events_emitted, 0);
     assert_eq!(report.native_tool_calls, 0);
 
@@ -839,8 +900,7 @@ async fn a_turn_runs_persists_and_reports_its_transport() {
         contents.contains(&"done"),
         "reply not persisted: {contents:?}"
     );
-    // The loop owns its own message list (system prompt plus an injected
-    // context turn); the store must hold only the non-system transcript.
+
     assert!(
         !history.iter().any(|m| m.role == "system"),
         "system row persisted as conversation: {contents:?}"
@@ -890,7 +950,6 @@ async fn history_before_the_prompt_is_carried_into_the_turn() {
         .await
         .expect("turn completes");
 
-    // The prompt is appended after the history, so the loop sees both.
     assert_eq!(report.steps, 1);
 }
 
@@ -909,11 +968,6 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
         .expect("scripted turn");
     assert_eq!(report.stop_reason, "EndTurn");
 
-    // The turn boundary now publishes its facts in a fixed order — the
-    // work_changed busy flip, the deduped status snapshot and the
-    // activity phase at start; the typed turn.ended, the work_changed
-    // flip back and the phase again at end. Every recv is bounded
-    // so a regression fails instead of hanging the suite.
     async fn next_event(
         sub: &mut crate::server::hub::WsSubscription,
     ) -> std::sync::Arc<crate::server::hub::SequencedEvent> {
@@ -936,16 +990,16 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
     assert_eq!(
         sequence,
         vec![
-            "event.session.work_changed",  // busy=true
-            "session.meta.updated",        // first-prompt lastPrompt/title
-            "agent.status.updated",        // snapshot (first for the session)
-            "agent.status.updated",        // phase: running
-            "event.message.created",       // the user prompt
-            "turn.ended",                  // the turn closes, before idle
-            "event.session.work_changed",  // busy=false
-            "agent.status.updated",        // snapshot (context grew)
-            "event.session.usage_updated", // live token accounting
-            "agent.status.updated",        // phase: ended
+            "event.session.work_changed",
+            "session.meta.updated",
+            "agent.status.updated",
+            "agent.status.updated",
+            "event.message.created",
+            "turn.ended",
+            "event.session.work_changed",
+            "agent.status.updated",
+            "event.session.usage_updated",
+            "agent.status.updated",
         ]
     );
 
@@ -974,8 +1028,6 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
     assert_eq!(end_phase["phase"]["kind"], "ended");
     assert_eq!(end_phase["phase"]["reason"], "completed");
 
-    // The turn closes on the typed event, scoped by its turn number and
-    // carrying the loop's end reason — the v2 turn-lifecycle contract.
     let crate::events::EngineEvent::TurnEnded {
         turn_id, reason, ..
     } = &events[5].event
@@ -996,11 +1048,6 @@ async fn a_turn_publishes_work_changed_busy_then_idle() {
     assert!(!busy);
     assert_eq!(last_turn_reason.as_deref(), Some("completed"));
 
-    // The mirror also lands on the session row. The live event asserted
-    // above is not enough: it is gone once the turn is over, so a client
-    // that attaches later — or after a restart — reads the outcome from
-    // here. Replacing the persisted value with `None` left this whole file
-    // green, because only the event was ever asserted.
     assert_eq!(
         engine.store().last_turn_reason("sess-wc").as_deref(),
         Some("completed"),
@@ -1028,8 +1075,7 @@ async fn status_updated_folds_agent_config_and_context_then_dedups() {
             }),
         )
         .unwrap();
-    // Four content bytes → the same `len() / 4` estimate the wire session
-    // reports, so the assertion pins the exact budget.
+
     engine
         .store
         .save_turn(
@@ -1054,11 +1100,9 @@ async fn status_updated_folds_agent_config_and_context_then_dedups() {
     assert_eq!(payload["thinkingEffort"], "high");
     assert_eq!(payload["permission"], "manual");
     assert_eq!(payload["planMode"], true);
-    // v2 `estimateTokensForMessage` counts the role plus the content: role
-    // "user" (1) + four content bytes (1) = 2.
+
     assert_eq!(payload["contextTokens"], 2);
 
-    // An unchanged state re-publish is dropped by the snapshot dedup.
     engine.publish_status_updated("sess-status").await;
     let next = tokio::time::timeout(std::time::Duration::from_millis(50), sub.recv()).await;
     assert!(next.is_err(), "dedup must swallow the identical payload");
@@ -1073,10 +1117,6 @@ fn work_turn_reason_maps_the_loop_vocabulary() {
     assert_eq!(work_turn_reason(&LoopTurnStopReason::Aborted), "cancelled");
 }
 
-/// v2 `buildContextCompactionShape` (`compactionHandoff.ts:107-111`): after a
-/// compaction the summary message's size is the summarization request's
-/// measured output, not an estimate of its text. Without that substitution the
-/// context gauge keeps guessing the largest fixed message in the new history.
 #[test]
 fn the_rebase_substitutes_the_measured_summary_output() {
     use crate::turn_loop::types::LLMMessage;
@@ -1126,10 +1166,6 @@ fn the_rebase_substitutes_the_measured_summary_output() {
     );
 }
 
-/// v2 `TurnEnded` filter: the interruption reminder arms only when the turn
-/// was cancelled **by the user** (`interruptReason === 'user_cancelled'`). A
-/// teardown flips the same cancel flag and lands the same `cancelled` reason,
-/// but telling the model "the user interrupted" after a shutdown is false.
 #[test]
 fn only_a_user_cancel_arms_the_interruption_reminder() {
     let engine = engine();
@@ -1174,8 +1210,6 @@ fn engine_with_mcp_manager_wires_and_exposes_manager() {
 
 #[test]
 fn enqueue_steer_refuses_and_leaves_the_signal_alone_when_no_turn_runs() {
-    // Nothing to steer without an active turn, and a refused steer must not
-    // fire the signal for whatever turn comes next.
     let engine = engine();
     let signal = crate::subagent::types::ParentCancel::new();
     *engine
@@ -1213,12 +1247,6 @@ fn enqueue_steer_queues_and_fires_the_turn_signal() {
     );
 }
 
-/// A steer the cancelled turn never drained is not lost: the queue
-/// survives the turn boundary and the session's next turn drains it at
-/// its first step head (v2's unconsumed-steer semantics; the session
-/// path's session-scoped queue behaves the same). The cancel check runs
-/// at the step top, ahead of `drain_steers`, so this is exactly the
-/// window where the message used to vanish with the turn.
 #[test]
 fn an_undrained_steer_survives_the_turn_boundary_for_the_next_turn() {
     let engine = engine();
@@ -1235,8 +1263,6 @@ fn an_undrained_steer_survives_the_turn_boundary_for_the_next_turn() {
     active("sess-steer-survive");
     assert!(engine.enqueue_steer("sess-steer-survive", LLMMessage::user("stop")));
 
-    // The turn ends: the guard drops the active-turn entry, then the
-    // steer bookkeeping (cancel at the step top, before the drain).
     engine
         .active_turns
         .lock()
@@ -1249,18 +1275,13 @@ fn an_undrained_steer_survives_the_turn_boundary_for_the_next_turn() {
         1,
         "the undrained steer must survive the turn boundary"
     );
-    // The next turn's callbacks wrap this very queue
-    // (`SteerQueueCallbacks::new(.., self.steer_queue(session))`), so the
-    // message reaches that turn's first step head.
+
     let queue = engine.steer_queue("sess-steer-survive");
     assert_eq!(queue.lock().unwrap_or_else(|e| e.into_inner()).len(), 1);
-    // A surviving queue does not make a nonexistent turn steerable: with
-    // no active turn the route still refuses and re-queues the prompt.
+
     assert!(!engine.enqueue_steer("sess-steer-survive", LLMMessage::user("late")));
 }
 
-/// An empty queue is dropped at the turn boundary, so the map does not
-/// grow one entry per session over a server's lifetime.
 #[test]
 fn an_empty_steer_queue_is_dropped_at_the_turn_boundary() {
     let engine = engine();
@@ -1272,7 +1293,7 @@ fn an_empty_steer_queue_is_dropped_at_the_turn_boundary() {
             "sess-steer-empty".to_string(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
-    // A turn that drained everything (or never got a steer) leaves nothing.
+
     engine.steer_queue("sess-steer-empty");
     engine.release_turn_steer_state("sess-steer-empty");
     assert!(
@@ -1286,8 +1307,6 @@ fn an_empty_steer_queue_is_dropped_at_the_turn_boundary() {
     );
 }
 
-/// An LLM that reports real counters, so the engine's usage fold can be read
-/// back off the status payload.
 struct UsageLlm;
 
 impl LLM for UsageLlm {
@@ -1323,8 +1342,6 @@ impl LLM for UsageLlm {
     }
 }
 
-/// A finished turn records its usage under the LLM's model name, and the
-/// status payload carries `usage` in the camelCase wire shape.
 #[tokio::test]
 async fn a_finished_turn_records_usage_per_model_and_the_status_carries_it() {
     let engine = engine();
@@ -1348,9 +1365,6 @@ async fn a_finished_turn_records_usage_per_model_and_the_status_carries_it() {
     assert_eq!(usage["currentTurn"]["output"], 5);
 }
 
-/// The configured model window reaches the turn loop (compaction and the
-/// LLM completion budget) and comes back on the report for hosts that
-/// render the context gauge.
 #[tokio::test]
 async fn a_turn_carries_the_configured_context_window() {
     let engine = engine();
@@ -1372,10 +1386,6 @@ async fn a_turn_carries_the_configured_context_window() {
     assert_eq!(report.context_window, Some(12_345));
 }
 
-/// v2 scopes todo / plan / goal / task / turn to the agent, not the
-/// workspace: two sessions of one checkout must not see each other's todo.
-/// A workspace value written before the scope change remains readable as a
-/// legacy fallback for a session that has not written the domain yet.
 #[test]
 fn session_state_is_isolated_between_sessions_of_one_workspace() {
     let engine = engine();
@@ -1404,8 +1414,6 @@ fn session_state_is_isolated_between_sessions_of_one_workspace() {
         "another session's todo must not leak through the workspace"
     );
 
-    // Legacy (pre-scope) workspace data stays readable until the session
-    // writes its own value, then the session store wins.
     crate::storage::StateStore::for_workspace(dir.path())
         .unwrap()
         .write_domain(
@@ -1418,9 +1426,6 @@ fn session_state_is_isolated_between_sessions_of_one_workspace() {
     assert_eq!(legacy[0].title, "legacy");
 }
 
-/// The callbacks a session's turns run with own that session's state store,
-/// so a turn-head checkpoint snapshots exactly this session — the anchor a
-/// later undo restores (and never another session's stack).
 #[tokio::test]
 async fn a_session_checkpoint_snapshots_only_that_sessions_state() {
     let engine = engine();
@@ -1459,10 +1464,6 @@ async fn a_session_checkpoint_snapshots_only_that_sessions_state() {
     );
 }
 
-/// v2 folds a finished turn into an active goal (`incrementGoalTurn` +
-/// `accountTokenUsage`) and launches a continuation while the goal is still
-/// active; both halves live in the engine on this entry point because no host
-/// loop re-prompts a server or ACP turn.
 #[tokio::test]
 async fn a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuation() {
     let engine = engine();
@@ -1532,10 +1533,6 @@ async fn a_finished_turn_folds_into_the_sessions_goal_and_offers_its_continuatio
     );
 }
 
-/// The status gauge is measured + estimated (v2 `statusSize`): the turn's
-/// last request anchors the *input prefix* it served, so the reply appended
-/// after it is estimated on top (v2 `measured` uses the request context
-/// length, not the finished transcript's).
 #[tokio::test]
 async fn a_finished_turn_anchors_the_context_gauge_on_its_last_request() {
     let engine = engine();
@@ -1546,12 +1543,9 @@ async fn a_finished_turn_anchors_the_context_gauge_on_its_last_request() {
         .await
         .expect("scripted turn completes");
 
-    // UsageLlm reports input 10, cache read 3, cache creation 2, output 5 —
-    // v2's measured total is their sum.
     let measured = 20;
     let history = engine.store().load_session_history("sess-count").unwrap();
-    // The loop appends its injected reminder as a user turn, so the stored
-    // slice is [user, reminder, reply]; only the reply trails the request.
+
     assert_eq!(
         history.len(),
         3,
@@ -1575,9 +1569,6 @@ async fn a_finished_turn_anchors_the_context_gauge_on_its_last_request() {
     );
 }
 
-/// v2 `matchesContext`: a request whose input prefix a compaction replaced no
-/// longer anchors the conversation — the turn falls back to an estimate at
-/// the final transcript length instead of pinning a stale measurement.
 #[test]
 fn a_spliced_request_measurement_falls_back_to_an_estimate() {
     let engine = engine();
@@ -1621,8 +1612,6 @@ fn a_spliced_request_measurement_falls_back_to_an_estimate() {
         "the whole transcript is estimated"
     );
 
-    // The same request, still current: two loop messages (system + user) map
-    // to a one-message durable prefix, and the reply is estimated on top.
     let fresh = crate::turn_loop::types::RequestMeasurement {
         usage,
         input_messages: 2,
@@ -1635,10 +1624,6 @@ fn a_spliced_request_measurement_falls_back_to_an_estimate() {
     );
 }
 
-/// The tool-schema table is part of every request, so the gauge counts it and
-/// `should_compact` — the threshold the turn loop and the micro-compaction
-/// path read — sizes the same figure. Enabling a large toolset must therefore
-/// move the trigger, not leave it unaware of the schema.
 #[test]
 fn the_context_gauge_and_the_compaction_threshold_share_the_tool_schema_basis() {
     let engine = engine();
@@ -1670,8 +1655,6 @@ fn the_context_gauge_and_the_compaction_threshold_share_the_tool_schema_basis() 
     );
 }
 
-/// A transcript cut re-baselines the gauge: anchors that measured the removed
-/// messages no longer apply (v2 `recordTruncation` on undo).
 #[tokio::test]
 async fn truncating_the_transcript_rebases_the_context_gauge() {
     let engine = engine();
@@ -1685,9 +1668,7 @@ async fn truncating_the_transcript_rebases_the_context_gauge() {
     let undone = engine.store().undo_turns("sess-cut", 1).expect("undo");
     assert_eq!(undone, 1);
     engine.record_context_truncation("sess-cut");
-    // The messages are gone, but the request still carries the turn's tool
-    // schema — the gauge counts it on the same basis as the compaction
-    // trigger.
+
     let schema_tokens = engine.token_counting("sess-cut").tool_schema_tokens;
     assert!(schema_tokens > 0, "the scripted turn enables a toolset");
     assert_eq!(
@@ -1701,9 +1682,6 @@ async fn truncating_the_transcript_rebases_the_context_gauge() {
     );
 }
 
-/// The todo list the ACP `plan` notification projects: read from the same
-/// workspace state domain the todo tools write, empty for an unknown
-/// session.
 #[test]
 fn session_todos_reads_the_workspace_todo_domain() {
     use crate::tools::todo_item::TodoStatus;
@@ -1763,8 +1741,6 @@ fn session_thinking_maps_to_the_wire_dialect_of_the_protocol() {
     assert_eq!(native.reasoning_effort.as_deref(), Some("medium"));
     assert_eq!(native.thinking_budget, None);
 
-    // Kimi's anthropic wire takes the effort itself, and off must be
-    // explicit so the transport can send its protocol-level disable.
     let mut kimi = spec();
     kimi.native_llm = Some(crate::rpc::types::NativeLlmConfig {
         protocol: "anthropic".into(),
@@ -1802,10 +1778,6 @@ fn session_thinking_off_clears_the_budget_and_the_keep() {
     assert_ne!(native.reasoning_effort.as_deref(), Some("off"));
 }
 
-/// v2 `WireService.externallyModified` / `SessionRunGateService.begin()`: a
-/// journal that moved since this engine last saw it means another client wrote
-/// the session while it was idle. A session never observed is a fresh scope
-/// (nothing is stale), and adopting the head is the reload that clears it.
 #[test]
 fn a_journal_that_moved_since_the_observed_head_reads_as_externally_modified() {
     let engine = engine();
@@ -1842,11 +1814,6 @@ fn a_journal_that_moved_since_the_observed_head_reads_as_externally_modified() {
     );
 }
 
-/// Rows this process's own persister wrote are the engine's in-flight tail, not
-/// an external modification. The turn watermark is taken before its post-turn
-/// events and the next prompt's `prompt.submitted` are persisted, so without
-/// the persisted head every second turn in the same process would be refused as
-/// `session.stale` — before its step head could drain a surviving steer.
 #[test]
 fn a_row_this_process_persisted_is_not_an_external_modification() {
     let engine = engine();
@@ -1906,8 +1873,6 @@ fn agents_md_reminder_is_silent_without_changes() {
     assert!(agents_md_change_reminder(&[]).is_none());
 }
 
-// ── `[environments]` at session creation ─────────────────────────────
-
 fn environment_entry(kind: &str) -> crate::environment::EnvironmentEntry {
     crate::environment::EnvironmentEntry {
         kind: Some(kind.to_string()),
@@ -1915,8 +1880,6 @@ fn environment_entry(kind: &str) -> crate::environment::EnvironmentEntry {
     }
 }
 
-/// An engine whose config carries `environments`, plus a workspace-backed
-/// session created before the environment is frozen.
 async fn engine_with_environments(
     environments: crate::environment::EnvironmentsConfig,
 ) -> (tempfile::TempDir, ServerEngine) {
@@ -1946,9 +1909,6 @@ async fn engine_with_environments(
     (temp_dir, engine)
 }
 
-/// Declaring a remote entry does not poison creation: with no `default`, the
-/// session binds to the built-in local environment, exactly like a config with
-/// no `[environments]` section.
 #[tokio::test]
 async fn a_declared_environment_without_a_default_still_binds_local() {
     let (temp_dir, engine) = engine_with_environments(crate::environment::EnvironmentsConfig {
@@ -1969,9 +1929,6 @@ async fn a_declared_environment_without_a_default_still_binds_local() {
     );
 }
 
-/// A declared default is what upstream uses when a session names no
-/// environment; this engine cannot reach the transport, so creation fails with
-/// the transport named rather than silently running locally.
 #[tokio::test]
 async fn a_declared_default_is_refused_as_unavailable_on_creation() {
     let (_temp_dir, engine) = engine_with_environments(crate::environment::EnvironmentsConfig {
@@ -1992,13 +1949,6 @@ async fn a_declared_default_is_refused_as_unavailable_on_creation() {
     assert!(error.detail().contains("ssh"), "{}", error.detail());
 }
 
-/// `local` is built in, not a declarable transport (upstream's entry union is
-/// ssh/docker/command): a config that declares it is malformed and creation
-/// reports that, instead of pretending the transport is merely unavailable.
-///
-/// This is the create/restore backstop: the config loader already staged the
-/// same finding as an `event.config.warning`, but the file can be edited while
-/// the server runs, so the typed error must still be reachable here.
 #[tokio::test]
 async fn a_local_declaration_fails_creation_with_a_declaration_error() {
     let (_temp_dir, engine) = engine_with_environments(crate::environment::EnvironmentsConfig {
@@ -2022,8 +1972,6 @@ async fn a_local_declaration_fails_creation_with_a_declaration_error() {
     assert!(error.detail().contains("built in"), "{}", error.detail());
 }
 
-/// A dangling `default` stays a config error at the same moment upstream
-/// reports it: while the declaration is validated, before any snapshot.
 #[tokio::test]
 async fn a_dangling_default_fails_creation_with_a_declaration_error() {
     let (_temp_dir, engine) = engine_with_environments(crate::environment::EnvironmentsConfig {
@@ -2043,8 +1991,6 @@ async fn a_dangling_default_fails_creation_with_a_declaration_error() {
     assert!(error.detail().contains("missing"), "{}", error.detail());
 }
 
-/// A scripted LLM that reports one usage per call, so a multi-turn test can
-/// drive the cache-read series the tracker observes.
 struct ScriptedUsageLlm {
     calls: std::sync::atomic::AtomicUsize,
     usages: Vec<TokenUsage>,
@@ -2092,9 +2038,6 @@ fn cache_usage(input_other: u32, cache_read: u32, cache_creation: u32, output: u
     }
 }
 
-/// D14: a collapsing cache read is recorded once with its buckets; a
-/// sub-threshold dip afterwards adds no noise. The read entry exposes what was
-/// collected without any wire field.
 #[tokio::test]
 async fn a_cache_read_collapse_is_recorded_and_a_small_dip_is_not() {
     let engine = engine();
@@ -2152,8 +2095,6 @@ async fn a_cache_read_collapse_is_recorded_and_a_small_dip_is_not() {
     );
 }
 
-/// D14: an unmeasured step is not a break and does not move the baseline, so
-/// providers that report nothing cannot fabricate a collapse.
 #[test]
 fn an_unmeasured_cache_observation_does_not_move_the_baseline() {
     let engine = engine();
@@ -2210,10 +2151,6 @@ fn an_unmeasured_cache_observation_does_not_move_the_baseline() {
     );
 }
 
-/// D14: a compaction rebase drops every pre-compaction comparison datum (the
-/// break baseline, the last observation, the request snapshots) so the summary
-/// prefix is never measured against the old transcript; the recorded breaks
-/// are history and stay.
 #[test]
 fn a_compaction_resets_the_cache_break_baseline() {
     let engine = engine();
@@ -2276,10 +2213,6 @@ fn a_compaction_resets_the_cache_break_baseline() {
     );
 }
 
-/// D14: a turn that compacted mid-loop hands the engine the observation index
-/// where the history was replaced. The fold resets the break baseline there, so
-/// the post-compaction cache-read drop is not reported as a break (v2 resets on
-/// `context.compactionCompleted`).
 #[test]
 fn a_compaction_boundary_in_the_fold_resets_the_baseline() {
     let engine = engine();
@@ -2333,16 +2266,10 @@ fn a_compaction_boundary_in_the_fold_resets_the_baseline() {
     );
 }
 
-/// D10: the engine reads the configured strategy through the config source, so
-/// an explicit `measured`/`estimated` changes the gauge and the default is
-/// byte-for-byte the historical figure.
 #[test]
 fn the_context_gauge_honours_the_configured_token_counting_strategy() {
     use std::str::FromStr;
-    // The gauge reads `KIMI_TOKEN_COUNTING_STRATEGY` on every call, so the
-    // whole test must own the variable: taking the lock only for the last
-    // assertion let a parallel config test flip the value under the earlier
-    // ones.
+
     let _env = crate::session::token_counting::tests::env_lock();
     unsafe { std::env::remove_var("KIMI_TOKEN_COUNTING_STRATEGY") };
     let engine = engine();
@@ -2400,14 +2327,10 @@ fn the_context_gauge_honours_the_configured_token_counting_strategy() {
         "estimated is the pure estimator over the stored history"
     );
 
-    // Back to the default: no config source at all.
     engine.set_config_source(Arc::new(tokio::sync::Mutex::new(None)));
     assert_eq!(engine.session_context_tokens("sess-strategy"), composed);
 }
 
-/// D10: a read that races a config reload must not report the default. The
-/// async config source is briefly held while a reload swaps it, and the
-/// synchronous gauge used to treat `try_lock` contention as "unconfigured".
 #[tokio::test]
 async fn a_contended_config_read_does_not_downgrade_the_token_counting_strategy() {
     use std::str::FromStr;
@@ -2423,7 +2346,6 @@ async fn a_contended_config_read_does_not_downgrade_the_token_counting_strategy(
         crate::session::token_counting::TokenCountingStrategy::Measured
     );
 
-    // Stand in for a reload: hold the source while the gauge reads it.
     let guard = source.lock().await;
     assert_eq!(
         engine.token_counting_strategy(),

@@ -1,24 +1,3 @@
-//! The host seam and turn driver for a server process that has **no host**.
-//!
-//! Both product entries reach the engine through a `HostCallbacks`
-//! implementation backed by a live JS side (`RpcHostCallbacks` over stdio,
-//! `NapiHostCallbacks` over the addon). A standalone HTTP/WS server has nobody
-//! behind that seam, and inventing a fifth implementation ad hoc is how legs
-//! end up quietly hanging a request. This module owns the two pieces that
-//! difference requires:
-//!
-//! - [`ServerHost`] — an explicit, documented answer for every leg the engine
-//!   may call, so an unsupported capability fails fast with a message instead
-//!   of blocking a socket;
-//! - [`ServerEngine`] — builds an engine context on the shared pipeline with
-//!   its events published onto the [`EventHub`]'s bus, runs one turn, and
-//!   persists the resulting transcript.
-//!
-//! Note the asymmetry this deliberately keeps: a self-contained server selects
-//! `native_llm` or `providers`, so `llm_chat` must never be reached. It is an
-//! error rather than a stubbed-out success precisely so that a misconfiguration
-//! surfaces as one.
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,13 +20,11 @@ use crate::turn_loop::run_turn::run_turn_continued_with_observations;
 use crate::turn_loop::types::{LLM, LLMMessage, RunTurnInput};
 use serde_json::Value;
 
-/// A host for standalone server execution with optional interactive interaction
-/// support (questions and approvals).
 #[derive(Clone, Default)]
 pub struct ServerHost {
     interaction_manager: Option<Arc<InteractionManager>>,
     session_id: Option<String>,
-    /// OAuth-managed token source for `auth_provider`-configured transports.
+
     oauth: Option<Arc<crate::server::oauth::OAuthManager>>,
 }
 
@@ -68,8 +45,6 @@ impl ServerHost {
         }
     }
 
-    /// Attach the OAuth token source so an OAuth-only provider
-    /// (`[providers.*].oauth`, no static key) can fetch a bearer token.
     #[must_use]
     pub fn with_oauth(mut self, oauth: Option<Arc<crate::server::oauth::OAuthManager>>) -> Self {
         self.oauth = oauth;
@@ -78,9 +53,6 @@ impl ServerHost {
 }
 
 impl HostCallbacks for ServerHost {
-    /// OAuth-managed bearer token for `auth_provider`-configured transports.
-    /// `managed_access_token` already refreshes an expired token and retries
-    /// once on the host's 401/403 path, so `force` needs no separate handling.
     fn auth_token(
         &self,
         _provider: String,
@@ -91,8 +63,7 @@ impl HostCallbacks for ServerHost {
             None => Box::pin(async { Err("host does not support oauth token fetch".into()) }),
         }
     }
-    /// The host-proxy LLM leg. Only reachable if a pipeline was built without
-    /// `providers` or `native_llm`, which [`ServerEngine`] refuses up front.
+
     fn llm_chat(
         &self,
         _request: LlmChatRequest,
@@ -106,9 +77,6 @@ impl HostCallbacks for ServerHost {
         })
     }
 
-    /// Tools the sandboxed native toolset does not serve. Answering "not
-    /// available" keeps a model from waiting forever on a host that cannot
-    /// answer, and keeps a capability gap visible in the transcript.
     fn execute_tool(
         &self,
         request: ToolExecuteRequest,
@@ -121,7 +89,6 @@ impl HostCallbacks for ServerHost {
         })
     }
 
-    /// Ask the host whether a mutating tool call may execute natively.
     fn check_permission(
         &self,
         request: PermissionCheckRequest,
@@ -150,7 +117,6 @@ impl HostCallbacks for ServerHost {
         }
     }
 
-    /// Ask the host an interactive question and wait for a human answer.
     fn ask_question(
         &self,
         request: AskQuestionRequest,
@@ -180,33 +146,32 @@ impl HostCallbacks for ServerHost {
             })
         }
     }
+
+    fn cancel_question(&self, question_id: &str, reason: &str) {
+        if let Some(manager) = self.interaction_manager.as_ref() {
+            manager.cancel_question(question_id, reason);
+        }
+    }
 }
 
-/// What one completed turn reports back to the caller.
 #[derive(Debug, Clone)]
 pub struct TurnReport {
     pub turn_id: String,
     pub stop_reason: String,
-    /// The turn's final assistant text; empty when the loop ended without one.
+
     pub reply: String,
     pub steps: u32,
     pub usage: TokenUsage,
-    /// Events the turn emitted through the counting wrapper — the same events
-    /// that went out over the [`EventHub`].
+
     pub events_emitted: u32,
     pub llm_transport: String,
     pub native_tool_calls: u32,
-    /// The bound model's context window this turn ran against, when the
-    /// config declares it. `None` = unknown (the turn loop used its defaults).
+
     pub context_window: Option<u32>,
-    /// The prompt gate blocked this turn (v2 `onBeforeSubmitPrompt`), so the
-    /// prompt row must settle as `blocked`, not `completed`.
+
     pub gate_blocked: bool,
 }
 
-/// The thinking axes a model alias declares: whether reasoning is always on,
-/// which effort levels it accepts (empty = the boolean off/on pair), and the
-/// level a fresh session starts at.
 #[derive(Debug, Clone, Default)]
 pub struct ModelThinking {
     pub always_thinking: bool,
@@ -214,25 +179,18 @@ pub struct ModelThinking {
     pub default_effort: Option<String>,
 }
 
-/// Why a server-side turn could not run. Flattened to a message because the
-/// turn loop's own error is a boxed trait object; a server reports this as
-/// JSON, and keeping the chain of causes in a type buys nothing there.
 #[derive(Debug)]
 pub enum EngineError {
-    /// No usable LLM was configured.
     NoModel(String),
-    /// The turn loop itself failed.
+
     Turn(String),
-    /// Persisting the turn failed.
+
     Store(rusqlite::Error),
-    /// A live foreign process holds the session's occupancy lock (v2
-    /// `session.occupied`, upstream #4246); the message is v2's wording.
+
     Occupied(String),
-    /// The journal moved since this engine last saw it (v2 `session.stale`,
-    /// `SessionRunGateService.begin()`): another client wrote the session
-    /// while it was idle, and starting here would interleave two histories.
+
     Stale(String),
-    /// The session's bound environment could not be restored.
+
     Environment(String),
 }
 
@@ -251,192 +209,136 @@ impl std::fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
-/// Runs turns for the standalone server on a fixed configuration.
 pub struct ServerEngine {
     spec: PipelineSpec,
     hub: Arc<EventHub>,
     store: Arc<SqliteSessionStore>,
     max_steps: u32,
-    /// Host `loopControl.maxAttemptsPerStep` override (`None` = the engine
-    /// default). Wired per host like `max_steps`; the session pump threads
-    /// its own value instead.
+
     max_attempts: Option<u32>,
-    /// Host `loopControl.compactionMaxAttempts` override (`None` = the engine
-    /// default), wired through [`Self::with_compaction_max_attempts`].
+
     compaction_max_attempts: Option<u32>,
     active_turns: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    /// Expected-turn guard for automatic wake interruption: a late cancel must
-    /// not hit the user turn that replaced the wake.
+
     active_turn_numbers: Mutex<HashMap<String, u32>>,
-    /// v2 `AppendLogStore`'s per-scope `knownLength`, ported to the SQLite
-    /// journal: the `MAX(seq)` this engine last saw for a session. A turn that
-    /// starts against a journal beyond this watermark was written by another
-    /// client while the session was idle, and is refused with `session.stale`
-    /// (v2 `SessionRunGateService.begin()` / `WireService.externallyModified`).
+
     journal_heads: Mutex<HashMap<String, u64>>,
     mcp_manager: Mutex<Option<Arc<McpManager>>>,
-    /// Per-session MCP status subscriptions, so a server-hosted session sees
-    /// `mcp.server.status` / `tool.list.updated` the same way the napi host
-    /// does. Dropped on session dispose (v2 `attachMcpTools`'s `_register`).
+
     mcp_status: Mutex<HashMap<String, Arc<crate::mcp::status::McpStatusBridge>>>,
     interaction_manager: Mutex<Option<Arc<InteractionManager>>>,
     subagent_manager: Arc<SubagentManager>,
-    /// OAuth token source for OAuth-bound providers; `None` until the server
-    /// attaches one (see [`Self::set_oauth_manager`]).
+
     oauth_manager: Mutex<Option<Arc<crate::server::oauth::OAuthManager>>>,
-    /// Per-session steering prompts queued while a turn is running; the turn
-    /// drains them at each step head (`SteerQueueCallbacks::drain_steers`).
+
     steer_queues: Mutex<HashMap<String, Arc<Mutex<Vec<LLMMessage>>>>>,
-    /// Per-session steer signal (#3697): fired by [`Self::enqueue_steer`], so a
-    /// blocking `WaitFor` in the running turn ends early. The pipeline is
-    /// rebuilt per turn, so the slot — like the queue — is held here and
-    /// threaded into each turn's toolset.
+
     steer_slots: Mutex<HashMap<String, Arc<Mutex<Option<crate::subagent::types::ParentCancel>>>>>,
-    /// The server's live config handle, so a session model override can be
-    /// re-resolved to its provider (base URL / key) rather than only renaming
-    /// the model on the engine's base transport.
+
     config_source: Mutex<Option<Arc<tokio::sync::Mutex<Option<crate::config::KimiConfig>>>>>,
-    /// The reloadable `[hooks]` set. Read once per session spec; a config
-    /// reload replaces it in place and a failed reload leaves it untouched.
-    /// Installing it is opt-in, so hosts that resolve hooks themselves keep
-    /// reading the policy snapshot baked into their spec.
+
     hooks_source: Mutex<Option<crate::tools::external_hooks::HooksSource>>,
-    /// The last successfully resolved token-counting strategy (v2
-    /// `[tokenCounting].strategy`).
-    ///
-    /// The config source above is an async mutex, but the gauge and the
-    /// turn-recording paths are synchronous. A contended `try_lock` used to
-    /// fall back to the default, which made an explicit `measured` /
-    /// `estimated` look unconfigured for the duration of a reload. The cache
-    /// keeps the last real answer instead; the default is only used when no
-    /// config has ever been readable.
+
     token_counting_strategy_cache:
         Mutex<Option<crate::session::token_counting::TokenCountingStrategy>>,
-    /// The enabled plugins' skill roots, asked for fresh on every session spec
-    /// (`with_plugin_skill_roots`). The standalone server owns the plugin
-    /// manager and installs a reader, so an install / enable / disable / remove
-    /// is reflected in the next turn without this engine tracking the four
-    /// mutation paths itself; a process with no plugins leaves it unset and
-    /// scans exactly what it did before.
+
     plugin_skill_roots: Mutex<Option<PluginSkillRoots>>,
-    /// The enabled plugins' system-prompt block and hook definitions, asked
-    /// for fresh on every session spec (see
-    /// [`ServerEngine::with_plugin_contributions`]): an install / enable /
-    /// disable changes the next turn's prompt and hook guard without this
-    /// engine tracking the mutation paths itself.
+
     plugin_contributions: Mutex<Option<PluginContributions>>,
-    /// Optional per-session host factory; non-HTTP hosts (ACP) install one to
-    /// answer permission checks through their own transport.
+
     host_factory: Mutex<Option<HostFactory>>,
-    /// Last published `agent.status.updated` payload hash per session, so a
-    /// re-publish with unchanged state stays silent (kap-server dedups its
-    /// legacy status the same way, by snapshot equality).
+
     status_hashes: Mutex<HashMap<String, u64>>,
-    /// Whether the session's last finished turn ended `Aborted` (the
-    /// interruption reminder's trigger, v2 `TurnEnded` reason filter). Read
-    /// and cleared when the next turn's spec is built.
+
     last_turn_aborted: Mutex<HashMap<String, bool>>,
-    /// Per-session AGENTS.md fingerprint, so an instruction file that changed
-    /// after the prompt was built is reported on the next turn instead of at
-    /// the next process start.
+
     agents_md_watches: Mutex<HashMap<String, crate::environment::AgentsMdWatch>>,
-    /// Per-session snapshots for v2's other `changeNotifier` variants (skills,
-    /// subagents, workspace directories). Each variant records what it last
-    /// observed and only queues a reminder when the next observation differs.
+
     change_notifier: Mutex<HashMap<String, crate::injection::change_notifier::ChangeNotifierState>>,
-    /// The skills listing `session_spec` already rendered for this turn's
-    /// system prompt, handed to the change notifier so a turn never scans the
-    /// skill roots twice. `Unreadable` is carried through unchanged so the
-    /// notifier can keep its baseline instead of reporting a deleted catalog.
+
     pending_skill_listings: Mutex<HashMap<String, crate::primitives::read::ReadOutcome<String>>>,
-    /// v2's per-session log settings (`agent-core-v2/src/_base/log/logConfig.ts`):
-    /// the level, the size cap and the number of rotated files. Read once at
-    /// construction; the sink itself is opened per turn.
+
     session_log_config: crate::session::session_log::SessionLogConfig,
-    /// Whether the *user* asked for the running turn to stop (v2
-    /// `TurnEnded.interruptReason === 'user_cancelled'`). Set by [`Self::cancel_turn`]
-    /// and consumed at turn end: a teardown or a host-side abort flips the same
-    /// cancel flag but must not arm the "interrupted by the user" reminder.
+
     last_cancel_user: Mutex<HashMap<String, bool>>,
-    /// When this session last produced assistant output, in epoch millis.
-    /// Micro compaction's cache-miss gate is *idle time since that moment*
-    /// (v2 `AgentMicroCompactionService.lastAssistantAt`, stamped on
-    /// `onDidFinishStep`), not a cache-hit counter: a prompt cache expires on
-    /// its own schedule, so what matters is how long the prefix has been
-    /// sitting unused.
+
     last_assistant_at: Mutex<HashMap<String, i64>>,
-    /// `session_id\0code\0message` keys whose `warning` event was already
-    /// published. A warning derived from static inputs (the AGENTS.md size
-    /// budget) is recomputed on every turn's prompt rebuild; keying by the
-    /// message means an edit that changes the finding is announced again.
+
     emitted_session_warnings: Mutex<std::collections::HashSet<String>>,
-    /// Per-session activity trackers (the `agent.status.updated` phase
-    /// machine), shared with the interaction manager so a pending
-    /// approval/question moves the phase too.
+
     activity_registry: Arc<crate::server::activity::ActivityRegistry>,
-    /// Per-session MCP managers for servers a client injected on
-    /// `session/new`. v2 makes ACP `mcpServers` ephemeral per-session servers
-    /// (connected for that session only, never persisted), so they must not
-    /// land on the process-wide manager every other session shares.
+
     session_mcp: Mutex<HashMap<String, Arc<McpManager>>>,
-    /// Resolves the media references a turn carries (v2
-    /// `AgentMediaResolverService`). One per engine, so the memo it keeps
-    /// survives across turns.
+
     media: crate::llm::media_resolver::MediaResolver,
-    /// Per-session media the request budget already omitted (v2
-    /// `media.budgetDropped` is agent state; the engine keeps the same
-    /// lifetime — the process, not the turn).
+
     media_dropped: Mutex<HashMap<String, crate::llm::media_budget::DroppedMedia>>,
-    /// Per-session media recovery record (v2 #4413 `llmRequester.mediaRecovery`):
-    /// a provider-forced degrade/strip re-applies to the session's later
-    /// turns; [`Self::record_context_truncation`] advances its revision.
+
     media_recovery: Mutex<HashMap<String, crate::llm::media_budget::SharedMediaRecovery>>,
-    /// Per-session prompt-cache observability (D14): the cache-break tracker,
-    /// the recent breaks and the last observation. Nothing here is on the
-    /// wire; [`Self::cache_observation`] is the read entry.
+
     cache_states: Mutex<HashMap<String, SessionCacheState>>,
-    /// Installed once by the standalone composition root. Per-turn toolsets
-    /// share the driver but receive session-specific runtimes.
+
     tower_wake_driver: Mutex<Option<Arc<dyn crate::session::wake::TowerWakeDriver>>>,
-    /// One wake batching/replay owner per session, shared by every toolset the
-    /// session builds across turns.
-    tower_wake_runtimes: Mutex<HashMap<String, Arc<crate::tools::tower::wake::TowerWakeRuntime>>>,
+
+    tower_wake_runtimes: Mutex<HashMap<String, Arc<crate::features::tower::wake::TowerWakeRuntime>>>,
 }
 
-/// Builds the host callbacks for one session.
 pub type HostFactory = Arc<dyn Fn(&str) -> Arc<dyn crate::callbacks::HostCallbacks> + Send + Sync>;
 
-/// How many cache breaks one session keeps for the read entry. The event is
-/// also telemetry; the retained ring is only for diagnostics/inspection.
 const CACHE_BREAK_RETENTION: usize = 32;
 
-/// One session's prompt-cache observability state (D14).
 #[derive(Default)]
 struct SessionCacheState {
-    /// v2 `AgentCacheBreakService`: the previous step's snapshot.
     tracker: crate::session::cache_observation::CacheBreakTracker,
-    /// Recent breaks, newest last, capped at [`CACHE_BREAK_RETENTION`].
+
     breaks: std::collections::VecDeque<crate::session::cache_observation::CacheBreakObservation>,
-    /// The last request's observation (v2 `lastTurnRequest.observation`).
+
     last: Option<crate::session::cache_observation::CacheObservation>,
-    /// The last request each agent served, keyed by agent id.
+
     requests: HashMap<String, crate::session::cache_observation::CacheProbeRequest>,
 }
 
-/// Reads the enabled plugins' skill roots on demand (see
-/// [`ServerEngine::with_plugin_skill_roots`]).
 pub type PluginSkillRoots = Arc<dyn Fn() -> Vec<crate::skills::PluginSkillDir> + Send + Sync>;
 
-/// The two session-facing contributions of the enabled plugins: the rendered
-/// `# Plugin Instructions` block and the external hook definitions.
 #[derive(Clone, Default)]
 pub struct PluginContributionSet {
     pub sections: Option<String>,
     pub hooks: Vec<crate::permission::HookDef>,
 }
 
-/// Reads the enabled plugins' contributions for the turn about to be built.
 pub type PluginContributions = Arc<dyn Fn() -> PluginContributionSet + Send + Sync>;
+
+fn resolve_permission_mode(
+    base: crate::permission::PermissionMode,
+    recorded: Option<crate::permission::PermissionMode>,
+    auto_env: bool,
+    metadata: &serde_json::Value,
+) -> crate::permission::PermissionMode {
+    use crate::permission::PermissionMode;
+    if let Some(mode) = recorded {
+        return mode;
+    }
+    if base != PermissionMode::Manual {
+        return base;
+    }
+    if auto_env {
+        return PermissionMode::Auto;
+    }
+    if let Some(mode_str) = metadata
+        .get("permission_mode")
+        .and_then(|value| value.as_str())
+    {
+        match mode_str.to_ascii_lowercase().as_str() {
+            "auto" => return PermissionMode::Auto,
+            "yolo" => return PermissionMode::Yolo,
+            _ => {}
+        }
+    }
+    if metadata.get("yolo").and_then(|value| value.as_bool()) == Some(true) {
+        return PermissionMode::Yolo;
+    }
+    base
+}
 
 impl ServerEngine {
     pub fn new(spec: PipelineSpec, hub: Arc<EventHub>, store: Arc<SqliteSessionStore>) -> Self {
@@ -486,8 +388,6 @@ impl ServerEngine {
         }
     }
 
-    /// Install the standalone wake driver once. Repeated composition-root
-    /// calls keep the original driver and every runtime created from it.
     pub fn install_tower_wake_driver(
         &self,
         driver: Arc<dyn crate::session::wake::TowerWakeDriver>,
@@ -501,9 +401,6 @@ impl ServerEngine {
         }
     }
 
-    /// Bind one session's long-lived runtime into this turn's fresh toolset.
-    /// The existing toolset API also returns the replay handler, which is
-    /// re-registered through the same driver shape used by stdio/NAPI/REPL.
     fn bind_tower_wake(
         &self,
         toolset: &crate::tools::NativeToolset,
@@ -519,23 +416,18 @@ impl ServerEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(session_id.to_string())
-            .or_insert_with(|| crate::tools::tower::wake::TowerWakeRuntime::new(driver.clone()))
+            .or_insert_with(|| crate::features::tower::wake::TowerWakeRuntime::new(driver.clone()))
             .clone();
         let handler = toolset.bind_tower_wake_runtime(runtime);
         driver.set_replay_handler(
             session_id,
-            crate::tools::tower::wake::TOWER_INBOX_WAKE_VARIANT,
+            crate::features::tower::wake::TOWER_INBOX_WAKE_VARIANT,
             handler,
         );
         Some(())
     }
 
-    /// Install the MCP manager one session's turns run with. ACP
-    /// `session/new` uses this so the client's `mcpServers` stay scoped to
-    /// that session (v2 `sessions.create({ mcpServers })`).
     pub fn set_session_mcp_manager(&self, session_id: &str, manager: Arc<McpManager>) {
-        // The old subscription belongs to the old manager; the next turn
-        // re-attaches to the new one.
         self.mcp_status
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -546,10 +438,6 @@ impl ServerEngine {
             .insert(session_id.to_string(), manager);
     }
 
-    /// Attach the session's MCP status bridge once, if the session has a
-    /// manager. Events go to the session's lane, so a connected/failed server
-    /// reaches the WS clients without polling the roster (v2
-    /// `attachMcpTools`).
     fn ensure_mcp_status_bridge(&self, session_id: &str) {
         let Some(manager) = self.mcp_manager_for(session_id) else {
             return;
@@ -571,7 +459,6 @@ impl ServerEngine {
         );
     }
 
-    /// Drop a disposed session's MCP status subscription (delete / archive).
     pub fn forget_mcp_status(&self, session_id: &str) {
         self.mcp_status
             .lock()
@@ -579,8 +466,6 @@ impl ServerEngine {
             .remove(session_id);
     }
 
-    /// The MCP manager a session's turns run with: its own when a client
-    /// injected servers for it, the process-wide one otherwise.
     pub(crate) fn mcp_manager_for(&self, session_id: &str) -> Option<Arc<McpManager>> {
         self.session_mcp
             .lock()
@@ -590,7 +475,6 @@ impl ServerEngine {
             .or_else(|| self.mcp_manager())
     }
 
-    /// The session's cross-turn record of omitted media, created on first use.
     fn media_dropped_for(&self, session_id: &str) -> crate::llm::media_budget::DroppedMedia {
         self.media_dropped
             .lock()
@@ -600,7 +484,6 @@ impl ServerEngine {
             .clone()
     }
 
-    /// The session's media recovery cell (v2 #4413), created on first use.
     fn media_recovery_for(
         &self,
         session_id: &str,
@@ -613,7 +496,6 @@ impl ServerEngine {
             .clone()
     }
 
-    /// Install a per-session host factory (ACP permission bridge).
     pub fn set_host_factory(&self, factory: HostFactory) {
         *self.host_factory.lock().unwrap_or_else(|e| e.into_inner()) = Some(factory);
     }
@@ -625,15 +507,10 @@ impl ServerEngine {
             .clone()
     }
 
-    /// Attach the OAuth token source so OAuth-bound providers can fetch bearer
-    /// tokens on this engine's turns.
     pub fn set_oauth_manager(&self, manager: Arc<crate::server::oauth::OAuthManager>) {
         *self.oauth_manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
     }
 
-    /// Attach the server's config handle so per-session model overrides resolve
-    /// to the right provider (base URL / key / protocol), not just a renamed
-    /// model on the engine's base transport.
     pub fn set_config_source(
         &self,
         source: Arc<tokio::sync::Mutex<Option<crate::config::KimiConfig>>>,
@@ -641,10 +518,6 @@ impl ServerEngine {
         *self.config_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(source);
     }
 
-    /// Attach the reloadable `[hooks]` set. Once installed, every session spec
-    /// takes its hooks from this source instead of the engine-wide snapshot,
-    /// so a config reload reaches the next turn without a restart. A turn that
-    /// is already running keeps the guard it built.
     pub fn set_hooks_source(&self, source: crate::tools::external_hooks::HooksSource) {
         *self.hooks_source.lock().unwrap_or_else(|e| e.into_inner()) = Some(source);
     }
@@ -656,10 +529,6 @@ impl ServerEngine {
             .clone()
     }
 
-    /// Install the reader for the enabled plugins' skill roots. Called once by
-    /// the server that owns the plugin manager; the returned roots go into each
-    /// session's [`PipelineSpec`] so the system prompt's skills section and the
-    /// `Skill` tool scan the same plugin catalog.
     pub fn with_plugin_skill_roots(&self, roots: PluginSkillRoots) {
         *self
             .plugin_skill_roots
@@ -667,7 +536,6 @@ impl ServerEngine {
             .unwrap_or_else(|e| e.into_inner()) = Some(roots);
     }
 
-    /// The plugins' skill roots for the turn about to be built.
     fn plugin_skill_roots(&self) -> Vec<crate::skills::PluginSkillDir> {
         self.plugin_skill_roots
             .lock()
@@ -677,9 +545,6 @@ impl ServerEngine {
             .unwrap_or_default()
     }
 
-    /// Install the reader for the enabled plugins' system-prompt block and
-    /// hooks (the server builder owns the plugin manager, mirroring
-    /// [`Self::with_plugin_skill_roots`]).
     pub fn with_plugin_contributions(&self, contributions: PluginContributions) {
         *self
             .plugin_contributions
@@ -687,7 +552,6 @@ impl ServerEngine {
             .unwrap_or_else(|e| e.into_inner()) = Some(contributions);
     }
 
-    /// The enabled plugins' contributions for the turn about to be built.
     fn plugin_contributions(&self) -> PluginContributionSet {
         let reader = self
             .plugin_contributions
@@ -704,17 +568,6 @@ impl ServerEngine {
             .clone()
     }
 
-    /// The context-gauge strategy for this engine (v2 `[tokenCounting]` +
-    /// `KIMI_TOKEN_COUNTING_STRATEGY`).
-    ///
-    /// The gauge readers ([`Self::session_context_tokens`] and the turn-end
-    /// recording) are synchronous while the config source is an async mutex.
-    /// `try_lock` reads the live config whenever no reload holds it; when a
-    /// reload *is* holding it, the last successfully resolved strategy is
-    /// returned instead of the default — an explicit `measured` / `estimated`
-    /// must never look unconfigured just because a read raced a write. The
-    /// default (which still honours the env binding) applies only when no
-    /// config has ever been readable.
     fn token_counting_strategy(&self) -> crate::session::token_counting::TokenCountingStrategy {
         let mut cache = self
             .token_counting_strategy_cache
@@ -724,8 +577,6 @@ impl ServerEngine {
             && let Ok(guard) = source.try_lock()
         {
             let strategy = guard.as_ref().map_or_else(
-                // No config published yet: only `KIMI_TOKEN_COUNTING_STRATEGY`
-                // can apply.
                 || crate::config::KimiConfig::default().resolve_token_counting_strategy(),
                 |config| config.resolve_token_counting_strategy(),
             );
@@ -740,15 +591,6 @@ impl ServerEngine {
         strategy
     }
 
-    /// The `[experimental].micro_compaction` knob: `Some(config)` when the
-    /// flag is enabled, `None` when unset/off. The feature must not change
-    /// model-visible content unless explicitly enabled — before this seam
-    /// existed the TUI advertised the flag while the engine had no
-    /// implementation at all.
-    ///
-    /// `None` is also returned when the engine has no config source (the napi
-    /// path resolves flags on the host instead), so the standalone server is
-    /// the only wired surface for now.
     async fn micro_compaction_config(
         &self,
     ) -> Option<crate::compaction::micro::MicroCompactionConfig> {
@@ -767,9 +609,6 @@ impl ServerEngine {
         enabled.then(crate::compaction::micro::MicroCompactionConfig::default)
     }
 
-    /// When this session last produced assistant output, or `None` if it never
-    /// has. Consumed by [`Self::model_context_window`]'s caller — micro
-    /// compaction's cache-miss gate — and nothing else.
     fn last_assistant_at_for(&self, session_id: &str) -> Option<i64> {
         self.last_assistant_at
             .lock()
@@ -777,12 +616,6 @@ impl ServerEngine {
             .and_then(|map| map.get(session_id).copied())
     }
 
-    /// The context window of the session's active model, from its config alias.
-    ///
-    /// `None` means "unknown", which micro compaction reads as a full window
-    /// (v2 `detect()` `:102-103` substitutes a ratio of 1 for an undefined
-    /// `maxContextTokens`) — so the usage gate never suppresses a pass the
-    /// idle gate already allowed.
     pub async fn model_context_window(&self, session_id: &str) -> Option<usize> {
         let model = self
             .store
@@ -806,10 +639,6 @@ impl ServerEngine {
         (size > 0).then_some(size as usize)
     }
 
-    /// The provider type the session's model resolves to (`kimi`,
-    /// `anthropic`, `openai`, …), for prompt-intake decisions that vary by
-    /// provider — today the inline-image budget. `None` when no engine config
-    /// or model is resolvable; callers then use the baseline policy.
     pub async fn session_provider_type(&self, session_id: &str) -> Option<String> {
         let model = self
             .store
@@ -832,12 +661,6 @@ impl ServerEngine {
         Some(native.provider_type).filter(|value| !value.is_empty())
     }
 
-    /// The thinking capability a model alias declares (v2 catalog
-    /// `thinkingSupported` / `alwaysThinking` / `supportEfforts`), or `None`
-    /// when the model is unknown or declares no thinking axis at all.
-    ///
-    /// Declared values only: a declared `support_efforts` list is itself
-    /// evidence of a thinking axis, the same way the docs treat it.
     pub async fn model_thinking(&self, model: &str) -> Option<ModelThinking> {
         let source = self.config_source()?;
         let config = {
@@ -936,29 +759,14 @@ impl ServerEngine {
             for issue in
                 crate::tools::tool_policy::find_inactive_tool_patterns(&patterns, Some(&is_known))
             {
-                let pattern = issue.pattern;
-                let message = match issue.kind {
-                    crate::tools::tool_policy::InactiveToolPatternKind::UnknownTool => format!(
-                        "Tool pattern \"{pattern}\" in {context} {field} does not match any registered or built-in tool; it will never activate anything."
-                    ),
-                    crate::tools::tool_policy::InactiveToolPatternKind::WildcardNotMcp => format!(
-                        "Tool pattern \"{pattern}\" in {context} {field} uses wildcards, which only match MCP tools (names starting with \"mcp__\"); it will never activate anything."
-                    ),
-                    crate::tools::tool_policy::InactiveToolPatternKind::IncompleteMcpName => {
-                        format!(
-                            "Tool pattern \"{pattern}\" in {context} {field} matches no tool; use \"{pattern}__*\" to match the whole MCP server."
-                        )
-                    }
-                };
+                let message = crate::tools::tool_policy::describe_inactive_tool_pattern(
+                    &context, field, &issue,
+                );
                 self.publish_session_warning(session_id, "tool-pattern-no-match", &message);
             }
         }
     }
 
-    /// Publish an observable `warning` event on the session lane, once per
-    /// distinct `(session, code, message)`. v2's `WarningIssued` is an
-    /// observable agent event and its consumers treat repeats as noise; the
-    /// engine recomputes some findings every turn, so the dedupe lives here.
     fn publish_session_warning(&self, session_id: &str, code: &str, message: &str) {
         let key = format!("{session_id}\u{0}{code}\u{0}{message}");
         let inserted = self
@@ -978,9 +786,6 @@ impl ServerEngine {
             })));
     }
 
-    /// Record that this session just produced assistant output, which resets
-    /// micro compaction's idle clock (v2 `onDidFinishStep` stamping
-    /// `lastAssistantAt`).
     fn stamp_last_assistant_at(&self, session_id: &str) {
         if let Ok(mut map) = self.last_assistant_at.lock() {
             map.insert(
@@ -990,10 +795,6 @@ impl ServerEngine {
         }
     }
 
-    /// Whether the background memory filing pass may run: the
-    /// `KIMI_AGENT_MEMORY_FILING` env override over the
-    /// `[experimental].memory_filing` entry, off when neither is set — v2
-    /// files only through the model's memory tool, with no turn-end pass.
     async fn memory_filing_enabled(&self) -> bool {
         memory_filing::resolve_gate(
             memory_filing::env_switch(),
@@ -1001,9 +802,6 @@ impl ServerEngine {
         )
     }
 
-    /// The `[experimental].memory_filing` entry alone, `None` when the engine
-    /// has no config source (the napi path resolves flags on the host) or the
-    /// entry is unset.
     async fn memory_filing_config_flag(&self) -> Option<bool> {
         let source = self.config_source()?;
         let config = {
@@ -1013,22 +811,12 @@ impl ServerEngine {
         memory_filing::config_flag(&config)
     }
 
-    /// Apply `[experimental].thinking_repeat_guard` to the process-wide
-    /// thinking-guard setting. Unset means on — the guard only ever removes a
-    /// degenerate repetition from the display, never content.
-    ///
-    /// The setting is process-wide rather than per-session because the guard
-    /// is built inside the LLM transport, which has no session handle. Every
-    /// session in one process reads the same config file, so they resolve the
-    /// same value; `KIMI_AGENT_THINKING_GUARD` still overrides it.
     async fn apply_thinking_guard_setting(&self) {
         crate::llm::thinking_guard::set_enabled(
             self.thinking_guard_config_flag().await.unwrap_or(true),
         );
     }
 
-    /// The `[experimental].thinking_repeat_guard` entry alone, `None` when the
-    /// engine has no config source or the entry is unset.
     async fn thinking_guard_config_flag(&self) -> Option<bool> {
         let source = self.config_source()?;
         let config = {
@@ -1047,11 +835,6 @@ impl ServerEngine {
         }
     }
 
-    /// Hand the finished exchange to the background memory filing pass.
-    ///
-    /// The pass is spawned, never awaited: the turn report and the
-    /// user-visible reply must not wait on it. Every reason not to run is
-    /// decided here, so the spawned task only ever does the work.
     async fn spawn_memory_filing(
         &self,
         system_prompt: &str,
@@ -1069,9 +852,7 @@ impl ServerEngine {
         else {
             return;
         };
-        // The store resolves from the Kimi home, and the project id from the
-        // workspace the native tools were sandboxed to — the same pair the
-        // memory tools use.
+
         let (Some(base), Some(workspace_root)) = (
             memory_store::memory_base(),
             self.spec.workspace_root.as_deref(),
@@ -1083,8 +864,6 @@ impl ServerEngine {
             base,
             project_id: memory_store::project_id_for(std::path::Path::new(workspace_root)),
             exchange: memory_filing::Exchange {
-                // The turn's own prompt, not the transcript's last user
-                // message: the loop appends injected reminders as user turns.
                 user_message: prompt.to_string(),
                 assistant_reply: reply.to_string(),
                 tool_activity: memory_filing::tool_activity(transcript),
@@ -1093,8 +872,6 @@ impl ServerEngine {
         .spawn();
     }
 
-    /// Build the native transport config for a model alias from the live
-    /// config. `None` when the alias cannot be resolved (no provider / key).
     async fn resolved_native_llm(&self, model: &str) -> Option<crate::rpc::types::NativeLlmConfig> {
         let source = self.config_source()?;
         let config = {
@@ -1113,9 +890,7 @@ impl ServerEngine {
             provider_type: Some(native.provider_type.clone()).filter(|value| !value.is_empty()),
             base_url: native.base_url,
             api_key: native.api_key,
-            // The env-bound credential channel survives resolution: the
-            // transport reads the named variable at request time, exactly as
-            // the CLI entry point (`main.rs`) passes it through.
+
             api_key_env: native.api_key_env,
             model: native.model,
             max_tokens: native.max_output_size.or(native.max_tokens),
@@ -1130,7 +905,7 @@ impl ServerEngine {
             max_input_size: native.max_input_size,
             adaptive_thinking: native.adaptive_thinking,
             reasoning_key: native.reasoning_key.clone(),
-            // `resolve_effort` above already applied the declared off-effort.
+
             off_effort: None,
             response_format: None,
             sampling: None,
@@ -1150,7 +925,6 @@ impl ServerEngine {
             .clone()
     }
 
-    /// Whether a turn is currently executing for `session_id`.
     pub fn is_turn_active(&self, session_id: &str) -> bool {
         self.active_turns
             .lock()
@@ -1158,10 +932,6 @@ impl ServerEngine {
             .contains_key(session_id)
     }
 
-    /// The active turn's number, when one is running (v2 `LoopSnapshot`
-    /// `activeTurnId`). The turn number and the activity phase's `turnId` are
-    /// the same value, but the number survives the brief window where the
-    /// phase has already moved to `ended` on an unusual exit.
     pub fn active_turn_number(&self, session_id: &str) -> Option<u32> {
         self.active_turn_numbers
             .lock()
@@ -1170,9 +940,6 @@ impl ServerEngine {
             .copied()
     }
 
-    /// Whether the running turn has been asked to stop (v2 `aborting` / the
-    /// `ending` flag of `LoopSnapshot.turn`). The flag is set by the cancel
-    /// paths and read by the loop at its next checkpoint.
     pub fn is_turn_ending(&self, session_id: &str) -> bool {
         self.active_turns
             .lock()
@@ -1181,13 +948,10 @@ impl ServerEngine {
             .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
-    /// The session's activity phase machine (v2 `loop.snapshot().turn.phase`).
     pub fn activity_phase(&self, session_id: &str) -> crate::server::activity::AgentPhase {
         self.activity_registry.tracker(session_id).snapshot()
     }
 
-    /// The session's activity tracker, for snapshots that also need the step
-    /// counter and the turn's start stamp.
     pub fn activity_tracker(
         &self,
         session_id: &str,
@@ -1195,18 +959,11 @@ impl ServerEngine {
         self.activity_registry.tracker(session_id)
     }
 
-    /// Queue a steering prompt for `session_id`'s active turn. Returns `false`
-    /// when no turn is running, so the caller can answer "nothing to steer"
-    /// rather than park the message until some later turn.
     pub fn enqueue_steer(&self, session_id: &str, mut message: LLMMessage) -> bool {
         if !self.is_turn_active(session_id) {
             return false;
         }
-        // v2 #3906: a steered message carries its prompt's identity so the
-        // projection can place it inside the host turn instead of minting a
-        // turn of its own (which made cancel show the text twice and left the
-        // host prompt un-undoable). Callers that already minted an id put it on
-        // the message; one without gets a fresh one here.
+
         if message.prompt_id.is_none() {
             message.prompt_id = Some(format!("prompt-{}", fastrand::u64(..)));
         }
@@ -1214,8 +971,7 @@ impl ServerEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(message);
-        // #3697: end the turn's blocking `WaitFor` now, so the model reads the
-        // new input instead of holding the turn until the waited task settles.
+
         if let Some(signal) = self
             .steer_slot(session_id)
             .lock()
@@ -1227,7 +983,6 @@ impl ServerEngine {
         true
     }
 
-    /// Number of steering prompts currently queued for `session_id`.
     pub fn queued_steer_count(&self, session_id: &str) -> usize {
         self.steer_queues
             .lock()
@@ -1245,17 +1000,6 @@ impl ServerEngine {
             .clone()
     }
 
-    /// Release the per-turn steer bookkeeping when a turn ends. A queue with
-    /// undrained messages **survives** the boundary, so the session's next
-    /// turn drains it at its first step head — v2's unconsumed-steer
-    /// semantics (`loopService` materializes the nudge into the next turn),
-    /// which the session path's session-scoped queue (`session/mod.rs`)
-    /// already implements. Dropping the queue here instead is what lost a
-    /// steer that was accepted moments before a cancel: the cancel check
-    /// runs at the step top, ahead of `drain_steers`, so the message never
-    /// reached the turn and then vanished with it. An empty queue is removed
-    /// so the map does not grow one entry per session. The signal slot is
-    /// always refreshed away: the next turn publishes a fresh one.
     fn release_turn_steer_state(&self, session_id: &str) {
         let mut queues = self.steer_queues.lock().unwrap_or_else(|e| e.into_inner());
         let keep = queues
@@ -1269,12 +1013,6 @@ impl ServerEngine {
         slots.remove(session_id);
     }
 
-    /// Record a step boundary for the session's live turn (the step ordinal
-    /// the v3 entity ids are built from): the production path is the closure
-    /// built in [`Self::execute`]; this is the test-facing equivalent.
-    /// This session's steer signal slot, created on first use. [`Self::execute`]
-    /// publishes a fresh signal into it per turn and the `ActiveGuard` clears
-    /// it, mirroring the queue's lifetime.
     fn steer_slot(
         &self,
         session_id: &str,
@@ -1302,8 +1040,6 @@ impl ServerEngine {
             .clone()
     }
 
-    /// The event hub every turn publishes to; callers subscribe per session
-    /// through `EventHub::bus_for`.
     pub fn hub(&self) -> Arc<EventHub> {
         self.hub.clone()
     }
@@ -1314,8 +1050,6 @@ impl ServerEngine {
     }
 
     pub fn set_interaction_manager(&self, manager: Arc<InteractionManager>) {
-        // Interaction blocks move the session's activity phase; the registry
-        // is engine-owned, so the notifier is (re)installed on every attach.
         let registry = self.activity_registry.clone();
         manager.set_activity_notifier(Arc::new(move |session_id, signal| {
             let tracker = registry.tracker(session_id);
@@ -1342,9 +1076,6 @@ impl ServerEngine {
             .clone()
     }
 
-    /// Host `loopControl.maxStepsPerTurn` override. `0` means "no cap" — the
-    /// same spelling v2's `maxSteps > 0` check gives it — and a positive value
-    /// bounds one turn's steps.
     pub fn with_max_steps(mut self, max_steps: u32) -> Self {
         self.max_steps = max_steps;
         self
@@ -1360,24 +1091,15 @@ impl ServerEngine {
         self
     }
 
-    /// The host's compaction attempt cap, for the routes that summarize
-    /// outside a turn (the manual `:compact` endpoint).
     pub fn compaction_max_attempts(&self) -> Option<u32> {
         self.compaction_max_attempts
     }
 
-    /// Host-resolved `[subagent] timeout_ms` (v2 `resolveSubagentTimeoutMs`):
-    /// rides the pipeline spec, so every subagent turn the sessions spawn
-    /// (foreground and background) reads the same override. `None` keeps the
-    /// engine's 2h default; `0` means the same as `None` to the tools.
     pub fn with_subagent_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
         self.spec.subagent_timeout_ms = timeout_ms;
         self
     }
 
-    /// Host-resolved `[swarm] timeout_ms` (v2 `resolveSwarmTimeoutMs`): a
-    /// dedicated knob on the shared subagent manager — swarms never inherit
-    /// the subagent timeout. `None` keeps the 2h swarm default.
     pub fn with_swarm_timeout_ms(self, timeout_ms: Option<u64>) -> Self {
         self.subagent_manager.set_swarm_timeout_ms(timeout_ms);
         self
@@ -1395,12 +1117,6 @@ impl ServerEngine {
         &self.spec.model_name
     }
 
-    /// Whether the session has any work in flight. v2's
-    /// `sessionActivityService` folds three sources: the main turn, every
-    /// agent's turn, and the background task set. A background subagent turn
-    /// (tower/swarm) or a running `Bash`-style task keeps the session busy
-    /// after the main turn ends, which is what the prompt queue and the idle
-    /// reaper must see.
     pub fn is_busy(&self, session_id: &str) -> bool {
         if self
             .active_turns
@@ -1416,9 +1132,6 @@ impl ServerEngine {
         false
     }
 
-    /// The non-turn half of the v2 activity fold: a detached subagent turn or
-    /// a running background task still belongs to the session even when no
-    /// main turn is executing.
     fn has_background_work(&self, session_id: &str) -> bool {
         if self.subagent_manager.session_has_active_turn(session_id) {
             return true;
@@ -1428,10 +1141,6 @@ impl ServerEngine {
             .is_some_and(|runner| runner.has_running_task_for_session(session_id))
     }
 
-    /// Recompute and publish `work_changed` for a session after background
-    /// work settled (v2's `TaskTerminatedNotice` / agent-turn-end recompute).
-    /// The main turn's own end publishes directly; this covers the tail where
-    /// the session stayed busy only for a task or a detached subagent turn.
     pub(crate) fn publish_background_work_changed(&self, session_id: &str) {
         let turn_running = self
             .active_turns
@@ -1439,7 +1148,6 @@ impl ServerEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(session_id);
         if turn_running {
-            // The turn's own completion publishes the next transition.
             return;
         }
         let busy = self.is_busy(session_id);
@@ -1452,11 +1160,6 @@ impl ServerEngine {
         self.publish_work_changed(session_id, busy, reason.as_deref());
     }
 
-    /// The turns still executing, as `(session id, turn number)`.
-    ///
-    /// A turn number is `0` when the session is between "marked busy" and
-    /// "recorded a number"; that still names the session, which is what a
-    /// shutdown report needs.
     pub fn active_turns_snapshot(&self) -> Vec<(String, u32)> {
         let sessions: Vec<String> = self
             .active_turns
@@ -1478,21 +1181,12 @@ impl ServerEngine {
             .collect()
     }
 
-    /// Wait for in-flight turns to finish.
-    ///
-    /// The reference's `settled()` has no upper bound
-    /// (`agent/loop/loopService.ts:970-993`). Shutdown deliberately waits
-    /// rather than cancelling: the turn may be one tool call away from a clean
-    /// transcript write.
     pub async fn drain_active_turns(&self) {
         while !self.active_turns_snapshot().is_empty() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 
-    /// Adopt the journal's current head as this engine's watermark — v2 opening
-    /// a session scope (`AppendLogStore` `knownLength`) and the point a client
-    /// reloads after a `session.stale`. Returns the adopted head.
     pub fn observe_journal_head(&self, session_id: &str) -> u64 {
         let head = self.store.latest_wire_event_seq(session_id).unwrap_or(0);
         self.journal_heads
@@ -1502,24 +1196,15 @@ impl ServerEngine {
         head
     }
 
-    /// Drop the watermark of a session this engine no longer tracks (delete /
-    /// fork target replacement). A session with no watermark reads as freshly
-    /// opened, which is v2's state right after `resume`.
     pub fn forget_journal_head(&self, session_id: &str) {
         self.journal_heads
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(session_id);
-        // The persisted head belongs to the deleted journal too: a session id
-        // re-created later starts a new journal whose sequences can be below
-        // this one, and a leftover head would read as a foreign write forever.
+
         self.hub.forget_persisted_head(session_id);
     }
 
-    /// Drop the per-session catalog-change snapshot when the session goes away
-    /// (delete / archive). v2 disposes it with the agent; this engine has no
-    /// agent object, so the lifecycle events have to forget it explicitly —
-    /// otherwise the map grows with every session ever opened.
     pub fn forget_change_notifier(&self, session_id: &str) {
         self.change_notifier
             .lock()
@@ -1527,10 +1212,6 @@ impl ServerEngine {
             .remove(session_id);
     }
 
-    /// The session's diagnostic log sink (v2 `sessionLogService`), or `None`
-    /// when this engine has no workspace root to locate a session directory
-    /// under. The sink is opened per turn; opening is lazy (no directory is
-    /// created until a line is written).
     fn session_log(&self, session_id: &str) -> Option<crate::session::session_log::SessionLog> {
         let root = self.spec.workspace_root.as_deref()?;
         let dir = crate::storage::paths::engine_session_dir(std::path::Path::new(root), session_id)
@@ -1541,9 +1222,6 @@ impl ServerEngine {
         ))
     }
 
-    /// v2 `resolveSessionLogPath` for this engine's session directory. The
-    /// export uses it to pick the session log members regardless of whether the
-    /// file exists yet.
     pub fn session_log_path(&self, session_id: &str) -> Option<std::path::PathBuf> {
         let root = self.spec.workspace_root.as_deref()?;
         let dir = crate::storage::paths::engine_session_dir(std::path::Path::new(root), session_id)
@@ -1551,18 +1229,6 @@ impl ServerEngine {
         Some(crate::session::session_log::resolve_session_log_path(&dir))
     }
 
-    /// v2 `WireService.externallyModified()`: the journal moved since this
-    /// engine last saw it. Both growth (a foreign turn appended rows) and
-    /// shrinkage (a foreign undo rewrote them) count — `AppendLogStore`'s
-    /// `disk < known || disk > known + inFlight`. A session this engine has
-    /// never observed has nothing to compare against, exactly like a scope
-    /// whose first read *is* the truth.
-    ///
-    /// Rows this process's persister wrote are its own in-flight tail (v2's
-    /// `inFlight`): the turn's own post-turn events and the next prompt's
-    /// `prompt.submitted` land after the turn watermark was taken, and must
-    /// not read back as an external write. Only rows beyond both the observed
-    /// watermark and the persisted head are foreign.
     fn journal_moved(&self, session_id: &str) -> bool {
         let head = self.store.latest_wire_event_seq(session_id).unwrap_or(0);
         let own_tail = self.hub.persisted_head(session_id).unwrap_or(0);
@@ -1573,7 +1239,6 @@ impl ServerEngine {
             .is_some_and(|seen| head != (*seen).max(own_tail))
     }
 
-    /// Signal cancellation for the active turn in the given session, if one is running.
     pub fn cancel_turn(&self, session_id: &str) -> bool {
         if let Some(mgr) = self.interaction_manager() {
             mgr.cancel_session(session_id);
@@ -1584,8 +1249,7 @@ impl ServerEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(flag) = turns.get(session_id) {
             flag.store(true, Ordering::SeqCst);
-            // This is the user's stop, not a teardown (v2 `interruptReason`):
-            // only the former arms the interruption reminder.
+
             drop(turns);
             self.last_cancel_user
                 .lock()
@@ -1597,8 +1261,6 @@ impl ServerEngine {
         }
     }
 
-    /// Cancel only if `turn_number` is still the active turn. Returns `false`
-    /// when the expected wake already ended or a newer turn owns the slot.
     pub(crate) fn cancel_turn_at(&self, session_id: &str, turn_number: u32) -> bool {
         let active_numbers = self
             .active_turn_numbers
@@ -1607,17 +1269,10 @@ impl ServerEngine {
         if active_numbers.get(session_id) != Some(&turn_number) {
             return false;
         }
-        // Hold the number guard through the flag store: turn installation and
-        // removal also take it, so the expected wake cannot be replaced between
-        // the identity check and cancellation.
+
         self.cancel_turn(session_id)
     }
 
-    /// Publish the `event.session.work_changed` fact the Web client folds
-    /// into its live session state (kap-server `SessionWorkChangedEvent`):
-    /// the busy flip a turn start/end produces plus the interaction, if any,
-    /// currently blocking the session. Without it the WebSocket stream never
-    /// tells a client the session went busy or idle.
     fn publish_work_changed(&self, session_id: &str, busy: bool, last_turn_reason: Option<&str>) {
         let pending_interaction = self
             .interaction_manager()
@@ -1634,19 +1289,7 @@ impl ServerEngine {
             });
     }
 
-    /// Publish the `turn.ended` fact (kap-server `TurnEndedEvent`) that
-    /// closes the turn in every projection. v2 assigns the turn state to
-    /// this event alone — scoped by `turnId`, carrying the loop's end reason
-    /// — while `prompt.completed` finalizes the prompt entity and owns no
-    /// turn state. Published before the `work_changed(busy=false)` flip: a
-    /// client that gates its busy indicator on the last turn's state must
-    /// see the turn closed before the session says idle.
     fn publish_turn_ended(&self, session_id: &str, turn_number: u32, reason: &str) {
-        // Record the interruption-reminder trigger for the next turn's spec.
-        // v2 filters `TurnEnded` on `reason === 'cancelled'` **and**
-        // `interruptReason === 'user_cancelled'`: `Aborted` is also what a
-        // session teardown produces, and telling the model "the user
-        // interrupted" after a shutdown is simply false.
         let user_cancelled = self
             .last_cancel_user
             .lock()
@@ -1670,8 +1313,6 @@ impl ServerEngine {
             });
     }
 
-    /// Take (read and clear) whether the session's last turn ended aborted —
-    /// the next turn's interruption-reminder trigger.
     fn take_last_turn_aborted(&self, session_id: &str) -> bool {
         self.last_turn_aborted
             .lock()
@@ -1680,15 +1321,6 @@ impl ServerEngine {
             .unwrap_or(false)
     }
 
-    /// Publish the `agent.status.updated` fact the Web client's status bar
-    /// folds (kap-server `AgentStatusUpdatedEvent`): the session's model,
-    /// thinking effort, permission mode, plan mode and context-token estimate.
-    ///
-    /// The payload keys are camelCase exactly as the kimi-web projector reads
-    /// them (`p?.model`, `p?.contextTokens`, …) — unlike the `event.*` family,
-    /// whose payloads are snake_case. A publish whose payload is byte-identical
-    /// to the session's last one is dropped, mirroring the broadcaster's
-    /// snapshot dedup.
     pub async fn publish_status_updated(&self, session_id: &str) {
         let payload = self.status_payload(session_id);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1709,11 +1341,6 @@ impl ServerEngine {
             .publish(&crate::events::EngineEvent::Custom(payload));
     }
 
-    /// Assemble the status snapshot from every state source the client folds:
-    /// `agent_config` (model / thinking / permission / plan mode) and the
-    /// session history (context tokens, measured + estimated). `maxContextTokens`
-    /// needs the model catalog the engine does not hold, so it stays the
-    /// caller's addition.
     fn status_payload(&self, session_id: &str) -> serde_json::Value {
         let agent_config = self
             .store
@@ -1727,10 +1354,7 @@ impl ServerEngine {
             .ok()
             .flatten()
             .unwrap_or_else(|| serde_json::json!({}));
-        // The measured+estimated figure (v2 `statusSize`): a provider response
-        // anchors the prefix it measured, the rest is estimated with the same
-        // estimator compaction uses. A pure estimate drifts low exactly in the
-        // sessions that are filling up.
+
         let context_tokens = self.session_context_tokens(session_id);
 
         let model = agent_config
@@ -1748,9 +1372,7 @@ impl ServerEngine {
         if let Some(thinking) = agent_config.get("thinking").and_then(|v| v.as_str()) {
             object.insert("thinkingEffort".into(), serde_json::json!(thinking));
         }
-        // The permission mode has two homes: `agent_config` (the profile
-        // route writes it) and `metadata` (the engine's per-turn mode
-        // resolution reads it). Either source wins over silence.
+
         let permission = agent_config
             .get("permission_mode")
             .and_then(|v| v.as_str())
@@ -1761,17 +1383,17 @@ impl ServerEngine {
         if let Some(plan_mode) = agent_config.get("plan_mode").and_then(|v| v.as_bool()) {
             object.insert("planMode".into(), serde_json::json!(plan_mode));
         }
-        // Swarm mode is reported from the registry the turn loop and the
-        // `swarm_mode` injection actually read, not from the persisted flag:
-        // the two can disagree across a restart, and reporting the flag alone
-        // would claim a mode the next turn never sees. v2 carries the same
-        // field on `AgentStatusUpdated` (`swarmOps.ts:41,45`).
+
         if crate::swarm::mode::swarm_mode_registry().is_active(crate::callbacks::MAIN_AGENT_ID) {
             object.insert("swarmMode".into(), serde_json::json!(true));
         }
-        // v2's `AgentStatusUpdated` carries `usage` as a first-class field
-        // (`usageEvents.ts`), and the TUI's cumulative-token counter reads
-        // `usage.total` off it. Absent until the session records a turn.
+        if let Some(run) = crate::features::helloWorld::helloWorldOps::hello_world_mode_registry()
+            .run(crate::callbacks::MAIN_AGENT_ID)
+        {
+            object.insert("helloWorldMode".into(), serde_json::json!(true));
+            object.insert("helloWorldStage".into(), serde_json::json!(run.stage));
+        }
+
         if let Some(usage) = crate::session::usage::status(&self.store, session_id, model).to_json()
         {
             object.insert("usage".into(), usage);
@@ -1779,19 +1401,9 @@ impl ServerEngine {
         payload
     }
 
-    /// The [`PipelineSpec`] one session's turns run with: the engine-wide spec
-    /// plus this session's persisted profile (model / thinking / disabled
-    /// tools) and its permission mode.
-    ///
-    /// Split out of [`Self::run_turn_with_media`] so engine-side work that
-    /// needs the session's model without running a turn — the REST `:compact`
-    /// summarizer — resolves it the same way instead of a second copy.
     async fn session_spec(&self, session_id: &str) -> PipelineSpec {
         let mut policy_snapshot = self.spec.policy_snapshot.clone().unwrap_or_default();
-        // `[hooks]` are reloadable: take the current set so a config edit
-        // reaches the next turn, while a turn already running keeps the guard
-        // it built. A failed reload never replaces the source, so a broken
-        // config cannot clear every guard and let blocked calls through.
+
         if let Some(hooks) = self.hooks_source().and_then(|source| source.snapshot()) {
             policy_snapshot.pre_tool_hooks = hooks;
         }
@@ -1801,33 +1413,20 @@ impl ServerEngine {
             .ok()
             .flatten()
             .unwrap_or_default();
-        if policy_snapshot.mode == crate::permission::PermissionMode::Manual {
-            if std::env::var("KIMI_AUTO_APPROVE")
+        let recorded_mode = crate::agent::permission_mode::permission_mode_ops::recorded_mode(
+            self.store.as_ref(),
+            session_id,
+            crate::callbacks::MAIN_AGENT_ID,
+        );
+        policy_snapshot.mode = resolve_permission_mode(
+            policy_snapshot.mode,
+            recorded_mode,
+            std::env::var("KIMI_AUTO_APPROVE")
                 .map(|v| v == "1" || v == "true")
-                .unwrap_or(false)
-            {
-                policy_snapshot.mode = crate::permission::PermissionMode::Auto;
-            } else {
-                if let Some(mode_str) = session_metadata
-                    .get("permission_mode")
-                    .and_then(|v| v.as_str())
-                {
-                    match mode_str.to_ascii_lowercase().as_str() {
-                        "auto" => policy_snapshot.mode = crate::permission::PermissionMode::Auto,
-                        "yolo" => policy_snapshot.mode = crate::permission::PermissionMode::Yolo,
-                        _ => {}
-                    }
-                } else if session_metadata.get("yolo").and_then(|v| v.as_bool()) == Some(true) {
-                    policy_snapshot.mode = crate::permission::PermissionMode::Yolo;
-                }
-            }
-        }
-        // Extra workspace roots this session runs with: the engine-wide list
-        // (`--add-dir`, ACP `additionalDirectories`), the ones recorded on the
-        // session, and the project's `.kimi-code/local.toml`. The sandbox, the
-        // directory listing AND the prompt's `${additional_dirs_section}` all
-        // read this one list, so a root is either unknown to the model or
-        // unauthorized — never authorized-but-unmentioned.
+                .unwrap_or(false),
+            &session_metadata,
+        );
+
         let mut extra_roots = self.spec.extra_roots.clone();
         if let Some(dirs) = session_metadata
             .get("additional_dirs")
@@ -1840,12 +1439,6 @@ impl ServerEngine {
         }
         extra_roots.extend(self.project_local_roots(session_id));
 
-        // The roots are re-derived every turn, so a directory added between
-        // turns (host `/add-dir` → session metadata, or `local.toml`) must be
-        // published for the spawns that follow: children resolve their cwd
-        // against the session's live roots, and the revision records that the
-        // set moved. Non-existent roots are dropped exactly as the toolset's
-        // extra roots are, and an unchanged set publishes nothing.
         if let Some(root) = self.session_root_path(session_id) {
             let additional: Vec<std::path::PathBuf> = extra_roots
                 .iter()
@@ -1859,9 +1452,7 @@ impl ServerEngine {
         }
 
         let plugin_skill_dirs = self.plugin_skill_roots();
-        // One scan per turn, shared by the system prompt and the change
-        // notifier: `session_spec` runs at the head of every turn, so scanning
-        // a second time just for change detection would double the disk walk.
+
         let skill_scan = crate::skills::SkillScanRoots {
             root: self
                 .spec
@@ -1872,9 +1463,15 @@ impl ServerEngine {
             plugin_dirs: plugin_skill_dirs.clone(),
             merge_all_available_skills: self.spec.merge_all_available_skills,
         };
+        let skill_roots = skill_scan.scanned_roots();
         let skill_listing = skill_scan
             .catalog_outcome()
-            .map(|skills| crate::prompt::skills_renderer::render_skills_markdown(&skills));
+            .map(|skills| {
+                crate::prompt::skills_renderer::render_skills_markdown_with_roots(
+                    &skills,
+                    &skill_roots,
+                )
+            });
         self.pending_skill_listings
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1905,9 +1502,6 @@ impl ServerEngine {
                 .starts_with("You are kimi-agent, running as a standalone service."))
             && let Some(ref ws) = self.spec.workspace_root
         {
-            // The prompt's skills section scans the declared extra roots and the
-            // plugin roots, in that order: v2 ranks `extra` (10) above `plugin`
-            // (5), so a plugin skill never shadows a declared one.
             let builder = crate::prompt::SystemPromptBuilder::new(ws)
                 .with_skill_dirs(self.spec.skill_dirs.clone())
                 .with_plugin_skill_dirs(plugin_skill_dirs.clone())
@@ -1918,19 +1512,26 @@ impl ServerEngine {
                 Some(name) => builder.with_profile(name.clone()),
                 None => builder,
             };
-            // Reuse the scan above. On an unreadable root the builder falls
-            // back to its own best-effort scan, exactly as before this turn's
-            // detection existed.
+
             let builder = match &skill_listing {
                 crate::primitives::read::ReadOutcome::Found(listing) => {
                     builder.with_custom_skills(listing.clone())
                 }
                 _ => builder,
             };
-            let (prompt, warnings) = builder.build_with_warnings();
+            let (prompt, warnings) = match builder.build_with_warnings() {
+                Ok(rendered) => rendered,
+                Err(error) => {
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "the system prompt cannot name a shell; session creation will fail on the same probe"
+                    );
+                    (session_system_prompt.clone(), Vec::new())
+                }
+            };
             session_system_prompt = prompt;
-            // v2 `publishAgentsMdWarning` (`profileService.ts:874-884`): the
-            // loader's finding reaches the client as an observable `warning`.
+
             for warning in warnings {
                 self.publish_session_warning(session_id, "agents-md-oversized", &warning);
             }
@@ -1945,9 +1546,7 @@ impl ServerEngine {
             plugin_skill_dirs,
             ..clone_spec(&self.spec)
         };
-        // A session model override re-resolves to its provider first, so a
-        // cross-provider alias picks up the right base URL / key; the
-        // field-level overrides below then win for model / thinking / tools.
+
         if let Some(model) = session_profile
             .get("model")
             .and_then(|v| v.as_str())
@@ -1975,8 +1574,6 @@ impl ServerEngine {
         spec
     }
 
-    /// The registered workspace a session belongs to, or `None` for a session
-    /// created before the workspace registry existed.
     fn session_workspace(
         &self,
         session_id: &str,
@@ -1990,8 +1587,6 @@ impl ServerEngine {
         self.store.get_workspace(&workspace_id).ok().flatten()
     }
 
-    /// The directory a session was created in: its workspace root, else the
-    /// cwd recorded on the session row.
     fn session_root_path(&self, session_id: &str) -> Option<std::path::PathBuf> {
         if let Some(workspace) = self.session_workspace(session_id) {
             return Some(std::path::PathBuf::from(workspace.root));
@@ -2004,11 +1599,6 @@ impl ServerEngine {
             .map(std::path::PathBuf::from)
     }
 
-    /// The validated `[environments]` declaration.
-    ///
-    /// No config source means the host resolves configuration itself (napi
-    /// path), where a declared remote environment would already have been
-    /// rejected; the built-in local environment is the correct default.
     async fn environment_declaration(
         &self,
     ) -> Result<crate::environment::EnvironmentDeclaration, crate::environment::EnvironmentError>
@@ -2025,13 +1615,6 @@ impl ServerEngine {
         }
     }
 
-    /// Watch the session's instruction files for the next turn.
-    ///
-    /// The prompt is built once per turn from these files; a file that changed
-    /// after the previous prompt was assembled becomes a model-visible
-    /// `agents_md_change` reminder (v2 `changeNotifierService`) instead of
-    /// something to discover after a restart. Absence stays silent — it is the
-    /// normal state of most workspaces.
     fn observe_agents_md(&self, session_id: &str, work_dir: &std::path::Path) -> Option<String> {
         let home = crate::default_workspace::user_home_dir();
         let mut watches = self
@@ -2058,23 +1641,10 @@ impl ServerEngine {
                 "AGENTS.md could not be read"
             );
         }
-        // v2 `notifyAgentsMdChanges` (`changeNotifierService.ts:146-183`): the
-        // change is model-visible, not just a log line — it is injected as the
-        // `agents_md_change` reminder, whose text says the copies already in
-        // the system prompt are stale.
+
         agents_md_change_reminder(&changes)
     }
 
-    /// Observe v2's skills / subagents / workspace-directory `changeNotifier`
-    /// variants for one turn.
-    ///
-    /// Everything here is bounded by work the turn already did: the skills
-    /// value is the listing `session_spec` rendered for this turn's system
-    /// prompt (never a second scan), the subagent list is an in-memory map, and
-    /// the workspace roots are the session's cached context refreshed at the
-    /// head of this turn. The only fallback scan happens when no prompt was
-    /// built this turn (a host-supplied system prompt), which is exactly the
-    /// case where the model cannot have seen the current listing.
     async fn observe_catalog_changes(
         &self,
         session_id: &str,
@@ -2087,8 +1657,6 @@ impl ServerEngine {
             WorkspaceSnapshot,
         };
 
-        // Gather the async observation before taking the snapshot lock: a std
-        // mutex must not be held across an await.
         let profiles: Vec<SubagentProfile> = self
             .subagent_manager
             .profile_listing()
@@ -2133,14 +1701,20 @@ impl ServerEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(session_id)
             .unwrap_or_else(|| {
-                crate::skills::SkillScanRoots {
+                let scan = crate::skills::SkillScanRoots {
                     root: spec.workspace_root.as_deref().map(std::path::PathBuf::from),
                     extra_dirs: spec.skill_dirs.clone(),
                     plugin_dirs: spec.plugin_skill_dirs.clone(),
                     merge_all_available_skills: spec.merge_all_available_skills,
-                }
-                .catalog_outcome()
-                .map(|skills| crate::prompt::skills_renderer::render_skills_markdown(&skills))
+                };
+                let roots = scan.scanned_roots();
+                scan.catalog_outcome()
+                    .map(|skills| {
+                        crate::prompt::skills_renderer::render_skills_markdown_with_roots(
+                            &skills,
+                            &roots,
+                        )
+                    })
             });
 
         let mut states = self
@@ -2150,13 +1724,7 @@ impl ServerEngine {
         let state = states
             .entry(session_id.to_string())
             .or_insert_with(ChangeNotifierState::default);
-        // v2 evaluates the composed tool policy per name
-        // (`isToolActiveComposed('Skill')`, `('Agent')`, `('AgentSwarm')`).
-        // `native_tools` only says the engine advertises *some* native table;
-        // the `[tools]` filter (global + profile + session disables) decides
-        // whether this particular tool is in it. Collapsing both into one
-        // boolean made a workspace that disabled `Skill` still announce skill
-        // changes the model could never act on.
+
         let tools_filter = spec
             .policy_snapshot
             .as_ref()
@@ -2165,8 +1733,7 @@ impl ServerEngine {
             spec.native_tools && tools_filter.map_or(true, |filter| filter.allows(name))
         };
         let mut reminders = Vec::new();
-        // v2's `plugin_change` reminder: mutations are queued by the plugin
-        // routes and announced once per live session.
+
         if let Some(text) = crate::injection::plugin::take_plugin_change_notices(session_id) {
             reminders.push((text, crate::injection::plugin::PLUGIN_CHANGE_VARIANT));
         }
@@ -2182,10 +1749,6 @@ impl ServerEngine {
         reminders
     }
 
-    /// Freeze the session's environment at creation (v2 `createSession`).
-    ///
-    /// A chat-only session has no directory; it still records `local` with no
-    /// cwd so a later resume can tell "never bound" from "bound elsewhere".
     pub async fn freeze_session_environment(
         &self,
         session_id: &str,
@@ -2222,10 +1785,7 @@ impl ServerEngine {
             &roots,
             true,
         )?;
-        // Children spawn against this snapshot: same environment id, cwd and
-        // variables, never a re-derivation from the current config. Registered
-        // only after the store write succeeds, so an error leaves no
-        // half-bound session behind.
+
         let cwd = snapshot.cwd().display().to_string();
         self.store
             .set_session_environment_snapshot(
@@ -2246,11 +1806,6 @@ impl ServerEngine {
         Ok(Some(snapshot))
     }
 
-    /// Restore the frozen environment on resume.
-    ///
-    /// `Ok(None)` covers both "no binding" (legacy row) and "binding without a
-    /// directory" (chat-only session); a binding whose directory vanished is an
-    /// error, because continuing would silently run the turn somewhere else.
     pub async fn restore_session_environment(
         &self,
         session_id: &str,
@@ -2296,9 +1851,6 @@ impl ServerEngine {
         Ok(Some(outcome))
     }
 
-    /// The session-scoped durable state store (v2 agent scope), when the
-    /// session's workspace resolves. The domain fold the goal needs — turn
-    /// and token totals — belongs to the engine, not to a host round-trip.
     fn session_state_store(&self, session_id: &str) -> Option<Arc<crate::storage::StateStore>> {
         let workspace = self.session_workspace(session_id);
         let ws_ref = workspace
@@ -2310,17 +1862,11 @@ impl ServerEngine {
             .map(Arc::new)
     }
 
-    /// The session's goal snapshot, as the engine's own goal store holds it.
-    /// This is the store the after-turn settle writes, so a REST read sees the
-    /// fold / pause / budget block that just happened instead of a host copy.
     pub fn session_goal_snapshot(&self, session_id: &str) -> Option<Value> {
         let store = self.session_state_store(session_id)?;
         store.goal_snapshot()
     }
 
-    /// Edit the current goal's objective in place (v2 #4568
-    /// `editGoalObjective`). Returns the same goal snapshot shape as the read
-    /// route, or an error string for a missing goal / invalid objective.
     pub fn edit_session_goal_objective(
         &self,
         session_id: &str,
@@ -2339,14 +1885,6 @@ impl ServerEngine {
         }
     }
 
-    /// The goal-continuation prompt the session's next autonomous turn owes,
-    /// or `None` when the goal is inactive or its budget is spent.
-    ///
-    /// v2's `goalService` launched the continuation from the turn-end hook,
-    /// so the prompt loop that drives REST / ACP turns owns the re-prompt
-    /// here. The decision reads the engine's own goal store — the same store
-    /// the after-turn settle folded into — so it sees the pause / block that
-    /// settle just recorded instead of a host-side copy that may lag.
     pub async fn pending_goal_continuation(
         &self,
         session_id: &str,
@@ -2372,23 +1910,6 @@ impl ServerEngine {
         Some(crate::goal::continuation_prompt(step_capped))
     }
 
-    /// The project's `workspace.additional_dir` roots.
-    ///
-    /// v2 `WorkspaceDirsService.reloadFromDisk` reads the project-local config
-    /// from the workspace directory on every reload and hands the entries to
-    /// the sandbox and to `${additional_dirs_section}`. Upstream #4013 removed
-    /// the `IWorkspaceTrust` gate that #3964 had wrapped around that read
-    /// ("once a user trusts a repository, content inside it is the user's own
-    /// responsibility"), so the file applies whether or not the workspace is
-    /// marked trusted — the engine no longer consults its own registry flag
-    /// here. The standalone server still resolves the *directory* from the
-    /// session's workspace record: the engine-wide `workspace_root` is the
-    /// directory the *server* started in, and a server hosts several
-    /// registered workspaces, so pairing it with one session would read
-    /// another workspace's config.
-    ///
-    /// A malformed file is reported and skipped rather than failing the turn:
-    /// v2 loads it on a background reload and only logs the failure.
     fn project_local_roots(&self, session_id: &str) -> Vec<String> {
         let Some(workspace) = self.session_workspace(session_id) else {
             return Vec::new();
@@ -2407,8 +1928,6 @@ impl ServerEngine {
         }
     }
 
-    /// The host callbacks one session's pipeline runs with, wrapped in the
-    /// workspace state store when `ws_ref` resolves to one.
     fn session_callbacks(
         &self,
         session_id: &str,
@@ -2444,10 +1963,6 @@ impl ServerEngine {
         }
     }
 
-    /// The skill catalog this session's prompt was rendered with — the same
-    /// scan the `Skill` tool resolves from. The engine serves it because the
-    /// builtin, plugin and `extra_skill_dirs` skills exist only here (v2
-    /// `session.skills.list`).
     pub async fn session_skills(&self, session_id: &str) -> Vec<crate::skills::SkillDescriptor> {
         let spec = self.session_spec(session_id).await;
         crate::skills::SkillScanRoots {
@@ -2459,10 +1974,6 @@ impl ServerEngine {
         .catalog()
     }
 
-    /// Render a user-slash skill activation against this session's own scan
-    /// (v2 `AgentSkillService.prepareBundled` + `renderUserSlashSkillPrompt`),
-    /// so an ACP `/skill:` command expands `$ARGUMENTS` / `${KIMI_SKILL_DIR}`
-    /// and plugin instructions exactly like the native host's activation.
     pub async fn render_session_skill_prompt(
         &self,
         session_id: &str,
@@ -2480,9 +1991,6 @@ impl ServerEngine {
         crate::tools::skill::render_user_slash_skill_prompt(&scan, name, args, session_id)
     }
 
-    /// The session's durable token-counting state (v2 `TokenCountingState`):
-    /// the measured anchors and the newest total, persisted with the session's
-    /// metadata so a restarted server keeps the gauge.
     fn token_counting(
         &self,
         session_id: &str,
@@ -2519,8 +2027,6 @@ impl ServerEngine {
         }
     }
 
-    /// The session's persisted micro-compaction cutoff (v2
-    /// `microCompaction.cutoff`), stored beside the token-counting state.
     fn micro_compaction_state(
         &self,
         session_id: &str,
@@ -2557,14 +2063,6 @@ impl ServerEngine {
         }
     }
 
-    /// Fold the finished turn into the counting state: the last request
-    /// anchors the input prefix it actually served (v2
-    /// `TokenCountingAgentModel.measured`, whose `length` is the request
-    /// context — not the transcript after the reply), and only while that
-    /// prefix still describes the history. A turn without an LLM call, one
-    /// whose provider reported no usage, or one a compaction spliced after the
-    /// request records an estimate instead (v2 `matchesContext` returning
-    /// false leaves the measured anchors untouched).
     fn record_token_counting(
         &self,
         session_id: &str,
@@ -2576,14 +2074,9 @@ impl ServerEngine {
             .load_session_history(session_id)
             .unwrap_or_default();
         let mut state = self.token_counting(session_id);
-        // Persist the active tool-schema overhead with the gauge; otherwise the
-        // status and the compaction trigger would size the same history
-        // differently once a turn enables a large toolset.
+
         state.tool_schema_tokens = u64::from(tool_schema_tokens);
-        // The loop's request carries the system prompt at index 0; the durable
-        // history does not, so the anchor length is the request length minus
-        // one. A prefix longer than the stored history cannot match the
-        // context either.
+
         let anchor = last_request
             .filter(|request| !request.spliced_after && request.usage.measured_context_tokens() > 0)
             .and_then(|request| {
@@ -2600,9 +2093,6 @@ impl ServerEngine {
         self.save_token_counting(session_id, &state);
     }
 
-    /// The session's context size for the status gauge and usage events (v2
-    /// `statusSize`, measured+estimated): the newest measured prefix plus an
-    /// estimate of everything appended after it.
     pub fn session_context_tokens(&self, session_id: &str) -> u64 {
         let history = self
             .store
@@ -2612,7 +2102,6 @@ impl ServerEngine {
             .status_size(&history, self.token_counting_strategy())
     }
 
-    /// Re-baseline the counting state after the transcript was cut (undo).
     pub fn record_context_truncation(&self, session_id: &str) {
         let history = self
             .store
@@ -2621,13 +2110,11 @@ impl ServerEngine {
         let mut state = self.token_counting(session_id);
         state.truncate(&history, history.len());
         self.save_token_counting(session_id, &state);
-        // v2 `clamp`: an index past the shortened history no longer describes a
-        // message, and a truncation never grows the cutoff.
+
         let mut micro = self.micro_compaction_state(session_id);
         micro.clamp(history.len());
         self.save_micro_compaction_state(session_id, &micro);
-        // v2 #4413: a history rewrite (undo) invalidates the session's media
-        // recovery — the media it captured may no longer be where they were.
+
         if let Some(cell) = self
             .media_recovery
             .lock()
@@ -2641,21 +2128,10 @@ impl ServerEngine {
         }
     }
 
-    /// Replace the counting state after a compaction: the transcript is now
-    /// the summary prefix (v2 `rebase`).
     pub fn record_context_rebase(&self, session_id: &str) {
         self.record_context_rebase_with_summary(session_id, None);
     }
 
-    /// [`Self::record_context_rebase`] that knows the summarization request's
-    /// output token count.
-    ///
-    /// v2 `buildContextCompactionShape` (`compactionHandoff.ts:107-111`) sets
-    /// the post-compaction total to `requestOverhead + (summaryOutputTokens ??
-    /// estimate(contextSummary)) + estimate(kept messages)`: the summary's size
-    /// is the **measured** count of the request that wrote it, not an estimate
-    /// of its text. The engine has no per-request overhead in its counting
-    /// model, so only the measured substitution applies here.
     pub fn record_context_rebase_with_summary(
         &self,
         session_id: &str,
@@ -2669,23 +2145,14 @@ impl ServerEngine {
         let mut state = self.token_counting(session_id);
         state.rebase(history.len(), tokens, false);
         self.save_token_counting(session_id, &state);
-        // v2 `context.applyCompaction`: the transcript was replaced, so nothing
-        // in the new one is "old" — the cutoff drops to zero and re-advances
-        // only on the next detected miss.
+
         let mut micro = self.micro_compaction_state(session_id);
         micro.reset();
         self.save_micro_compaction_state(session_id, &micro);
-        // v2 `AgentCacheBreakService` listens for `context.compactionCompleted`
-        // and drops its baseline: the pre-compaction cache read is not
-        // comparable with the summary prefix.
+
         self.reset_cache_baseline(session_id);
     }
 
-    /// Fold a finished turn's per-step cache observations into the session's
-    /// tracker (v2 `AgentCacheBreakService.observe`, called once per step).
-    /// A detected break is logged, emitted as `cache_break_detected` telemetry
-    /// and retained for [`Self::cache_observation`]; the turn's last request
-    /// also becomes the agent's `prompt_cache_probe` baseline.
     pub fn observe_cache_observations(
         &self,
         session_id: &str,
@@ -2703,10 +2170,6 @@ impl ServerEngine {
         let state = states.entry(session_id.to_string()).or_default();
         for (index, observation) in observations.iter().enumerate() {
             if resets.contains(&index) {
-                // v2 `AgentCacheBreakService` resets on
-                // `context.compactionCompleted`: the step after a replaced
-                // history starts a new trajectory, so its cache read is never
-                // compared with the pre-compaction one.
                 state.tracker.reset();
             }
             state.last = Some(observation.clone());
@@ -2738,9 +2201,6 @@ impl ServerEngine {
         }
     }
 
-    /// The session's prompt-cache observability snapshot (D14): the recent
-    /// breaks, the last request's observation and every agent's last request
-    /// shape. This is the read entry — none of it is a wire field.
     pub fn cache_observation(&self, session_id: &str) -> serde_json::Value {
         let states = self.cache_states.lock().unwrap_or_else(|e| e.into_inner());
         let Some(state) = states.get(session_id) else {
@@ -2759,13 +2219,6 @@ impl ServerEngine {
         })
     }
 
-    /// Drop the prompt-cache comparison state after a compaction (v2
-    /// `AgentCacheBreakService` resets on `context.compactionCompleted`): the
-    /// break baseline, the last observation and every agent's request snapshot
-    /// describe the pre-compaction transcript, so none of them may be compared
-    /// with the summary prefix. The recorded breaks are history and stay.
-    /// The main agent's probe generation advances as well (v2
-    /// `prefixRevision`), invalidating a fork that captured the old request.
     fn reset_cache_baseline(&self, session_id: &str) {
         let mut states = self.cache_states.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = states.get_mut(session_id) {
@@ -2778,8 +2231,6 @@ impl ServerEngine {
             .bump_probe_generation(crate::callbacks::MAIN_AGENT_ID);
     }
 
-    /// The last request the main agent served in `session_id` (v2
-    /// `lastTurnRequest()`), read as a manual compaction's probe baseline.
     fn cache_probe_request(
         &self,
         session_id: &str,
@@ -2791,10 +2242,6 @@ impl ServerEngine {
             .cloned()
     }
 
-    /// The LLM one session's turns run on, without building a pipeline.
-    ///
-    /// `None` when the session's spec selects no model the engine can reach —
-    /// the caller falls back to whatever it does without an LLM.
     pub async fn session_llm(&self, session_id: &str) -> Option<Arc<dyn LLM>> {
         let spec = self.session_spec(session_id).await;
         let callbacks = self.session_callbacks_for(session_id);
@@ -2802,9 +2249,6 @@ impl ServerEngine {
         crate::pipeline::build_llm_for_spec(&spec, &callbacks, sections.as_deref()).ok()
     }
 
-    /// The host callbacks one session's operations run with. Manual compaction
-    /// runs outside a turn, but its telemetry still has to reach the same sink
-    /// the turn loop uses (v2 `compaction_finished` with `source: 'manual'`).
     pub fn session_callbacks_for(&self, session_id: &str) -> Arc<dyn HostCallbacks> {
         let ws_root = match self.store.get_session(session_id) {
             Ok(Some(s)) if s.workspace_id.is_some() => {
@@ -2821,10 +2265,6 @@ impl ServerEngine {
         self.session_callbacks(session_id, ws_ref)
     }
 
-    /// Manual compaction (the REST `:compact` route and ACP `/compact`):
-    /// resolve the session's model, summarize the prefix, persist the folded
-    /// history, and publish the compaction events. One owner so every entry
-    /// point produces the same summary and events.
     pub async fn compact_session(
         &self,
         session_id: &str,
@@ -2856,17 +2296,12 @@ impl ServerEngine {
         let mut summary_usage = None;
         let mut summary_retry_count = 0;
         let mut summary_dropped_count = 0;
-        // v2 captures `lastTurnRequest()` before the summarizer request starts;
-        // a manual compaction runs between turns, so the stored turn-end
-        // snapshot is that request.
+
         let probe_baseline = self.cache_probe_request(session_id);
         let mut summary_probe = None;
         let summary = if count == 0 {
             None
         } else {
-            // v2 #3911: pre-shrink the summarizer's first request to the
-            // effective window — the configured `max_context_tokens` lowered
-            // by any overflow observed in this process.
             let configured_window = self
                 .store
                 .get_state("metadata", session_id)
@@ -2883,6 +2318,11 @@ impl ServerEngine {
                 llm.model_name(),
                 configured_window,
             );
+            let emit_request = |event: serde_json::Value| {
+                self.hub
+                    .bus_for(session_id)
+                    .publish(&crate::events::EngineEvent::Custom(event));
+            };
             let summary = crate::compaction::summarize_with_llm_budgeted(
                 &history[1..count as usize],
                 llm.as_ref(),
@@ -2893,6 +2333,7 @@ impl ServerEngine {
                 crate::callbacks::MAIN_AGENT_ID,
                 probe_baseline.as_ref(),
                 None,
+                Some(&emit_request),
             )
             .await
             .map_err(|error| EngineError::Turn(error.to_string()))?;
@@ -2906,14 +2347,13 @@ impl ServerEngine {
             ))
         };
         let duration_ms = started.elapsed().as_millis() as u64;
-        let report = self
+        let summary_text = summary.clone();
+        let (report, compacted_messages) = self
             .store
             .compact_session_with_summary(session_id, instruction, summary)
             .map_err(EngineError::Turn)?;
         let summary_output_tokens = summary_usage.as_ref().map(|usage| usage.output_tokens);
-        // A manual compaction is a real LLM call: bill it in the session's
-        // compaction slice so the model bucket and the exported status both
-        // account for it.
+
         if let Some(usage) = &summary_usage
             && let Err(e) = crate::session::usage::record_compaction(
                 &self.store,
@@ -2925,19 +2365,12 @@ impl ServerEngine {
             tracing::warn!(%session_id, %e, "could not persist compaction usage");
         }
         if report.removed > 0 {
-            // The transcript is now the summary prefix: re-baseline the
-            // counting state so the gauge does not keep the pre-compaction
-            // measurement (v2 `rebase`). The summary's size is the measured
-            // output of the request that wrote it, not an estimate of its text.
-            self.record_context_rebase_with_summary(session_id, summary_output_tokens);
+            tracing::debug!(%session_id, removed = report.removed, "manual compaction folded the history");
         }
-        // v2 `compaction_finished` with `source: 'manual'`: a manual /compact
-        // reports the same round telemetry the automatic paths do, usage
-        // included. `turn_id` is omitted — this runs between turns.
+
         if count > 0 {
             let callbacks = self.session_callbacks_for(session_id);
-            // v2 `prompt_cache_probe` with `source: 'compaction'` compares the
-            // summarizer request with the agent's last turn request.
+
             if let Some(probe) = summary_probe.as_ref() {
                 callbacks.telemetry(probe.telemetry_payload());
             }
@@ -2961,26 +2394,33 @@ impl ServerEngine {
                 ),
             );
         }
-        // v2's `context.compaction` persists the spliced history so a replay
-        // reproduces the summary, the kept verbatim user messages and the
-        // continuation note; the native event store folds this array at its
-        // boundary instead of keeping only a system summary.
-        let compacted_messages = self
-            .store
-            .load_session_history(session_id)
-            .unwrap_or_default();
-        self.hub
-            .bus_for(session_id)
-            .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
-                "type": "compaction.completed",
-                "sessionId": session_id,
-                "compactedCount": report.compacted_count,
-                "removed": report.removed,
-                "tokensBefore": report.tokens_before,
-                "tokensAfter": report.tokens_after,
-                "keptUserMessageCount": report.kept_user_message_count,
-                "messages": compacted_messages,
-            })));
+
+        let mut result = serde_json::json!({
+            "summary": summary_text.unwrap_or_default(),
+            "compactedCount": report.compacted_count,
+            "tokensBefore": report.tokens_before,
+            "tokensAfter": report.tokens_after,
+            "keptUserMessageCount": report.kept_user_message_count,
+        });
+        if summary_dropped_count > 0 {
+            result["droppedCount"] = serde_json::json!(summary_dropped_count);
+        }
+        if report.removed > 0 {
+            self.hub
+                .bus_for(session_id)
+                .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
+                    "type": "compaction.completed",
+                    "sessionId": session_id,
+                    "result": result,
+                    "compactedCount": report.compacted_count,
+                    "removed": report.removed,
+                    "tokensBefore": report.tokens_before,
+                    "tokensAfter": report.tokens_after,
+                    "keptUserMessageCount": report.kept_user_message_count,
+                    "messages": compacted_messages,
+                })));
+            self.record_context_rebase_with_summary(session_id, summary_output_tokens);
+        }
         self.hub
             .bus_for(session_id)
             .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
@@ -2989,20 +2429,15 @@ impl ServerEngine {
                 "reason": "manual",
                 "summary_message_id": serde_json::Value::Null,
             })));
-        // Refresh the status snapshot so the context gauge and the usage
-        // buckets reflect the compaction that just ran.
+
         self.publish_status_updated(session_id).await;
         Ok(report)
     }
 
-    /// The process-wide background-task runner (installed by the server
-    /// builder or by the first pipeline that ran), when one exists.
     pub async fn task_runner(&self) -> Option<Arc<crate::storage::TaskRunner>> {
         self.subagent_manager.get_task_runner().await
     }
 
-    /// Drain one session's queued task notifications into a wake prompt and its
-    /// v2 `TaskOrigin`, or `None` when nothing is queued.
     pub async fn take_task_notification_prompt(
         &self,
         session_id: &str,
@@ -3011,9 +2446,6 @@ impl ServerEngine {
         crate::server::prompt_queue::take_task_wake_prompt(&runner, session_id)
     }
 
-    /// Live MCP server entries for one session (v2 `agent.getMcpServers`), for
-    /// the ACP `/mcp` builtin. Session-injected servers win over the shared
-    /// manager, exactly as the turn's toolset resolves them.
     pub async fn session_mcp_entries(
         &self,
         session_id: &str,
@@ -3024,8 +2456,6 @@ impl ServerEngine {
         }
     }
 
-    /// Background tasks from the process-wide runner, for the ACP `/tasks`
-    /// builtin. Empty when no pipeline has installed a runner.
     pub async fn background_tasks(&self) -> Vec<serde_json::Value> {
         match self.subagent_manager.get_task_runner().await {
             Some(runner) => runner.list(),
@@ -3033,15 +2463,6 @@ impl ServerEngine {
         }
     }
 
-    /// The session's todos rendered for the compaction summary (v2
-    /// `postProcessSummary`, fullCompactionService.ts:844): `None` when the
-    /// workspace has no todo list or it is empty. Resolves the workspace the
-    /// way [`Self::session_llm`] does, and reads the domain straight from the
-    /// store the way `StateStoreCallbacks` routes engine-owned domains, so
-    /// the REST `:compact` route appends exactly what a turn's
-    /// `host/state_read` would answer for this session.
-    /// The session's todo list, read from the same workspace state domain the
-    /// todo tools write. Used by hosts that project the list (ACP `plan`).
     pub fn session_todos(&self, session_id: &str) -> Vec<crate::tools::todo_item::TodoItem> {
         let ws_root = match self.store.get_session(session_id) {
             Ok(Some(s)) if s.workspace_id.is_some() => {
@@ -3108,18 +2529,12 @@ impl ServerEngine {
         crate::compaction::todo_list_for_summary(raw.as_ref())
     }
 
-    /// The LLM one model alias resolves to, without a session or a pipeline.
-    ///
-    /// `None` when the alias resolves to no reachable provider — the caller
-    /// reports that instead of a transport error. The callbacks are the
-    /// session-less standalone host: a one-shot request needs neither a
-    /// session's state store nor its interaction manager.
     pub async fn llm_for_model(&self, model: &str) -> Option<Arc<dyn LLM>> {
         let native = self.resolved_native_llm(model).await?;
         let mut spec = clone_spec(&self.spec);
         spec.model_name = model.to_string();
         spec.native_llm = Some(native);
-        // The named model is the target; a provider race would ignore it.
+
         spec.providers.clear();
         let callbacks: Arc<dyn HostCallbacks> =
             Arc::new(ServerHost::standalone().with_oauth(self.oauth_manager()));
@@ -3127,12 +2542,6 @@ impl ServerEngine {
         crate::pipeline::build_llm_for_spec(&spec, &callbacks, sections.as_deref()).ok()
     }
 
-    /// Persist the prompt-derived session metadata and announce it
-    /// (v2 `applyPromptMetadata` + `SessionMetaUpdated`).
-    ///
-    /// The title is only applied while the session is untitled and not custom;
-    /// `lastPrompt` always advances so the session list can show the latest
-    /// request even after the title is frozen by a rename.
     fn apply_prompt_metadata(&self, session_id: &str, prompt: &str, origin: Option<&Value>) {
         let client_metadata = origin.and_then(|origin| origin.get("clientMetadata"));
         let Some(text) =
@@ -3174,12 +2583,6 @@ impl ServerEngine {
         }
     }
 
-    /// Build an engine context for one turn and run it.
-    ///
-    /// The pipeline is rebuilt per turn, as the legacy stdio entry does: the
-    /// configuration is fixed for the process, but the subagent runtime and the
-    /// event bus binding are per-context, and nothing here is long-lived enough
-    /// to be worth caching yet.
     pub async fn run_turn(
         &self,
         session_id: &str,
@@ -3191,8 +2594,6 @@ impl ServerEngine {
             .await
     }
 
-    /// Run a turn whose opening user message carries media content blocks
-    /// (prompt attachments resolved from the local file store).
     pub async fn run_turn_with_media(
         &self,
         session_id: &str,
@@ -3203,13 +2604,9 @@ impl ServerEngine {
         origin: Option<Value>,
     ) -> Result<TurnReport, EngineError> {
         let mut history = history;
-        // A self-contained engine must refuse the host-proxy fallback rather
-        // than reach ServerHost.llm_chat and fail mid-turn.
+
         let spec = self.session_spec(session_id).await;
-        // The environment was frozen when the session was created; a resume
-        // must use that binding, not today's defaults. A vanished directory is
-        // an explicit failure, and a declaration edit is a warning, never a
-        // silent rebind.
+
         match self.restore_session_environment(session_id).await {
             Ok(Some(outcome)) => {
                 for drift in &outcome.drift {
@@ -3223,24 +2620,16 @@ impl ServerEngine {
             Ok(None) => {}
             Err(error) => return Err(EngineError::Environment(error.to_string())),
         }
-        // The prompt was assembled from AGENTS.md before this turn; report a
-        // file that changed since the previous turn, and an unreadable one.
+
         if let Some(root) = self.session_root_path(session_id) {
             if let Some(reminder) = self.observe_agents_md(session_id, &root) {
-                // v2 injects this as the `agents_md_change` reminder, so the
-                // model — not only the host log — learns the prompt copy is
-                // stale before it reasons about the affected paths again.
                 history.push(crate::injection::injection_message_named(
                     reminder,
                     "agents_md_change",
                 ));
             }
         }
-        // v2's other `changeNotifier` variants (skills, subagents, workspace
-        // directories). Each compares against the snapshot it recorded on the
-        // previous turn and queues at most one reminder: a change is announced
-        // once, and a failed read keeps the baseline instead of manufacturing a
-        // "everything was deleted" reminder.
+
         for (reminder, variant) in self
             .observe_catalog_changes(session_id, &spec, &spec.system_prompt)
             .await
@@ -3259,19 +2648,10 @@ impl ServerEngine {
             _ => None,
         };
         let ws_ref = ws_root.as_deref().unwrap_or(std::path::Path::new("."));
-        // Apply the thinking-guard setting before the pipeline builds its LLM:
-        // the guard is constructed with the transport, so a later write would
-        // only take effect on the next turn.
+
         self.apply_thinking_guard_setting().await;
         let host_callbacks = self.session_callbacks(session_id, ws_ref);
-        // Message identities (`event.message.created` / `event.assistant.delta` /
-        // `event.message.updated`) must sit on the chain the LLM's event sink
-        // writes to. The sink is bound when the pipeline builds its LLM, so a
-        // decorator applied afterwards never sees a streaming delta: the raw
-        // `llm.delta` reaches the hub untranslated and the transcript lane
-        // produces no `append` / `frame.upsert` ops for it. Wrapping here —
-        // before the pipeline is built — is what makes the translation
-        // reachable.
+
         let message_callbacks = Arc::new(
             crate::server::message_events::MessageCallbacks::with_step_tracker(
                 host_callbacks,
@@ -3285,8 +2665,7 @@ impl ServerEngine {
             ),
         );
         let host_callbacks: Arc<dyn HostCallbacks> = message_callbacks.clone();
-        // Attach the session's MCP status bridge before the pipeline runs, so a
-        // server that connects while the turn is in flight reaches the lane.
+
         self.ensure_mcp_status_bridge(session_id);
         let contributions = self.plugin_contributions();
         let pipeline = build_engine_pipeline(
@@ -3294,95 +2673,55 @@ impl ServerEngine {
             host_callbacks,
             PipelineHost {
                 subagent_manager: self.subagent_manager.clone(),
-                // The enabled plugins' prompt block and hooks, read fresh so a
-                // plugin install / enable / disable reaches the next turn.
+
                 plugin_sections: contributions.sections,
                 plugin_hooks: contributions.hooks,
-                // The server's process-wide runner: task routes and the wake
-                // service read it, so the tasks this pipeline spawns must
-                // register there instead of on a per-turn runner.
+
                 task_runner: self.subagent_manager.get_task_runner().await,
                 parent_cancel: None,
                 parent_cancel_slot: None,
                 steer_slot: Some(self.steer_slot(session_id)),
                 mcp_manager: self.mcp_manager_for(session_id),
-                // This session's lane, so the turn's events carry its session id
-                // and its seq. Every connection still sees every lane.
+
                 event_bus: Some(self.hub.bus_for(session_id)),
-                // The server's runner already carries the hub sink.
+
                 task_event_sink: None,
             },
         )
         .await
         .map_err(|error| EngineError::NoModel(error.message))?;
 
-        // Every turn builds a fresh toolset; the runtime it receives is the
-        // session's single long-lived instance, so wake batching survives the
-        // turn boundary instead of restarting with each toolset.
         if let Some(toolset) = pipeline.toolset.as_ref() {
             let _ = self.bind_tower_wake(toolset, session_id);
         }
 
-        // Arm native file-history capture for this turn. `write` / `edit` only
-        // record a `session_file_history` row when a recorder is installed, and
-        // this is the only production installation point: without it the table
-        // stayed empty, `/file-history/*` always answered `[]`, and
-        // `undo {revert_files:true}` reported success without restoring any
-        // file. A no-op for hosts whose callbacks are not `NativeToolCallbacks`.
         pipeline.callbacks.set_file_history(
             self.store.clone(),
             session_id.to_string(),
             turn_number as usize,
         );
 
-        // `session_query` reads the same store's wire journal and session
-        // summaries. Installed alongside file history; hosts with callbacks
-        // that are not `NativeToolCallbacks` ignore it and the tool reports
-        // `session_query.index_unavailable`.
         pipeline.callbacks.set_session_store(self.store.clone());
         pipeline.callbacks.set_tool_select_persist_listener({
             let persisted_heads = self.hub.persisted_heads();
             std::sync::Arc::new(move |session_id, seq| persisted_heads.note(session_id, seq))
         });
 
-        // Micro compaction (v2 `AgentMicroCompactionService`): with the
-        // `[experimental].micro_compaction` flag on, blank oversized old tool
-        // results in the outgoing history so the rebuilt prefix stays small.
-        // The transform is a deterministic projection — the store keeps the
-        // originals — so the blanked prefix is stable across requests (one
-        // cache miss on first application, then stable).
-        //
-        // v2 gates the pass on a *detected* prompt-cache miss
-        // (`detect()`, `microCompactionService.ts:89-107`). Its test is **idle
-        // time since the last assistant output** against
-        // `cacheMissedThresholdMs` — not a cache-read counter — combined with a
-        // `minContextUsageRatio` fullness gate. Both are ported into
-        // `compaction::micro::detect_micro_compaction`; this call supplies the
-        // per-session `last_assistant_at` the engine stamps after each turn.
-        //
-        // ROADMAP §6.28 once recorded this work as blocked because the
-        // reference "was deleted with that package". That was wrong: the
-        // reference is intact in `.tmp/v2-ref/…/agent/microCompaction/`, and
-        // §6.43.1 records the correction.
         if let Some(config) = self.micro_compaction_config().await {
             let now = chrono::Utc::now().timestamp_millis();
             let last_assistant_at = self.last_assistant_at_for(session_id);
-            // Measured+estimated, the same figure the status gauge reports, so
-            // the fullness gate and the gauge cannot disagree.
+
             let context_tokens =
                 self.token_counting(session_id)
                     .status_size(&history, self.token_counting_strategy()) as usize;
-            let outcome_gate = crate::compaction::micro::detect_micro_compaction(
+            let outcome_gate = crate::compaction::micro::detect(
                 last_assistant_at,
                 now,
                 context_tokens,
                 self.model_context_window(session_id).await,
                 &config,
             );
-            // v2 advances the cutoff only on a detected miss; every other
-            // request re-applies the *stored* value. Re-deriving it from the
-            // history each time would blank a newer result as the transcript
-            // grows, changing the prefix the cutoff exists to keep stable.
+
             let mut micro = self.micro_compaction_state(session_id);
             let previous_cutoff = micro.cutoff;
             let advanced = outcome_gate.triggered()
@@ -3408,9 +2747,7 @@ impl ServerEngine {
                 if outcome.changed {
                     history = outcome.messages;
                 }
-                // v2 `micro_compaction_finished` telemetry: reported whenever
-                // the cutoff moved, even if no result was large enough to
-                // blank, so the effect counts and the gate knobs are visible.
+
                 if advanced {
                     let tokens_after =
                         crate::compaction::estimate_messages_tokens(&history) as usize;
@@ -3462,16 +2799,6 @@ impl ServerEngine {
         .await
     }
 
-    /// Run a turn on a caller-supplied LLM, skipping pipeline construction.
-    ///
-    /// The two product entries never use this; it exists so the exact same
-    /// loop, persistence and reporting path can be driven from a test, and so
-    /// a future custom transport has one obvious insertion point.
-    ///
-    /// Message identities are installed on a decorator here so this path
-    /// behaves like the product one. Its streaming deltas cannot be translated
-    /// — the caller owns the LLM, so that transport's event sink is already
-    /// bound — but the prompt identity and the turn's message lifecycle are.
     pub async fn run_turn_on(
         &self,
         llm: &dyn LLM,
@@ -3480,9 +2807,6 @@ impl ServerEngine {
         history: Vec<LLMMessage>,
         prompt: &str,
     ) -> Result<TurnReport, EngineError> {
-        // The same callback stack the product entry builds: the engine's
-        // state-domain seam (goal / plan / todo / cron) must be present or an
-        // after-turn goal fold has nowhere to land on this path.
         let ws_ref = self
             .session_workspace(session_id)
             .map(|workspace| std::path::PathBuf::from(&workspace.root))
@@ -3529,20 +2853,10 @@ impl ServerEngine {
         origin: Option<Value>,
         message_callbacks: Option<Arc<crate::server::message_events::MessageCallbacks>>,
     ) -> Result<TurnReport, EngineError> {
-        // The occupancy gate (v2 `runGate.begin()`, upstream #4246): a turn
-        // may only start under this process's session lock, and the hold
-        // rides the guard below to the turn's end so a second process is
-        // refused for the whole run rather than interleaving wire rows.
-        // First thing: a refused turn must not mark itself active, publish
-        // busy, or snapshot undo state.
         let _occupancy = crate::session::lock::SESSION_LOCKS
             .hold_guard(session_id)
             .map_err(|error| EngineError::Occupied(error.to_string()))?;
-        // v2 `SessionRunGateService.begin()`: once the lock is ours, a journal
-        // that moved since we last saw it was written by another client while
-        // this session sat idle. Release the publish (v2 does, rather than
-        // letting the grace window hold it) and refuse, so the host reloads
-        // instead of interleaving two histories.
+
         if self.journal_moved(session_id) {
             self.observe_journal_head(session_id);
             crate::session::lock::SESSION_LOCKS.release(session_id);
@@ -3551,8 +2865,7 @@ impl ServerEngine {
             )));
         }
         let turn_id = format!("turn-{}", fastrand::u64(..));
-        // The model this turn's usage belongs to (v2 groups `UsageRecord`s by
-        // the request's model). Read before the LLM moves into `RunTurnInput`.
+
         let turn_model = llm.model_name().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         {
@@ -3567,31 +2880,22 @@ impl ServerEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(session_id.to_string(), turn_number);
         self.publish_work_changed(session_id, true, None);
-        // v2 `sessionOutcomeMirrorService`: a new turn clears the previous
-        // outcome. `lastTurnReason` describes the last turn that *ended*; while
-        // a turn is running there is no such turn, so the stale value must not
-        // survive into the new turn's window.
+
         if let Err(error) = self.store.set_last_turn_reason(session_id, None) {
             tracing::warn!(%session_id, %error, "failed to clear last_turn_reason at turn start");
         }
-        // v2 `applyPromptMetadata` runs for every prompt (sessionMetadataService
-        // .ts:150-159): `lastPrompt` always advances, and the derived title
-        // only fills in while the session is still untitled and not custom.
+
         self.apply_prompt_metadata(session_id, prompt, origin.as_ref());
         self.publish_status_updated(session_id).await;
-        // #3697: a fresh steer signal for this turn, so a signal fired by an
-        // earlier turn cannot end this turn's first `WaitFor`.
+
         *self
             .steer_slot(session_id)
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(crate::subagent::types::ParentCancel::new());
-        // The activity phase machine follows the turn from here: running →
-        // streaming / tool_call / retrying (via the callback decorator) →
-        // ended or interrupted.
+
         let activity = self.activity_registry.tracker(session_id);
         activity.turn_started(turn_number);
-        // v2 `sessionLogService`: the turn lifecycle lands in the session's own
-        // `logs/kimi-code.log` at the configured level (default `info`).
+
         if let Some(log) = self.session_log(session_id) {
             log.log(
                 crate::session::session_log::LogLevel::Info,
@@ -3602,24 +2906,18 @@ impl ServerEngine {
                 ],
             );
         }
-        // The undo anchor for this turn: snapshot the session's durable state
-        // before the turn can change it, so a later undo (REST `:undo` /
-        // native `undoHistory`) restores the state the cut turn started from.
-        // A turn without an origin is a user prompt — the v2 default.
+
         let undo_anchor = origin
             .as_ref()
             .is_none_or(crate::session::origin_is_undo_anchor);
         if undo_anchor && let Err(error) = callbacks.checkpoint_state().await {
             tracing::warn!(%session_id, %error, "state checkpoint failed; undo cannot restore this turn's state");
         }
-        // The prompt's message identity lands here: after the busy/status/phase
-        // flips and before the first step, the order the turn-boundary contract
-        // pins (a client must know the turn started before it sees the prompt).
+
         if let Some(callbacks) = message_callbacks.as_ref() {
             callbacks.announce_prompt();
         }
-        // Innermost decorator: drains this session's steering queue at every
-        // step head, so a `POST /prompts:steer` lands in the running turn.
+
         let callbacks: Arc<dyn HostCallbacks> = Arc::new(
             crate::session::SteerQueueCallbacks::new(
                 callbacks.clone(),
@@ -3628,16 +2926,7 @@ impl ServerEngine {
             )
             .with_steer_slot(Some(self.steer_slot(session_id))),
         );
-        // Outermost decorator: every step boundary, streaming delta and tool
-        // execution the turn produces moves the session's activity phase
-        // before the underlying chain sees the event.
-        //
-        // Message identities (`event.message.created` / `event.assistant.delta`
-        // / `event.message.updated`) are NOT installed here: the LLM's event
-        // sink was bound when the pipeline built it, so a decorator added at
-        // this point never sees a streaming delta. `MessageCallbacks` wraps the
-        // callbacks the pipeline is built with instead (see
-        // `run_turn_with_media`).
+
         let callbacks: Arc<dyn HostCallbacks> =
             Arc::new(crate::server::activity::ActivityCallbacks {
                 inner: callbacks.clone(),
@@ -3678,32 +2967,26 @@ impl ServerEngine {
             tool_call_id: None,
 
             prompt_id: None,
-            // The turn origin rides the opening message, the way the session
-            // pump stamps it: a replayed transcript can then tell a skill
-            // activation or a goal continuation from a typed prompt.
+
             origin: origin.clone(),
+            tools: Vec::new(),
         };
         messages.push(user_message.clone());
         let input_len = messages.len();
-        // Micro compaction was applied to `history` at the top of this
-        // function (see the `micro_compaction.apply` block above) — applying
-        // it again here would be a no-op rescan, because already-blanked tool
-        // results sit below `min_content_tokens`.
 
         let goal = callbacks.goal().await.ok().flatten();
-        // The model window the loop must compact against and the transport
-        // must cap completions by (v2 `maxContextTokens`). This was `None`
-        // here, so every standalone-server turn ran with the loop's default
-        // budget instead of the selected model's window.
+
         let context_window = self
             .model_context_window(session_id)
             .await
             .and_then(|value| u32::try_from(value).ok());
-        // The interruption-reminder trigger: whether this session's last
-        // finished turn ended aborted (read-and-clear, v2 filters `TurnEnded`
-        // on the cancelled reason).
+
         let previous_turn_aborted = self.take_last_turn_aborted(session_id);
         let input = RunTurnInput {
+            llm_request_byte_budget: self
+                .spec
+                .llm_request_byte_budget
+                .unwrap_or(crate::config::DEFAULT_LLM_REQUEST_BYTE_BUDGET),
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
             max_attempts: self.max_attempts,
             turn_id: turn_id.clone(),
@@ -3725,22 +3008,15 @@ impl ServerEngine {
             media: Some(&self.media),
             media_dropped: Some(self.media_dropped_for(session_id)),
             media_recovery: Some(self.media_recovery_for(session_id)),
-            // The toolset this pipeline just built: its disclosed-tool
-            // announcement state must span the session's turns, and it is the
-            // same handle the turn loop's select_tools arm executes through.
+
             toolset,
             previous_turn_aborted,
         };
 
-        // D14(a): a hard failure returns `Err` with no `TurnResult`, so the
-        // turn loop also mirrors each completed step's cache observation into
-        // this sink. The `Ok` path keeps reading `result`; the `Err` path
-        // folds whatever completed before the failure instead of dropping it.
         let observations = std::sync::Arc::new(std::sync::Mutex::new(
             crate::turn_loop::types::TurnObservations::default(),
         ));
-        // Flatten the loop error before any later await: `Box<dyn StdError>`
-        // is not `Send`, and the spawned turn future must stay `Send`.
+
         let turn = match run_turn_continued_with_observations(
             input,
             &callbacks,
@@ -3751,15 +3027,9 @@ impl ServerEngine {
             Ok(result) => Ok(result),
             Err(error) => Err(error.to_string()),
         };
-        // The turn is done appending to the journal, so this engine's watermark
-        // now covers every row it produced. Without this the next turn in the
-        // same process would read its own rows as a foreign modification.
+
         self.observe_journal_head(session_id);
-        // v2 `cancelInteractionsForTurn` (`interactionWiring.ts:35-51`): the
-        // turn is over, so an approval/question still tagged with it can no
-        // longer be answered by anything. Sweeping it here — on the finished
-        // turn only, not the whole session — keeps a reconnect from listing a
-        // phantom prompt while a concurrent turn keeps its own.
+
         if let Some(manager) = self.interaction_manager() {
             manager.cancel_turn(session_id, &turn_id, "turn_ended");
         }
@@ -3774,24 +3044,17 @@ impl ServerEngine {
                     );
                 }
                 self.publish_turn_ended(session_id, turn_number, reason);
-                // A detached subagent turn or a background task may outlive
-                // this turn; the fold stays busy until that work settles.
+
                 self.publish_work_changed(
                     session_id,
                     self.has_background_work(session_id),
                     Some(reason),
                 );
-                // Mirror the outcome into the session row as well as the live
-                // event (v2 `SessionOutcomeMirror`): a client that attaches
-                // after this turn, or after a restart, still sees the outcome.
-                // A failure here must not fail the turn — the live event has
-                // already gone out and the transcript is unaffected.
+
                 if let Err(e) = self.store.set_last_turn_reason(session_id, Some(reason)) {
                     tracing::warn!(%session_id, %e, "could not persist the turn outcome");
                 }
-                // D14: fold the step observations into the session's
-                // cache-break tracker (v2 `AgentCacheBreakService.observe`
-                // runs at each step; the turn loop hands the steps over here).
+
                 self.observe_cache_observations(
                     session_id,
                     &turn_id,
@@ -3813,9 +3076,7 @@ impl ServerEngine {
                         ],
                     );
                 }
-                // D14(a): fold the steps that completed before the failure.
-                // Without this a hard-failed turn silently dropped every
-                // prompt-cache observation it had already collected.
+
                 if let Ok(partial) = observations.lock() {
                     self.observe_cache_observations(
                         session_id,
@@ -3849,17 +3110,6 @@ impl ServerEngine {
             }
         };
 
-        // The loop returns system (index 0) + everything it was handed + what it
-        // appended, so adopting `messages[1..]` would rewrite the carried
-        // history on every turn. `EngineSession` already solved this at
-        // `session/mod.rs:742` by skipping the system message *and* its own
-        // input; this store additionally owns the transcript, so the prompt
-        // itself is kept while the history is not re-written.
-        //
-        // Still open: the appended slice includes the loop's per-turn injected
-        // reminders (date change, workspace AGENTS.md), which are regenerated
-        // each turn and were never meant to be durable. Filtering them needs a
-        // tag from the injection registry; until then they land in history.
         let mut transcript =
             Vec::with_capacity(1 + result.messages.len().saturating_sub(input_len));
         transcript.push(user_message);
@@ -3875,26 +3125,18 @@ impl ServerEngine {
             )
             .map_err(EngineError::Store)?;
 
-        // Fold the turn into the context-token counting state: the last
-        // request measured the prefix it served, everything after it is
-        // estimated until the next measurement (v2 `TokenCountingMeasured`).
         self.record_token_counting(
             session_id,
             result.last_request_usage.as_ref(),
             result.tool_schema_tokens,
         );
 
-        // Fold the turn's counters into the session's per-model usage buckets
-        // (v2 `UsageAgentModel.record` -> durable `byModel`). The turn is
-        // already durable; a usage write failure degrades the status snapshot
-        // rather than failing a completed turn.
         if let Err(e) =
             crate::session::usage::record_turn(&self.store, session_id, &turn_model, &result.usage)
         {
             tracing::warn!(%session_id, %e, "could not persist turn usage");
         }
-        // Compaction requests the turn ran are billable too; record them in
-        // their own slice so per-turn statistics stay clean.
+
         if let Some(compaction_usage) = &result.compaction_usage
             && let Err(e) = crate::session::usage::record_compaction(
                 &self.store,
@@ -3906,11 +3148,6 @@ impl ServerEngine {
             tracing::warn!(%session_id, %e, "could not persist compaction usage");
         }
 
-        // v2 `incrementGoalTurn` + `accountTokenUsage` + `settleAbnormalTurn`:
-        // fold the finished turn into the session's goal, settle a pause /
-        // budget block, and let the queue's continuation decision read the
-        // same store. Without this a server goal's budget could never be
-        // exhausted and an error would leave the goal active.
         crate::session::goal_turn::settle_goal_after_turn(
             callbacks.as_ref(),
             crate::session::goal_turn::GoalTurnEnd::Ran {
@@ -3920,21 +3157,10 @@ impl ServerEngine {
         )
         .await;
 
-        // Reset micro compaction's idle clock: this turn produced assistant
-        // output, so the prefix is fresh again and a cache miss is not due
-        // (v2 stamps `lastAssistantAt` on `onDidFinishStep`).
         self.stamp_last_assistant_at(session_id);
 
-        // Report the status only after the turn is durable: the snapshot
-        // reads the session history, so it must see this turn's context
-        // growth. Before persistence the payload is identical to the turn
-        // start's and the dedup would swallow it.
         self.publish_status_updated(session_id).await;
 
-        // Live token accounting for the Web client (kap-server
-        // `event.session.usage_updated`): the turn's counters ride as the
-        // delta, and the usage snapshot carries the same context figure the
-        // status payload reports (measured + estimated).
         let context_tokens = self.session_context_tokens(session_id);
         self.hub
             .bus_for(session_id)
@@ -3964,12 +3190,6 @@ impl ServerEngine {
             .map(|message| message.content.clone())
             .unwrap_or_default();
 
-        // The memory section promises that durable filing happens after the
-        // turn, so the model never files on its own initiative. The pass is
-        // spawned, not awaited: it must not delay the report or the reply.
-        // The system prompt is read off the LLM, which is the one the model
-        // actually ran with — the engine's base spec may have been rebuilt
-        // for this turn.
         self.spawn_memory_filing(
             llm.system_prompt(),
             &transcript,
@@ -3994,10 +3214,6 @@ impl ServerEngine {
     }
 }
 
-/// Map the loop's stop reason onto the three `last_turn_reason` values the
-/// kap-server contract allows ('completed' | 'cancelled' | 'failed').
-/// `MaxSteps` and `Filtered` are failed turns (ROADMAP §2.5), `Aborted` is a
-/// cancellation, everything else completed.
 fn work_turn_reason(reason: &crate::turn_loop::types::LoopTurnStopReason) -> &'static str {
     use crate::turn_loop::types::LoopTurnStopReason::*;
     match reason {
@@ -4007,15 +3223,6 @@ fn work_turn_reason(reason: &crate::turn_loop::types::LoopTurnStopReason) -> &'s
     }
 }
 
-/// The post-compaction token total (v2 `buildContextCompactionShape`'s
-/// `tokensAfter`, `compactionHandoff.ts:107-111`): the rebuilt history's
-/// estimate with the summary message's own size replaced by the summarization
-/// request's measured output tokens. Falling back to the estimate when either
-/// side is unavailable keeps the counter honest rather than guessing.
-///
-/// The same rule lives in [`crate::compaction::rebased_tokens`] for the turn
-/// loop's live gauge; this one runs on the session counter's text-only
-/// estimator, which is what that state has always used.
 fn rebased_tokens(
     history: &[crate::turn_loop::types::LLMMessage],
     summary_output_tokens: Option<u32>,
@@ -4034,10 +3241,6 @@ fn rebased_tokens(
     estimate.saturating_sub(summary_estimate) + u64::from(measured)
 }
 
-/// Overlay a session's persisted profile (`agent_config`) onto the engine's
-/// base spec for one turn. Model switching is alias-level: the transport
-/// (base URL / key) stays the engine's, so an alias on a different provider is
-/// not re-resolved here.
 fn apply_session_overrides(spec: &mut PipelineSpec, profile: &serde_json::Value) {
     if let Some(model) = profile
         .get("model")
@@ -4055,10 +3258,6 @@ fn apply_session_overrides(spec: &mut PipelineSpec, profile: &serde_json::Value)
         .filter(|effort| !effort.is_empty())
         && let Some(native) = spec.native_llm.as_mut()
     {
-        // Mirror the host's `applySessionLlmOverrides`: anthropic takes a
-        // thinking budget, every other protocol an effort; thinking off
-        // clears the budget and the preserved-thinking keep instead of
-        // leaving the config's value on the wire.
         let thinking_on = effort != "off" && effort != "none";
         let is_kimi_anthropic = native.protocol == "anthropic"
             && native
@@ -4066,8 +3265,6 @@ fn apply_session_overrides(spec: &mut PipelineSpec, profile: &serde_json::Value)
                 .as_deref()
                 .is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
         if is_kimi_anthropic {
-            // The Kimi anthropic trait takes an effort level (or the
-            // protocol-level disable), never a token budget.
             native.thinking_budget = None;
             native.reasoning_effort = Some(if thinking_on {
                 effort.to_string()
@@ -4076,9 +3273,6 @@ fn apply_session_overrides(spec: &mut PipelineSpec, profile: &serde_json::Value)
             });
         } else if native.protocol == "anthropic" {
             if native.adaptive_thinking == Some(true) {
-                // v2 `encodeThinking` adaptive mode: the level rides
-                // `output_config.effort` (off is an explicit disable) and no
-                // token budget is sent.
                 native.thinking_budget = None;
                 native.reasoning_effort = Some(if thinking_on {
                     effort.to_string()
@@ -4142,8 +3336,6 @@ fn apply_session_overrides(spec: &mut PipelineSpec, profile: &serde_json::Value)
     }
 }
 
-/// `PipelineSpec` has no `Clone`: a provider list and a couple of option
-/// fields, cheap to rebuild field by field at the one call site that needs it.
 fn clone_spec(spec: &PipelineSpec) -> PipelineSpec {
     PipelineSpec {
         notify_user_enabled: true,
@@ -4181,6 +3373,7 @@ fn clone_spec(spec: &PipelineSpec) -> PipelineSpec {
         caller_agent_id: spec.caller_agent_id.clone(),
         session_id: spec.session_id.clone(),
         image_read_byte_budget: spec.image_read_byte_budget,
+        llm_request_byte_budget: spec.llm_request_byte_budget,
         image_max_edge_px: spec.image_max_edge_px,
         model_capabilities: spec.model_capabilities.clone(),
         skill_dirs: spec.skill_dirs.clone(),
@@ -4190,10 +3383,6 @@ fn clone_spec(spec: &PipelineSpec) -> PipelineSpec {
     }
 }
 
-/// v2 `notifyAgentsMdChanges` text (`changeNotifierService.ts:146-183`),
-/// rendered from the watch's classified changes. `BecameUnreadable` joins the
-/// stale group and `BecameReadable` the new group, because in both cases the
-/// copy in the system prompt no longer matches the file on disk.
 fn agents_md_change_reminder(changes: &[crate::environment::AgentsMdChange]) -> Option<String> {
     use crate::environment::AgentsMdChange;
 
@@ -4221,7 +3410,6 @@ fn agents_md_change_reminder(changes: &[crate::environment::AgentsMdChange]) -> 
         ));
     }
     if !fresh.is_empty() {
-        // v2 `agentsMdChangeText`'s added section, verbatim.
         sections.push(format!(
             "The following AGENTS.md file(s) exist in your workspace but were not included in your system prompt:\n{}\nRead them before making changes in those directories.",
             fresh.join("\n")

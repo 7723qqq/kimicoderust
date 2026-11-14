@@ -199,6 +199,13 @@ pub enum TaskOutcome {
     /// The work failed; the string is the error text, kept as the task output
     /// so the reader sees why.
     Failed(String),
+    /// A process task (v2 `ProcessTask`): the output plus the exit code the
+    /// process reported, so `task.terminated`'s `info.exitCode` is the real
+    /// one and the settlement follows v2's `exitCode === 0` rule.
+    Process {
+        output: String,
+        exit_code: Option<i32>,
+    },
 }
 
 impl From<String> for TaskOutcome {
@@ -208,11 +215,20 @@ impl From<String> for TaskOutcome {
 }
 
 impl TaskOutcome {
-    /// The status this outcome settles as, and the output to record.
-    fn settle(self) -> (TaskStatus, Option<String>) {
+    /// The status this outcome settles as, the output to record, and the exit
+    /// code a process task reported.
+    fn settle(self) -> (TaskStatus, Option<String>, Option<i32>) {
         match self {
-            TaskOutcome::Completed(output) => (TaskStatus::Completed, Some(output)),
-            TaskOutcome::Failed(output) => (TaskStatus::Failed, Some(output)),
+            TaskOutcome::Completed(output) => (TaskStatus::Completed, Some(output), None),
+            TaskOutcome::Failed(output) => (TaskStatus::Failed, Some(output), None),
+            TaskOutcome::Process { output, exit_code } => {
+                let status = match exit_code {
+                    Some(0) => TaskStatus::Completed,
+                    Some(_) => TaskStatus::Failed,
+                    None => TaskStatus::Completed,
+                };
+                (status, Some(output), exit_code)
+            }
         }
     }
 }
@@ -266,6 +282,27 @@ pub struct TaskSpawnMeta<'a> {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TaskAgentInfo<'a> {
+    pub parent_tool_call_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub thinking_effort: Option<&'a str>,
+}
+
+#[derive(Default)]
+struct TaskExtra {
+    question_count: Option<usize>,
+    tool_call_id: Option<String>,
+    command: Option<String>,
+    pid: Option<u32>,
+    parent_tool_call_id: Option<String>,
+    model: Option<String>,
+    thinking_effort: Option<String>,
+    /// Output produced before the task was registered. Set only for a process
+    /// promoted from a foreground command.
+    initial_output: Option<String>,
+}
+
 /// Generate a background task id (v2 `generateTaskId`): `{kind}-{8 chars}`,
 /// where the suffix is drawn from `[0-9a-z]`.
 ///
@@ -295,7 +332,7 @@ struct TaskEntry {
     /// Live public text for a running subagent; rendered only if the run ends
     /// without a normal completion.
     partial_output: RunOutput,
-    /// Which session spawned the task (`event.task.*` lane routing).
+    /// Which session spawned the task (`task.*` lane routing).
     session_id: Option<String>,
     /// `subagent` | `bash` | `tool`.
     kind: String,
@@ -303,16 +340,98 @@ struct TaskEntry {
     /// The subagent's stable id (`kind == "subagent"`); see
     /// [`TaskSpawnMeta::agent_id`].
     agent_id: Option<String>,
+    question_count: Option<usize>,
+    tool_call_id: Option<String>,
+    parent_tool_call_id: Option<String>,
+    model: Option<String>,
+    thinking_effort: Option<String>,
+    /// The command line a process task runs (v2 `ProcessTaskInfo.command`).
+    command: Option<String>,
+    /// The spawned process id (v2 `ProcessTaskInfo.pid`).
+    pid: Option<u32>,
+    /// The exit code once the process settled (v2 `ProcessTaskInfo.exitCode`).
+    exit_code: Option<i32>,
+    /// Set when the task was stopped or the session exited, so its terminal
+    /// notification is suppressed (v2 `terminalNotificationSuppressed`).
+    terminal_notification_suppressed: bool,
     /// Cooperative cancellation flag, set by `stop()`; the spawned
     /// wrapper checks it at the task's next yield point.
     cancel: Arc<AtomicBool>,
     /// Wakes the wrapper when the cancel flag is set.
     cancel_notify: Arc<Notify>,
+    /// Bytes of live output reported through `task.output` so far.
+    output_bytes: u64,
     /// Resolves once the wrapper has settled the entry; every waiter
     /// (including late ones) observes the completion.
     done: Shared<BoxFuture<'static, ()>>,
     /// The spawned tokio task.
     handle: Option<JoinHandle<()>>,
+}
+
+fn task_info(entry: &TaskEntry) -> Value {
+    let kind = match entry.kind.as_str() {
+        "subagent" => "agent",
+        "question" => "question",
+        _ => "process",
+    };
+    let mut info = serde_json::Map::new();
+    info.insert("taskId".into(), json!(entry.id));
+    info.insert("description".into(), json!(entry.description));
+    info.insert("kind".into(), json!(kind));
+    info.insert("status".into(), json!(entry.status.as_str()));
+    info.insert("detached".into(), json!(true));
+    info.insert("startedAt".into(), json!(entry.started_at));
+    info.insert(
+        "endedAt".into(),
+        entry.ended_at.map_or(Value::Null, |ended| json!(ended)),
+    );
+    if let Some(reason) = &entry.stop_reason {
+        info.insert("stopReason".into(), json!(reason));
+    }
+    if entry.terminal_notification_suppressed {
+        info.insert("terminalNotificationSuppressed".into(), json!(true));
+    }
+    if kind == "agent" {
+        if let Some(agent_id) = &entry.agent_id {
+            info.insert("agentId".into(), json!(agent_id));
+        }
+        if let Some(subagent_type) = &entry.subagent_type {
+            info.insert("subagentType".into(), json!(subagent_type));
+        }
+        if let Some(parent_tool_call_id) = &entry.parent_tool_call_id {
+            info.insert("parentToolCallId".into(), json!(parent_tool_call_id));
+        }
+        if let Some(model) = &entry.model {
+            info.insert("model".into(), json!(model));
+        }
+        if let Some(thinking_effort) = &entry.thinking_effort {
+            info.insert("thinkingEffort".into(), json!(thinking_effort));
+        }
+    }
+    if kind == "question" {
+        if let Some(count) = entry.question_count {
+            info.insert("questionCount".into(), json!(count));
+        }
+        if let Some(tool_call_id) = &entry.tool_call_id {
+            info.insert("toolCallId".into(), json!(tool_call_id));
+        }
+    }
+    if kind == "process" {
+        info.insert(
+            "exitCode".into(),
+            entry.exit_code.map_or(Value::Null, |code| json!(code)),
+        );
+        if let Some(command) = &entry.command {
+            info.insert("command".into(), json!(command));
+        }
+        if let Some(pid) = entry.pid {
+            info.insert("pid".into(), json!(pid));
+        }
+        if let Some(parent_tool_call_id) = &entry.parent_tool_call_id {
+            info.insert("parentToolCallId".into(), json!(parent_tool_call_id));
+        }
+    }
+    Value::Object(info)
 }
 
 /// The lifecycle sink signature: the task's session (for lane routing; `None`
@@ -345,9 +464,11 @@ pub struct BackgroundLimits {
 
 impl BackgroundLimits {
     /// Build from host-resolved wire values (the session params of the napi /
-    /// stdio entries). A non-positive grace period or concurrency cap is not
-    /// meaningful and is treated as unset; `bash_task_timeout_s` keeps `0`,
-    /// which is a real value meaning "no timeout".
+    /// stdio entries). `kill_grace_period_ms` keeps `0` — v2's schema allows
+    /// it (`min(0)`) and `terminateWithGrace` uses it as a real zero-width
+    /// window, so an explicit `0` must not collapse into the 5s default. A
+    /// non-positive concurrency cap is still treated as unset, and
+    /// `bash_task_timeout_s` keeps `0` as "no timeout".
     #[must_use]
     pub fn from_wire(
         kill_grace_period_ms: Option<u64>,
@@ -357,7 +478,7 @@ impl BackgroundLimits {
         keep_alive_on_exit: Option<bool>,
     ) -> Self {
         Self {
-            kill_grace_period_ms: kill_grace_period_ms.filter(|value| *value > 0),
+            kill_grace_period_ms,
             max_running_tasks: max_running_tasks
                 .filter(|value| *value > 0)
                 .and_then(|value| u32::try_from(value).ok()),
@@ -386,10 +507,9 @@ pub struct TaskRunner {
     /// conversation input; the runner itself does not inject — v2
     /// wires the dispatcher, repl, and host to consume.
     pending_notifications: Mutex<Vec<TaskNotification>>,
-    /// Optional lifecycle sink (the server's hub): fired as
-    /// `event.task.created` / `background.task.started` on spawn and
-    /// `event.task.completed` / `background.task.terminated` on settle, with
-    /// the task's session for lane routing. Absent = purely local runner.
+    /// Optional lifecycle sink (the server's hub): fired as `task.started`
+    /// on spawn and `task.terminated` on settle (plus `task.output` chunks),
+    /// with the task's session for lane routing. Absent = purely local runner.
     event_sink: Mutex<Option<TaskEventSink>>,
     /// Fired after a task settles, with its session, so the server can
     /// recompute the session activity fold (v2 `TaskTerminatedNotice`). The
@@ -472,6 +592,11 @@ pub struct TaskNotification {
     pub truncated: bool,
 }
 
+struct QuestionNotification {
+    title: &'static str,
+    body: String,
+}
+
 impl TaskNotification {
     /// v2 `buildAgentTaskNotification` + `renderNotificationXml`: the XML the
     /// model reads when a background task settles. The id/type/source fields
@@ -500,7 +625,11 @@ impl TaskNotification {
             escape_xml_attr(&self.task_id),
             agent_attr
         )];
-        lines.push(format!("Title: Background {kind} {status}"));
+        let question = self.question_notification();
+        match &question {
+            Some(notification) => lines.push(format!("Title: {}", notification.title)),
+            None => lines.push(format!("Title: Background {kind} {status}")),
+        }
         lines.push(format!(
             "Severity: {}",
             if self.status == TaskStatus::Completed {
@@ -509,12 +638,60 @@ impl TaskNotification {
                 "warning"
             }
         ));
-        lines.push(self.body(kind));
-        if let Some(child) = self.output_child() {
+        match &question {
+            Some(notification) => lines.push(notification.body.clone()),
+            None => lines.push(self.body(kind)),
+        }
+        if question.is_some() {
+            if let Some(child) = self.question_answer_child() {
+                lines.push(child);
+            }
+        } else if let Some(child) = self.output_child() {
             lines.push(child);
         }
         lines.push("</notification>".to_string());
         lines.join("\n")
+    }
+
+    fn question_outcome(&self) -> Option<bool> {
+        if self.status != TaskStatus::Completed || self.truncated {
+            return None;
+        }
+        let preview = self.output_preview.as_deref()?;
+        let parsed: serde_json::Value = serde_json::from_str(preview).ok()?;
+        let answers = parsed.get("answers")?.as_object()?;
+        Some(!answers.is_empty())
+    }
+
+    fn question_notification(&self) -> Option<QuestionNotification> {
+        if self.kind.as_deref() != Some("question") {
+            return None;
+        }
+        if self.question_outcome()? {
+            Some(QuestionNotification {
+                title: "Background question answered",
+                body: format!("The user answered \"{}\".", self.description),
+            })
+        } else {
+            Some(QuestionNotification {
+                title: "Background question dismissed",
+                body: format!(
+                    "The user dismissed \"{}\" without answering.",
+                    self.description
+                ),
+            })
+        }
+    }
+
+    fn question_answer_child(&self) -> Option<String> {
+        if self.kind.as_deref() != Some("question") || self.truncated {
+            return None;
+        }
+        let preview = self.output_preview.as_deref()?;
+        if preview.is_empty() {
+            return None;
+        }
+        Some(format!("<answer>\n{}\n</answer>", escape_xml_tags(preview)))
     }
 
     /// v2 `buildAgentTaskNotificationBody`.
@@ -641,6 +818,11 @@ fn escape_xml_attr(input: &str) -> String {
     input.replace('&', "&amp;").replace('"', "&quot;")
 }
 
+/// v2 `escapeXmlTags`.
+fn escape_xml_tags(input: &str) -> String {
+    input.replace('<', "&lt;").replace('>', "&gt;")
+}
+
 impl TaskRunner {
     /// Create a runner; `store` is the state store whose `task` domain
     /// receives the status updates (`None` keeps the runner purely
@@ -691,7 +873,7 @@ impl TaskRunner {
         max_settled_tasks: Option<u32>,
         keep_alive_on_exit: Option<bool>,
     ) {
-        if let Some(ms) = kill_grace_period_ms.filter(|ms| *ms > 0) {
+        if let Some(ms) = kill_grace_period_ms {
             *self.kill_grace.lock().unwrap_or_else(|e| e.into_inner()) = Duration::from_millis(ms);
         }
         if let Some(Ok(cap)) = max_running_tasks
@@ -784,22 +966,27 @@ impl TaskRunner {
     }
 
     /// Emit one live output chunk for a running task on its session lane
-    /// (`event.task.progress`). A no-op for an unknown task or when no sink is
-    /// wired, so a streaming caller can report unconditionally.
+    /// (`task.output`, v2 `TaskOutput`). A no-op for an unknown task or when
+    /// no sink is wired, so a streaming caller can report unconditionally.
     pub fn emit_progress(&self, task_id: &str, output_chunk: &str, stream: &str) {
-        let session = {
-            let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-            match tasks.get(task_id) {
-                Some(entry) => entry.session_id.clone(),
+        let (session, output_size_bytes) = {
+            let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+            match tasks.get_mut(task_id) {
+                Some(entry) => {
+                    entry.output_bytes =
+                        entry.output_bytes.saturating_add(output_chunk.len() as u64);
+                    (entry.session_id.clone(), entry.output_bytes)
+                }
                 None => return,
             }
         };
         self.fire_event(
             session.as_deref(),
             serde_json::json!({
-                "type": "event.task.progress",
-                "task_id": task_id,
-                "output_chunk": output_chunk,
+                "type": "task.output",
+                "taskId": task_id,
+                "chunk": output_chunk,
+                "outputSizeBytes": output_size_bytes,
                 "stream": stream,
             }),
         );
@@ -868,6 +1055,170 @@ impl TaskRunner {
     where
         F: Future<Output = TaskOutcome> + Send + 'static,
     {
+        self.spawn_entry(meta, TaskExtra::default(), id, description, future)
+    }
+
+    /// [`Self::spawn_task_with_meta`] for a process task: `command` and `pid`
+    /// ride into `task.started`/`task.terminated` as v2 `ProcessTaskInfo`
+    /// fields, and the future reports the real exit code.
+    pub fn spawn_process_task<F>(
+        self: &Arc<Self>,
+        meta: TaskSpawnMeta<'_>,
+        command: &str,
+        pid: Option<u32>,
+        parent_tool_call_id: Option<&str>,
+        id: String,
+        description: String,
+        future: F,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = TaskOutcome> + Send + 'static,
+    {
+        self.spawn_process_task_with_output(
+            meta,
+            command,
+            pid,
+            parent_tool_call_id,
+            id,
+            description,
+            None,
+            future,
+        )
+    }
+
+    /// Register a process task that already printed `initial_output`.
+    ///
+    /// The foreground Bash path waits inline and only promotes the command when
+    /// its timeout fires, while v2 registers every command as a task from spawn
+    /// and writes into one output sink. Handing the text collected before the
+    /// promotion in here keeps `TaskOutput` equivalent across the detach
+    /// boundary instead of starting the task's output at the promotion point.
+    /// The future's own output is appended to it on settlement.
+    pub fn spawn_promoted_process_task<F>(
+        self: &Arc<Self>,
+        meta: TaskSpawnMeta<'_>,
+        command: &str,
+        pid: Option<u32>,
+        parent_tool_call_id: Option<&str>,
+        id: String,
+        description: String,
+        initial_output: String,
+        future: F,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = TaskOutcome> + Send + 'static,
+    {
+        self.spawn_process_task_with_output(
+            meta,
+            command,
+            pid,
+            parent_tool_call_id,
+            id,
+            description,
+            Some(initial_output),
+            future,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_process_task_with_output<F>(
+        self: &Arc<Self>,
+        meta: TaskSpawnMeta<'_>,
+        command: &str,
+        pid: Option<u32>,
+        parent_tool_call_id: Option<&str>,
+        id: String,
+        description: String,
+        initial_output: Option<String>,
+        future: F,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = TaskOutcome> + Send + 'static,
+    {
+        self.spawn_entry(
+            meta,
+            TaskExtra {
+                command: Some(command.to_string()),
+                pid,
+                parent_tool_call_id: parent_tool_call_id.map(str::to_string),
+                initial_output,
+                ..TaskExtra::default()
+            },
+            id,
+            description,
+            future,
+        )
+    }
+
+    pub fn spawn_agent_task_with_meta<F>(
+        self: &Arc<Self>,
+        meta: TaskSpawnMeta<'_>,
+        agent: TaskAgentInfo<'_>,
+        id: String,
+        description: String,
+        future: F,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = TaskOutcome> + Send + 'static,
+    {
+        self.spawn_entry(
+            meta,
+            TaskExtra {
+                parent_tool_call_id: agent.parent_tool_call_id.map(str::to_string),
+                model: agent.model.map(str::to_string),
+                thinking_effort: agent.thinking_effort.map(str::to_string),
+                ..TaskExtra::default()
+            },
+            id,
+            description,
+            future,
+        )
+    }
+
+    pub fn spawn_question_task<F>(
+        self: &Arc<Self>,
+        session_id: Option<&str>,
+        id: String,
+        description: String,
+        question_count: usize,
+        tool_call_id: Option<&str>,
+        future: F,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = TaskOutcome> + Send + 'static,
+    {
+        self.spawn_entry(
+            TaskSpawnMeta {
+                session_id,
+                kind: "question",
+                subagent_type: None,
+                agent_id: None,
+                timeout_ms: None,
+            },
+            TaskExtra {
+                question_count: Some(question_count),
+                tool_call_id: tool_call_id
+                    .filter(|tool_call_id| !tool_call_id.is_empty())
+                    .map(str::to_string),
+                ..TaskExtra::default()
+            },
+            id,
+            description,
+            future,
+        )
+    }
+
+    fn spawn_entry<F>(
+        self: &Arc<Self>,
+        meta: TaskSpawnMeta<'_>,
+        extra: TaskExtra,
+        id: String,
+        description: String,
+        future: F,
+    ) -> Result<(), String>
+    where
+        F: Future<Output = TaskOutcome> + Send + 'static,
+    {
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         if tasks.contains_key(&id) {
             return Err(format!("task already exists: {id}"));
@@ -893,6 +1244,10 @@ impl TaskRunner {
         .boxed()
         .shared();
         let started_at = now_ms();
+        let initial_output = extra.initial_output;
+        let initial_output_bytes = initial_output
+            .as_ref()
+            .map_or(0, |output| output.len() as u64);
         let entry = TaskEntry {
             id: id.clone(),
             description: description.clone(),
@@ -900,24 +1255,33 @@ impl TaskRunner {
             status: TaskStatus::Running,
             ended_at: None,
             stop_reason: None,
-            output: None,
+            output: initial_output,
             partial_output: RunOutput::default(),
             session_id: meta.session_id.map(str::to_string),
             kind: meta.kind.to_string(),
             subagent_type: meta.subagent_type.map(str::to_string),
             agent_id: meta.agent_id.map(str::to_string),
+            question_count: extra.question_count,
+            tool_call_id: extra.tool_call_id,
+            parent_tool_call_id: extra.parent_tool_call_id,
+            model: extra.model,
+            thinking_effort: extra.thinking_effort,
+            command: extra.command,
+            pid: extra.pid,
+            exit_code: None,
+            terminal_notification_suppressed: false,
             cancel: Arc::new(AtomicBool::new(false)),
             cancel_notify: Arc::new(Notify::new()),
+            output_bytes: initial_output_bytes,
             done,
             handle: None,
         };
+        let started_info = task_info(&entry);
         self.persist_wire(&self.entry_wire(&entry));
         let cancel = Arc::clone(&entry.cancel);
         let cancel_notify = Arc::clone(&entry.cancel_notify);
         let spawn_session = entry.session_id.clone();
         let spawn_kind = entry.kind.clone();
-        let spawn_subagent_type = entry.subagent_type.clone();
-        let spawn_agent_id = entry.agent_id.clone();
         let spawn_timeout = meta.timeout_ms.map(Duration::from_millis);
         tasks.insert(id.clone(), entry);
         self.ghosts
@@ -941,12 +1305,12 @@ impl TaskRunner {
                     _ = cancelled(cancel, cancel_notify) => Err(false),
                 }
             };
-            let (status, stop_reason, output) = match output {
+            let (status, stop_reason, output, exit_code) = match output {
                 Ok(outcome) => {
-                    let (status, output) = outcome.settle();
-                    (status, None, output)
+                    let (status, output, exit_code) = outcome.settle();
+                    (status, None, output, exit_code)
                 }
-                Err(true) => (TaskStatus::TimedOut, None, None),
+                Err(true) => (TaskStatus::TimedOut, None, None, None),
                 Err(false) => {
                     // Killed via the cancel flag, which only `stop()` sets —
                     // and `stop()` records the reason on the entry up front —
@@ -954,46 +1318,23 @@ impl TaskRunner {
                     // it. Nothing else produces a kill, which is why a
                     // subagent that was cancelled upstream settles `Failed`
                     // rather than reaching this arm.
-                    (TaskStatus::Killed, None, None)
+                    (TaskStatus::Killed, None, None, None)
                 }
             };
-            runner.settle_task(&task_id, status, output, stop_reason);
+            runner.settle_task(&task_id, status, output, stop_reason, exit_code);
             let _ = done_tx.send(());
         });
         tasks.get_mut(&id).unwrap().handle = Some(handle);
         drop(tasks);
 
-        // Announce the task in both vocabularies the Web client consumes:
-        // the protocol shape (mappers `event.task.created`) and the legacy
-        // agent-event name (projector allowlist).
+        // Announce the task on its session lane with the v2 task record
+        // (`task.started`, payload `AgentTaskInfo`).
         let session = spawn_session.as_deref();
         self.fire_event(
             session,
             serde_json::json!({
-                "type": "event.task.created",
-                "task": {
-                    "id": id,
-                    "session_id": session,
-                    "kind": spawn_kind,
-                    "description": description,
-                    "status": "running",
-                    "created_at": chrono::Utc::now().to_rfc3339(),
-                    "started_at": chrono::Utc::now().to_rfc3339(),
-                    "subagent_type": spawn_subagent_type,
-                    // The agent↔task association (upstream #3970): the
-                    // transcript fold adopts the spawn placeholder keyed by
-                    // this id instead of duplicating the task.
-                    "agent_id": spawn_agent_id,
-                    "run_in_background": true,
-                },
-            }),
-        );
-        self.fire_event(
-            session,
-            serde_json::json!({
-                "type": "background.task.started",
-                "task_id": id,
-                "description": description,
+                "type": "task.started",
+                "info": started_info,
             }),
         );
         // v2 `TaskStarted` hook event (agentExternalHooksService): hooks
@@ -1124,6 +1465,10 @@ impl TaskRunner {
                 // announced again — but its loss is still persisted, and the
                 // marker keeps later reconciles silent too.
                 let report = !remindable && !already.contains(&task_id);
+                let suppressed = task
+                    .get("terminalNotificationSuppressed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let mut task = task;
                 if let Some(object) = task.as_object_mut() {
                     object.insert("status".into(), json!(TaskStatus::Lost.as_str()));
@@ -1137,7 +1482,7 @@ impl TaskRunner {
                         changed = true;
                     }
                 }
-                if report {
+                if report && !suppressed {
                     notifications.push(previous_session_notification(&task));
                     reported.push(previous_session_task_line(&task));
                 }
@@ -1371,6 +1716,7 @@ impl TaskRunner {
             }
             entry.cancel.store(true, Ordering::Relaxed);
             entry.cancel_notify.notify_waiters();
+            entry.terminal_notification_suppressed = true;
             entry.done.clone()
         };
         let grace = *self.kill_grace.lock().unwrap_or_else(|e| e.into_inner());
@@ -1383,7 +1729,7 @@ impl TaskRunner {
             .await
             .is_err()
         {
-            self.settle_task(id, TaskStatus::Killed, None, None);
+            self.settle_task(id, TaskStatus::Killed, None, None, None);
         }
         let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         let entry = tasks.get(id).unwrap();
@@ -1443,6 +1789,7 @@ impl TaskRunner {
                 }
                 entry.cancel.store(true, Ordering::Relaxed);
                 entry.cancel_notify.notify_waiters();
+                entry.terminal_notification_suppressed = true;
                 ids.push(id.clone());
                 waits.push((id.clone(), entry.done.clone()));
             }
@@ -1461,7 +1808,7 @@ impl TaskRunner {
                 .await
                 .is_err()
             {
-                self.settle_task(&id, TaskStatus::Killed, None, None);
+                self.settle_task(&id, TaskStatus::Killed, None, None, None);
             }
         }
         SessionStopOutcome { flagged: ids }
@@ -1605,6 +1952,7 @@ impl TaskRunner {
         status: TaskStatus,
         output: Option<String>,
         stop_reason: Option<String>,
+        exit_code: Option<i32>,
     ) {
         let (
             description,
@@ -1617,8 +1965,10 @@ impl TaskRunner {
             output_bytes,
             agent_id,
             stop_reason,
+            terminal_suppressed,
             output_path,
             truncated,
+            info,
         ) = {
             let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = tasks.get_mut(id) else {
@@ -1629,6 +1979,8 @@ impl TaskRunner {
             }
             entry.status = status;
             entry.ended_at = Some(now_ms());
+            entry.exit_code = exit_code;
+            let existing_output = entry.output.take();
             let partial = if entry.kind == "subagent" && status != TaskStatus::Completed {
                 entry.partial_output.render()
             } else {
@@ -1636,11 +1988,16 @@ impl TaskRunner {
             };
             let partial =
                 (!partial.is_empty()).then(|| format!("{PARTIAL_OUTPUT_NOTICE}\n\n{partial}"));
-            entry.output = match (output, partial) {
+            let settled = match (output, partial) {
                 (Some(output), _) if output.contains("[partial output]") => Some(output),
                 (Some(output), Some(partial)) => Some(format!("{output}\n\n{partial}")),
                 (Some(output), None) => Some(output),
                 (None, partial) => partial,
+            };
+            entry.output = match (existing_output, settled) {
+                (Some(existing), Some(settled)) => Some(format!("{existing}{settled}")),
+                (Some(existing), None) => Some(existing),
+                (None, settled) => settled,
             };
             entry.partial_output = RunOutput::default();
             if let Some(reason) = stop_reason {
@@ -1654,6 +2011,7 @@ impl TaskRunner {
                 .is_some_and(|output| output.chars().count() > NOTIFICATION_PREVIEW_CHARS);
             let description = entry.description.clone();
             let wire = self.entry_wire(entry);
+            let info = task_info(entry);
             (
                 description,
                 entry.started_at,
@@ -1665,6 +2023,7 @@ impl TaskRunner {
                 entry.output.as_ref().map(|o| o.len() as u64).unwrap_or(0),
                 entry.agent_id.clone(),
                 entry.stop_reason.clone(),
+                entry.terminal_notification_suppressed,
                 self.store
                     .as_ref()
                     .filter(|_| {
@@ -1675,6 +2034,7 @@ impl TaskRunner {
                     })
                     .map(|store| store.task_output_path(id).to_string_lossy().into_owned()),
                 truncated,
+                info,
             )
         };
         if let Some(output) = wire.get("output").and_then(|v| v.as_str())
@@ -1690,7 +2050,7 @@ impl TaskRunner {
         // session's pump, so when the host reports that session gone the
         // notification has no future reader — queueing it just leaks. v2
         // gates `notifyAgentTask` on `lifecycleActive()` the same way.
-        if self.session_alive(session_id.as_deref()) {
+        if !terminal_suppressed && self.session_alive(session_id.as_deref()) {
             // v2 `Notification` hook event (agentExternalHooksService,
             // delivered-as-context task notifications): hooks match against
             // the terminal status.
@@ -1758,31 +2118,19 @@ impl TaskRunner {
                 "task notification skipped: agent lifecycle inactive"
             );
         }
-        // Terminal facts, both vocabularies (mappers + projector). Same
+        // Terminal facts in the v2 task vocabulary (`task.terminated`). Same
         // liveness gate as v2's `recordTaskTerminated`: a session teardown
         // must not be answered by terminal events for tasks it will never
         // see.
         if self.session_alive(session_id.as_deref()) {
-            let session = session_id.as_deref();
-            self.fire_event(
-                session,
-                serde_json::json!({
-                    "type": "event.task.completed",
-                    "task_id": id,
-                    "status": status.as_str(),
-                    "output_preview": output_preview,
-                    "output_bytes": output_bytes,
-                }),
-            );
-            self.fire_event(
-                session,
-                serde_json::json!({
-                    "type": "background.task.terminated",
-                    "task_id": id,
-                    "status": status.as_str(),
-                    "kind": kind,
-                }),
-            );
+            let mut event = serde_json::json!({
+                "type": "task.terminated",
+                "info": info,
+            });
+            if let Some(tail) = &output_preview {
+                event["outputTail"] = json!(tail);
+            }
+            self.fire_event(session_id.as_deref(), event);
         } else {
             // v2 `recordTaskTerminated`'s guard, surfaced (upstream #4280).
             tracing::warn!(
@@ -1929,11 +2277,9 @@ impl TaskRunner {
     /// drains it like any task notification and turns it into a follow-up
     /// turn, which is what actually wakes the tower.
     ///
-    /// Mirrors `settle_task`'s two channels: the terminal events fire on the
-    /// session lane (gated on liveness, so a dead session is not announced
-    /// to) and the notification queues for the print/steer drain. No task
-    /// entry is created — the wake is not a task and stays out of
-    /// TaskList/TaskOutput.
+    /// Only the notification channel exists: no task entry is created and no
+    /// `task.*` record is emitted — the wake is not a task (v2 sends no task
+    /// record for a tower wake) and stays out of TaskList/TaskOutput.
     pub fn enqueue_wake(&self, session_id: &str, task_id: &str, description: String) {
         if !self.session_alive(Some(session_id)) {
             // Same lifecycle guard as `settle_task`'s notification arm,
@@ -1949,19 +2295,18 @@ impl TaskRunner {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let now = now_ms();
-        let description = match queue.iter_mut().find(|notification| {
+        match queue.iter_mut().find(|notification| {
             notification.task_id == task_id
                 && notification.session_id.as_deref() == Some(session_id)
         }) {
             Some(existing) => {
                 existing.description = description;
                 existing.ended_at = now;
-                existing.description.clone()
             }
             None => {
                 queue.push(TaskNotification {
                     task_id: task_id.to_string(),
-                    description: description.clone(),
+                    description,
                     status: TaskStatus::Completed,
                     output_preview: None,
                     started_at: now,
@@ -1974,30 +2319,10 @@ impl TaskRunner {
                     output_size_bytes: 0,
                     truncated: false,
                 });
-                description
             }
-        };
+        }
         drop(queue);
         self.ring_notification_bell();
-        self.fire_event(
-            Some(session_id),
-            serde_json::json!({
-                "type": "event.task.completed",
-                "task_id": task_id,
-                "status": "completed",
-                "output_preview": description,
-                "output_bytes": 0,
-            }),
-        );
-        self.fire_event(
-            Some(session_id),
-            serde_json::json!({
-                "type": "background.task.terminated",
-                "task_id": task_id,
-                "status": "completed",
-                "kind": "other",
-            }),
-        );
     }
 
     /// Drop a pending wake: leaving tower mode must not answer the session
@@ -2019,8 +2344,8 @@ impl TaskRunner {
     /// Two consumers read this one document: the in-tree REST/napi clients
     /// (and the persisted `task` state domain) use the camelCase pair
     /// `taskId` / `startedAt`, while the official Web bundle's task mapper
-    /// requires the protocol shape — a snake_case `id`, matching
-    /// `event.task.created`, and a boolean `run_in_background` it throws on
+    /// requires the protocol shape — a snake_case `id`, matching the REST
+    /// task mapper, and a boolean `run_in_background` it throws on
     /// when absent. Carry both rather than picking a side.
     fn entry_wire(&self, entry: &TaskEntry) -> Value {
         let started_iso = chrono::DateTime::from_timestamp_millis(entry.started_at as i64)
@@ -2041,6 +2366,9 @@ impl TaskRunner {
         if let Some(reason) = &entry.stop_reason {
             obj.insert("stopReason".into(), json!(reason));
         }
+        if entry.terminal_notification_suppressed {
+            obj.insert("terminalNotificationSuppressed".into(), json!(true));
+        }
         if let Some(output) = &entry.output {
             obj.insert("output".into(), json!(output));
             if entry.kind == "subagent"
@@ -2057,9 +2385,42 @@ impl TaskRunner {
         if let Some(session) = &entry.session_id {
             obj.insert("sessionId".into(), json!(session));
         }
-        // Protocol vocabulary (`event.task.created` / the Web task mapper).
+        // REST vocabulary for the Web task mapper.
         obj.insert("id".into(), json!(entry.id));
         obj.insert("kind".into(), json!(entry.kind));
+        if entry.kind == "question" {
+            if let Some(question_count) = entry.question_count {
+                obj.insert("questionCount".into(), json!(question_count));
+            }
+            if let Some(tool_call_id) = &entry.tool_call_id {
+                obj.insert("toolCallId".into(), json!(tool_call_id));
+            }
+        }
+        if entry.kind != "subagent" && entry.kind != "question" {
+            obj.insert(
+                "exitCode".into(),
+                entry.exit_code.map_or(Value::Null, |code| json!(code)),
+            );
+            if let Some(command) = &entry.command {
+                obj.insert("command".into(), json!(command));
+            }
+            if let Some(pid) = entry.pid {
+                obj.insert("pid".into(), json!(pid));
+            }
+        }
+        if entry.kind != "question" {
+            if let Some(parent_tool_call_id) = &entry.parent_tool_call_id {
+                obj.insert("parent_tool_call_id".into(), json!(parent_tool_call_id));
+            }
+        }
+        if entry.kind == "subagent" {
+            if let Some(model) = &entry.model {
+                obj.insert("model".into(), json!(model));
+            }
+            if let Some(thinking_effort) = &entry.thinking_effort {
+                obj.insert("thinking_effort".into(), json!(thinking_effort));
+            }
+        }
         if let Some(session) = &entry.session_id {
             obj.insert("session_id".into(), json!(session));
         }

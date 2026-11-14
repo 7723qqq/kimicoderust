@@ -1,20 +1,22 @@
-//! Cache-token accounting shared by the OpenAI and Responses usage parsers
-//! (v2 `requester/bases/openai/usage.ts`).
-//!
-//! Providers report prompt-cache accounting in three incompatible shapes: a
-//! generic `cached_tokens` (sometimes nested), and DeepSeek's explicit
-//! hit/miss pair. When the pair contradicts the prompt total the reported
-//! numbers are unusable, so the split collapses to the generic cached count.
-
-/// The resolved cache accounting of one usage object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheSplit {
-    /// DeepSeek reported a usable hit/miss pair.
     Split { cached: u32, miss: Option<u32> },
-    /// DeepSeek's pair disagrees with `prompt_tokens`; ignore it.
+
     Contradiction { cached: u32, reported_miss: u32 },
-    /// No DeepSeek pair; only the generic cached count is known.
+
     Absent { cached: u32 },
+}
+
+pub fn chargeable_tokens(usage: &serde_json::Value) -> i64 {
+    ["inputOther", "inputCacheCreation", "output"]
+        .into_iter()
+        .map(|key| {
+            usage
+                .get(key)
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 impl CacheSplit {
@@ -26,7 +28,6 @@ impl CacheSplit {
         }
     }
 
-    /// The uncached input count, from the split when usable.
     pub fn input_other(self, prompt_tokens: u32) -> u32 {
         match self {
             CacheSplit::Split {
@@ -37,7 +38,6 @@ impl CacheSplit {
     }
 }
 
-/// v2 `classifyDeepSeekCacheSplit`.
 pub fn classify_deepseek_cache_split(
     hit: Option<u32>,
     miss: Option<u32>,
@@ -60,8 +60,6 @@ pub fn classify_deepseek_cache_split(
     CacheSplit::Split { cached: hit, miss }
 }
 
-/// v2 `readOpenAICacheFields`: the generic cached count falls back from the
-/// flat `cached_tokens` through both nested detail objects.
 pub fn read_openai_cache_fields(
     cached_tokens: Option<u32>,
     prompt_tokens_details_cached: Option<u32>,
@@ -127,6 +125,17 @@ mod tests {
         );
         assert_eq!(split.cached(), 5);
         assert_eq!(split.input_other(100), 95);
+    }
+
+    #[test]
+    fn chargeable_tokens_exclude_cache_reads() {
+        let usage = serde_json::json!({
+            "inputOther": 10,
+            "inputCacheRead": 20,
+            "inputCacheCreation": 3,
+            "output": 7,
+        });
+        assert_eq!(chargeable_tokens(&usage), 20);
     }
 
     #[test]

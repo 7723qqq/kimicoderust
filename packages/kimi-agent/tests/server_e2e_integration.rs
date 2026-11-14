@@ -150,6 +150,8 @@ async fn server_e2e_http_rest_full_roundtrip() {
         question_id: "q_e2e_1".into(),
         turn_id: "turn-e2e".into(),
         tool_call_id: "call_q".into(),
+        agent_id: None,
+        session_id: None,
         background: false,
         timeout_ms: None,
         questions: vec![kimi_agent::rpc::types::AskQuestionItem {

@@ -1,24 +1,3 @@
-//! The antigravity protocol: a subprocess bridge to the Google Cloud Code
-//! `agy` CLI.
-//!
-//! This is not an HTTP wire format. The reference implementation
-//! (`agent-core-v2/src/human/llm/requester/bases/antigravity/`) spawns the
-//! locally installed `agy` binary, reads its NDJSON stdout, and polls a
-//! transcript file for the CLI's internal tool activity. There is no endpoint,
-//! no auth header and no request body: the CLI owns its credentials, and the
-//! engine only forwards a prompt string plus a whitelisted environment.
-//!
-//! Two deliberate hardenings over the reference:
-//!
-//! * every wait is bounded ([`crate::primitives::deadline`]); the reference
-//!   has no timeouts at all, only an abort signal;
-//! * malformed lines, unknown events and empty streams are counted and
-//!   reported, where the reference silently drops them.
-//!
-//! Everything else — prompt assembly, model aliasing, stream-event semantics,
-//! usage bucketing, transcript rendering — follows the reference so the
-//! observable behaviour matches.
-
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,14 +15,12 @@ use crate::primitives::deadline::{Deadline, bounded};
 use crate::rpc::types::{AntigravityLimits, BoxFuture, ContentBlock, NativeLlmConfig, TokenUsage};
 use kimi_core::types::{LLM, LLMChatParams, LLMChatResponse, LLMMessage};
 
-/// Poll cadence for the transcript side channel (reference: 250ms).
 pub const TRANSCRIPT_POLL: Duration = Duration::from_millis(250);
-/// Bound for one transcript side-channel read. This provider has no
-/// counterpart in the reference tree, so the value is local to this module.
+
 const TRANSCRIPT_READ_WAIT: Duration = Duration::from_secs(30);
-/// Bound for waiting out the provider process once it was asked to exit.
+
 const AGY_EXIT_WAIT: Duration = Duration::from_secs(15);
-/// How much stderr is kept for the exit report (reference: 64 KiB).
+
 pub const STDERR_LIMIT: usize = 64 * 1024;
 
 const ENV_ALLOWLIST: &[&str] = &[
@@ -67,8 +44,6 @@ const ENV_ALLOWLIST: &[&str] = &[
     "GOOGLE_CLOUD_LOCATION",
 ];
 
-// Error prefixes. Stable strings: the retry layer classifies on them and the
-// host shows them verbatim.
 const ERR_SPAWN: &str = "antigravity.spawn";
 const ERR_AUTH: &str = "antigravity.auth";
 const ERR_QUOTA: &str = "antigravity.quota";
@@ -76,13 +51,8 @@ const ERR_MODEL_NOT_FOUND: &str = "antigravity.model_not_found";
 const ERR_PROTOCOL: &str = "antigravity.protocol";
 const ERR_TIMEOUT: &str = "antigravity.timeout";
 
-/// Cancellation message shared with the native HTTP transport, so the retry
-/// layer's `is_cancelled_error` recognizes it.
 const CANCELLED: &str = "llm cancelled: antigravity request aborted";
 
-// ── Process abstraction ────────────────────────────────────────────────────
-
-/// One `agy` invocation, fully resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnSpec {
     pub binary: String,
@@ -91,37 +61,29 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
 }
 
-/// A spawned `agy` process as the transport sees it.
 #[async_trait]
 pub trait AntigravityChild: Send {
-    /// The next stdout chunk, `None` on EOF.
     async fn recv_chunk(&mut self) -> Option<Result<Vec<u8>, String>>;
-    /// Wait for the process to exit.
+
     async fn wait_exit(&mut self) -> Result<ExitInfo, String>;
-    /// The last [`STDERR_LIMIT`] bytes the process wrote.
+
     fn stderr_tail(&self) -> String;
-    /// Terminate the process (idempotent).
+
     fn kill(&mut self);
 }
 
-/// Starts `agy`. Split out so tests can script a process without a real
-/// binary or a network round-trip.
 #[async_trait]
 pub trait AntigravityRunner: Send + Sync {
     async fn spawn(&self, spec: SpawnSpec) -> Result<Box<dyn AntigravityChild>, String>;
 }
 
-/// A process exit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitInfo {
-    /// The exit code, when the platform reports one (a signal-killed child has
-    /// none).
     pub code: Option<i32>,
-    /// The signal that killed the child, when there was one.
+
     pub signal: Option<i32>,
 }
 
-/// The production runner: a real `tokio::process::Child`.
 #[derive(Debug, Default)]
 pub struct TokioRunner;
 
@@ -137,7 +99,6 @@ impl AntigravityRunner for TokioRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // An abandoned turn must not leave an `agy` process behind.
             .kill_on_drop(true);
         command.env_clear();
         for (key, value) in &spec.env {
@@ -227,8 +188,7 @@ impl AntigravityChild for TokioChild {
             .wait()
             .await
             .map_err(|error| format!("{ERR_PROTOCOL}: failed waiting for agy: {error}"))?;
-        // The stderr reader sees EOF once the child is gone; joining it makes
-        // the tail complete before the exit is classified.
+
         if let Some(handle) = self.stderr_task.take() {
             let _ = handle.await;
         }
@@ -257,9 +217,6 @@ impl AntigravityChild for TokioChild {
     }
 }
 
-// ── Stream frames ──────────────────────────────────────────────────────────
-
-/// One decoded stdout frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     Init { conversation_id: String },
@@ -311,8 +268,6 @@ struct RawResult {
     usage: Option<RawUsage>,
 }
 
-/// What the decoder had to ignore, kept so a silent stream cannot hide
-/// protocol drift.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FrameTrouble {
     pub malformed: usize,
@@ -346,10 +301,6 @@ impl FrameTrouble {
     }
 }
 
-/// Incremental line decoder for the NDJSON stdout stream.
-///
-/// A chunk may end mid-line (half frame) or contain several lines (coalesced
-/// frames); both are handled by carrying the residual bytes between pushes.
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
     buffer: Vec<u8>,
@@ -362,7 +313,6 @@ impl FrameDecoder {
         Self::default()
     }
 
-    /// Feed one stdout chunk and return every frame it completed.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Frame> {
         self.buffer.extend_from_slice(chunk);
         let mut frames = Vec::new();
@@ -374,7 +324,6 @@ impl FrameDecoder {
         frames
     }
 
-    /// Flush a residual line at EOF (the reference's readline emits it too).
     pub fn finish(&mut self) -> Vec<Frame> {
         let mut frames = Vec::new();
         if self.buffer.is_empty() {
@@ -457,9 +406,6 @@ fn trim_ascii(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-// ── Prompt / model / env ───────────────────────────────────────────────────
-
-/// Model alias mapping (v2 `mapModelToAntigravity`).
 #[must_use]
 pub fn map_model(model: &str, effort: Option<&str>) -> String {
     let normalized = model.to_lowercase().replace(['_', ' ', '.'], "-");
@@ -511,8 +457,6 @@ pub fn map_model(model: &str, effort: Option<&str>) -> String {
     model.to_string()
 }
 
-/// The visible text of a message, with thinking and media dropped
-/// (v2's `extractText`).
 fn message_text(message: &LLMMessage) -> String {
     if message.blocks.is_empty() {
         return message.content.clone();
@@ -536,8 +480,6 @@ fn same_message(left: &LLMMessage, right: &LLMMessage) -> bool {
         && left.tool_call_id == right.tool_call_id
 }
 
-/// Whether the new history strictly extends the remembered one
-/// (v2 `extendsMessages`).
 fn extends_messages(previous: &[LLMMessage], current: &[LLMMessage]) -> bool {
     previous.len() <= current.len()
         && previous
@@ -546,11 +488,6 @@ fn extends_messages(previous: &[LLMMessage], current: &[LLMMessage]) -> bool {
             .all(|(left, right)| same_message(left, right))
 }
 
-/// Build the prompt string and the conversation id to resume.
-///
-/// * resumed: only the last message, the thread lives in the CLI;
-/// * one message: just that message;
-/// * otherwise: the whole history with role prefixes.
 #[must_use]
 pub fn build_prompt(history: &[LLMMessage], remembered: Option<&str>) -> (String, Option<String>) {
     if let Some(id) = remembered
@@ -582,8 +519,6 @@ fn last_text(history: &[LLMMessage]) -> String {
     history.last().map(message_text).unwrap_or_default()
 }
 
-/// v2 sends `"hi"` when there is nothing to say, so the CLI never receives an
-/// empty prompt.
 fn non_empty_prompt(prompt: String) -> String {
     if prompt.trim().is_empty() {
         "hi".to_string()
@@ -628,14 +563,6 @@ fn child_env() -> Vec<(String, String)> {
         .collect()
 }
 
-// ── Usage ──────────────────────────────────────────────────────────────────
-
-/// Map one antigravity usage object onto the engine's bucket convention.
-///
-/// The CLI reports the uncached input (`input_tokens`) and the cached read
-/// (`cache_read_tokens`) separately, with no prompt total. The prompt total is
-/// therefore their sum, and [`classify_deepseek_cache_split`] keeps the bucket
-/// arithmetic identical to every other provider.
 #[must_use]
 pub fn parse_usage(raw: &RawUsage) -> TokenUsage {
     let miss = raw.input_tokens.unwrap_or(0);
@@ -648,23 +575,13 @@ pub fn parse_usage(raw: &RawUsage) -> TokenUsage {
     TokenUsage {
         input_tokens,
         output_tokens,
-        // Same convention as every other transport: the wire total is the two
-        // headline buckets, not the provider's raw prompt total.
+
         total_tokens: input_tokens.saturating_add(output_tokens),
         input_cache_read,
         input_cache_creation: 0,
     }
 }
 
-// ── Error classification ───────────────────────────────────────────────────
-
-/// Classify a non-zero exit by its stderr.
-///
-/// The reference has no classification at all — every failure is
-/// `Antigravity exited with code N: <stderr>`. The Rust engine needs
-/// auth/quota/model-not-found to be distinguishable, so the stderr is
-/// scanned for the phrases those failures carry. Anything unrecognized stays
-/// a protocol failure (the bridge produced no usable result).
 #[must_use]
 pub fn classify_exit(exit: &ExitInfo, stderr: &str) -> String {
     let haystack = stderr.to_lowercase();
@@ -717,8 +634,6 @@ fn is_retryable(error: &str) -> bool {
     error.starts_with(ERR_QUOTA) || error.starts_with(ERR_TIMEOUT)
 }
 
-// ── Transcript side channel ────────────────────────────────────────────────
-
 #[derive(Deserialize)]
 struct TranscriptEntry {
     #[serde(rename = "type")]
@@ -735,11 +650,6 @@ struct TranscriptToolCall {
     args: serde_json::Value,
 }
 
-/// The CLI's internal activity, rendered as thinking text.
-///
-/// `root` is `None` until `init` names a conversation; the reader is a no-op
-/// before that. Offsets and a pending buffer make partial lines safe, and a
-/// shrunken file resets both.
 #[derive(Debug, Default)]
 pub struct TranscriptReader {
     root: Option<PathBuf>,
@@ -747,7 +657,7 @@ pub struct TranscriptReader {
     pending: Vec<u8>,
     last_thinking_len: usize,
     awaiting_tool_result: bool,
-    /// Last-resort response text, mirroring v2's `finalResponseText`.
+
     pub final_text: Option<String>,
     pub io_errors: usize,
 }
@@ -765,9 +675,6 @@ impl TranscriptReader {
         self.root = Some(root);
     }
 
-    /// Read the new tail and return the thinking fragments it produced.
-    ///
-    /// `flush` treats an unterminated last line as complete (process exit).
     pub async fn poll(&mut self, flush: bool) -> Result<Vec<String>, String> {
         let Some(root) = self.root.clone() else {
             return Ok(Vec::new());
@@ -778,14 +685,11 @@ impl TranscriptReader {
             .join("transcript.jsonl");
         let metadata = match tokio::fs::metadata(&path).await {
             Ok(metadata) => metadata,
-            // The transcript is created by the child after it starts, so an
-            // absent file is the normal "nothing written yet" state.
+
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Vec::new());
             }
-            // Anything else is a read failure, not evidence that the
-            // transcript does not exist — the remaining reads treat it the
-            // same way.
+
             Err(error) => {
                 self.io_errors += 1;
                 return Err(format!("reading transcript metadata: {error}"));
@@ -909,15 +813,12 @@ fn format_tool_args(args: &serde_json::Value) -> String {
     parts.join(", ")
 }
 
-// ── The transport ──────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 struct Remembered {
     id: String,
     messages: Vec<LLMMessage>,
 }
 
-/// The antigravity LLM transport.
 pub struct AntigravityLlm {
     config: NativeLlmConfig,
     system_prompt: String,
@@ -925,6 +826,7 @@ pub struct AntigravityLlm {
     stream_agent_id: Mutex<Option<String>>,
     turn_watch: Mutex<Option<Arc<kimi_core::watch::TurnWatchState>>>,
     remembered: Mutex<Option<Remembered>>,
+    interrupted_response: Mutex<Option<LLMChatResponse>>,
     transcript_root: Option<PathBuf>,
     runner: Arc<dyn AntigravityRunner>,
     limits: AntigravityLimits,
@@ -947,6 +849,7 @@ impl AntigravityLlm {
             stream_agent_id: Mutex::new(None),
             turn_watch: Mutex::new(None),
             remembered: Mutex::new(None),
+            interrupted_response: Mutex::new(None),
             transcript_root: None,
             runner: Arc::new(TokioRunner),
             limits,
@@ -960,8 +863,6 @@ impl AntigravityLlm {
         self
     }
 
-    /// Root of the transcript tree (`<root>/<conversation>/.system_generated/
-    /// logs/transcript.jsonl`), injectable so tests need no real CLI state.
     #[must_use]
     pub fn with_transcript_root(mut self, root: PathBuf) -> Self {
         self.transcript_root = Some(root);
@@ -1028,6 +929,10 @@ impl AntigravityLlm {
         &self,
         params: LLMChatParams,
     ) -> Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        self.interrupted_response
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         let started_at = Instant::now();
         let history: &[LLMMessage] = &params.messages;
 
@@ -1036,8 +941,7 @@ impl AntigravityLlm {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        // v2 drops the remembered thread as soon as the history is not a
-        // strict extension, so a rewritten history cannot resume stale state.
+
         if let Some(state) = &remembered
             && !extends_messages(&state.messages, history)
         {
@@ -1121,9 +1025,7 @@ impl AntigravityLlm {
 
         let mut ticker = tokio::time::interval(TRANSCRIPT_POLL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Stream progress marks: a transcript tick must not reset the stream
-        // timeout, so the wait is measured from the last stdout chunk, not from
-        // the last loop iteration.
+
         let mut last_output_at = Instant::now();
 
         let mut stdout_closed = false;
@@ -1163,6 +1065,28 @@ impl AntigravityLlm {
                 biased;
                 _ = cancel_future(cancel) => {
                     child.kill();
+                    let thinking_blocks = if thinking.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![ContentBlock::Think {
+                            think: std::mem::take(&mut thinking),
+                            encrypted: None,
+                            details_index: None,
+                            reasoning_key: None,
+                            details_summary: None,
+                        }]
+                    };
+                    *self
+                        .interrupted_response
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(LLMChatResponse {
+                        content: std::mem::take(&mut content),
+                        thinking: thinking_blocks,
+                        tool_calls: Vec::new(),
+                        finish_reason: None,
+                        usage: usage.clone(),
+                        timing: None,
+                    });
                     return Err(CANCELLED.into());
                 }
                 chunk = bounded(
@@ -1377,9 +1301,7 @@ impl AntigravityLlm {
                 "antigravity transcript side channel had read failures"
             );
         }
-        // A stream that yielded no frames at all is as suspicious as one with
-        // frames the decoder could not use: a clean exit would otherwise hide
-        // a CLI that printed nothing.
+
         let mut stream_notes = Vec::new();
         if !decoder.trouble.is_empty() {
             stream_notes.push(decoder.trouble.describe());
@@ -1400,8 +1322,6 @@ impl AntigravityLlm {
 
         let succeeded = exit.code == Some(0);
         if !succeeded {
-            // v2 yields whatever text it already produced before throwing, so
-            // a truncated answer is not lost.
             if !yielded_text && !final_text.is_empty() {
                 content.push_str(&final_text);
                 self.emit_delta(StreamDelta::Text(final_text.clone()));
@@ -1418,8 +1338,6 @@ impl AntigravityLlm {
         }
 
         if !yielded_text {
-            // v2 substitutes a single space so an empty answer never becomes
-            // an empty assistant message.
             let fallback = if final_text.is_empty() {
                 " ".to_string()
             } else {
@@ -1513,7 +1431,7 @@ impl LLM for AntigravityLlm {
                 .clone()
                 .unwrap_or_else(|| "antigravity".to_string()),
             provider_type: self.config.provider_type.clone().unwrap_or_default(),
-            // v2 declares image/video/audio false for this provider.
+
             image_in: false,
             video_in: false,
             audio_in: false,
@@ -1536,6 +1454,13 @@ impl LLM for AntigravityLlm {
             .unwrap_or_else(|error| error.into_inner()) = watch;
     }
 
+    fn take_interrupted_response(&self) -> Option<LLMChatResponse> {
+        self.interrupted_response
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+
     fn chat(
         &self,
         params: LLMChatParams,
@@ -1551,8 +1476,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use kimi_core::types::ToolInfo;
-
-    // ── Scripted process ───────────────────────────────────────────────────
 
     #[derive(Clone)]
     enum Step {
@@ -1584,8 +1507,6 @@ mod tests {
     #[async_trait]
     impl AntigravityChild for ScriptedChild {
         async fn recv_chunk(&mut self) -> Option<Result<Vec<u8>, String>> {
-            // A cancelled `recv_chunk` must not consume the pending step: the
-            // transport drops the read future on every timeout stage retry.
             let step = self.steps.front()?.clone();
             match step {
                 Step::Chunk(text) => {
@@ -1682,6 +1603,8 @@ mod tests {
             cancel: None,
             used_context_tokens: None,
             max_context_tokens: None,
+            max_output_tokens: None,
+            max_output_size: None,
         }
     }
 
@@ -1703,8 +1626,6 @@ mod tests {
         }
     }
 
-    // ── Frame decoding ─────────────────────────────────────────────────────
-
     #[test]
     fn decoder_handles_half_and_coalesced_frames() {
         let mut decoder = FrameDecoder::new();
@@ -1712,7 +1633,6 @@ mod tests {
         let step = r#"{"event":"step_update","step_update":{"text_delta":"hello"}}"#;
         let combined = format!("{init}\n{step}\n");
 
-        // One byte at a time: every frame is split across pushes.
         let mut frames = Vec::new();
         for byte in combined.as_bytes() {
             frames.extend(decoder.push(&[*byte]));
@@ -1731,8 +1651,6 @@ mod tests {
             ]
         );
 
-        // Coalesced: two complete lines plus a half one in one push; the half
-        // line is a trailing line with no newline, so EOF flushes it.
         let mut decoder = FrameDecoder::new();
         let coalesced = format!("{init}\n{step}\n{step}");
         let split = coalesced.len() - 4;
@@ -1762,8 +1680,6 @@ mod tests {
         assert!(described.contains("malformed"));
         assert!(described.contains("unknown"));
     }
-
-    // ── Prompt / model / usage ─────────────────────────────────────────────
 
     #[test]
     fn model_mapping_matches_the_reference_aliases() {
@@ -1850,8 +1766,6 @@ mod tests {
         assert!(!is_retryable(&format!("{ERR_PROTOCOL}: x")));
     }
 
-    // ── Chat against a scripted process ────────────────────────────────────
-
     #[tokio::test]
     async fn chat_streams_text_thinking_and_usage() {
         let child = ScriptedChild::new(
@@ -1914,6 +1828,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_exposes_the_partial_response_when_cancelled() {
+        let child = ScriptedChild::new(
+            vec![
+                Step::Chunk(
+                    "{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"partial\",\"thinking_delta\":\"why\"}}\n",
+                ),
+                Step::Delay(Duration::from_secs(10)),
+            ],
+            0,
+            "",
+        );
+        let runner = ScriptedRunner::new(vec![child]);
+        let llm = Arc::new(
+            AntigravityLlm::new(base_config(), "sys".to_string())
+                .with_runner(Arc::clone(&runner) as Arc<dyn AntigravityRunner>),
+        );
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut request = params(vec![user("hi")]);
+        request.cancel = Some(token.clone());
+        let chat_llm = llm.clone();
+        let chat = tokio::spawn(async move { chat_llm.chat(request).await });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        token.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(5), chat)
+            .await
+            .expect("cancellation resolves promptly")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.to_string(), CANCELLED);
+        let partial = llm
+            .take_interrupted_response()
+            .expect("the cancelled antigravity attempt exposes its partial response");
+        assert_eq!(partial.content, "partial");
+        assert!(matches!(
+            partial.thinking.as_slice(),
+            [ContentBlock::Think { think, .. }] if think == "why"
+        ));
+        assert!(llm.take_interrupted_response().is_none());
+    }
+
+    #[tokio::test]
     async fn chat_preserves_streamed_text_on_a_non_zero_exit() {
         let child = ScriptedChild::new(
             vec![Step::Chunk(
@@ -1938,7 +1894,7 @@ mod tests {
         let message = error.to_string();
         assert!(message.starts_with(ERR_QUOTA), "{message}");
         assert!(llm.is_retryable_error(&message));
-        // The already-streamed text reached the sink before the failure.
+
         let events = emitted.lock().unwrap();
         assert!(
             events
@@ -2026,8 +1982,7 @@ mod tests {
             0,
             "",
         );
-        // A rewritten history must not resume: the second spawn gets a fresh
-        // prompt, but the first (extended) one resumes.
+
         let second = ScriptedChild::new(
             vec![Step::Chunk(
                 "{\"event\":\"result\",\"result\":{\"response\":\"two\"}}\n",
@@ -2087,8 +2042,6 @@ mod tests {
         assert!(!specs[1].args.contains(&"--conversation".to_string()));
     }
 
-    // ── Transcript side channel ────────────────────────────────────────────
-
     fn transcript_file(root: &Path, conversation: &str) -> PathBuf {
         root.join(conversation)
             .join(".system_generated")
@@ -2106,7 +2059,6 @@ mod tests {
         let mut reader = TranscriptReader::new(root);
         reader.set_conversation(dir.path().join("brain").join("conv-1"));
 
-        // A partial line yields nothing and is carried over.
         std::fs::write(
             &path,
             "{\"type\":\"PLANNER_RESPONSE\",\"thinking\":\"thinking\"}",
@@ -2115,7 +2067,6 @@ mod tests {
         let thoughts = tokio_test_block_on(reader.poll(false)).unwrap();
         assert!(thoughts.is_empty());
 
-        // The newline completes the line; only the new suffix is emitted.
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -2136,7 +2087,6 @@ mod tests {
                 .any(|thought| thought == "\n🔧 read_file(path: a.rs)")
         );
 
-        // A tool result line renders a short summary.
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -2169,7 +2119,6 @@ mod tests {
         let thoughts = tokio_test_block_on(reader.poll(false)).unwrap();
         assert_eq!(thoughts, vec!["hello".to_string()]);
 
-        // A trailing line without a newline is only emitted on flush.
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -2184,8 +2133,6 @@ mod tests {
         let flushed = tokio_test_block_on(reader.poll(true)).unwrap();
         assert_eq!(flushed, vec![" world".to_string()]);
 
-        // A shrunken file resets the offset instead of reading nothing; the
-        // cumulative-thinking slice still starts at the last seen length.
         std::fs::write(
             &path,
             "{\"type\":\"PLANNER_RESPONSE\",\"thinking\":\"short again and longer\"}\n",
@@ -2195,8 +2142,6 @@ mod tests {
         assert_eq!(reset, vec![" and longer".to_string()]);
     }
 
-    /// Minimal block-on for the non-async transcript tests: a current-thread
-    /// runtime drives the `tokio::fs` calls to completion.
     fn tokio_test_block_on<F: std::future::Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

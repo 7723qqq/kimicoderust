@@ -1,20 +1,12 @@
-//! File upload / download / delete (`/api/v1/files`), mirroring v2
-//! `FileServiceImpl`'s blob+index layout and kap-server's `routes/files.ts`
-//! contract.
-//!
-//! Layout (under the data root, `<kimi home>/blobs`): one blob per file at
-//! `files/<id>` plus a `file/index.json` listing every [`FileMeta`]. Requests
-//! buffer the whole body, so the transport caps uploads (see
-//! `http::MAX_UPLOAD_BYTES`).
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::persistence::{FileStorageService, JsonAtomicDocumentStore, StorageResult};
 use crate::server::envelope::error_codes;
+use kimi_core::primitives::errors::Error2;
 
-/// One protocol error: HTTP status, kap-server code, message.
 pub type FileError = (u16, u32, String);
 
 fn validation(message: impl Into<String>) -> FileError {
@@ -33,7 +25,10 @@ fn internal(message: impl Into<String>) -> FileError {
     (500, error_codes::INTERNAL_ERROR, message.into())
 }
 
-/// `fileMetaSchema`: what upload returns and the index stores.
+fn internal_storage(error: Error2) -> FileError {
+    internal(format!("[{}] {}", error.code().as_str(), error.message()))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileMeta {
     pub id: String,
@@ -45,7 +40,6 @@ pub struct FileMeta {
     pub expires_at: Option<String>,
 }
 
-/// `FILE_ID_REGEX = /^f_[A-Za-z0-9][A-Za-z0-9_-]*$/`.
 pub fn is_file_id(value: &str) -> bool {
     let Some(rest) = value.strip_prefix("f_") else {
         return false;
@@ -76,17 +70,11 @@ fn is_expired(meta: &FileMeta) -> bool {
     }
 }
 
-/// The file store. `root` is the blob root (v2's storage base dir); `None`
-/// means the data home could not be resolved, and every operation fails.
 #[derive(Debug, Clone, Default)]
 pub struct FileStore {
     root: Option<PathBuf>,
 }
 
-/// Resolve a tool argument that names a preserved attachment to the blob it
-/// lives in. Accepts a `kimi-file://<id>` reference (what an attachment notice
-/// hands the model) and a bare store id; anything else is left to the caller's
-/// normal path resolution (v2 `fileReadSource`, upstream #3688).
 pub fn resolve_attachment_reference(store: &FileStore, value: &str) -> Option<PathBuf> {
     let id = crate::llm::media_resolver::parse_daemon_file_url(value).unwrap_or(value);
     if !is_file_id(id) {
@@ -97,15 +85,12 @@ pub fn resolve_attachment_reference(store: &FileStore, value: &str) -> Option<Pa
 }
 
 impl FileStore {
-    /// The store under `KIMI_CODE_HOME` (or `~/.kimi-code`), matching the
-    /// credential layout.
     pub fn new() -> Self {
         Self {
             root: data_home().map(|home| home.join("blobs")),
         }
     }
 
-    /// A store rooted at an explicit directory (tests).
     pub fn with_root(root: PathBuf) -> Self {
         Self { root: Some(root) }
     }
@@ -115,40 +100,57 @@ impl FileStore {
         Some((root.join("files"), root.join("file").join("index.json")))
     }
 
-    fn read_index(index_path: &Path) -> Vec<FileMeta> {
-        let Ok(raw) = std::fs::read_to_string(index_path) else {
-            return Vec::new();
+    fn read_index(index_path: &Path) -> StorageResult<Vec<FileMeta>> {
+        let store = Self::index_documents(index_path);
+        let Some(payload) = store.get::<Value>("file", "index.json")? else {
+            return Ok(Vec::new());
         };
-        let Ok(payload) = serde_json::from_str::<Value>(&raw) else {
-            return Vec::new();
+        let Some(items) = payload.get("files").and_then(Value::as_array) else {
+            let cause = std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the index payload does not contain a files array",
+            );
+            return Err(crate::persistence::atomic_document_store::decode_error(
+                "file",
+                "index.json",
+                "json",
+                Box::new(cause),
+            ));
         };
-        payload
-            .get("files")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| serde_json::from_value::<FileMeta>(item.clone()).ok())
-                    .collect()
+        items
+            .iter()
+            .map(|item| {
+                serde_json::from_value::<FileMeta>(item.clone()).map_err(|cause| {
+                    crate::persistence::atomic_document_store::decode_error(
+                        "file",
+                        "index.json",
+                        "json",
+                        Box::new(cause),
+                    )
+                })
             })
-            .unwrap_or_default()
+            .collect()
     }
 
-    fn write_index(index_path: &Path, metas: &[FileMeta]) -> Result<(), String> {
-        if let Some(parent) = index_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
-        }
+    fn write_index(index_path: &Path, metas: &[FileMeta]) -> StorageResult<()> {
         let payload = json!({ "version": 1, "files": metas });
-        let text = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
-        let tmp = index_path.with_extension(format!("tmp.{}", fastrand::u32(..)));
-        std::fs::write(&tmp, text.as_bytes())
-            .map_err(|error| format!("cannot write {}: {error}", tmp.display()))?;
-        std::fs::rename(&tmp, index_path)
-            .map_err(|error| format!("cannot replace {}: {error}", index_path.display()))
+        Self::index_documents(index_path).set("file", "index.json", &payload)
     }
 
-    /// Drop expired entries and their blobs; returns whether the index changed.
+    fn index_documents(index_path: &Path) -> JsonAtomicDocumentStore {
+        let base = index_path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| Path::new(""));
+        JsonAtomicDocumentStore::new(FileStorageService::new(base, None, None))
+    }
+
+    fn write_blob(blob: &Path, bytes: &[u8]) -> StorageResult<()> {
+        let parent = blob.parent().unwrap_or_else(|| Path::new("."));
+        let key = blob.file_name().unwrap_or_default().to_string_lossy();
+        FileStorageService::new(parent, None, None).write("", &key, bytes)
+    }
+
     fn prune(blob_dir: &Path, metas: &mut Vec<FileMeta>) -> bool {
         let mut removed = Vec::new();
         metas.retain(|meta| {
@@ -165,7 +167,6 @@ impl FileStore {
         !removed.is_empty()
     }
 
-    /// Save one upload and return its metadata.
     pub fn save(
         &self,
         name: &str,
@@ -180,16 +181,7 @@ impl FileStore {
         std::fs::create_dir_all(&blob_dir)
             .map_err(|error| internal(format!("cannot create {}: {error}", blob_dir.display())))?;
         let blob = blob_dir.join(&id);
-        let tmp = blob.with_extension(format!("tmp.{}", fastrand::u32(..)));
-        std::fs::write(&tmp, bytes)
-            .map_err(|error| internal(format!("cannot write {}: {error}", tmp.display())))?;
-        if let Err(error) = std::fs::rename(&tmp, &blob) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(internal(format!(
-                "cannot store {}: {error}",
-                blob.display()
-            )));
-        }
+        Self::write_blob(&blob, bytes).map_err(internal_storage)?;
 
         let created_at = now_rfc3339();
         let meta = FileMeta {
@@ -211,18 +203,13 @@ impl FileStore {
                 .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         };
 
-        let mut metas = Self::read_index(&index_path);
+        let mut metas = Self::read_index(&index_path).map_err(internal_storage)?;
         Self::prune(&blob_dir, &mut metas);
         metas.push(meta.clone());
-        Self::write_index(&index_path, &metas).map_err(internal)?;
+        Self::write_index(&index_path, &metas).map_err(internal_storage)?;
         Ok(meta)
     }
 
-    /// Store `bytes` under a caller-chosen id, replacing any entry with that
-    /// id. The id must already look like a file id (`f_…`), and writing one
-    /// that is already present is a no-op beyond refreshing the index entry —
-    /// which is what makes a content-addressed id (v2's `f_mcp_<sha256>`)
-    /// dedupe: the same attachment preserved twice occupies one blob.
     pub fn save_with_id(
         &self,
         id: &str,
@@ -241,10 +228,7 @@ impl FileStore {
             .map_err(|error| internal(format!("cannot create {}: {error}", blob_dir.display())))?;
         let blob = blob_dir.join(id);
         if blob.is_file() {
-            // The id is content-addressed, so the bytes already on disk are the
-            // ones this call would write. Leave them, and leave an existing
-            // index entry alone: a repeat preservation is a no-op.
-            let mut metas = Self::read_index(&index_path);
+            let mut metas = Self::read_index(&index_path).map_err(internal_storage)?;
             Self::prune(&blob_dir, &mut metas);
             if let Some(existing) = metas.iter().find(|existing| existing.id == id) {
                 return Ok(existing.clone());
@@ -269,20 +253,11 @@ impl FileStore {
                 expires_at: None,
             };
             metas.push(meta.clone());
-            Self::write_index(&index_path, &metas).map_err(internal)?;
+            Self::write_index(&index_path, &metas).map_err(internal_storage)?;
             return Ok(meta);
         }
 
-        let tmp = blob.with_extension(format!("tmp.{}", fastrand::u32(..)));
-        std::fs::write(&tmp, bytes)
-            .map_err(|error| internal(format!("cannot write {}: {error}", tmp.display())))?;
-        if let Err(error) = std::fs::rename(&tmp, &blob) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(internal(format!(
-                "cannot store {}: {error}",
-                blob.display()
-            )));
-        }
+        Self::write_blob(&blob, bytes).map_err(internal_storage)?;
 
         let meta = FileMeta {
             id: id.to_string(),
@@ -303,34 +278,30 @@ impl FileStore {
                 .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         };
 
-        let mut metas = Self::read_index(&index_path);
+        let mut metas = Self::read_index(&index_path).map_err(internal_storage)?;
         Self::prune(&blob_dir, &mut metas);
         metas.retain(|existing| existing.id != meta.id);
         metas.push(meta.clone());
-        Self::write_index(&index_path, &metas).map_err(internal)?;
+        Self::write_index(&index_path, &metas).map_err(internal_storage)?;
         Ok(meta)
     }
 
-    /// The blob path a stored id lives at, without reading the index — what a
-    /// caller hands to a path-based tool (`Read`, `ReadMediaFile`).
     pub fn blob_path(&self, id: &str) -> Option<PathBuf> {
         let (blob_dir, _) = self.paths()?;
         Some(blob_dir.join(id))
     }
 
-    /// Every live entry, pruning expired ones first.
     pub fn list(&self) -> Result<Vec<FileMeta>, FileError> {
         let (blob_dir, index_path) = self
             .paths()
             .ok_or_else(|| internal("cannot resolve the file store location"))?;
-        let mut metas = Self::read_index(&index_path);
+        let mut metas = Self::read_index(&index_path).map_err(internal_storage)?;
         if Self::prune(&blob_dir, &mut metas) {
-            Self::write_index(&index_path, &metas).map_err(internal)?;
+            Self::write_index(&index_path, &metas).map_err(internal_storage)?;
         }
         Ok(metas)
     }
 
-    /// Look one file up, dropping the entry when its blob went missing.
     pub fn get(&self, file_id: &str) -> Result<(FileMeta, PathBuf), FileError> {
         if !is_file_id(file_id) {
             return Err(not_found(file_id));
@@ -338,7 +309,7 @@ impl FileStore {
         let (blob_dir, index_path) = self
             .paths()
             .ok_or_else(|| internal("cannot resolve the file store location"))?;
-        let mut metas = Self::read_index(&index_path);
+        let mut metas = Self::read_index(&index_path).map_err(internal_storage)?;
         let mut dirty = Self::prune(&blob_dir, &mut metas);
         let blob = blob_dir.join(file_id);
         if !blob.is_file() {
@@ -347,24 +318,22 @@ impl FileStore {
                 dirty = true;
             }
             if dirty {
-                Self::write_index(&index_path, &metas).map_err(internal)?;
+                Self::write_index(&index_path, &metas).map_err(internal_storage)?;
             }
             return Err(not_found(file_id));
         }
         let Some(meta) = metas.iter().find(|meta| meta.id == file_id).cloned() else {
             if dirty {
-                Self::write_index(&index_path, &metas).map_err(internal)?;
+                Self::write_index(&index_path, &metas).map_err(internal_storage)?;
             }
             return Err(not_found(file_id));
         };
         if dirty {
-            Self::write_index(&index_path, &metas).map_err(internal)?;
+            Self::write_index(&index_path, &metas).map_err(internal_storage)?;
         }
         Ok((meta, blob))
     }
 
-    /// Delete one file (idempotent only for the caller's view: unknown ids
-    /// are a not-found error, like kap-server).
     pub fn delete(&self, file_id: &str) -> Result<(), FileError> {
         let (_, index_path) = self
             .paths()
@@ -372,14 +341,13 @@ impl FileStore {
         let (_, blob) = self.get(file_id)?;
         std::fs::remove_file(&blob)
             .map_err(|error| internal(format!("cannot delete {}: {error}", blob.display())))?;
-        let mut metas = Self::read_index(&index_path);
+        let mut metas = Self::read_index(&index_path).map_err(internal_storage)?;
         metas.retain(|meta| meta.id != file_id);
-        Self::write_index(&index_path, &metas).map_err(internal)?;
+        Self::write_index(&index_path, &metas).map_err(internal_storage)?;
         Ok(())
     }
 }
 
-/// The data home (`KIMI_CODE_HOME`, else `~/.kimi-code`).
 fn data_home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("KIMI_CODE_HOME") {
         return Some(PathBuf::from(home));
@@ -387,7 +355,6 @@ fn data_home() -> Option<PathBuf> {
     crate::config::dirs_home().map(|home| home.join(".kimi-code"))
 }
 
-/// One parsed `multipart/form-data` part.
 #[derive(Debug, Clone)]
 pub struct MultipartPart {
     pub name: String,
@@ -396,7 +363,6 @@ pub struct MultipartPart {
     pub bytes: Vec<u8>,
 }
 
-/// Extract the boundary from a `multipart/form-data` content type.
 pub fn boundary_of(content_type: &str) -> Option<String> {
     if !content_type
         .to_ascii_lowercase()
@@ -428,9 +394,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .map(|offset| from + offset)
 }
 
-/// Parse the body of a `multipart/form-data` request. Only the parts this
-/// route reads are materialized; unknown parts are still parsed so they do not
-/// corrupt the boundary walk.
 pub fn parse_multipart(body: &[u8], boundary: &str) -> Result<Vec<MultipartPart>, String> {
     let delimiter = format!("--{boundary}");
     let delimiter = delimiter.as_bytes();
@@ -441,11 +404,11 @@ pub fn parse_multipart(body: &[u8], boundary: &str) -> Result<Vec<MultipartPart>
         if body[after..].starts_with(b"--") {
             break;
         }
-        // Skip the CRLF that terminates the boundary line.
+
         if body[after..].starts_with(b"\r\n") {
             after += 2;
         }
-        // The closing delimiter starts with CRLF as well.
+
         let next = find_bytes(body, delimiter, after).ok_or("unterminated part")?;
         let mut end = next;
         if body[..end].ends_with(b"\r\n") {
@@ -496,8 +459,6 @@ fn parse_part(raw: &[u8]) -> Result<MultipartPart, String> {
     })
 }
 
-/// `POST /api/v1/files`: one multipart `file` part plus optional `name` and
-/// `expires_in_sec` fields.
 pub fn upload(store: &FileStore, content_type: &str, body: &[u8]) -> Result<Value, FileError> {
     let Some(boundary) = boundary_of(content_type) else {
         return Err(validation("multipart not initialized"));
@@ -530,8 +491,6 @@ pub fn upload(store: &FileStore, content_type: &str, body: &[u8]) -> Result<Valu
     serde_json::to_value(meta).map_err(|error| internal(error.to_string()))
 }
 
-/// Range parsing for `GET /api/v1/files/{id}` (`bytes=start-end`, suffix and
-/// open-ended forms included).
 pub fn parse_range(header: &str, size: u64) -> Option<(u64, u64)> {
     if size == 0 {
         return None;
@@ -566,7 +525,6 @@ pub fn parse_range(header: &str, size: u64) -> Option<(u64, u64)> {
     Some((start, end.min(size - 1)))
 }
 
-/// `content-disposition` for the download route.
 pub fn content_disposition(name: &str, media_type: &str) -> String {
     let disposition = if media_type.starts_with("image/")
         || media_type.starts_with("video/")
@@ -589,8 +547,7 @@ pub fn content_disposition(name: &str, media_type: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// A `kimi-file://<id>` reference resolves to the stored blob, a bare id
-    /// too, and anything else is not this function's business.
+
     #[test]
     fn test_resolve_attachment_reference() {
         let dir = tempfile::tempdir().unwrap();
@@ -606,16 +563,15 @@ mod tests {
             by_reference,
             resolve_attachment_reference(&store, &meta.id).unwrap()
         );
-        // A query suffix is dropped: the prompt intake appends the saved path.
+
         assert!(
             resolve_attachment_reference(&store, &format!("kimi-file://{}?x=1", meta.id)).is_some()
         );
-        // Not a reference, not an id, not stored.
+
         assert!(resolve_attachment_reference(&store, "src/main.rs").is_none());
         assert!(resolve_attachment_reference(&store, "kimi-file://f_nope").is_none());
     }
 
-    /// Storing the same id twice keeps one blob and one index entry.
     #[test]
     fn test_save_with_id_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
@@ -629,12 +585,11 @@ mod tests {
 
         let entries = store.list().unwrap();
         assert_eq!(entries.len(), 1);
-        // A repeat preservation is a no-op: the id is content-addressed, so the
-        // stored bytes and the record that describes them are the first ones.
+
         assert_eq!(entries[0].name, "first");
         let (_, path) = store.get("f_dup").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"one");
-        // An id that does not look like one is refused outright.
+
         assert!(
             store
                 .save_with_id("nope", "x", "text/plain", None, b"x")
@@ -705,8 +660,7 @@ mod tests {
             b"Content-Disposition: form-data; name=\"file\"; filename=\"blob.bin\"\r\n",
         );
         body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
-        // Binary payload containing CRLFs and a boundary-lookalike that is not
-        // at a line start.
+
         body.extend_from_slice(b"\x00\x01\r\n--not-a-boundary\xff\r\n");
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
@@ -747,9 +701,67 @@ mod tests {
         assert_eq!(meta["size"], 7);
         assert!(meta["id"].as_str().unwrap().starts_with("f_"));
 
-        // A non-multipart request is a validation failure.
         let error = upload(&store, "application/json", b"{}").unwrap_err();
         assert_eq!(error.1, error_codes::VALIDATION_FAILED);
+    }
+
+    #[test]
+    fn malformed_index_is_a_decode_error_instead_of_an_empty_list() {
+        let store = temp_store("malformed-index");
+        let (_, index_path) = store.paths().unwrap();
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        std::fs::write(&index_path, "{not-json").unwrap();
+
+        let error = store.list().unwrap_err();
+        assert!(
+            error.2.contains("storage.decode_failed"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_index_entry_is_not_silently_dropped() {
+        let store = temp_store("invalid-index-entry");
+        let (_, index_path) = store.paths().unwrap();
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        std::fs::write(&index_path, r#"{"version":1,"files":[{"id":123}]}"#).unwrap();
+
+        let error = store.list().unwrap_err();
+        assert!(
+            error.2.contains("storage.decode_failed"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn save_cannot_overwrite_an_index_it_cannot_decode() {
+        let store = temp_store("corrupt-index-save");
+        let (_, index_path) = store.paths().unwrap();
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        std::fs::write(&index_path, "{not-json").unwrap();
+
+        let error = store
+            .save("new.txt", "text/plain", None, b"new")
+            .unwrap_err();
+        assert!(
+            error.2.contains("storage.decode_failed"),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(std::fs::read_to_string(index_path).unwrap(), "{not-json");
+    }
+
+    #[test]
+    fn repeated_saves_replace_the_existing_index() {
+        let store = temp_store("repeat-save");
+        let first = store.save("first.txt", "text/plain", None, b"one").unwrap();
+        let second = store
+            .save("second.txt", "text/plain", None, b"two")
+            .unwrap();
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| entry.id == first.id));
+        assert!(entries.iter().any(|entry| entry.id == second.id));
     }
 
     #[test]

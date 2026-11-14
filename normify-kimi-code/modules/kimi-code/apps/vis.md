@@ -10,8 +10,8 @@ description:
   en: >
       Visualization service: local web rendering of sessions and structures (server + web frontend).
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.289Z"
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-11T19:20:38.905Z"
 fingerprint: e92ad9f9e97ecd55451604a8ce680f4d1818a39a2ce69dc8bec28000a8fd6e1a
 source:
   - path: "apps/vis/server/src/index.ts"

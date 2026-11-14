@@ -38,7 +38,6 @@ async fn test_http_files_upload_download_delete() {
     assert_eq!(meta["size"], 11);
     let file_id = meta["id"].as_str().unwrap().to_string();
 
-    // Download the whole file.
     let res = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -56,7 +55,6 @@ async fn test_http_files_upload_download_delete() {
         Some("attachment; filename=\"note.txt\"")
     );
 
-    // A range answers 206 with the slice.
     let res = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -70,7 +68,6 @@ async fn test_http_files_upload_download_delete() {
     assert_eq!(res.body, b"hello");
     assert_eq!(res.header("content-range"), Some("bytes 0-4/11"));
 
-    // Unknown ids answer FILE_NOT_FOUND.
     let res = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -84,7 +81,6 @@ async fn test_http_files_upload_download_delete() {
     let missing: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(missing["code"], 40407);
 
-    // Delete drops the blob; the listing is empty afterwards.
     let res = server
         .handle_request(&HttpRequest {
             method: "DELETE".into(),
@@ -117,7 +113,6 @@ async fn test_http_files_upload_download_delete() {
 async fn test_http_mcp_endpoints() {
     let server = HttpServer::in_memory().unwrap();
 
-    // 1. Initial MCP servers list is empty
     let res_mcp = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -144,7 +139,6 @@ async fn test_http_mcp_endpoints() {
     let val_mcp_servers: Value = serde_json::from_slice(&res_mcp_servers.body).unwrap();
     assert_eq!(val_mcp_servers["servers"].as_array().unwrap().len(), 0);
 
-    // 2. Add an MCP client to server's manager
     let client = crate::mcp::client::McpClient::mock("github-mcp");
     server.mcp_manager().add_client(client).await;
 
@@ -165,7 +159,6 @@ async fn test_http_mcp_endpoints() {
     assert_eq!(servers[0]["status"], "connected");
     assert_eq!(servers[0]["tool_count"], 1);
 
-    // 3. Query tools
     let res_tools = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -179,7 +172,6 @@ async fn test_http_mcp_endpoints() {
     let val_tools: Value = serde_json::from_slice(&res_tools.body).unwrap();
     assert_eq!(val_tools["tools"].as_array().unwrap().len(), 1);
 
-    // 4. Session MCP endpoint
     server
         .store_arc()
         .create_session("sess-mcp", Some("MCP Session"))
@@ -197,12 +189,9 @@ async fn test_http_mcp_endpoints() {
     let val_sess_mcp: Value = serde_json::from_slice(&res_sess_mcp.body).unwrap();
     assert_eq!(val_sess_mcp["sessionId"], "sess-mcp");
     assert_eq!(val_sess_mcp["servers"].as_array().unwrap().len(), 1);
-    // The roster is engine-global and the payload says so, rather than
-    // leaving a client to assume the servers are session-scoped.
+
     assert_eq!(val_sess_mcp["scope"], "engine-global");
 
-    // 4b. The session-scoped MCP views the web UI calls. Same roster, the
-    // paths the client actually requests.
     let res_sess_servers = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -250,9 +239,7 @@ async fn test_http_mcp_endpoints() {
             body: Vec::new(),
         })
         .await;
-    // The route reaches the manager, which refuses: the fixture added the
-    // client directly, so there is no spawn recipe to reconnect from. A
-    // 404 here would mean the path never matched.
+
     assert_eq!(res_sess_reconnect.status, 500);
     let val_sess_reconnect: Value = serde_json::from_slice(&res_sess_reconnect.body).unwrap();
     assert!(
@@ -263,7 +250,6 @@ async fn test_http_mcp_endpoints() {
         "{val_sess_reconnect}"
     );
 
-    // 5. Session not found -> 404
     let res_sess_none = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -275,7 +261,6 @@ async fn test_http_mcp_endpoints() {
         .await;
     assert_eq!(res_sess_none.status, 404);
 
-    // The session-scoped views validate the session the same way.
     for path in [
         "/api/v1/sessions/sess-missing/mcp/servers",
         "/api/v1/sessions/sess-missing/mcp/servers/github-mcp",
@@ -292,7 +277,6 @@ async fn test_http_mcp_endpoints() {
         assert_eq!(res.status, 404, "{path}");
     }
 
-    // 6. Test server probe: POST /api/v1/mcp/servers:test
     let res_test = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -304,7 +288,6 @@ async fn test_http_mcp_endpoints() {
         .await;
     assert_eq!(res_test.status, 200);
 
-    // 7. Inspect server: POST /api/v1/mcp/servers:inspect
     let res_inspect = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -318,7 +301,6 @@ async fn test_http_mcp_endpoints() {
     let val_inspect: Value = serde_json::from_slice(&res_inspect.body).unwrap();
     assert!(val_inspect["tools"].as_array().is_some());
 
-    // 8. Auth statuses: GET /api/v1/mcp/auth-statuses
     let res_auth = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -330,7 +312,6 @@ async fn test_http_mcp_endpoints() {
         .await;
     assert_eq!(res_auth.status, 200);
 
-    // 9. Delete server: DELETE /api/v1/mcp/servers/github-mcp
     let res_del = server
         .handle_request(&HttpRequest {
             method: "DELETE".into(),
@@ -349,7 +330,6 @@ async fn test_http_fs_endpoints() {
     let temp_dir = tempfile::tempdir().unwrap();
     let temp_path = temp_dir.path().to_string_lossy().to_string();
 
-    // Create subdirectories and files
     let sub_dir = temp_dir.path().join("child_dir");
     std::fs::create_dir_all(&sub_dir).unwrap();
     let file_a = temp_dir.path().join("file_a.txt");
@@ -357,7 +337,6 @@ async fn test_http_fs_endpoints() {
     let file_b = sub_dir.join("file_b.rs");
     std::fs::write(&file_b, "content b").unwrap();
 
-    // 1. GET /api/v1/fs:home
     let res_home = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -372,7 +351,6 @@ async fn test_http_fs_endpoints() {
     assert!(val_home.get("home").is_some());
     assert!(val_home["recent_roots"].is_array());
 
-    // 2. GET /api/v1/fs:browse
     let res_browse = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -392,7 +370,6 @@ async fn test_http_fs_endpoints() {
     assert_eq!(entries[0]["name"], "child_dir");
     assert_eq!(entries[0]["is_dir"], true);
 
-    // 3. GET /api/v1/fs:browse with non-existent path -> 404
     let res_browse_none = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -404,7 +381,6 @@ async fn test_http_fs_endpoints() {
         .await;
     assert_eq!(res_browse_none.status, 404);
 
-    // 4. POST /api/v1/workspace/fs:search
     let res_search = server
         .handle_request(&HttpRequest {
             method: "POST".into(),

@@ -1,25 +1,9 @@
-//! The DNS-rebinding guard: which `Host` values this server answers to.
-//!
-//! A browser sends the `Host` of the URL it was told to load, so a page served
-//! from `evil.example` that resolves to this server's address arrives with
-//! `Host: evil.example` — and, being same-origin from the browser's point of
-//! view, can read every response the bearer token would otherwise gate. The
-//! credential cannot stop that: the browser attaches it for the attacker.
-//! Comparing the header against the addresses this server is actually
-//! reachable at does stop it.
-//!
-//! Ports are ignored. `Host: 127.0.0.1:58627` and `Host: 127.0.0.1` name the
-//! same host, and the port is already pinned by the socket the request arrived
-//! on.
-
 use std::net::IpAddr;
 
-/// The `Host` values a server accepts, beyond the ones every bind allows.
 #[derive(Debug, Clone, Default)]
 pub struct HostGuard {
-    /// The host the listener was bound to, as given to `--serve`.
     bind_host: String,
-    /// Extra values from `--allowed-host` / `KIMI_CODE_ALLOWED_HOSTS`.
+
     extra: Vec<String>,
 }
 
@@ -31,11 +15,6 @@ impl HostGuard {
         }
     }
 
-    /// Whether a request carrying this `Host` header may be answered.
-    ///
-    /// A missing or empty header is refused: HTTP/1.1 requires `Host`, so its
-    /// absence means the request was not built by a client that meant to reach
-    /// this server.
     pub fn allows(&self, host: Option<&str>) -> bool {
         let Some(host) = host.filter(|value| !value.is_empty()) else {
             return false;
@@ -45,14 +24,11 @@ impl HostGuard {
         if matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]") {
             return true;
         }
-        // `*.localhost` is reserved for loopback by RFC 6761, so it resolves to
-        // this machine by definition.
+
         if host.ends_with(".localhost") {
             return true;
         }
-        // An IP literal is an address the caller had to know; a rebinding
-        // attack arrives under a *name*, so this cannot be one. Brackets are
-        // stripped first, so `[fe80::1]` counts as the literal it is.
+
         let bare = host
             .strip_prefix('[')
             .and_then(|inner| inner.strip_suffix(']'))
@@ -66,8 +42,6 @@ impl HostGuard {
         self.extra.iter().any(|entry| {
             let entry = strip_port(entry);
             match entry.strip_prefix('.') {
-                // A leading dot is a domain suffix: the domain itself and any
-                // subdomain of it.
                 Some(base) => host == base || host.ends_with(&entry),
                 None => host == entry,
             }
@@ -75,8 +49,6 @@ impl HostGuard {
     }
 }
 
-/// Split a `--allowed-host` / `KIMI_CODE_ALLOWED_HOSTS` value on commas,
-/// dropping empty entries so a trailing comma is not an error.
 pub fn split_allowed_hosts(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
@@ -85,8 +57,6 @@ pub fn split_allowed_hosts(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Strip the port from a `Host` header value, lowercasing it. IPv6 brackets
-/// are kept, so `[::1]:8080` becomes `[::1]` and a bare `::1` stays `::1`.
 pub fn strip_port(host: &str) -> String {
     if host.starts_with('[') {
         let end = host.find(']').map_or(host.len(), |index| index + 1);
@@ -95,7 +65,7 @@ pub fn strip_port(host: &str) -> String {
     let Some(first) = host.find(':') else {
         return host.to_ascii_lowercase();
     };
-    // A second colon means this is a bare IPv6 address, not `host:port`.
+
     if host.rfind(':') == Some(first) {
         let port = &host[first + 1..];
         if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -105,7 +75,6 @@ pub fn strip_port(host: &str) -> String {
     host.to_ascii_lowercase()
 }
 
-/// The 403 body for a rejected `Host`, naming both ways to allow it.
 pub fn rejection_message(host: Option<&str>) -> String {
     let normalized = host.filter(|value| !value.is_empty()).map(strip_port);
     let label = normalized

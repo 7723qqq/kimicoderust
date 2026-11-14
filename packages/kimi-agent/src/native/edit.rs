@@ -1,8 +1,3 @@
-/// Edit tool — exact string replacement in a file.
-///
-/// Replaces the first occurrence of `old_string` with `new_string` by default.
-/// When `replace_all` is true, replaces all occurrences.
-/// Mirrors `packages/agent-core-v2/src/agent/tools/edit/edit.ts`.
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
@@ -10,7 +5,6 @@ use crate::_base::text::line_endings::{materialize_model_text, to_model_text_vie
 use std::fs;
 use std::path::Path;
 
-/// Result of an edit operation.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct EditResult {
@@ -19,14 +13,6 @@ pub struct EditResult {
     pub replacements: i32,
 }
 
-/// Edit a file by replacing exact string occurrences.
-///
-/// Behavior:
-///   - Reads the entire file, converts to model text view (CRLF → LF for pure CRLF files).
-///   - If `replace_all` is false: requires exactly 1 occurrence of `old_string`.
-///   - If `replace_all` is true: replaces all occurrences.
-///   - Writes back using the detected line ending style.
-///   - `old_string` must be non-empty.
 pub fn edit_file(path: &str, old_string: &str, new_string: &str, replace_all: bool) -> EditResult {
     if old_string.is_empty() {
         return EditResult {
@@ -48,7 +34,6 @@ pub fn edit_file(path: &str, old_string: &str, new_string: &str, replace_all: bo
 
     let file_path = Path::new(path);
 
-    // Read file.
     let raw = match fs::read_to_string(file_path) {
         Ok(s) => s,
         Err(e) => {
@@ -75,12 +60,10 @@ pub fn edit_file(path: &str, old_string: &str, new_string: &str, replace_all: bo
         }
     };
 
-    // Convert to model text view (CRLF → LF normalization for pure CRLF files).
     let model_view = to_model_text_view(&raw);
     let content = &model_view.text;
 
     if replace_all {
-        // Split-join approach for replace all.
         let parts: Vec<&str> = content.split(old_string).collect();
         if parts.len() == 1 {
             return EditResult {
@@ -108,7 +91,6 @@ pub fn edit_file(path: &str, old_string: &str, new_string: &str, replace_all: bo
             },
         }
     } else {
-        // Unique match path — count occurrences first.
         let count = count_occurrences(content, old_string);
 
         match count {
@@ -148,7 +130,6 @@ pub fn edit_file(path: &str, old_string: &str, new_string: &str, replace_all: bo
     }
 }
 
-/// Count non-overlapping occurrences of `needle` in `haystack`.
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     let mut count = 0;
     let mut pos = 0;
@@ -159,7 +140,6 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     count
 }
 
-/// Replace the first occurrence of `old` with `new` in `content`.
 fn replace_once(content: &str, old: &str, new: &str) -> String {
     if let Some(idx) = content.find(old) {
         let mut result = String::with_capacity(content.len() + new.len() - old.len());
@@ -172,9 +152,6 @@ fn replace_once(content: &str, old: &str, new: &str) -> String {
     }
 }
 
-/// Persist `content` atomically (temp file + rename, reusing the write tool's
-/// mechanism) so a crash or power loss mid-write cannot leave a half-edited
-/// file behind.
 fn write_disk_content(path: &str, content: &str) -> Result<(), String> {
     let result = crate::native::write::write_file(
         path,

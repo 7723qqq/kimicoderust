@@ -24,8 +24,16 @@ pub const SYSTEM_REMINDER_PREFIX: &str = "<system-reminder>\n";
 /// Wrapper suffix for injection texts, matching v2's `SYSTEM_REMINDER_SUFFIX`.
 pub const SYSTEM_REMINDER_SUFFIX: &str = "\n</system-reminder>";
 
+pub mod git_memory;
 /// Goal/plan-mode injection providers.
 pub mod goal_plan;
+
+/// Hello-world mode reminders (v2 `HelloWorldInjection`, the
+/// `hello_world_mode` variant).
+pub mod hello_world_mode;
+
+/// Spec-mode reminders (v2 `SpecModeInjection`, the `spec_mode` variant).
+pub mod spec_mode;
 
 /// Permission-mode injection providers (v2 `PermissionModeInjection`).
 pub mod permission_mode;
@@ -673,13 +681,10 @@ impl AgentsMdReminder {
         } else {
             dir.to_path_buf()
         };
-        // Inside the workspace the chain starts at the workspace root, so a
-        // session rooted at a subdirectory still sees the root's file; outside
-        // it starts at the anchor's own work-tree root.
-        let chain = match self.root.as_ref().filter(|root| resolved.starts_with(root)) {
-            Some(root) => crate::prompt::agents_md::dirs_root_to_leaf(root, &resolved),
-            None => crate::prompt::agents_md::instruction_dirs(&resolved),
-        };
+        // v2 resolves the anchor's own project root: the nearest git work-tree
+        // root, or the anchor itself when it is not in a repository. A nested
+        // repository therefore has its own chain rather than the workspace's.
+        let chain = crate::prompt::agents_md::instruction_dirs(&resolved);
         for dir in chain {
             for found in find_agents_md_in_dir(&dir) {
                 self.queue_path(&found);
@@ -1354,6 +1359,7 @@ mod tests {
     #[test]
     fn test_agents_md_provider_still_finds_the_workspace_root() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
         let sub = dir.path().join("pkg");
         std::fs::create_dir_all(&sub).unwrap();
         let agents_path = dir.path().join("AGENTS.md");
@@ -1371,6 +1377,42 @@ mod tests {
             text.contains(&normalize_agents_md(&agents_path)),
             "content: {text}"
         );
+    }
+
+    /// v2 resolves the anchor's own project root, so a nested repository's
+    /// AGENTS.md chain stops at the nested root instead of climbing to the
+    /// workspace root's instructions.
+    #[test]
+    fn a_nested_repository_uses_its_own_chain() {
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outer.path().join(".git")).unwrap();
+        let outer_agents = outer.path().join("AGENTS.md");
+        std::fs::write(&outer_agents, "# Outer").unwrap();
+
+        let nested = outer.path().join("nested");
+        std::fs::create_dir_all(nested.join("src")).unwrap();
+        std::fs::create_dir(nested.join(".git")).unwrap();
+        let nested_agents = nested.join("AGENTS.md");
+        std::fs::write(&nested_agents, "# Nested").unwrap();
+
+        let mut provider = agents_md_provider(Some(outer.path().to_path_buf()), Vec::new());
+        let access = StepAccess {
+            dirs: vec![nested.join("src")],
+            ..Default::default()
+        };
+        let text = provider(&step(&access)).expect("the nested chain has a fresh file");
+        assert!(
+            text.contains(&normalize_agents_md(&nested_agents)),
+            "{text}"
+        );
+        assert!(
+            !text.contains(
+                "AGENTS.md
+- "
+            ) || text.contains(&normalize_agents_md(&nested_agents)),
+            "{text}"
+        );
+        assert_eq!(provider(&step(&access)), None);
     }
 
     /// v2 `selfKnown`: a model that just read an AGENTS.md is not told to go

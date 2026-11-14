@@ -10,9 +10,9 @@ description:
   en: >
       OpenAI-family adapters: Chat Completions and the Responses API.
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.304Z"
-fingerprint: e80a51e6340bb4f6259798a3503fc88ddffa77e38587329c632b3d6816fb306f
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-11T19:20:38.919Z"
+fingerprint: 2c31e9ac6256b046b34f0a274b67ec014e597beb3553921afe3b4d431aa92a68
 source:
   - path: "packages/kimi-agent/src/llm/openai_responses.rs"
   - path: "packages/kimi-agent/src/llm/openai.rs"

@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 const MEMORY_AUTHOR_NAME: &str = "kimi-code memory";
 const MEMORY_AUTHOR_EMAIL: &str = "memory@local";
@@ -35,6 +37,16 @@ pub struct MemoryCommit {
     pub sha: String,
     pub date: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitMemoryCommit {
+    pub sha: String,
+    pub date: String,
+    pub author: String,
+    pub subject: String,
+    pub body: String,
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +124,87 @@ impl MemoryRepo {
             .collect()
     }
 
+    pub fn git_memory_commits(&self, limit: usize) -> Vec<GitMemoryCommit> {
+        let spec = format!("-{limit}");
+        let Some(meta) = self.run(&[
+            "-c",
+            "core.quotePath=false",
+            "log",
+            &spec,
+            "--date=short",
+            "--format=%H%x09%ad%x09%an%x09%s%x00%b%x00",
+        ]) else {
+            return Vec::new();
+        };
+        let Some(files) = self.run(&[
+            "-c",
+            "core.quotePath=false",
+            "log",
+            &spec,
+            "--name-only",
+            "--no-renames",
+            "--format=%H",
+        ]) else {
+            return Vec::new();
+        };
+        parse_git_memory_commits(&meta, &files)
+    }
+
+    pub fn tree_paths(&self, path: Option<&str>) -> Option<Vec<String>> {
+        let mut args = vec![
+            "-c",
+            "core.quotePath=false",
+            "ls-tree",
+            "-r",
+            "-t",
+            "--name-only",
+            "HEAD",
+        ];
+        if let Some(path) = path {
+            args.push("--");
+            args.push(path);
+        }
+        self.run(&args).map(|output| {
+            output
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+    }
+
+    pub fn git_memory_dirs(&self) -> Vec<String> {
+        self.run(&[
+            "-c",
+            "core.quotePath=false",
+            "ls-tree",
+            "-d",
+            "-r",
+            "--name-only",
+            "HEAD",
+        ])
+        .map(|output| {
+            output
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn recent_commit_shas(&self, limit: usize) -> HashMap<String, String> {
+        let mut shas = HashMap::new();
+        for commit in self.git_memory_commits(limit) {
+            for file in commit.files {
+                shas.entry(file).or_insert_with(|| commit.sha.clone());
+            }
+        }
+        shas
+    }
+
     pub fn revert(&self, sha: &str) -> bool {
         if !self.ensure_repo() {
             return false;
@@ -127,6 +220,69 @@ impl MemoryRepo {
         ])
         .is_some()
     }
+}
+
+fn parse_git_memory_commits(meta: &str, files: &str) -> Vec<GitMemoryCommit> {
+    let mut metadata = HashMap::new();
+    let chunks: Vec<&str> = meta.split('\0').collect();
+    for index in (0..chunks.len()).step_by(2) {
+        let header = chunks[index].trim();
+        if header.is_empty() {
+            continue;
+        }
+        let mut parts = header.split('\t');
+        let sha = parts.next().unwrap_or("").trim().to_string();
+        if sha.is_empty() {
+            continue;
+        }
+        let date = parts.next().unwrap_or("").trim().to_string();
+        let author = parts.next().unwrap_or("").trim().to_string();
+        let subject = parts.collect::<Vec<_>>().join("\t").trim().to_string();
+        let body = chunks
+            .get(index + 1)
+            .copied()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        metadata.insert(sha, (date, author, subject, body));
+    }
+
+    let mut commits = Vec::new();
+    let mut current = None;
+    let mut current_files = Vec::new();
+    let flush = |current: &mut Option<String>,
+                 current_files: &mut Vec<String>,
+                 commits: &mut Vec<GitMemoryCommit>| {
+        let Some(sha) = current.take() else {
+            return;
+        };
+        if current_files.is_empty() {
+            return;
+        }
+        let (date, author, subject, body) = metadata.get(&sha).cloned().unwrap_or_default();
+        commits.push(GitMemoryCommit {
+            sha,
+            date,
+            author,
+            subject,
+            body,
+            files: std::mem::take(current_files),
+        });
+    };
+    for line in files.lines() {
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if text.len() == 40 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            flush(&mut current, &mut current_files, &mut commits);
+            current = Some(text.to_string());
+        } else if current.is_some() {
+            current_files.push(text.to_string());
+        }
+    }
+    flush(&mut current, &mut current_files, &mut commits);
+    commits
 }
 
 pub fn has_git_reference(workspace_root: &Path, memory_dir: &Path, content: &str) -> bool {

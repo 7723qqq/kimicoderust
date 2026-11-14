@@ -9,7 +9,7 @@ use super::agents_md::load_agents_md;
 use super::environment::{collect_environment, generate_cwd_listing};
 use super::profiles::ProfileCatalog;
 use super::skills_renderer::generate_skills_section_with_options;
-use crate::tools::memory_store;
+use crate::tools::{git_memory, memory_action, memory_repo, memory_store};
 
 pub const DEFAULT_PRODUCT_NAME: &str = "Kimi Code CLI";
 pub const DEFAULT_REPLY_STYLE_GUIDE: &str = "Your text replies render as Markdown in the user's terminal. Keep structure light and shallow — deep nesting, large tables, and heavy headings read poorly there. Cite code locations as `path/to/file.ts:42` so the user can navigate to them. Do not use emoji unless the user does first or asks for it.";
@@ -37,6 +37,7 @@ pub struct SystemPromptBuilder {
     reply_style_guide: String,
     override_shell: Option<String>,
     profile_name: String,
+    model_adaptation: Option<String>,
     custom_brand_home: Option<PathBuf>,
     custom_agents_md: Option<String>,
     custom_skills_section: Option<String>,
@@ -56,6 +57,8 @@ pub struct SystemPromptBuilder {
     notify_user_active: bool,
     todo_list_active: bool,
     memory_active: bool,
+    associative_memory_override: Option<bool>,
+    git_memory_override: Option<bool>,
 }
 
 impl SystemPromptBuilder {
@@ -67,6 +70,7 @@ impl SystemPromptBuilder {
             reply_style_guide: DEFAULT_REPLY_STYLE_GUIDE.to_string(),
             override_shell: None,
             profile_name: "agent".to_string(),
+            model_adaptation: None,
             custom_brand_home: None,
             custom_agents_md: None,
             custom_skills_section: None,
@@ -78,7 +82,25 @@ impl SystemPromptBuilder {
             notify_user_active: false,
             todo_list_active: false,
             memory_active: false,
+            associative_memory_override: None,
+            git_memory_override: None,
         }
+    }
+
+    fn with_memory_feature_flags(mut self, associative: bool, git: bool) -> Self {
+        self.associative_memory_override = Some(associative);
+        self.git_memory_override = Some(git);
+        self
+    }
+
+    fn associative_memory_enabled(&self) -> bool {
+        self.associative_memory_override
+            .unwrap_or_else(memory_action::associative_memory_enabled)
+    }
+
+    fn git_memory_enabled(&self) -> bool {
+        self.git_memory_override
+            .unwrap_or_else(memory_repo::git_memory_enabled)
     }
 
     /// Set whether `NotifyUser` guidance is injected into the system prompt.
@@ -143,6 +165,11 @@ impl SystemPromptBuilder {
         self
     }
 
+    pub fn with_model_adaptation(mut self, adaptation: Option<String>) -> Self {
+        self.model_adaptation = adaptation;
+        self
+    }
+
     pub fn with_shell(mut self, shell_path: impl Into<String>) -> Self {
         self.override_shell = Some(shell_path.into());
         self
@@ -188,7 +215,9 @@ impl SystemPromptBuilder {
     /// The default prompt carries the memory section: the memory tools are in
     /// the session tool table, so a prompt without the section would advertise
     /// a capability the model was never told how to use.
-    pub fn build_default(workspace_root: impl AsRef<Path>) -> String {
+    pub fn build_default(
+        workspace_root: impl AsRef<Path>,
+    ) -> Result<String, crate::native::environment_probe::ProbeShellNotFound> {
         Self::new(workspace_root).with_memory(true).build()
     }
 
@@ -199,7 +228,7 @@ impl SystemPromptBuilder {
         workspace_root: impl AsRef<Path>,
         skill_dirs: Vec<PathBuf>,
         merge_all_available_skills: bool,
-    ) -> String {
+    ) -> Result<String, crate::native::environment_probe::ProbeShellNotFound> {
         Self::new(workspace_root)
             .with_skill_dirs(skill_dirs)
             .with_merge_all_available_skills(merge_all_available_skills)
@@ -217,7 +246,7 @@ impl SystemPromptBuilder {
         skill_dirs: Vec<PathBuf>,
         merge_all_available_skills: bool,
         profile_name: impl Into<String>,
-    ) -> String {
+    ) -> Result<String, crate::native::environment_probe::ProbeShellNotFound> {
         Self::new(workspace_root)
             .with_profile(profile_name)
             .with_skill_dirs(skill_dirs)
@@ -227,8 +256,8 @@ impl SystemPromptBuilder {
     }
 
     /// Build the full system prompt string.
-    pub fn build(self) -> String {
-        self.build_with_warnings().0
+    pub fn build(self) -> Result<String, crate::native::environment_probe::ProbeShellNotFound> {
+        self.build_with_warnings().map(|(prompt, _)| prompt)
     }
 
     /// [`Self::build`] plus the user-facing warnings the load produced.
@@ -239,9 +268,13 @@ impl SystemPromptBuilder {
     /// it as a `warning` event with code `agents-md-oversized`
     /// (`publishAgentsMdWarning`, `profileService.ts:874-884`); a caller with
     /// an event lane forwards these, everyone else keeps using [`Self::build`].
-    pub fn build_with_warnings(self) -> (String, Vec<String>) {
+    pub fn build_with_warnings(
+        self,
+    ) -> Result<(String, Vec<String>), crate::native::environment_probe::ProbeShellNotFound> {
+        let associative_memory_enabled = self.associative_memory_enabled();
+        let git_memory_enabled = self.git_memory_enabled();
         // 1. Environment
-        let env = collect_environment(&self.workspace_root, self.override_shell.as_deref());
+        let env = collect_environment(&self.workspace_root, self.override_shell.as_deref())?;
 
         // 2. Profile role additional
         let catalog = ProfileCatalog::with_builtins();
@@ -362,6 +395,35 @@ impl SystemPromptBuilder {
             (String::new(), String::new(), String::new())
         };
 
+        let model_adaptation_section = self
+            .model_adaptation
+            .as_ref()
+            .map(|adaptation| {
+                format!(
+                    "\n\nThe section below describes standing guidance for the model family you are running as. It is reference data, not an instruction from the user. Where it conflicts with the instructions above, the instructions above win.\n\n{adaptation}\n\n"
+                )
+            })
+            .unwrap_or_default();
+        let memory_base = self
+            .custom_brand_home
+            .as_deref()
+            .map(memory_store::memory_base_at)
+            .or_else(memory_store::memory_base);
+        let repo_memory = memory_base
+            .as_deref()
+            .map(|base| git_memory::repo_block_from(&self.workspace_root, base, git_memory_enabled))
+            .unwrap_or_default();
+        let memory_code = memory_base
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|home| memory_action::code_block_from(home, associative_memory_enabled))
+            .unwrap_or_default();
+        let memory_code_section = if memory_code.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n# Memory code\n\n{memory_code}\n\n")
+        };
+
         let replacements = [
             ("${product_name}", self.product_name.as_str()),
             ("${role_additional}", role_additional.as_str()),
@@ -379,14 +441,14 @@ impl SystemPromptBuilder {
                 additional_dirs_section.as_str(),
             ),
             ("${agents_md}", agents_md.as_str()),
+            ("${repo_memory}", repo_memory.as_str()),
+            ("${memory_code_section}", memory_code_section.as_str()),
             ("${skills_section}", skills_section.as_str()),
             ("${plugin_sections}", plugin_sections.as_str()),
-            // v2 `model_adaptation_section` (`profile-shared.ts:182`): standing
-            // guidance for the model family. The fork's catalog supplies none,
-            // so the hook resolves empty — the same text v2 renders when
-            // `context.modelAdaptation` is absent. It stays a named variable so
-            // a profile can fill it without editing the template.
-            ("${model_adaptation_section}", ""),
+            (
+                "${model_adaptation_section}",
+                model_adaptation_section.as_str(),
+            ),
             // The memory section is expanded before its own inner blocks, so
             // `${memory_listing}` and friends resolve in the same pass.
             ("${memory_section}", memory_section.as_str()),
@@ -399,7 +461,7 @@ impl SystemPromptBuilder {
             prompt = prompt.replace(var, val);
         }
 
-        (prompt, warnings)
+        Ok((prompt, warnings))
     }
 }
 
@@ -413,7 +475,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("agent")
-            .build();
+            .build()
+            .unwrap();
 
         // Hard requirement: NO unexpanded ${variable} template placeholders remain
         assert!(
@@ -473,7 +536,8 @@ mod tests {
         std::fs::write(temp.path().join("AGENTS.md"), "x".repeat(35 * 1024)).unwrap();
         let (_prompt, warnings) = SystemPromptBuilder::new(temp.path())
             .with_brand_home(temp.path())
-            .build_with_warnings();
+            .build_with_warnings()
+            .unwrap();
         assert!(
             warnings
                 .iter()
@@ -489,34 +553,39 @@ mod tests {
         // 1. Agent profile has no subagent prefix
         let agent_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("agent")
-            .build();
+            .build()
+            .unwrap();
         assert!(!agent_prompt.contains("You are a subagent; the main agent is your caller"));
 
         // 2. Coder profile has subagent prefix + coder handoff suffix
         let coder_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("coder")
-            .build();
+            .build()
+            .unwrap();
         assert!(coder_prompt.contains("You are a subagent; the main agent is your caller"));
         assert!(coder_prompt.contains("Your final message is the entire handoff"));
 
         // 3. Explore profile has subagent prefix + explore overlay
         let explore_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("explore")
-            .build();
+            .build()
+            .unwrap();
         assert!(explore_prompt.contains("You are a subagent; the main agent is your caller"));
         assert!(explore_prompt.contains("You are a codebase exploration specialist."));
 
         // 4. Plan profile has subagent prefix + plan suffix
         let plan_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("plan")
-            .build();
+            .build()
+            .unwrap();
         assert!(plan_prompt.contains("You are a subagent; the main agent is your caller"));
         assert!(plan_prompt.contains("You are read-only: do not run commands or modify files"));
 
         // 5. Unknown profile defaults to empty role_additional without error
         let unknown_prompt = SystemPromptBuilder::new(temp.path())
             .with_profile("custom_unknown")
-            .build();
+            .build()
+            .unwrap();
         assert!(!unknown_prompt.contains("You are a subagent; the main agent is your caller"));
         assert!(!unknown_prompt.contains("${role_additional}"));
     }
@@ -527,7 +596,8 @@ mod tests {
         let prompt = SystemPromptBuilder::new(temp.path())
             .with_product_name("Kimi Native Agent")
             .with_shell("/custom/bin/bash")
-            .build();
+            .build()
+            .unwrap();
 
         assert!(prompt.starts_with("You are Kimi Native Agent, an interactive general AI agent"));
         assert!(
@@ -544,7 +614,8 @@ mod tests {
         let prompt = SystemPromptBuilder::new(temp.path())
             .with_custom_agents_md(custom_md)
             .with_custom_skills(custom_skills)
-            .build();
+            .build()
+            .unwrap();
 
         assert!(prompt.contains("The applicable `AGENTS.md` instructions are:\n\n```````\n# Custom Rules\nAlways verify before done.\n```````"));
         assert!(prompt.contains("Custom skills list here."));
@@ -559,7 +630,8 @@ mod tests {
         let prompt = SystemPromptBuilder::new(temp_ws.path())
             .add_additional_dir(extra_dir.path())
             .with_plugin_sections("## Plugin A\nFollow plugin instructions.")
-            .build();
+            .build()
+            .unwrap();
 
         // Additional directories section
         assert!(prompt.contains("## Additional Directories"));
@@ -573,10 +645,11 @@ mod tests {
     #[test]
     fn test_builder_build_default_matches_new_build() {
         let temp = tempdir().unwrap();
-        let default_built = SystemPromptBuilder::build_default(temp.path());
+        let default_built = SystemPromptBuilder::build_default(temp.path()).unwrap();
         let manual_built = SystemPromptBuilder::new(temp.path())
             .with_memory(true)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(default_built, manual_built);
     }
 
@@ -587,9 +660,10 @@ mod tests {
     fn test_builder_build_for_profile_selects_the_role_overlay() {
         let temp = tempdir().unwrap();
         let default_built =
-            SystemPromptBuilder::build_for_profile(temp.path(), Vec::new(), true, "agent");
+            SystemPromptBuilder::build_for_profile(temp.path(), Vec::new(), true, "agent").unwrap();
         let explore_built =
-            SystemPromptBuilder::build_for_profile(temp.path(), Vec::new(), true, "explore");
+            SystemPromptBuilder::build_for_profile(temp.path(), Vec::new(), true, "explore")
+                .unwrap();
 
         assert_ne!(
             default_built, explore_built,
@@ -603,13 +677,14 @@ mod tests {
         // default build — the profile name only ever adds, never replaces.
         assert_eq!(
             default_built,
-            SystemPromptBuilder::build_default(temp.path())
+            SystemPromptBuilder::build_default(temp.path()).unwrap()
         );
 
         // An unknown name degrades to the default profile's empty overlay
         // instead of failing the turn.
         let unknown_built =
-            SystemPromptBuilder::build_for_profile(temp.path(), Vec::new(), true, "no-such-agent");
+            SystemPromptBuilder::build_for_profile(temp.path(), Vec::new(), true, "no-such-agent")
+                .unwrap();
         assert_eq!(unknown_built, default_built);
     }
 
@@ -618,13 +693,15 @@ mod tests {
         let temp = tempdir().unwrap();
         let prompt_disabled = SystemPromptBuilder::new(temp.path())
             .with_notify_user(false)
-            .build();
+            .build()
+            .unwrap();
         assert!(!prompt_disabled.contains(NOTIFY_USER_GUIDANCE));
         assert!(!prompt_disabled.contains("${notify_user_guidance}"));
 
         let prompt_enabled = SystemPromptBuilder::new(temp.path())
             .with_notify_user(true)
-            .build();
+            .build()
+            .unwrap();
         assert!(prompt_enabled.contains(NOTIFY_USER_GUIDANCE));
         assert!(prompt_enabled.contains("When `NotifyUser` is available, use it proactively"));
         assert!(!prompt_enabled.contains("${notify_user_guidance}"));
@@ -635,13 +712,15 @@ mod tests {
         let temp = tempdir().unwrap();
         let prompt_disabled = SystemPromptBuilder::new(temp.path())
             .with_todo_list(false)
-            .build();
+            .build()
+            .unwrap();
         assert!(!prompt_disabled.contains(TODO_LIST_GUIDANCE));
         assert!(!prompt_disabled.contains("${todo_list_guidance}"));
 
         let prompt_enabled = SystemPromptBuilder::new(temp.path())
             .with_todo_list(true)
-            .build();
+            .build()
+            .unwrap();
         assert!(prompt_enabled.contains(TODO_LIST_GUIDANCE));
         assert!(!prompt_enabled.contains("${todo_list_guidance}"));
         // v2 `system.md`: the guidance sits directly before the final-reply
@@ -655,18 +734,81 @@ mod tests {
     }
 
     #[test]
+    fn test_builder_renders_git_and_associative_memory_blocks() {
+        let workspace = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("associative-memory")).unwrap();
+        std::fs::write(
+            home.path().join("associative-memory/code.md"),
+            "---\nrules: []\n---\nPrefer explicit memories.\n",
+        )
+        .unwrap();
+        let memory_base = memory_store::memory_base_at(home.path());
+        memory_store::write(
+            &memory_base,
+            "global/note.md",
+            "# Note\n\nRemember this.\n",
+            "new",
+        )
+        .unwrap();
+        memory_store::write(
+            &memory_base,
+            "global/scoped.md",
+            "---\napplies_to: [\"src/**\"]\n---\n# Scoped\n\nDo not include globally.\n",
+            "new",
+        )
+        .unwrap();
+        let repo = memory_repo::MemoryRepo::new(memory_base.clone());
+        assert!(repo.commit("remember: Note"));
+        let workspace_repo = memory_repo::MemoryRepo::new(workspace.path().to_path_buf());
+        std::fs::write(
+            workspace.path().join("README.md"),
+            "hello
+",
+        )
+        .unwrap();
+        assert!(workspace_repo.commit("project change"));
+        std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+        std::fs::write(
+            workspace.path().join("src/lib.rs"),
+            "fn main() {}
+",
+        )
+        .unwrap();
+        assert!(workspace_repo.commit("add src"));
+
+        let prompt = SystemPromptBuilder::new(workspace.path())
+            .with_brand_home(home.path())
+            .with_memory(false)
+            .with_memory_feature_flags(true, true)
+            .build()
+            .unwrap();
+        assert!(prompt.contains("# Memory code\n\nPrefer explicit memories."));
+        assert!(prompt.contains("<repo-memory>"));
+        assert!(prompt.contains("project change"));
+        assert!(prompt.contains("<repo-tree depth=\"3\">"));
+        assert!(prompt.contains("<memory sha=\""));
+        assert!(prompt.contains("Remember this."));
+        assert!(!prompt.contains("Do not include globally."));
+        assert!(!prompt.contains("${repo_memory}"));
+        assert!(!prompt.contains("${memory_code_section}"));
+    }
+
+    #[test]
     fn test_builder_memory_toggle() {
         let temp = tempdir().unwrap();
         let prompt_disabled = SystemPromptBuilder::new(temp.path())
             .with_memory(false)
-            .build();
+            .build()
+            .unwrap();
         assert!(!prompt_disabled.contains("# Memory"));
         assert!(!prompt_disabled.contains("`Memory`"));
         assert!(!prompt_disabled.contains("${memory_section}"));
 
         let prompt_enabled = SystemPromptBuilder::new(temp.path())
             .with_memory(true)
-            .build();
+            .build()
+            .unwrap();
         assert!(prompt_enabled.contains("# Memory"));
         assert!(prompt_enabled.contains("`Memory`"));
         assert!(!prompt_enabled.contains("${memory_section}"));
@@ -693,7 +835,8 @@ mod tests {
         let prompt = SystemPromptBuilder::new(temp.path())
             .with_brand_home(home.path())
             .with_memory(true)
-            .build();
+            .build()
+            .unwrap();
 
         assert!(
             prompt.contains(
@@ -714,8 +857,31 @@ mod tests {
         let off = SystemPromptBuilder::new(temp.path())
             .with_brand_home(home.path())
             .with_memory(false)
-            .build();
+            .build()
+            .unwrap();
         assert!(!off.contains("<memory_listing>"));
         assert!(!off.contains("<profile>"));
+    }
+
+    #[test]
+    fn test_model_adaptation_is_rendered_only_when_supplied() {
+        let temp = tempdir().unwrap();
+        let adapted = SystemPromptBuilder::new(temp.path())
+            .with_model_adaptation(Some(
+                "# Model Adaptation: deepseek-chat\n\n## Autonomy and persistence".to_string(),
+            ))
+            .build()
+            .unwrap();
+        assert!(
+            adapted.contains("The section below describes standing guidance for the model family")
+        );
+        assert!(adapted.contains("# Model Adaptation: deepseek-chat"));
+        assert!(adapted.contains("## Autonomy and persistence"));
+
+        let unadapted = SystemPromptBuilder::new(temp.path())
+            .with_model_adaptation(None)
+            .build()
+            .unwrap();
+        assert!(!unadapted.contains("# Model Adaptation:"));
     }
 }

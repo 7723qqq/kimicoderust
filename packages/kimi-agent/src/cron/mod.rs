@@ -32,6 +32,15 @@ pub const ONE_SHOT_MAX_FUTURE_MS: i64 = 350 * 24 * 60 * 60 * 1000;
 
 pub const MAX_PROMPT_BYTES: usize = 8 * 1024;
 
+/// v2 `MAX_CRON_JOBS_PER_SESSION` (`cron-create.ts:7`): the per-session cap the
+/// tool checks before scheduling and the store enforces on write.
+pub const MAX_CRON_JOBS_PER_SESSION: usize = 50;
+
+/// The refusal v2's `CronCreate` returns once the session cap is reached
+/// (`cronCreateTool.ts:77-81`). Shared so the store's error and the tool's
+/// model-facing result cannot drift.
+pub const CRON_JOB_CAP_MESSAGE: &str = "Cron job cap reached (max 50 per session).";
+
 const MS_PER_MINUTE: i64 = 60_000;
 const HARD_ITERATION_CAP: i64 = 10_000_000;
 const FIVE_YEAR_WINDOW_MINUTES: i64 = 5 * 366 * 24 * 60;

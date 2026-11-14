@@ -13,7 +13,6 @@ use crate::environment::{
     AgentEnvironment, AgentEnvironmentRequest, EnvironmentSnapshot, WorkspaceChange,
     WorkspaceContext, WorkspaceRoots,
 };
-use crate::i18n::{LocalizedText, i18n_params};
 use crate::session::sqlite_store::SqliteSessionStore;
 use crate::subagent::types::*;
 
@@ -61,26 +60,6 @@ impl Drop for ForegroundTurnClaim {
     }
 }
 
-/// How many completed subagent scopes stay resident for a fast resume
-/// (v2 `SUBAGENT_SCOPE_CACHE_SIZE_ENV`).
-pub const SUBAGENT_SCOPE_CACHE_SIZE_ENV: &str = "KIMI_CODE_SUBAGENT_SCOPE_CACHE_SIZE";
-
-/// Wall-clock bound on a single scope eviction
-/// (v2 `SUBAGENT_SCOPE_EVICT_TIMEOUT_ENV`).
-pub const SUBAGENT_SCOPE_EVICT_TIMEOUT_ENV: &str = "KIMI_CODE_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS";
-
-pub const DEFAULT_SUBAGENT_SCOPE_CACHE_SIZE: usize = 32;
-
-pub const DEFAULT_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS: u64 = 15_000;
-
-/// How often one scope may refuse eviction before it is left resident
-/// (v2 `MAX_EVICT_ATTEMPTS`).
-const MAX_SCOPE_EVICT_ATTEMPTS: u32 = 3;
-
-/// The retry cadence of `createAgentAwaitingClose` (v2
-/// `session/agentLifecycle/createAwaitingClose.ts`).
-const SCOPE_CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
 /// How long `kill` waits for the running turn to observe the cancellation
 /// before shutting the rest of the scope down (v2
 /// `REMOVE_PROMPT_QUIESCE_TIMEOUT_MS`).
@@ -88,138 +67,6 @@ const REMOVE_PROMPT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The quiescence poll cadence (v2 `REMOVE_PROMPT_QUIESCE_POLL_MS`).
 const REMOVE_PROMPT_QUIESCE_POLL: Duration = Duration::from_millis(10);
-
-/// Parses `KIMI_CODE_SUBAGENT_SCOPE_CACHE_SIZE` (v2
-/// `resolveSubagentScopeCacheSize`). Missing or blank values yield the
-/// default; a negative size means "never evict"; a non-integer errors.
-pub fn resolve_subagent_scope_cache_size(env: &HashMap<String, String>) -> Result<usize, String> {
-    let Some(raw) = env.get(SUBAGENT_SCOPE_CACHE_SIZE_ENV) else {
-        return Ok(DEFAULT_SUBAGENT_SCOPE_CACHE_SIZE);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(DEFAULT_SUBAGENT_SCOPE_CACHE_SIZE);
-    }
-    match trimmed.parse::<i64>() {
-        Ok(value) => Ok(value.max(0) as usize),
-        Err(_) => Err(format!(
-            "{SUBAGENT_SCOPE_CACHE_SIZE_ENV} must be an integer, got {raw:?}."
-        )),
-    }
-}
-
-/// Parses `KIMI_CODE_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS` (v2
-/// `resolveSubagentScopeEvictTimeoutMs`). Missing or blank values yield the
-/// default; anything but a positive integer errors.
-pub fn resolve_subagent_scope_evict_timeout_ms(
-    env: &HashMap<String, String>,
-) -> Result<u64, String> {
-    let Some(raw) = env.get(SUBAGENT_SCOPE_EVICT_TIMEOUT_ENV) else {
-        return Ok(DEFAULT_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(DEFAULT_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS);
-    }
-    match trimmed.parse::<u64>() {
-        Ok(value) if value > 0 => Ok(value),
-        _ => Err(format!(
-            "{SUBAGENT_SCOPE_EVICT_TIMEOUT_ENV} must be a positive integer, got {raw:?}."
-        )),
-    }
-}
-
-/// Why a scope eviction did or did not happen (v2 `EvictOutcome`).
-enum EvictOutcome {
-    Removed,
-    Missing,
-    /// The scope is running again; it stays retired and is retried later.
-    Deferred,
-    /// The eviction did not finish inside the configured bound.
-    Timeout,
-}
-
-/// Completed-scope LRU (v2 `subagentScopeCacheService`): once more than
-/// `capacity` completed scopes are resident, the oldest completion is
-/// evicted. Only the resident instance and its in-memory conversation are
-/// dropped — the persisted resume record is left alone, so the next `resume`
-/// rebuilds both from it.
-struct ScopeCache {
-    capacity: usize,
-    evict_timeout: Duration,
-    /// Completed ids in least-recently-completed order, with the eviction
-    /// attempts already spent on each (v2 `retired`).
-    retired: Vec<(String, u32)>,
-    /// Set when the two env vars failed validation; the first spawn reports
-    /// it (v2 throws when the session scope is created).
-    error: Option<String>,
-}
-
-impl ScopeCache {
-    fn from_env() -> Self {
-        let env: HashMap<String, String> = std::env::vars().collect();
-        let resolved = resolve_subagent_scope_cache_size(&env).and_then(|capacity| {
-            resolve_subagent_scope_evict_timeout_ms(&env).map(|timeout_ms| (capacity, timeout_ms))
-        });
-        match resolved {
-            Ok((capacity, timeout_ms)) => Self {
-                capacity,
-                evict_timeout: Duration::from_millis(timeout_ms),
-                retired: Vec::new(),
-                error: None,
-            },
-            Err(error) => Self {
-                capacity: DEFAULT_SUBAGENT_SCOPE_CACHE_SIZE,
-                evict_timeout: Duration::from_millis(DEFAULT_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS),
-                retired: Vec::new(),
-                error: Some(error),
-            },
-        }
-    }
-
-    /// Move `id` to the most-recently-completed end (v2 `retire`).
-    fn retire(&mut self, id: &str) {
-        self.retired.retain(|(entry, _)| entry != id);
-        self.retired.push((id.to_string(), 0));
-    }
-
-    /// Drop `id` from the LRU (v2 `revive`): a scope that is live again must
-    /// not be evicted.
-    fn revive(&mut self, id: &str) {
-        self.retired.retain(|(entry, _)| entry != id);
-    }
-
-    /// The oldest entry still worth trying, skipping the ones this pass
-    /// already failed on and the ones that exhausted their attempts
-    /// (v2 `oldestCandidate`).
-    fn oldest_candidate(&self, skipped: &HashSet<String>) -> Option<(String, u32)> {
-        self.retired
-            .iter()
-            .find(|(id, attempts)| *attempts < MAX_SCOPE_EVICT_ATTEMPTS && !skipped.contains(id))
-            .cloned()
-    }
-
-    fn remove(&mut self, id: &str) {
-        self.retired.retain(|(entry, _)| entry != id);
-    }
-
-    fn reinsert(&mut self, id: &str, attempts: u32) {
-        if !self.retired.iter().any(|(entry, _)| entry == id) {
-            self.retired.push((id.to_string(), attempts));
-        }
-    }
-}
-
-/// The last non-empty assistant text of a turn — the subagent's summary
-/// the `Agent` tool reports to the caller (v2 `r.summary`).
-pub(crate) fn final_assistant_summary(messages: &[crate::turn_loop::types::LLMMessage]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "assistant" && !message.content.is_empty())
-        .map(|message| message.content.clone())
-        .unwrap_or_default()
-}
 
 /// The partial-output section of a stopped subagent's report: the last
 /// assistant text an aborted turn produced, rendered as a `[partial output]`
@@ -231,26 +78,6 @@ pub(crate) fn partial_output_section(turn: &crate::turn_loop::types::TurnResult)
     let partial = final_assistant_summary(&turn.messages);
     let partial = partial.trim();
     (!partial.is_empty()).then(|| format!("\n\n[partial output]\n{partial}"))
-}
-
-/// Shared prefix of the v2 `AGENT_NO_FINAL_MESSAGE` failure text, so the
-/// report layer can name the reason without re-parsing prose.
-pub const NO_FINAL_MESSAGE_PREFIX: &str = "Subagent turn ended without a final message";
-
-/// v2 `runAgentTurn` `awaitRun`: a turn that ends without any assistant text
-/// has no handoff to report, so it fails instead of completing with an empty
-/// summary (v2 `AGENT_NO_FINAL_MESSAGE`). The loop only ever forces one stop
-/// reason — the repeat breaker — and v2 renders it in the message.
-fn no_final_message_error(turn: &crate::turn_loop::types::TurnResult) -> Option<String> {
-    if !final_assistant_summary(&turn.messages).trim().is_empty() {
-        return None;
-    }
-    Some(match turn.stop_reason {
-        crate::turn_loop::types::LoopTurnStopReason::RepeatBreaker => {
-            format!("{NO_FINAL_MESSAGE_PREFIX} (stop reason: repeat_breaker).")
-        }
-        _ => format!("{NO_FINAL_MESSAGE_PREFIX}."),
-    })
 }
 
 /// A profile's tool policy (v2 `resolveActiveToolNames` subset semantics):
@@ -596,9 +423,6 @@ pub struct SubagentManager {
     /// `None` keeps the previous behavior: the swarm follows the subagent
     /// timeout (or the 2h default).
     swarm_timeout_ms: Mutex<Option<u64>>,
-    /// Completed-scope LRU (v2 `subagentScopeCache`), resolved once at
-    /// construction.
-    scope_cache: Mutex<ScopeCache>,
     /// Cumulative token usage per instance id (v2 `ISessionUsageService`
     /// per-agent status), folded at every turn completion. Session-lifetime
     /// bookkeeping: an evicted scope's entry goes with it (the persisted
@@ -798,11 +622,6 @@ fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// v2 `classifyTurnResult` mirror: a max-token-truncated subagent turn
-/// fails the run with the verbatim v2 error text.
-pub const SUBAGENT_MAX_TOKENS_ERROR: &str =
-    "Subagent turn failed before completing its final summary: reason=max_tokens";
-
 /// v2 `distillSummary` (P51): while the final assistant text is shorter
 /// than the policy floor, re-prompt with the continuation prompt and adopt
 /// the newer non-empty assistant text (`final_assistant_summary` keeps the
@@ -850,97 +669,6 @@ async fn distill_continuations(
     }
     turn.usage = usage_total;
     Ok(turn)
-}
-
-/// Run one `run_turn` for the foreground subagent, aborting immediately
-/// when the parent cancels: dropping the run future interrupts the
-/// subagent at its current await point (in-flight LLM call / tool wait,
-/// the v2 AbortSignal semantics the step-top flag checks cannot reach);
-/// the instance flag also flips so the scheduler's own cancellation
-/// checks observe it.
-async fn run_one(
-    runtime: &SubagentRuntime,
-    agent_id: &str,
-    callbacks: &Arc<dyn crate::callbacks::HostCallbacks>,
-    messages: Vec<crate::turn_loop::types::LLMMessage>,
-    tool_defs: Vec<crate::turn_loop::types::ToolInfo>,
-    cancel_flag: &Arc<AtomicBool>,
-    parent_cancel: Option<&crate::subagent::types::ParentCancel>,
-) -> Result<crate::turn_loop::types::TurnResult, RunExit> {
-    // v2 instantiates the external-hooks service per agent; the guard rides
-    // the callbacks this session already runs with, so a subagent fires
-    // `UserPromptSubmit` / `PreCompact` / `Stop` without sharing another
-    // session's hooks.
-    let hook_guard = callbacks.hook_guard();
-    // v2 `AGENT_RUN_PROMPT_ORIGIN`: the subagent's prompt is a system trigger
-    // named `subagent`. `TurnStarted` hooks fire per agent in v2
-    // (`agentExternalHooksService`), so the subagent announces its own turn;
-    // the numeric suffix keeps the hook payload's turn id unique.
-    let origin = crate::subagent::types::agent_run_prompt_origin();
-    let turn_seq = fastrand::u64(..);
-    if let Some(guard) = hook_guard.as_ref() {
-        let prompt = messages
-            .iter()
-            .rev()
-            .find(|message| message.role == "user")
-            .map(|message| message.content.clone())
-            .unwrap_or_default();
-        guard.notify_turn_started(turn_seq, &origin, &prompt).await;
-    }
-    let end_guard = hook_guard.clone();
-    let run_input = crate::turn_loop::types::RunTurnInput {
-        agent_id: agent_id.to_string(),
-        previous_turn_aborted: false,
-        max_attempts: None,
-        turn_id: format!("subturn-{turn_seq}"),
-        llm: runtime.llm.as_ref(),
-        messages,
-        tools: &[],
-        tool_defs,
-        // Foreground subagents run until done — the caller owns the
-        // timeout (v2 `resolveSubagentTimeoutMs`), not a step cap.
-        max_steps: u32::MAX,
-        max_context_tokens: None,
-        compaction_max_attempts: None,
-        // Subagent turns carry no policy snapshot, and the reminders address
-        // the main agent's user interaction (AskUserQuestion / ExitPlanMode).
-        permission_mode: None,
-        goal: None,
-        cancellation: Some(cancel_flag.clone()),
-        // v2 instantiates the external-hooks service per agent, so a subagent
-        // turn fires `UserPromptSubmit` / `PreCompact` / `Stop` like the main
-        // turn, and `run_turn_continued` honors the Stop hook's one-shot
-        // continuation inside the same turn.
-        hook_guard,
-        media: Some(&runtime.media),
-        media_dropped: Some(runtime.media_dropped.clone()),
-        media_recovery: Some(runtime.media_recovery.clone()),
-        toolset: None,
-    };
-    let run_future = crate::turn_loop::run_turn::run_turn_continued(run_input, callbacks);
-    tokio::pin!(run_future);
-    let outcome = match parent_cancel {
-        Some(signal) => {
-            tokio::select! {
-                result = &mut run_future => {
-                    result.map_err(|err| RunExit::Failed(err.to_string()))
-                }
-                () = signal.wait() => Err(RunExit::ParentCancelled),
-            }
-        }
-        None => run_future
-            .await
-            .map_err(|err| RunExit::Failed(err.to_string())),
-    };
-    if let Some(guard) = end_guard.as_ref() {
-        let end = match &outcome {
-            Ok(turn) => crate::session::AgentTurnEnd::Ran(turn),
-            Err(RunExit::ParentCancelled) => crate::session::AgentTurnEnd::Cancelled,
-            Err(RunExit::Failed(message)) => crate::session::AgentTurnEnd::Failed(message),
-        };
-        crate::session::notify_agent_turn_end(guard, turn_seq, end).await;
-    }
-    outcome
 }
 
 impl SubagentManager {
@@ -998,76 +726,6 @@ impl SubagentManager {
             );
         }
 
-        // Tower worker profile (v2 `TOWER_WORKER_PROFILE_DEF`):
-        // executes one tower mission in its own git worktree, coordinating
-        // only through Tower* tools. Without this registration, every
-        // `TowerSpawn` lookup returns None and the host falls back with
-        // "not available". The role overlay emphasizes the handoff: the
-        // worker's final message IS the entire handoff to the parent.
-        let tower_worker_tools: Vec<String> = [
-            "Agent",
-            "Bash",
-            "TowerFinding",
-            "TowerInbox",
-            "TowerMission",
-            "TowerReview",
-            "TowerSend",
-            "TowerStatus",
-            "CronCreate",
-            "CronDelete",
-            "CronList",
-            "Edit",
-            "ExitPlanMode",
-            "Glob",
-            "Grep",
-            "Read",
-            "Skill",
-            "TaskList",
-            "TaskOutput",
-            "TaskStop",
-            "TodoList",
-            "WaitFor",
-            "WebSearch",
-            "FetchURL",
-            "Write",
-            "mcp__*",
-        ]
-        .iter()
-        .map(|s| s.to_lowercase())
-        .collect();
-        const TOWER_WORKER_ROLE_OVERLAY: &str = "\
-Tower worker protocol. Your final message is the entire handoff — the parent sees nothing \
-else from your run. Make it technically complete: what you changed and why, the path of every \
-file you touched, how you verified the change (tests or commands run, with results), and \
-anything left undone or worth follow-up. Coordinate only through the Tower* tools; treat the \
-worktree root the tower assigns you as your full authority scope.";
-        defs.insert(
-            "tower-worker".into(),
-            SubagentDefinition {
-                name: "tower-worker".into(),
-                description: "Tower worker/reviewer agent — executes one tower mission in its own git worktree (or reviews one branch), coordinating only through Tower* tools. Spawned via the TowerSpawn tool.".into(),
-                system_prompt: format!(
-                    "{}\n\n{}",
-                    "You are a tower worker. Complete the assigned mission accurately.",
-                    TOWER_WORKER_ROLE_OVERLAY,
-                ),
-                tools: tower_worker_tools,
-                disallowed_tools: Vec::new(),
-                when_to_use: None,
-                prompt_prefix: None,
-                subagents: None,
-                summary_policy: Some(crate::subagent::types::SummaryPolicy {
-                    min_chars: 200,
-                    continuation_prompt: "Your summary was too brief. Expand it: what you \
-                        changed and why, the path of every file you touched, how you \
-                        verified the change, and anything left undone or worth follow-up."
-                        .into(),
-                    retries: 1,
-                }),
-                model: None,
-            },
-        );
-
         Self {
             definitions: Arc::new(RwLock::new(defs)),
             instances: Arc::new(RwLock::new(HashMap::new())),
@@ -1082,7 +740,6 @@ worktree root the tower assigns you as your full authority scope.";
             session_store: RwLock::new(None),
             task_runner: RwLock::new(None),
             swarm_timeout_ms: Mutex::new(None),
-            scope_cache: Mutex::new(ScopeCache::from_env()),
             usage_by_instance: Arc::new(Mutex::new(HashMap::new())),
             parents: Arc::new(RwLock::new(HashMap::new())),
             forked_from: Arc::new(RwLock::new(HashMap::new())),
@@ -1270,102 +927,6 @@ worktree root the tower assigns you as your full authority scope.";
         *self.main_profile_name.write().await = name
             .filter(|name| !name.trim().is_empty())
             .map(str::to_string);
-    }
-
-    /// The caller's profile name for a spawn (v2 `profile.data().profileName`):
-    /// the main agent's bound profile (default `agent`), or a subagent
-    /// caller's own type.
-    pub async fn caller_profile_name(&self, caller_id: &str) -> Option<String> {
-        if caller_id == crate::callbacks::MAIN_AGENT_ID {
-            return Some(
-                self.main_profile_name
-                    .read()
-                    .await
-                    .clone()
-                    .unwrap_or_else(|| "agent".to_string()),
-            );
-        }
-        self.instances
-            .read()
-            .await
-            .get(caller_id)
-            .map(|(instance, _)| instance.type_name.clone())
-    }
-
-    /// The caller's effective spawn allowlist (v2 `planSpawn`'s
-    /// `subagentAllowlistFor` + `withoutDelegatingTargets` halves, and the
-    /// bind-time `rootDelegationExtras` for the main agent): the caller's
-    /// own declared `subagents`, else the default profile's delegation set;
-    /// the main agent additionally gains the turn's discovered types unless
-    /// a custom main profile declared its own list. An undeclared caller
-    /// may not chain delegation — targets that can themselves spawn are
-    /// filtered out. `None` means unrestricted (`['*']`).
-    pub async fn spawn_allowlist(&self, caller_id: &str) -> Option<Vec<String>> {
-        use crate::subagent::allowlist as gate;
-        let caller_profile = self.caller_profile_name(caller_id).await?;
-        let is_main = caller_id == crate::callbacks::MAIN_AGENT_ID;
-        let definitions = self.definitions.read().await;
-        let own = definitions
-            .get(&caller_profile)
-            .and_then(|def| def.subagents.clone());
-        let extras = if is_main && !(caller_profile != "agent" && own.is_some()) {
-            // v2 `rootDelegationExtras`: the discovered set excludes the
-            // default profile itself and the tower worker (v2's `feature:`
-            // source) — builtins dedupe against the declared list anyway.
-            Some(
-                self.discovered_types
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|name| {
-                        // The tower worker is v2's `feature:` source — never
-                        // a delegation extra (the const is private to
-                        // tools/tower, so the filter names the literal).
-                        name.as_str() != "agent" && name.as_str() != "tower-worker"
-                    })
-                    .cloned()
-                    .collect::<Vec<String>>(),
-            )
-        } else {
-            None
-        };
-        let default_subagents = definitions
-            .get("agent")
-            .and_then(|def| def.subagents.clone());
-        let mut allowlist = gate::subagent_allowlist_for(
-            default_subagents.as_deref(),
-            own.as_deref(),
-            extras.as_deref(),
-        )?;
-        if own.is_none() {
-            allowlist = gate::without_delegating_targets(&definitions, &allowlist);
-        }
-        Some(allowlist)
-    }
-
-    /// v2 `planSpawn`'s `AGENT_TYPE_NOT_ALLOWED` arm: a non-fork spawn whose
-    /// requested type is outside the caller's allowlist is refused with the
-    /// guidance text. Forks skip the gate — a fork inherits the caller's own
-    /// type, which the caller's allowlist already admitted once.
-    pub async fn check_spawn_allowed(
-        &self,
-        caller_id: &str,
-        requested: &str,
-        is_fork: bool,
-    ) -> Result<(), String> {
-        if is_fork {
-            return Ok(());
-        }
-        if let Some(allowlist) = self.spawn_allowlist(caller_id).await
-            && !allowlist.iter().any(|name| name == requested)
-        {
-            return Err(
-                crate::subagent::allowlist::subagent_type_not_allowed_message(
-                    requested, &allowlist,
-                ),
-            );
-        }
-        Ok(())
     }
 
     /// The advertise-hop raw material for the `Agent` description (v2's
@@ -1659,59 +1220,6 @@ worktree root the tower assigns you as your full authority scope.";
             .cloned()
     }
 
-    /// The builtin `explore` profile's git-context prefix (v2
-    /// `session/agentLifecycle/profile/profiles.ts:126-132` + `gitContext.ts`).
-    /// A host-pushed profile replaces the builtin wholesale (v2 `override:
-    /// true`), including its `promptPrefix`, so a discovered name is skipped.
-    async fn builtin_explore_prompt_prefix(
-        &self,
-        agent_id: &str,
-        def: &SubagentDefinition,
-    ) -> Option<String> {
-        if !def.name.eq_ignore_ascii_case("explore") {
-            return None;
-        }
-        if self
-            .discovered_types
-            .read()
-            .await
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(&def.name))
-        {
-            return None;
-        }
-        // A narrowed child reads the repository at its own cwd (v2 reads the
-        // agent scope's workspace context, not the session's). The guard is
-        // scoped: a std lock must not be held across the awaits below.
-        let agent_cwd = {
-            let environments = self
-                .agent_environments
-                .read()
-                .unwrap_or_else(|error| error.into_inner());
-            environments
-                .get(agent_id)
-                .map(|environment| environment.cwd().to_path_buf())
-        };
-        let root = match agent_cwd {
-            Some(cwd) => cwd,
-            None => {
-                let session_id = self
-                    .runtime
-                    .read()
-                    .await
-                    .as_ref()
-                    .and_then(|runtime| runtime.session_id.clone())?;
-                self.workspace_roots
-                    .read()
-                    .await
-                    .get(&session_id)
-                    .cloned()?
-            }
-        };
-        let context = crate::prompt::collect_git_context(&root).await;
-        (!context.is_empty()).then_some(context)
-    }
-
     /// Get a registered definition by name.
     pub async fn get_definition(&self, name: &str) -> Option<SubagentDefinition> {
         let defs = self.definitions.read().await;
@@ -1785,63 +1293,6 @@ worktree root the tower assigns you as your full authority scope.";
         }
     }
 
-    /// v2 `AgentMeta` for one agent (`sessionMetadata.ts:4-11`), built from the
-    /// maps the engine keeps: `subagentLabels` (`parentAgentId`, `swarmItem`,
-    /// `subagentDepth`), `withSubagentProfile` (`profileName`), and the fork
-    /// lineage.
-    async fn agent_meta_value(&self, id: &str) -> Option<serde_json::Value> {
-        let (profile_name, depth) = {
-            let instances = self.instances.read().await;
-            let (instance, _) = instances.get(id)?;
-            (instance.type_name.clone(), instance.depth)
-        };
-        let parent = self.parent_of(id).await;
-        // v2 `create` defaults `meta.parentAgentId` to `'main'`; only a
-        // subagent caller records a deeper parent (and then `subagentLabels`
-        // carries the same id).
-        let parent_agent_id = parent
-            .as_ref()
-            .map(|p| p.agent_id.clone())
-            .unwrap_or_else(|| crate::callbacks::MAIN_AGENT_ID.to_string());
-        let forked_from = match self.forked_from.read().await.get(id).cloned() {
-            Some(source) => Some(source),
-            None => self.persisted_forked_from(id).await,
-        };
-        let homedir = self.agent_homedir(id).await;
-
-        let mut labels = serde_json::Map::new();
-        labels.insert(
-            "parentAgentId".into(),
-            serde_json::Value::String(parent_agent_id.clone()),
-        );
-        if let Some(item) = parent.as_ref().and_then(|p| p.swarm_item.clone()) {
-            labels.insert("swarmItem".into(), serde_json::Value::String(item));
-        }
-        labels.insert(
-            "subagentDepth".into(),
-            serde_json::Value::String(depth.to_string()),
-        );
-        labels.insert(
-            "profileName".into(),
-            serde_json::Value::String(profile_name),
-        );
-
-        let mut meta = serde_json::Map::new();
-        meta.insert("type".into(), serde_json::Value::String("sub".into()));
-        meta.insert(
-            "parentAgentId".into(),
-            serde_json::Value::String(parent_agent_id),
-        );
-        if let Some(source) = forked_from {
-            meta.insert("forkedFrom".into(), serde_json::Value::String(source));
-        }
-        if let Some(homedir) = homedir {
-            meta.insert("homedir".into(), serde_json::Value::String(homedir));
-        }
-        meta.insert("labels".into(), serde_json::Value::Object(labels));
-        Some(serde_json::Value::Object(meta))
-    }
-
     /// v2 `join(bootstrap.homeDir, scope('agents/${agentId}'))`: the per-agent
     /// home under the session's engine directory. Absent until the session's
     /// workspace root is known.
@@ -1905,153 +1356,6 @@ worktree root the tower assigns you as your full authority scope.";
         {
             self.next_agent_number.fetch_max(number, Ordering::Relaxed);
         }
-    }
-
-    /// Spawn a new subagent instance.
-    pub async fn spawn(&self, type_name: &str, role: &str) -> Result<String, String> {
-        let id = self.allocate_agent_id().await;
-        self.spawn_with_id(&id, type_name, role).await
-    }
-
-    /// Spawn a subagent with an explicit per-agent environment request.
-    ///
-    /// The resolver inherits the caller's environment (a session id, a cwd and
-    /// a set of variables) and only lets the child narrow: a relative cwd is
-    /// joined to the caller's cwd, an absolute one must stay inside the parent
-    /// workspace, and variables override key by key. There is no flag to widen
-    /// that boundary. Internal spawn sites that know a narrower directory (a
-    /// tower worker in its worktree) use this; the model-facing `Agent` tool
-    /// never sees a cwd parameter.
-    pub async fn spawn_in_environment(
-        &self,
-        type_name: &str,
-        role: &str,
-        environment: AgentEnvironmentRequest,
-    ) -> Result<String, String> {
-        let id = self.allocate_agent_id().await;
-        let caller_id = crate::tools::CALLER_AGENT_ID
-            .try_with(|id| id.clone())
-            .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
-        self.spawn_with_id_from_in(&id, &caller_id, type_name, role, environment)
-            .await
-    }
-
-    /// Spawn a subagent for an explicitly named caller.
-    ///
-    /// A batch resolves its members on the scheduler's own tasks, which do not
-    /// inherit the caller's [`crate::tools::CALLER_AGENT_ID`] scope, so the
-    /// caller is passed in rather than read from the ambient scope. Everything
-    /// else — the depth gate included — is the shared spawn path.
-    pub async fn spawn_child(
-        &self,
-        caller_id: &str,
-        type_name: &str,
-        role: &str,
-    ) -> Result<String, String> {
-        let id = self.allocate_agent_id().await;
-        self.spawn_with_id_from(&id, caller_id, type_name, role)
-            .await
-    }
-
-    /// Spawn a new subagent instance with an explicit identifier.
-    pub async fn spawn_with_id(
-        &self,
-        id: &str,
-        type_name: &str,
-        role: &str,
-    ) -> Result<String, String> {
-        let caller_id = crate::tools::CALLER_AGENT_ID
-            .try_with(|id| id.clone())
-            .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
-        self.spawn_with_id_from(id, &caller_id, type_name, role)
-            .await
-    }
-
-    /// The shared spawn path: resolve the child's delegation depth from its
-    /// caller, refuse a caller already at [`MAX_SUBAGENT_DEPTH`] (v2
-    /// `assertSubagentDepthAllowed`), resolve the child's environment against
-    /// the caller's, then register the instance.
-    pub async fn spawn_with_id_from(
-        &self,
-        id: &str,
-        caller_id: &str,
-        type_name: &str,
-        role: &str,
-    ) -> Result<String, String> {
-        self.spawn_with_id_from_in(
-            id,
-            caller_id,
-            type_name,
-            role,
-            AgentEnvironmentRequest::default(),
-        )
-        .await
-    }
-
-    /// [`Self::spawn_with_id_from`] with an explicit environment request.
-    pub async fn spawn_with_id_from_in(
-        &self,
-        id: &str,
-        caller_id: &str,
-        type_name: &str,
-        role: &str,
-        environment: AgentEnvironmentRequest,
-    ) -> Result<String, String> {
-        self.scope_cache_error()?;
-        {
-            let defs = self.definitions.read().await;
-            if !defs.contains_key(type_name) && type_name != "self" {
-                return Err(format!("Unknown subagent type: '{type_name}'"));
-            }
-        }
-        let depth = self.child_depth_for_spawn(caller_id).await?;
-        // Outside the duplicate check below: a refused environment must not
-        // leave a half-registered instance behind, and an existing instance
-        // must not have its environment replaced by a failed spawn.
-        let environment = self
-            .resolve_agent_environment(id, caller_id, environment)
-            .await?;
-
-        let cancellation = Arc::new(AtomicBool::new(false));
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
-        let instance = SubagentInstance {
-            id: id.to_string(),
-            type_name: type_name.to_string(),
-            role: role.to_string(),
-            state: SubagentState::Running,
-            created_at_ms: now_ms,
-            last_result: None,
-            depth,
-        };
-
-        let mut instances = self.instances.write().await;
-        // v2 `agentLifecycleService.ts:202-208`: explicit ids are unique; a
-        // duplicate spawn must fail loudly instead of silently replacing the
-        // running instance (and its cancellation flag) underneath its caller.
-        if instances.contains_key(id) {
-            return Err(format!(
-                "agent.already_exists: a subagent with id \"{id}\" already exists — pass a different id"
-            ));
-        }
-        instances.insert(id.to_string(), (instance, cancellation));
-        drop(instances);
-        if let Some(environment) = environment {
-            self.agent_environments
-                .write()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(id.to_string(), environment);
-        }
-        self.observe_agent_id(id);
-        self.revive_scope(id);
-        self.record_parent(id);
-        self.register_agent_metadata(id).await;
-
-        Ok(id.to_string())
     }
 
     /// Resolve a child's environment against its parent.
@@ -2150,111 +1454,6 @@ worktree root the tower assigns you as your full authority scope.";
             cwd: Some(cwd),
             env,
         }
-    }
-
-    /// The delegation depth of `agent_id` (v2 `subagentDepthOf`): 0 for the
-    /// main agent and for any id this engine never spawned, else the hop count
-    /// recorded when it was spawned.
-    pub async fn depth_of(&self, agent_id: &str) -> u32 {
-        if let Some((instance, _)) = self.instances.read().await.get(agent_id) {
-            return instance.depth;
-        }
-        self.persisted_depth(agent_id).await
-    }
-
-    /// Depth from the cold-resume record, for an agent whose resident scope
-    /// the completed-scope LRU already evicted.
-    async fn persisted_depth(&self, agent_id: &str) -> u32 {
-        let store = self.session_store.read().await.as_ref().cloned();
-        let Some(store) = store else {
-            return 0;
-        };
-        store
-            .get_state("subagent_resume", agent_id)
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::from_value::<SubagentPersistedState>(value).ok())
-            .map_or(0, |state| state.depth)
-    }
-
-    /// v2 `assertSubagentDepthAllowed`: the depth a child of `caller_id` gets,
-    /// or the refusal when the caller already sits at the ceiling.
-    async fn child_depth_for_spawn(&self, caller_id: &str) -> Result<u32, String> {
-        let caller_depth = self.depth_of(caller_id).await;
-        if caller_depth >= MAX_SUBAGENT_DEPTH {
-            return Err(LocalizedText::with_params(
-                "engine.subagent.depthExceeded",
-                i18n_params!["maxDepth" => MAX_SUBAGENT_DEPTH],
-            )
-            .render());
-        }
-        Ok(caller_depth + 1)
-    }
-
-    /// Record who spawned `id` (v2 `subagents.spawn({ callerAgentId })`).
-    ///
-    /// The spawning agent is read from the `CALLER_AGENT_ID` scope the caller
-    /// already runs in, so every spawn site is covered by construction rather
-    /// than by remembering to pass the parent at each one. A spawn outside any
-    /// agent scope (a test, a bootstrap) records nothing, and the resume gate
-    /// then treats the child as unowned.
-    fn record_parent(&self, id: &str) {
-        let Ok(agent_id) = crate::tools::CALLER_AGENT_ID.try_with(|id| id.clone()) else {
-            return;
-        };
-        if let Ok(mut parents) = self.parents.try_write() {
-            parents.insert(
-                id.to_string(),
-                SubagentParent {
-                    agent_id,
-                    parent_tool_call_id: None,
-                    swarm_item: None,
-                    swarm_index: None,
-                },
-            );
-        }
-    }
-
-    /// Who spawned `agent_id`, if the engine knows (v2 `isSubagentMeta` +
-    /// `subagentParentAgentId`).
-    ///
-    /// `None` means "not a subagent this engine spawned" — the main agent and
-    /// unknown ids both land here, and both are refused by a resume.
-    pub async fn parent_of(&self, agent_id: &str) -> Option<SubagentParent> {
-        if let Some(parent) = self.parents.read().await.get(agent_id) {
-            return Some(parent.clone());
-        }
-        // Cold recovery: the resident record went with the scope, but the
-        // persisted one still names the parent (#3478).
-        let store = self.session_store.read().await.as_ref()?.clone();
-        let stored = store.get_state("subagent_resume", agent_id).ok()??;
-        let state: SubagentPersistedState = serde_json::from_value(stored).ok()?;
-        let parent = SubagentParent {
-            agent_id: state.parent_agent_id?,
-            parent_tool_call_id: state.parent_tool_call_id,
-            swarm_item: state.swarm_item,
-            swarm_index: state.swarm_index,
-        };
-        self.parents
-            .write()
-            .await
-            .insert(agent_id.to_string(), parent.clone());
-        Some(parent)
-    }
-
-    /// Attach the swarm `{{item}}` a member was spawned for (v2
-    /// `subagentLabels(callerAgentId, { swarmItem })`), so a later
-    /// `resume_agent_ids` call can label it again.
-    pub async fn set_swarm_item(&self, agent_id: &str, item: Option<String>) {
-        {
-            let mut parents = self.parents.write().await;
-            if let Some(parent) = parents.get_mut(agent_id) {
-                parent.swarm_item = item;
-            }
-        }
-        // v2 `subagentLabels` writes the item into the agent's roster labels;
-        // refresh them or a resume/restore loses which batch item spawned it.
-        self.register_agent_metadata(agent_id).await;
     }
 
     /// Record the agent this one was forked from (v2 `AgentMeta.forkedFrom`,
@@ -2389,41 +1588,6 @@ worktree root the tower assigns you as your full authority scope.";
         callbacks.telemetry(probe.telemetry_payload());
     }
 
-    /// Record a subagent's parent explicitly (v2
-    /// `subagents.spawn({ callerAgentId })`).
-    ///
-    /// [`Self::spawn_with_id`] already records the `CALLER_AGENT_ID` scope, but
-    /// that scope does not cross the scheduler's `tokio::spawn` — a caller that
-    /// resolves its member asynchronously has to name the parent itself. Overwrites
-    /// whatever the scope recorded.
-    ///
-    /// `swarm_index` is what separates a swarm member from a plain child
-    /// everywhere downstream: the journal records it, the session snapshot
-    /// reports it, and the client keys the member's card off it. `None` means
-    /// an ordinary subagent.
-    pub async fn set_parent(
-        &self,
-        agent_id: &str,
-        parent_agent_id: String,
-        parent_tool_call_id: Option<String>,
-        swarm_item: Option<String>,
-        swarm_index: Option<u32>,
-    ) {
-        {
-            let mut parents = self.parents.write().await;
-            parents.insert(
-                agent_id.to_string(),
-                SubagentParent {
-                    agent_id: parent_agent_id,
-                    parent_tool_call_id,
-                    swarm_item,
-                    swarm_index,
-                },
-            );
-        }
-        self.register_agent_metadata(agent_id).await;
-    }
-
     /// Spawn a new subagent and launch an autonomous background execution loop.
     pub async fn spawn_and_run(
         self: &Arc<Self>,
@@ -2475,6 +1639,12 @@ worktree root the tower assigns you as your full authority scope.";
             .as_ref()
             .and_then(|r| r.session_id.clone().filter(|session| !session.is_empty()));
 
+        let task_model = llm
+            .model_alias()
+            .unwrap_or_else(|| llm.model_name())
+            .to_string();
+        let task_thinking_effort = llm.thinking_effort().map(str::to_string);
+
         let subagent_run = async move {
             let origin = crate::subagent::types::agent_run_prompt_origin();
             let turn_seq = fastrand::u64(..);
@@ -2499,9 +1669,11 @@ worktree root the tower assigns you as your full authority scope.";
 
                 prompt_id: None,
                 origin: Some(origin),
+                tools: Vec::new(),
             }];
 
             let run_input = crate::turn_loop::types::RunTurnInput {
+                llm_request_byte_budget: crate::config::DEFAULT_LLM_REQUEST_BYTE_BUDGET,
                 agent_id: subagent_id.clone(),
                 max_attempts: None,
                 turn_id: format!("subturn-{turn_seq}"),
@@ -2577,13 +1749,18 @@ worktree root the tower assigns you as your full authority scope.";
 
         if let Some(task_runner) = runner {
             let description = format!("Subagent {}: {}", role, prompt);
-            let _ = task_runner.spawn_task_with_meta(
+            let _ = task_runner.spawn_agent_task_with_meta(
                 crate::storage::TaskSpawnMeta {
                     session_id: parent_session.as_deref(),
                     kind: "subagent",
                     subagent_type: Some(type_name),
                     agent_id: Some(id.as_str()),
                     timeout_ms: None,
+                },
+                crate::storage::TaskAgentInfo {
+                    parent_tool_call_id: None,
+                    model: Some(&task_model),
+                    thinking_effort: task_thinking_effort.as_deref(),
                 },
                 id.clone(),
                 description,
@@ -2757,6 +1934,7 @@ worktree root the tower assigns you as your full authority scope.";
 
                 prompt_id: None,
                 origin: Some(origin),
+                tools: Vec::new(),
             });
             msgs
         } else {
@@ -2769,6 +1947,7 @@ worktree root the tower assigns you as your full authority scope.";
 
                 prompt_id: None,
                 origin: Some(origin),
+                tools: Vec::new(),
             }]
         };
 
@@ -3262,86 +2441,6 @@ worktree root the tower assigns you as your full authority scope.";
         }
     }
 
-    /// Spawn a persistent subagent instance that keeps its message history
-    /// across turns. The instance is registered in the instance map with its
-    /// own cancellation flag, so the existing `kill` mechanism aborts any
-    /// running turn and blocks further ones.
-    pub async fn spawn_persistent(
-        &self,
-        type_name: &str,
-        role: &str,
-        llm: Arc<dyn crate::turn_loop::types::LLM>,
-        callbacks: Arc<dyn crate::callbacks::HostCallbacks>,
-    ) -> Result<String, String> {
-        self.scope_cache_error()?;
-        let defs = self.definitions.read().await;
-        if !defs.contains_key(type_name) && type_name != "self" {
-            return Err(format!("Unknown subagent type: '{type_name}'"));
-        }
-        drop(defs);
-        let caller_id = crate::tools::CALLER_AGENT_ID
-            .try_with(|id| id.clone())
-            .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
-        let depth = self.child_depth_for_spawn(&caller_id).await?;
-
-        let def = self.definition_for(type_name, role).await;
-        let id = self.allocate_agent_id().await;
-        let environment = self
-            .resolve_agent_environment(&id, &caller_id, AgentEnvironmentRequest::default())
-            .await?;
-        let cancellation = Arc::new(AtomicBool::new(false));
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
-        let instance = SubagentInstance {
-            id: id.clone(),
-            type_name: type_name.to_string(),
-            role: role.to_string(),
-            state: SubagentState::Running,
-            created_at_ms: now_ms,
-            last_result: None,
-            depth,
-        };
-
-        {
-            let mut instances = self.instances.write().await;
-            instances.insert(id.clone(), (instance, cancellation.clone()));
-        }
-        if let Some(environment) = environment {
-            self.agent_environments
-                .write()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(id.clone(), environment);
-        }
-        {
-            let mut persistent = self.persistent.write().await;
-            persistent.insert(
-                id.clone(),
-                PersistentInstance {
-                    llm,
-                    callbacks,
-                    system_prompt: def.system_prompt,
-                    messages: Vec::new(),
-                    usage: crate::rpc::types::TokenUsage::default(),
-                    running: false,
-                    cancelled: cancellation,
-                },
-            );
-        }
-        self.revive_scope(&id);
-        // A persistent instance is owned by whoever created it, exactly like a
-        // transient one: the `Agent` tool's resume path checks that ownership
-        // (v2 `agentTool.ts` `AGENT_NOT_OWNED`), so an unrecorded persistent
-        // subagent would read as "not a subagent" and become unresumable.
-        self.record_parent(&id);
-        self.register_agent_metadata(&id).await;
-
-        Ok(id)
-    }
-
     /// Run one turn on a persistent instance: append the prompt to the
     /// instance's message history and execute a full `run_turn` with that
     /// history. The turn runs with the caller-supplied LLM and callbacks;
@@ -3405,6 +2504,7 @@ worktree root the tower assigns you as your full authority scope.";
         }
         let end_guard = hook_guard.clone();
         let run_input = crate::turn_loop::types::RunTurnInput {
+            llm_request_byte_budget: crate::config::DEFAULT_LLM_REQUEST_BYTE_BUDGET,
             agent_id: id.to_string(),
             max_attempts: None,
             turn_id: format!("subturn-{turn_seq}"),
@@ -3734,141 +2834,6 @@ worktree root the tower assigns you as your full authority scope.";
         }
     }
 
-    /// The scope-cache env vars are validated once per manager; a bad value
-    /// fails the spawn that would create the first cached scope instead of
-    /// silently running without eviction.
-    fn scope_cache_error(&self) -> Result<(), String> {
-        let cache = self.scope_cache.lock().unwrap_or_else(|e| e.into_inner());
-        match cache.error.as_ref() {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }
-    }
-
-    /// Drop `id` from the LRU: a scope that is live again must not be evicted
-    /// (v2 `revive`).
-    fn revive_scope(&self, id: &str) {
-        self.scope_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .revive(id);
-    }
-
-    /// Retire a completed scope into the LRU and evict the overflow (v2
-    /// `retire` → `evictOverflow`). Persistent instances are excluded — their
-    /// conversation lives only in memory, so `destroy_persistent` stays their
-    /// single removal path — and so is every manager without a session store:
-    /// there the in-memory conversation is the only copy, so evicting it would
-    /// break `resume` instead of rebuilding it.
-    async fn retire_completed_scope(&self, id: &str) {
-        if self.persistent.read().await.contains_key(id) {
-            return;
-        }
-        if self.session_store.read().await.is_none() {
-            return;
-        }
-        {
-            let mut cache = self.scope_cache.lock().unwrap_or_else(|e| e.into_inner());
-            if cache.capacity == 0 || cache.error.is_some() {
-                return;
-            }
-            cache.retire(id);
-        }
-        self.evict_completed_scopes().await;
-    }
-
-    /// Evict completed scopes until the cache fits its capacity. A scope that
-    /// refuses eviction is skipped for the rest of this pass and retried on a
-    /// later one (v2 `evictOverflow`).
-    async fn evict_completed_scopes(&self) {
-        let mut skipped: HashSet<String> = HashSet::new();
-        loop {
-            let (timeout, candidate) = {
-                let cache = self.scope_cache.lock().unwrap_or_else(|e| e.into_inner());
-                if cache.retired.len() <= cache.capacity {
-                    return;
-                }
-                let Some(candidate) = cache.oldest_candidate(&skipped) else {
-                    return;
-                };
-                (cache.evict_timeout, candidate)
-            };
-            let (id, attempts) = candidate;
-            self.scope_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id);
-            match self.evict_scope(&id, timeout).await {
-                EvictOutcome::Removed | EvictOutcome::Missing => continue,
-                EvictOutcome::Deferred => {
-                    // Still running: keep it retired at the same attempt count
-                    // and move on (v2 defers without spending an attempt).
-                    skipped.insert(id.clone());
-                    self.scope_cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .reinsert(&id, attempts);
-                }
-                EvictOutcome::Timeout => {
-                    skipped.insert(id.clone());
-                    let next_attempt = attempts + 1;
-                    if next_attempt >= MAX_SCOPE_EVICT_ATTEMPTS {
-                        tracing::warn!(
-                            subagent = %id,
-                            attempts = next_attempt,
-                            "subagent scope eviction timed out; leaving it resident"
-                        );
-                    }
-                    self.scope_cache
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .reinsert(&id, next_attempt);
-                }
-            }
-        }
-    }
-
-    /// Drop one completed scope's resident state (v2 `evict`): the instance
-    /// entry and the in-memory conversation. The persisted resume record is
-    /// untouched — `resume` rebuilds both from it. The bound covers the whole
-    /// removal, so a scope whose locks stay contended is skipped rather than
-    /// stalling the queue.
-    async fn evict_scope(&self, id: &str, timeout: Duration) -> EvictOutcome {
-        {
-            let instances = self.instances.read().await;
-            match instances.get(id) {
-                None => return EvictOutcome::Missing,
-                Some((instance, _)) if instance.state == SubagentState::Running => {
-                    return EvictOutcome::Deferred;
-                }
-                Some(_) => {}
-            }
-        }
-        let removal = async {
-            let mut instances = self.instances.write().await;
-            instances.remove(id);
-            self.foreground_histories
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(id);
-            self.usage_by_instance
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(id);
-            // Session-lifetime bookkeeping goes with the scope; the persisted
-            // record still names the parent, so a cold resume recovers it.
-            self.parents.write().await.remove(id);
-            self.agent_environments
-                .write()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(id);
-        };
-        match tokio::time::timeout(timeout, removal).await {
-            Ok(()) => EvictOutcome::Removed,
-            Err(_) => EvictOutcome::Timeout,
-        }
-    }
-
     /// Recreate the resident instance of a scope that was evicted (v2
     /// `rebuildSubagent`): the persisted resume record carries the profile and
     /// role, so the rebuilt instance is indistinguishable from the original
@@ -3929,32 +2894,6 @@ worktree root the tower assigns you as your full authority scope.";
         self.revive_scope(id);
         self.register_agent_metadata(id).await;
         Ok(())
-    }
-
-    /// v2 `createAgentAwaitingClose`: retry the create while a closing scope
-    /// still holds `id`, every [`SCOPE_CLOSE_POLL_INTERVAL`], until the scope
-    /// eviction timeout elapses.
-    async fn await_scope_close(&self, id: &str) -> bool {
-        let timeout = self
-            .scope_cache
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .evict_timeout;
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            match self
-                .evict_scope(id, remaining.max(Duration::from_millis(1)))
-                .await
-            {
-                EvictOutcome::Removed | EvictOutcome::Missing => return true,
-                EvictOutcome::Deferred | EvictOutcome::Timeout => {}
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(SCOPE_CLOSE_POLL_INTERVAL).await;
-        }
     }
 
     /// List summaries of all subagent instances.

@@ -20,7 +20,7 @@ pub fn workflow_tool_def() -> ToolInfo {
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["run", "status", "wait", "cancel", "list"],
+                    "enum": ["run", "status", "wait", "cancel"],
                     "description": "The workflow operation to perform."
                 },
                 "name": {
@@ -42,9 +42,14 @@ pub fn workflow_tool_def() -> ToolInfo {
                 "timeout_ms": {
                     "type": "number",
                     "description": "Timeout in milliseconds (for `wait`)."
+                },
+                "deadline_ms": {
+                    "type": "number",
+                    "description": "Total runtime limit in milliseconds for the script (for `run`). Defaults to 1800000 (30 minutes)."
                 }
             },
-            "required": ["operation"]
+            "required": ["operation"],
+            "additionalProperties": false
         }),
     }
 }
@@ -93,7 +98,6 @@ pub async fn run_workflow_tool(
             };
             handle_run(service, host, home, input)
         }
-        "list" => handle_list(service),
         "status" => match required_run_id(input) {
             Ok(run_id) => match service.status(&run_id) {
                 Some(result) => WorkflowToolOutcome::ok(format_status(&result)),
@@ -140,18 +144,6 @@ pub async fn run_workflow_tool(
     }
 }
 
-fn handle_list(service: &WorkflowService) -> WorkflowToolOutcome {
-    let builtins = service.list_builtins();
-    if builtins.is_empty() {
-        return WorkflowToolOutcome::ok("No built-in workflows are registered.");
-    }
-    let mut lines = vec!["Available workflows:".to_string()];
-    for meta in builtins {
-        lines.push(format!("- {} — {}", meta.name, meta.description));
-    }
-    WorkflowToolOutcome::ok(lines.join("\n"))
-}
-
 fn handle_run(
     service: &WorkflowService,
     host: Arc<dyn WorkflowHost>,
@@ -185,7 +177,8 @@ fn handle_run(
     };
 
     let args = input.get("args").cloned();
-    let run_id = service.start(script, args, host);
+    let deadline_ms = input.get("deadline_ms").and_then(Value::as_u64);
+    let run_id = service.start(script, args, host, deadline_ms);
     WorkflowToolOutcome::ok(format!(
         "Workflow \"{workflow_name}\" started. run_id: {run_id}\nUse Workflow({{ operation: \"wait\", run_id: \"{run_id}\" }}) to block until it completes, or Workflow({{ operation: \"status\", run_id: \"{run_id}\" }}) to check progress."
     ))
@@ -255,20 +248,6 @@ mod tests {
         fn home_dir(&self) -> Option<std::path::PathBuf> {
             None
         }
-    }
-
-    #[tokio::test]
-    async fn list_includes_the_builtins() {
-        let service = WorkflowService::new();
-        let outcome = run_workflow_tool(
-            &service,
-            None,
-            None,
-            &serde_json::json!({ "operation": "list" }),
-        )
-        .await;
-        assert!(!outcome.is_error);
-        assert!(outcome.content.contains("deep-research"));
     }
 
     #[cfg(feature = "workflow-js")]

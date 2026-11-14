@@ -16,11 +16,44 @@ pub fn field_name(key: &str) -> String {
 fn format_value(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => format_js_number(n),
         Value::Bool(b) => b.to_string(),
-        Value::Null => String::new(),
-        Value::Array(_) | Value::Object(_) => value.to_string(),
+        Value::Null => "null".to_string(),
+        Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                if value.is_null() {
+                    String::new()
+                } else {
+                    format_value(value)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Object(_) => "[object Object]".to_string(),
     }
+}
+
+fn format_js_number(value: &serde_json::Number) -> String {
+    let Some(value) = value.as_f64() else {
+        return value.to_string();
+    };
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let magnitude = value.abs();
+    let raw = if (1e-6..1e21).contains(&magnitude) {
+        value.to_string()
+    } else {
+        format!("{value:e}")
+    };
+    let Some((mantissa, exponent)) = raw.split_once('e') else {
+        return raw;
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return raw;
+    };
+    format!("{mantissa}e{}{exponent}", if exponent >= 0 { "+" } else { "" })
 }
 
 fn format_lines<'a>(entries: impl Iterator<Item = (&'a str, &'a Value)>) -> String {
@@ -42,7 +75,7 @@ pub fn format_task_record(record: &Value) -> String {
     let Some(obj) = record.as_object() else {
         return String::new();
     };
-    let started_at = obj.get("startedAt").and_then(|v| v.as_u64());
+    let started_at = obj.get("startedAt").and_then(|v| v.as_f64());
     let body = format_lines(
         obj.iter()
             .filter(|(key, _)| !matches!(key.as_str(), "startedAt" | "endedAt"))
@@ -53,9 +86,10 @@ pub fn format_task_record(record: &Value) -> String {
     };
     let ended_at = obj
         .get("endedAt")
-        .and_then(|v| v.as_u64())
-        .unwrap_or_else(now_ms);
-    let header = crate::turn_loop::wall_time::wall_time_header(ended_at.saturating_sub(started_at));
+        .and_then(|v| v.as_f64())
+        .unwrap_or_else(|| now_ms() as f64);
+    let duration_ms = (ended_at - started_at).max(0.0);
+    let header = format!("Wall time: {:.3} seconds", duration_ms / 1000.0);
     if body.is_empty() {
         header
     } else {

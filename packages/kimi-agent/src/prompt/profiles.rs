@@ -78,6 +78,8 @@ const AGENT_TOOLS: &[&str] = &[
     "TowerStatus",
     "TowerTeardown",
     "RepoMap",
+    "run_code",
+    "lsp",
     // v2 `...GITHUB_READONLY_TOOL_NAMES, ...GITHUB_MUTATING_TOOL_NAMES`.
     "GitHubGetRepo",
     "GitHubListBranches",
@@ -129,6 +131,8 @@ const CODER_TOOLS: &[&str] = &[
     "Grep",
     "Read",
     "RepoMap",
+    "run_code",
+    "lsp",
     "Skill",
     "TaskList",
     "TaskOutput",
@@ -259,8 +263,23 @@ impl ProfileCatalog {
             subagents: None,
         };
 
+        // v2 `features/promptOptimizer/optimizerProfile.ts`: the rewrite agent
+        // reads the repository but never writes, and answers with the prompt.
+        let prompt_optimizer = AgentProfile {
+            name: crate::features::promptOptimizer::promptOptimizer::PROMPT_OPTIMIZER_PROFILE_NAME
+                .into(),
+            description: "Rewrites a drafted prompt without acting on it.".into(),
+            when_to_use: None,
+            role_additional: crate::features::promptOptimizer::promptOptimizer::PROMPT_OPTIMIZER_SYSTEM_PROMPT
+                .into(),
+            tools: tools(
+                crate::features::promptOptimizer::promptOptimizer::PROMPT_OPTIMIZER_TOOLS,
+            ),
+            subagents: None,
+        };
+
         Self {
-            profiles: vec![agent, coder, explore, plan],
+            profiles: vec![agent, coder, explore, plan, prompt_optimizer],
         }
     }
 
@@ -503,7 +522,7 @@ mod tests {
         let catalog = ProfileCatalog::with_builtins();
 
         // Verify catalog list count and default profile
-        assert_eq!(catalog.list().len(), 4);
+        assert_eq!(catalog.list().len(), 5);
         assert_eq!(catalog.default_profile().name, "agent");
         assert_eq!(catalog.default_profile().description, "Default agent");
 
@@ -532,6 +551,19 @@ mod tests {
         assert_eq!(
             plan.description,
             "Read-only implementation planning and architecture design."
+        );
+
+        let prompt_optimizer = catalog
+            .get("promptOptimizer")
+            .expect("promptOptimizer profile must exist");
+        assert_eq!(prompt_optimizer.name, "promptOptimizer");
+        assert_eq!(
+            prompt_optimizer.description,
+            "Rewrites a drafted prompt without acting on it."
+        );
+        assert_eq!(
+            prompt_optimizer.tools,
+            names(crate::features::promptOptimizer::promptOptimizer::PROMPT_OPTIMIZER_TOOLS)
         );
 
         // Case-insensitive retrieval verification
@@ -569,9 +601,11 @@ mod tests {
 
         // v2 `CODER_TOOLS`, verbatim: 21 entries, `NotifyUser` first.
         assert_eq!(coder.tools, names(CODER_TOOLS));
-        assert_eq!(coder.tools.len(), 21);
+        assert_eq!(coder.tools.len(), 23);
         assert!(coder.tools.contains(&"NotifyUser".to_string()));
         assert!(coder.tools.contains(&"RepoMap".to_string()));
+        assert!(coder.tools.contains(&"run_code".to_string()));
+        assert!(coder.tools.contains(&"lsp".to_string()));
         assert!(coder.tools.contains(&"ExitSpecMode".to_string()));
 
         // Boundary enforcement: coder cannot spawn recursive subagents or manage top-level goals
@@ -706,7 +740,7 @@ mod tests {
         let builtins = ProfileCatalog::with_builtins();
         let merged = MergedProfileCatalog::merge(builtins.list(), &[]);
 
-        assert_eq!(merged.list().len(), 4);
+        assert_eq!(merged.list().len(), 5);
         let agent = merged.inspect("agent").expect("agent inspection");
         assert_eq!(agent.source_id, BUILTIN_AGENT_PROFILE_SOURCE_ID);
         assert!(agent.suppressed.is_empty());
@@ -777,7 +811,7 @@ mod tests {
             effective.subagents,
             Some(names(&["coder", "explore", "plan"]))
         );
-        assert_eq!(merged.list().len(), 4);
+        assert_eq!(merged.list().len(), 5);
 
         // A winner that declares its own list keeps it.
         replacement.subagents = Some(vec!["explore".into()]);
@@ -851,8 +885,8 @@ mod tests {
             ]
         );
         // Builtins keep their positions; the new name is appended.
-        assert_eq!(merged.list().len(), 5);
-        assert_eq!(merged.list()[4].name, "reviewer");
+        assert_eq!(merged.list().len(), 6);
+        assert_eq!(merged.list()[5].name, "reviewer");
     }
 
     #[test]

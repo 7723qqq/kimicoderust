@@ -35,6 +35,13 @@ reports/*
 # tree left those citations pointing at files no clone would have.
 !reports/design/
 !reports/runbooks/
+# The root AGENTS.md points here for the project map, commands, and background,
+# so a clone has to carry it.
+!reports/repo-guide.md
+!reports/v2-parity/
+reports/v2-parity/*
+!reports/v2-parity/v2-parity-initial-summary.md
+!reports/v2-parity/v2-parity-initial-summary.json
 .superpowers/
 /plan/
 
@@ -60,6 +67,13 @@ handover.md
 
 # Stray Cargo build dirs created outside their package (e.g. /target/prompt_test)
 /target/
+
+# Alternate cargo target dir used for baseline builds
+/target-baseline/
+
+# Dated agent analysis runs (perf/fold/census scratch)
+/2026-11-11/
+/2026-11-12/
 
 # Vendored reference copies (not part of this repo)
 参考目录/

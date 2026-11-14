@@ -1,0 +1,9 @@
+pub mod builtin;
+pub mod checkKimiCodeDocs;
+pub mod customTheme;
+pub mod importFromCcCodex;
+pub mod mcpConfig;
+pub mod registry;
+pub mod subSkill;
+pub mod updateConfig;
+pub mod writeGoal;

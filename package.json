@@ -55,6 +55,11 @@
     "scan:hardcoded:rust": "bun scripts/scan-hardcoded-rust.mjs",
     "check:no-legacy-engine": "bun scripts/check-no-legacy-engine.mjs",
     "check:parity": "bun scripts/scan-parity.mjs",
+    "check:agent-parity": "bun scripts/check-agent-parity.mjs",
+    "check:agent-parity:update": "bun scripts/check-agent-parity.mjs --update-baseline",
+    "check:v2-parity": "bun scripts/check-agent-parity.mjs --manifest scripts/v2-parity-manifest.json",
+    "check:v2-parity:update": "bun scripts/check-agent-parity.mjs --manifest scripts/v2-parity-manifest.json --update-baseline",
+    "generate:v2-parity": "bun scripts/generate-v2-parity-manifest.mjs",
     "check:error-codes": "bun scripts/check-error-codes.mjs",
     "check:patch-budget": "bun scripts/check-patch-budget.mjs",
     "check:config-registry": "bun scripts/check-config-registry.mjs",
@@ -68,7 +73,7 @@
     "check:normify": "bun packages/normify/src/cli.ts normify_validate \"{\\\"project\\\":\\\"kimi-code\\\",\\\"repoRoot\\\":\\\".\\\"}\"",
     "check:rust-module-deps": "bun scripts/check-rust-module-deps.mjs",
     "check:rust-module-deps:update": "bun scripts/check-rust-module-deps.mjs --update",
-    "check:all": "bun run check:nix-workspace && bun run check:bun-first && bun run check:no-legacy-engine && bun run check:architecture && bun run check:normify && bun run check:rust-module-deps && bun run check:parity && bun run check:error-codes && bun run check:config-registry && bun run check:event-coverage && bun run check:patch-budget && bun run check:no-comments && bun run check:t-call-coverage && bun run check:engine-i18n && bun run scan:hardcoded && bun run scan:hardcoded:rust && bun run check:upstream-v2-delta && bun run check:locale-keys && bun run check:locale-orphans && bun run check:locale-placeholders",
+    "check:all": "bun run check:nix-workspace && bun run check:bun-first && bun run check:no-legacy-engine && bun run check:architecture && bun run check:normify && bun run check:rust-module-deps && bun run check:parity && bun run check:v2-parity && bun run check:error-codes && bun run check:config-registry && bun run check:event-coverage && bun run check:patch-budget && bun run check:no-comments && bun run check:t-call-coverage && bun run check:engine-i18n && bun run scan:hardcoded && bun run scan:hardcoded:rust && bun run check:upstream-v2-delta && bun run check:locale-keys && bun run check:locale-orphans && bun run check:locale-placeholders",
     "gen:brief": "bun scripts/gen-brief.mjs",
     "changeset": "changeset",
     "version": "changeset version",
@@ -135,7 +140,7 @@
     "ws": ">=8.21.0"
   },
   "simple-git-hooks": {
-    "pre-commit": "bunx lint-staged && bun run check:architecture"
+    "pre-commit": "bunx lint-staged && bun run check:architecture && bun run check:v2-parity"
   },
   "lint-staged": {
     "concurrent": "false",

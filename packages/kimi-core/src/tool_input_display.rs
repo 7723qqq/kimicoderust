@@ -1,4 +1,3 @@
-
 use serde::{Deserialize, Serialize};
 
 use serde_json::Value;
@@ -74,7 +73,9 @@ pub enum ToolInputDisplay {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<String>,
     },
-    TodoList { items: Vec<TodoListItem> },
+    TodoList {
+        items: Vec<TodoListItem>,
+    },
     Task {
         task_id: String,
         status: String,

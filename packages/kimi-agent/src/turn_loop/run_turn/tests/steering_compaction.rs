@@ -2,16 +2,10 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-// ── Goal steering text injection test ────────────────────────────────
-
-/// Verify that when a goal is active, the system prompt is enriched
-/// with steering text containing the objective and budget info.
 #[tokio::test]
 async fn test_goal_steering_injected_into_system_prompt() {
     use std::sync::Mutex;
 
-    // LLM that captures the messages it receives so we can inspect
-    // the system prompt.
     struct CaptureLlm {
         captured_system: Arc<Mutex<Option<String>>>,
         call: AtomicU32,
@@ -77,6 +71,7 @@ async fn test_goal_steering_injected_into_system_prompt() {
     };
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-steering".into(),
@@ -124,14 +119,8 @@ async fn test_goal_steering_injected_into_system_prompt() {
     assert!(captured.contains("10"), "should mention turn budget");
 }
 
-// ── Max steps enforcement test ──────────────────────────────────────
-
-/// When the LLM always returns tool calls, the loop must stop at
-/// max_steps with EndTurn (the loop exits after the max_steps
-/// iterations).
 #[tokio::test]
 async fn test_max_steps_enforcement() {
-    // LLM that always returns a tool call — never stops on its own.
     let llm = PredictTestLlm {
         system_prompt: "You are helpful.".into(),
         model_name: "test-model".into(),
@@ -161,6 +150,7 @@ async fn test_max_steps_enforcement() {
 
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-max-steps".into(),
@@ -187,11 +177,9 @@ async fn test_max_steps_enforcement() {
     };
 
     let result = run_turn(input, &callbacks).await.unwrap();
-    // The loop runs max_steps iterations; steps = max_steps.
+
     assert_eq!(result.steps, 3, "should stop at max_steps");
 }
-
-// ── render_goal_steering tests ──────────────────────────────────────
 
 #[test]
 fn test_render_goal_steering_basic() {
@@ -269,7 +257,7 @@ fn test_render_goal_steering_near_limit() {
         updated_at: 0,
         terminal_reason: None,
     };
-    // 80 + 10 = 90 / 100 = 0.9 >= 0.75 → should say "nearing"
+
     let text = render_goal_steering(&goal, 10, 0, 0);
     assert!(
         text.contains("nearing a budget"),
@@ -300,12 +288,6 @@ fn test_render_goal_steering_no_budgets() {
     );
 }
 
-// ── Context compaction wiring tests ────────────────────────────────
-
-/// When the message history crosses the context trigger threshold, the
-/// loop compacts it before the LLM call: the system prompt and the
-/// most recent messages survive, the middle is replaced by a summary
-/// placeholder.
 #[tokio::test]
 async fn test_context_compaction_before_llm_call() {
     use std::sync::Mutex;
@@ -331,11 +313,23 @@ async fn test_context_compaction_before_llm_call() {
             let captured = self.captured.clone();
             Box::pin(async move {
                 *captured.lock().unwrap() = params.messages.to_vec();
-                Ok(LLMChatResponse {
-                    content: if params.messages[0]
+                let is_summarizer = params.messages.last().is_some_and(|message| {
+                    message
                         .content
-                        .contains("conversation summarizer")
-                    {
+                        .contains("You are about to run out of context")
+                });
+                if is_summarizer {
+                    assert_eq!(
+                        params
+                            .messages
+                            .first()
+                            .map(|message| message.content.as_str()),
+                        Some("base prompt"),
+                        "the summarizer carries the agent's profile system prompt"
+                    );
+                }
+                Ok(LLMChatResponse {
+                    content: if is_summarizer {
                         "Earlier user and assistant discussed the task.".into()
                     } else {
                         String::new()
@@ -355,9 +349,6 @@ async fn test_context_compaction_before_llm_call() {
         }
     }
 
-    // Default trigger threshold is 128k - 50k reserved = 81_072 tokens;
-    // at 4 chars/token that is ~324k chars. Three 120k-char messages
-    // (90k estimated tokens) cross it.
     let big = "x".repeat(120_000);
     let captured: Arc<Mutex<Vec<LLMMessage>>> = Arc::new(Mutex::new(Vec::new()));
     let llm = CaptureLlm {
@@ -366,6 +357,7 @@ async fn test_context_compaction_before_llm_call() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-compaction".into(),
@@ -407,9 +399,7 @@ async fn test_context_compaction_before_llm_call() {
     assert!(matches!(result.stop_reason, LoopTurnStopReason::EndTurn));
 
     let captured = captured.lock().unwrap();
-    // v2 compaction shape: system, the compacted range's head user input
-    // (verbatim), the elision note, the prefixed summary, the continuation
-    // note, the preserved recent user input, then the turn injections.
+
     assert_eq!(captured[0].role, "system");
     let summary_message = captured
         .iter()
@@ -462,11 +452,6 @@ async fn test_context_compaction_before_llm_call() {
     );
 }
 
-/// v2 `postProcessSummary` (fullCompactionService.ts:844): a compaction
-/// in a session with todos appends the rendered list to the written
-/// summary, so the todo state survives the fold that dropped the older
-/// history. The default `host/state_read` answers Null for every domain;
-/// the todo domain gets a real list here.
 #[tokio::test]
 async fn test_auto_compaction_summary_carries_the_todo_list() {
     use std::sync::Mutex;
@@ -492,11 +477,23 @@ async fn test_auto_compaction_summary_carries_the_todo_list() {
             let captured = self.captured.clone();
             Box::pin(async move {
                 *captured.lock().unwrap() = params.messages.to_vec();
-                Ok(LLMChatResponse {
-                    content: if params.messages[0]
+                let is_summarizer = params.messages.last().is_some_and(|message| {
+                    message
                         .content
-                        .contains("conversation summarizer")
-                    {
+                        .contains("You are about to run out of context")
+                });
+                if is_summarizer {
+                    assert_eq!(
+                        params
+                            .messages
+                            .first()
+                            .map(|message| message.content.as_str()),
+                        Some("base prompt"),
+                        "the summarizer carries the agent's profile system prompt"
+                    );
+                }
+                Ok(LLMChatResponse {
+                    content: if is_summarizer {
                         "Earlier user and assistant discussed the task.".into()
                     } else {
                         String::new()
@@ -523,9 +520,7 @@ async fn test_auto_compaction_summary_carries_the_todo_list() {
     };
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
-    // Overwrite the no-op state_read (a HashMap insert, so this wins) and
-    // answer only the todo domain — goal/plan keep the Null the step-head
-    // refresh expects.
+
     RpcServer::register_arc(&server, types::methods::HOST_STATE_READ, |params| {
         Box::pin(async move {
             let value = if params.get("domain").and_then(|v| v.as_str()) == Some("todo") {
@@ -540,6 +535,7 @@ async fn test_auto_compaction_summary_carries_the_todo_list() {
         })
     });
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-compaction-todos".into(),
@@ -600,5 +596,3 @@ async fn test_auto_compaction_summary_carries_the_todo_list() {
         "the summary carries the todo list (v2 postProcessSummary)"
     );
 }
-
-// ── Injection wiring tests ─────────────────────────────────────────

@@ -46,15 +46,7 @@ impl HttpServer {
                 }
                 HttpResponse::ok(&resp)
             }
-            // Remote-control runtime (#3594).
-            //
-            // Remote Control (#3594): the runtime behind this endpoint is now
-            // real (`server/remote_control.rs` — device registration, a relay
-            // WebSocket channel, reverse HTTP proxy and heartbeats). POST
-            // starts it (the caller must supply the Kimi login refresh token —
-            // the standalone server holds none of its own), GET reports the
-            // live status. The old `501 + available:false` responses existed
-            // because there was genuinely nothing listening behind them.
+
             ("GET", "/api/v1/remote-control") => {
                 let runtime = self.remote_control_runtime.lock().await;
                 match runtime.as_ref() {
@@ -116,7 +108,6 @@ impl HttpServer {
                 }
                 let enabled = body["enabled"].as_bool().unwrap_or(false);
                 if !enabled {
-                    // Stop the runtime if one is live and report the off state.
                     if let Some(handle) = self.remote_control_runtime.lock().await.take() {
                         handle.close().await;
                     }
@@ -124,8 +115,7 @@ impl HttpServer {
                         let mut st = self.remote_control_state.lock().await;
                         *st = RemoteControlStatusWire::off();
                     }
-                    // v2 #3897 `remote_control_toggle`
-                    // (kap-server/src/routes/remoteControl.ts:84).
+
                     self.emit_session_telemetry(
                         "remote_control_toggle",
                         serde_json::json!({ "enabled": false, "outcome": "ok" }),
@@ -137,10 +127,7 @@ impl HttpServer {
                         "available": false,
                     }));
                 }
-                // Start (or report the already-running) runtime. The in-process
-                // slot is the start gate: a logout that holds it or a runtime
-                // that already owns it is reported as 40928 with the holder
-                // (upstream `REMOTE_CONTROL_ALREADY_RUNNING`).
+
                 if let Some(started_at) = self.remote_control_logout_gate.active_since() {
                     self.emit_session_telemetry(
                         "remote_control_toggle",
@@ -168,11 +155,7 @@ impl HttpServer {
                         handle.url().to_string(),
                     );
                 }
-                // The Kimi login refresh token is the WS-upgrade credential at
-                // the relay; the standalone server holds none of its own, so
-                // the caller (the web UI, which owns the user session) passes
-                // it in. Refusing without it is honest: an empty token would
-                // fail the upgrade mid-handshake anyway.
+
                 let refresh_token = body
                     .get("refresh_token")
                     .and_then(|v| v.as_str())
@@ -183,8 +166,7 @@ impl HttpServer {
                         "Field 'refresh_token' is required: remote control authenticates to the relay with the Kimi login credential",
                     );
                 }
-                // Stable device id, persisted in the session store (TS:
-                // `createKimiDeviceId(homeDir)`).
+
                 let device_id = match self.stored_remote_control_device_id() {
                     Some(id) => id,
                     None => {
@@ -195,8 +177,7 @@ impl HttpServer {
                         id
                     }
                 };
-                // Forward target: this server itself, as addressed by the
-                // caller (the Host header carries the loopback host:port).
+
                 let local_base_url =
                     format!("http://{}", req.header("host").unwrap_or("127.0.0.1"));
                 let local_server_token = self.auth.token().unwrap_or_default().to_string();
@@ -211,8 +192,7 @@ impl HttpServer {
                 let handle = crate::server::remote_control::RemoteControlRuntime::start(options);
                 let st = handle.status();
                 *slot = Some(handle);
-                // v2 reports `error` for a failed start (routes/remoteControl.ts:105);
-                // the runtime encodes a failed start in its status.
+
                 let outcome = if st.error.is_some() { "error" } else { "ok" };
                 self.emit_session_telemetry(
                     "remote_control_toggle",
@@ -312,9 +292,6 @@ impl HttpServer {
                     Err(error) => return HttpResponse::internal_error(error),
                 };
 
-                // Same slot lock as DELETE: a local deactivate cannot race a
-                // start, and the cloud mutation happens after the tunnel is
-                // stopped (upstream disables before and after the cloud call).
                 let mut runtime = self.remote_control_runtime.lock().await;
                 let active_id = runtime
                     .as_ref()
@@ -360,11 +337,6 @@ impl HttpServer {
                     Err(error) => return HttpResponse::internal_error(error),
                 };
 
-                // Keep the runtime slot locked across a current-device delete.
-                // POST /remote-control takes the same slot before starting, so a
-                // deleted local device cannot be re-registered behind the cloud
-                // mutation. This is the fork-runtime equivalent of upstream's
-                // start gate; no second filesystem lock is introduced here.
                 let mut runtime = self.remote_control_runtime.lock().await;
                 let active_id = runtime
                     .as_ref()
@@ -388,9 +360,6 @@ impl HttpServer {
                     .delete_device(&self.oauth_manager, &device_auth, &device_id)
                     .await;
                 if is_local {
-                    // Upstream disables once more after the cloud mutation. The
-                    // slot lock already excludes new starts; repeating the state
-                    // reset preserves that externally visible postcondition.
                     *self.remote_control_state.lock().await = RemoteControlStatusWire::off();
                 }
                 drop(runtime);
@@ -402,7 +371,7 @@ impl HttpServer {
                     }
                 }
             }
-            // MCP endpoints
+
             ("GET", "/api/v1/mcp")
             | ("GET", "/api/v1/mcp/servers")
             | ("GET", "/api/v2/mcp/servers") => {
@@ -413,8 +382,7 @@ impl HttpServer {
                 let tools = self.mcp_manager.list_tool_infos().await;
                 HttpResponse::ok(&json!({ "tools": tools }))
             }
-            // On-demand reconnect for a configured server (v2
-            // `reconnectAndJoin` surface): truthful failed/connected status.
+
             ("POST", p)
                 if p.starts_with("/api/v1/mcp/servers/")
                     && (p.ends_with(":reconnect") || p.ends_with(":restart")) =>
@@ -446,8 +414,7 @@ impl HttpServer {
                     .get("name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("test-server");
-                // Report the real status of the named configured server rather
-                // than a fabricated success.
+
                 let entries = self.mcp_manager.server_entries().await;
                 match entries.iter().find(|entry| entry.name == name) {
                     Some(entry) => HttpResponse::ok(&json!({
@@ -493,11 +460,7 @@ impl HttpServer {
                     HttpResponse::not_found()
                 }
             }
-            // The browser lands here after the authorization server's
-            // redirect. Unauthenticated by design (a browser carries no bearer
-            // token): the single-use `state` minted by `auth:begin-auth-code`
-            // is the credential this route checks, and the code is worthless
-            // without the PKCE verifier held by the pending flow.
+
             ("GET", "/api/v1/mcp/auth/callback") | ("GET", "/api/v2/mcp/auth/callback") => {
                 let state = req.query_param("state").unwrap_or_default();
                 let Some(service) = self.mcp_oauth.lock().await.clone() else {
@@ -590,14 +553,6 @@ impl HttpServer {
                 }
             }
             ("GET", "/api/v1/mcp/auth-statuses") | ("GET", "/api/v2/mcp/auth-statuses") => {
-                // `authenticated` is a real probe, not key presence: the token
-                // is fetched through the OAuth service, which refreshes an
-                // expired one and returns `None` when the credential cannot be
-                // used. A stored-but-unusable key therefore reports
-                // `needs-auth` (v2 `McpServerStatus`) instead of a fabricated
-                // `true`. Shape note: v2 returned `data: McpServerAuthStatus[]`;
-                // this server keeps its own `{statuses:{<key>:{...}}}` object,
-                // which its clients and tests already consume.
                 let service = self.mcp_oauth.lock().await.clone();
                 let mut statuses = serde_json::Map::new();
                 if let Some(service) = service {
@@ -635,18 +590,11 @@ impl HttpServer {
                     );
                 };
                 match action {
-                    // Browser authorization-code + PKCE: the server discovers
-                    // the authorization server, registers a public PKCE client
-                    // and mints one flow. The browser opens the returned URL;
-                    // the callback route below exchanges the code.
                     "begin-auth-code" => {
                         if name.is_empty() || url.is_empty() {
                             return HttpResponse::bad_request("name and url are required");
                         }
-                        // The redirect must land on this server. A caller
-                        // behind an HTTPS proxy passes its own spelling;
-                        // otherwise the request's Host header is the address
-                        // the browser used to reach us.
+
                         let redirect_uri = body
                             .get("redirect_uri")
                             .and_then(|v| v.as_str())
@@ -678,8 +626,7 @@ impl HttpServer {
                             Err(e) => HttpResponse::bad_request(e),
                         }
                     }
-                    // Poll the flow the browser is completing: 202 while it is
-                    // still pending, 200 on success, 400 on failure.
+
                     "complete-auth-code" => {
                         let flow_id = body
                             .get("flow_id")
@@ -709,7 +656,7 @@ impl HttpServer {
                         let cancelled = self.mcp_auth_code.cancel(flow_id).await;
                         HttpResponse::ok(&json!({ "cancelled": cancelled }))
                     }
-                    // RFC 8628 §3.1: start a device authorization.
+
                     "begin" => {
                         let endpoint = body
                             .get("device_authorization_endpoint")
@@ -735,7 +682,7 @@ impl HttpServer {
                             Err(e) => HttpResponse::bad_request(e),
                         }
                     }
-                    // RFC 8628 §3.4: poll until approved, then persist.
+
                     "complete" => {
                         let device_code = body
                             .get("device_code")
@@ -802,7 +749,7 @@ impl HttpServer {
                             Err(e) => HttpResponse::bad_request(e),
                         }
                     }
-                    // Drop the stored credentials.
+
                     "cancel" | "reset" => {
                         let key = match crate::mcp::oauth::mcp_oauth_store_key(name, url) {
                             Ok(key) => key,
@@ -828,10 +775,7 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
-                // The roster is engine-global: there is no per-workspace MCP
-                // config, so every session sees the same servers. The session
-                // is validated so a client cannot probe arbitrary ids, and the
-                // payload names the scope rather than implying it is per-session.
+
                 let servers = self.mcp_manager.server_entries().await;
                 HttpResponse::ok(&json!({
                     "servers": servers,
@@ -839,9 +783,7 @@ impl HttpServer {
                     "scope": "engine-global",
                 }))
             }
-            // The session-scoped MCP views the web UI calls. Same engine-global
-            // roster as above; the paths differ because the client asks per
-            // session, and the session is validated the same way.
+
             ("GET", p) if p.starts_with("/api/v1/sessions/") && p.ends_with("/mcp/servers") => {
                 let segments: Vec<&str> = p.split('/').collect();
                 if segments.len() != 7 {
@@ -927,9 +869,6 @@ fn remote_control_device_auth(
     })
 }
 
-/// `resolveKimiTokenStorageName`: strip the `oauth/` namespace, then reject a
-/// path-like key instead of letting the credential store sanitize it into a
-/// different account's file.
 fn remote_control_token_storage_name(oauth_key: &str) -> Result<String, String> {
     let name = if oauth_key == "kimi-code" || oauth_key == crate::region::KIMI_CODE_OAUTH_KEY {
         "kimi-code"
@@ -942,12 +881,8 @@ fn remote_control_token_storage_name(oauth_key: &str) -> Result<String, String> 
     Ok(name.to_string())
 }
 
-/// The callback path the begin route advertises unless the caller supplies its
-/// own redirect URI.
 const MCP_AUTH_CALLBACK_PATH: &str = "/api/v1/mcp/auth/callback";
 
-/// A small HTML page for the browser the authorization server redirected: the
-/// flow's result has to be readable without any client.
 fn html_result(status: u16, title: &str, message: &str) -> HttpResponse {
     let body = format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
@@ -959,8 +894,6 @@ fn html_result(status: u16, title: &str, message: &str) -> HttpResponse {
     HttpResponse::bytes(status, "text/html; charset=utf-8", body.into_bytes())
 }
 
-/// The provider's error text is third-party content rendered into the result
-/// page, so it must not be able to inject markup.
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -971,7 +904,6 @@ fn escape_html(value: &str) -> String {
 }
 
 impl HttpServer {
-    /// The persisted stable device id (ts `createKimiDeviceId(homeDir)`).
     fn stored_remote_control_device_id(&self) -> Option<String> {
         self.store
             .get_state("remote-control", "device_id")
@@ -981,8 +913,6 @@ impl HttpServer {
     }
 }
 
-/// 50001 for a failed cloud device mutation, matching the upstream
-/// `handleDeviceRoute` catch-all code.
 fn remote_control_internal_error(req: &HttpRequest, message: String) -> HttpResponse {
     HttpResponse::json(
         500,
@@ -995,8 +925,6 @@ fn remote_control_internal_error(req: &HttpRequest, message: String) -> HttpResp
     )
 }
 
-/// 40928 conflict: another holder owns the remote-control start slot
-/// (upstream `REMOTE_CONTROL_ALREADY_RUNNING` with `details`).
 fn remote_control_already_running(
     req: &HttpRequest,
     started_at: u64,

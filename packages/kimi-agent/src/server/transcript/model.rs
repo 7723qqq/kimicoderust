@@ -459,12 +459,7 @@ pub struct TranscriptTurn {
     pub duration_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Set when the turn's loop died before writing a terminal event (upstream
-    /// #4280 `TranscriptTurn.wedged`): a cold rebuild marks it `failed` with
-    /// this flag once a later turn prompt exists in the wire, and the live
-    /// projector closes the previous running turn this way when a new turn
-    /// starts. Additive optional — released clients parse the transcript
-    /// unchanged and render the turn as failed.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wedged: Option<bool>,
 }
@@ -611,10 +606,7 @@ pub struct TranscriptPrompt {
     pub user_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<Value>,
-    /// The client metadata the submission carried (v2 #3764), as the
-    /// one-element array the contract's `clientMetadata` is. The turn's
-    /// origin may name a `skill_activation` variant; the metadata itself
-    /// rides here, the way the contract shapes it.
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_metadata: Option<Vec<Value>>,
     pub created_at: String,

@@ -1,18 +1,3 @@
-//! XML/HTML escaping — fast byte-level replacements for safe XML embedding.
-//!
-//! Mirrors `packages/agent-core-v2/src/_base/utils/xml-escape.ts`. Three variants:
-//!   - `escape_xml`: escapes all XML-significant characters (& < > ")
-//!   - `escape_xml_attr`: escapes only attribute boundary chars (& ")
-//!   - `escape_xml_tags`: escapes only tag delimiters (< >), preserving &
-//!     for Markdown compatibility
-//!
-//! These are called on every agent turn (skill prompt injection, bash I/O
-//! XML wrapping, plugin session start, background task notifications) across
-//! the agent engine (`packages/agent-core-v2/src/`). Moving them to Rust
-//! eliminates the per-call JS string-replacement overhead and runs with
-//! SIMD-friendly byte scanning.
-
-/// Escape all XML-significant characters: & < > "
 pub fn escape_xml(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
@@ -27,7 +12,6 @@ pub fn escape_xml(input: &str) -> String {
     out
 }
 
-/// Escape XML attribute boundary characters only: & "
 pub fn escape_xml_attr(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
@@ -40,8 +24,6 @@ pub fn escape_xml_attr(input: &str) -> String {
     out
 }
 
-/// Escape tag delimiters only: < >
-/// Preserves & and " for Markdown compatibility.
 pub fn escape_xml_tags(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
@@ -71,7 +53,7 @@ mod tests {
         assert_eq!(escape_xml_attr("hello"), "hello");
         assert_eq!(escape_xml_attr("a & b"), "a &amp; b");
         assert_eq!(escape_xml_attr(r#""quoted""#), "&quot;quoted&quot;");
-        // Tags NOT escaped in attr mode
+
         assert_eq!(escape_xml_attr("<tag>"), "<tag>");
     }
 
@@ -79,7 +61,7 @@ mod tests {
     fn test_escape_xml_tags() {
         assert_eq!(escape_xml_tags("hello"), "hello");
         assert_eq!(escape_xml_tags("<tag>"), "&lt;tag&gt;");
-        // & and " NOT escaped in tag-only mode (Markdown safe)
+
         assert_eq!(escape_xml_tags("a & b"), "a & b");
         assert_eq!(escape_xml_tags(r#""quoted""#), r#""quoted""#);
     }
@@ -108,7 +90,6 @@ mod tests {
 
     #[test]
     fn test_matches_js_output() {
-        // These must produce identical output to the TS escapeXml/escapeXmlAttr/escapeXmlTags
         let cases = vec![
             (
                 "<skill name=\"test\">content & more</skill>",

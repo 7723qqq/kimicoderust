@@ -1,17 +1,6 @@
-//! Provider-side media upload (v2 `KimiFiles`).
-//!
-//! A provider that takes media by reference is sent `ms://<file id>` instead
-//! of inline base64: the bytes go up once through the provider's files API and
-//! every later request names the upload. v2 gates this on the provider being
-//! OAuth-managed (`modelSource === 'oauth-catalog'`); the engine gates it on
-//! `NativeLlmConfig.auth_provider`, which is the same set.
-
 use crate::rpc::types::BoxFuture;
 pub use kimi_core::types::{CredentialFuture, UploadError};
 
-
-/// v2 `kimiFilesBaseUrl`: the anthropic route strips the `/v1` segment for the
-/// Messages API, but the files API lives under it.
 pub fn files_base_url(base_url: &str, protocol: &str) -> String {
     let base = base_url.trim_end_matches('/');
     if protocol != "anthropic" || base.ends_with("/v1") {
@@ -20,11 +9,6 @@ pub fn files_base_url(base_url: &str, protocol: &str) -> String {
     format!("{base}/v1")
 }
 
-/// The multipart body one upload sends (v2 `KimiFiles._upload`).
-///
-/// Hand-rolled rather than pulling in `reqwest`'s `multipart` feature: the
-/// daemon already parses the same format by hand on the receiving side
-/// (`server::files::parse_multipart`), so the two stay symmetric.
 pub fn multipart_body(
     boundary: &str,
     filename: &str,
@@ -51,7 +35,6 @@ pub fn multipart_body(
     body
 }
 
-/// A filename the provider can place the upload by (v2 `guessFilename`).
 pub fn upload_filename(media_type: &str) -> String {
     let extension = match media_type {
         "image/png" => "png",
@@ -69,7 +52,6 @@ pub fn upload_filename(media_type: &str) -> String {
     format!("upload.{extension}")
 }
 
-/// The provider's file id, when the response carries one.
 fn file_id_of(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     value
@@ -79,8 +61,6 @@ fn file_id_of(body: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Classify a non-success status (v2 `isMediaUploadAuthError` +
-/// `ImageUploadUnsupportedError`).
 fn classify_status(status: u16, body: &str) -> UploadError {
     let message = format!("media upload failed with status {status}: {body}");
     match status {
@@ -90,8 +70,6 @@ fn classify_status(status: u16, body: &str) -> UploadError {
     }
 }
 
-/// `POST {base}/files` with `purpose=image|video`; returns the provider's file
-/// id (v2 `KimiFiles._upload`).
 pub async fn upload_media(
     base_url: &str,
     protocol: &str,
@@ -111,8 +89,7 @@ pub async fn upload_media(
             format!("multipart/form-data; boundary={boundary}"),
         )
         .body(body);
-    // The files API authenticates the same way the chat route does: a bearer
-    // token for OpenAI-compatible providers, `x-api-key` for Anthropic.
+
     request = if protocol == "anthropic" {
         request.header("x-api-key", credential)
     } else {
@@ -125,8 +102,6 @@ pub async fn upload_media(
     let status = response.status().as_u16();
     let text = response.text().await;
     if !(200..300).contains(&status) {
-        // A body that cannot be read is not an empty body: keep the status
-        // classification and name the read failure in the detail.
         let body = match &text {
             Ok(text) => text.clone(),
             Err(error) => format!("<body could not be read: {error}>"),
@@ -160,7 +135,7 @@ mod tests {
             files_base_url("https://api.example.test/v1/", "anthropic"),
             "https://api.example.test/v1"
         );
-        // The openai route already carries whatever version it needs.
+
         assert_eq!(
             files_base_url("https://api.example.test/v1", "openai"),
             "https://api.example.test/v1"

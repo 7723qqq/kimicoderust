@@ -7,6 +7,7 @@ fn completion_input(mission: &TowerMission, report: &str) -> TowerSendInput {
         subject: match mission.kind {
             TowerMissionKind::Build => "review-request".into(),
             TowerMissionKind::Survey => "survey-summary".into(),
+            TowerMissionKind::Artifact => "acceptance-request".into(),
         },
         body: report.trim().into(),
         scope: Some(mission.id.clone()),
@@ -15,11 +16,24 @@ fn completion_input(mission: &TowerMission, report: &str) -> TowerSendInput {
     }
 }
 
-fn recovered_completion_input(report: &str) -> TowerSendInput {
+fn recovered_completion_input(report: &str, key_artifacts: &[String]) -> TowerSendInput {
+    let body = if key_artifacts.is_empty() {
+        report.trim().to_string()
+    } else {
+        format!(
+            "Key artifacts:\n{}\n\n{}",
+            key_artifacts
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            report.trim()
+        )
+    };
     TowerSendInput {
         to: TOWER_NAME.into(),
         subject: "completion-report-state-lost".into(),
-        body: report.trim().into(),
+        body,
         scope: None,
         action: Some("complete".into()),
         consent_ref: None,
@@ -82,11 +96,13 @@ impl TowerStore {
         &self,
         caller_name: &str,
         report: &str,
+        key_artifacts: &[String],
     ) -> Result<TowerCompleteResult, String> {
         if report.trim().is_empty() {
             return Err("TowerComplete report must not be empty".into());
         }
-        self.complete_resolved(caller_name, report.trim(), None)
+        let key_artifacts = normalize_artifact_paths(key_artifacts)?;
+        self.complete_resolved(caller_name, report.trim(), &key_artifacts, None)
             .await
     }
 
@@ -94,12 +110,14 @@ impl TowerStore {
         &self,
         caller_agent_id: &str,
         report: &str,
+        key_artifacts: &[String],
     ) -> Result<TowerCompleteResult, String> {
         if report.trim().is_empty() {
             return Err("TowerComplete report must not be empty".into());
         }
+        let key_artifacts = normalize_artifact_paths(key_artifacts)?;
         let (_, caller, recovered_at, _) = self.resolve_agent_operation(caller_agent_id).await?;
-        self.complete_resolved(&caller, report.trim(), recovered_at)
+        self.complete_resolved(&caller, report.trim(), &key_artifacts, recovered_at)
             .await
     }
 
@@ -107,20 +125,24 @@ impl TowerStore {
         &self,
         caller_name: &str,
         report: &str,
+        key_artifacts: &[String],
         recovered_at: Option<String>,
     ) -> Result<TowerCompleteResult, String> {
         let prepare_store = self.clone();
         let prepare_caller = caller_name.to_string();
         let prepare_report = report.to_string();
+        let prepare_artifacts = key_artifacts.to_vec();
         let prepare_recovered = recovered_at.clone();
         let commit_store = self.clone();
         let commit_caller = caller_name.to_string();
         let commit_report = report.to_string();
+        let commit_artifacts = key_artifacts.to_vec();
         self.run_prepared(
             move || {
                 let store = prepare_store.clone();
                 let caller = prepare_caller.clone();
                 let report = prepare_report.clone();
+                let key_artifacts = prepare_artifacts.clone();
                 let recovered_at = prepare_recovered.clone();
                 async move {
                     let snapshot = store.load_snapshot().await?;
@@ -132,6 +154,7 @@ impl TowerStore {
                         .complete_from_state(
                             &caller,
                             &report,
+                            &key_artifacts,
                             recovered_at,
                             snapshot.state.clone(),
                             MissionUpdateOptions {
@@ -148,6 +171,7 @@ impl TowerStore {
                 let store = commit_store.clone();
                 let caller = commit_caller.clone();
                 let report = commit_report.clone();
+                let key_artifacts = commit_artifacts.clone();
                 let recovered_at = recovered_at.clone();
                 async move {
                     let lock_store = store.clone();
@@ -164,6 +188,7 @@ impl TowerStore {
                                 .complete_from_state(
                                     &caller,
                                     &report,
+                                    &key_artifacts,
                                     recovered_at,
                                     state,
                                     MissionUpdateOptions {
@@ -185,6 +210,7 @@ impl TowerStore {
         &self,
         caller_name: &str,
         report: &str,
+        key_artifacts: &[String],
         recovered_at: Option<String>,
         state: TowerState,
         options: MissionUpdateOptions,
@@ -213,7 +239,7 @@ impl TowerStore {
                     "agent \"{caller_name}\" cannot use TowerComplete — only the worker who owns a mission can complete it"
                 ));
             }
-            let input = recovered_completion_input(report);
+            let input = recovered_completion_input(report, key_artifacts);
             if let Some(existing) = find_message(&inbox_items, caller_name, &input) {
                 let mut result = empty_result(None, recovered_at);
                 result.message = Some(sent_from_existing(existing, None));
@@ -243,8 +269,117 @@ impl TowerStore {
             });
         };
 
+        if mission.kind != TowerMissionKind::Artifact && !key_artifacts.is_empty() {
+            return Err(
+                "TowerComplete key_artifacts is only supported for artifact missions".into(),
+            );
+        }
+        if mission.kind == TowerMissionKind::Artifact && key_artifacts.is_empty() {
+            return Err(format!(
+                "TowerComplete key_artifacts for artifact mission {} must name at least one committed key deliverable",
+                mission.id
+            ));
+        }
+
+        let mut completion_tip: Option<String> = None;
+        let mut completion_changed: Vec<String> = Vec::new();
+        if mission.kind == TowerMissionKind::Artifact {
+            if !branch_exists(&self.repo_root, &mission.branch).await? {
+                if options.completion_prepared {
+                    return Err(format!(
+                        "artifact mission {} cannot complete — its branch \"{}\" does not exist, so there are no committed deliverables to accept",
+                        mission.id, mission.branch
+                    ));
+                }
+            } else {
+                let tip = branch_tip(&self.repo_root, &mission.branch).await?;
+                let base = self.diff_base(&state.base, &mission).await?;
+                completion_changed =
+                    diff_name_only(&self.repo_root, &base, &mission.branch).await?;
+                if completion_changed.is_empty() {
+                    if options.completion_prepared {
+                        return Err(format!(
+                            "artifact mission {} cannot complete — branch \"{}\" has no changes vs \"{}\"; commit the deliverables there first",
+                            mission.id, mission.branch, base
+                        ));
+                    }
+                } else {
+                    let changed: HashSet<&str> =
+                        completion_changed.iter().map(String::as_str).collect();
+                    let uncommitted: Vec<String> = key_artifacts
+                        .iter()
+                        .filter(|path| !changed.contains(path.as_str()))
+                        .cloned()
+                        .collect();
+                    if !uncommitted.is_empty() {
+                        return Err(format!(
+                            "TowerComplete key_artifacts for artifact mission {} must name paths from the committed branch diff; not found: {}",
+                            mission.id,
+                            uncommitted.join(", ")
+                        ));
+                    }
+                    let out_of_scope: Vec<String> = key_artifacts
+                        .iter()
+                        .filter(|path| {
+                            !mission.scope.iter().any(|pattern| {
+                                if let Ok(glob) = globset::Glob::new(pattern) {
+                                    glob.compile_matcher().is_match(path)
+                                } else {
+                                    path.starts_with(pattern.trim_end_matches('*'))
+                                }
+                            })
+                        })
+                        .cloned()
+                        .collect();
+                    if !out_of_scope.is_empty() {
+                        return Err(format!(
+                            "TowerComplete key_artifacts for artifact mission {} must stay inside its scope ({}): {}",
+                            mission.id,
+                            mission.scope.join(", "),
+                            out_of_scope.join(", ")
+                        ));
+                    }
+                    let mut missing_at_tip: Vec<String> = Vec::new();
+                    for path in key_artifacts {
+                        let entry_type = git(
+                            &self.repo_root,
+                            &["cat-file", "-t", &format!("{tip}:{path}")],
+                        )
+                        .await
+                        .unwrap_or_default();
+                        if entry_type.trim() != "blob" {
+                            missing_at_tip.push(path.clone());
+                        }
+                    }
+                    if !missing_at_tip.is_empty() {
+                        return Err(format!(
+                            "TowerComplete key_artifacts for artifact mission {} must name files present at completion tip {}; missing or not files: {}",
+                            mission.id,
+                            &tip[..tip.len().min(7)],
+                            missing_at_tip.join(", ")
+                        ));
+                    }
+                }
+                completion_tip = Some(tip);
+            }
+        }
+
         let input = completion_input(&mission, report);
+        let completion_report = match completion_tip.as_deref() {
+            Some(tip) => {
+                artifact_acceptance_report(report, key_artifacts, &completion_changed, tip)
+            }
+            None => report.to_string(),
+        };
+        let input = TowerSendInput {
+            body: completion_report.clone(),
+            ..input
+        };
+        let same_completion = mission.kind != TowerMissionKind::Artifact
+            || (completion_tip.as_deref() == mission.completion_tip.as_deref()
+                && same_artifact_paths(mission.key_artifacts.as_ref(), key_artifacts));
         if mission.status == TowerMissionStatus::Completed
+            && same_completion
             && let Some(existing) = find_message(&inbox_items, caller_name, &input)
         {
             let mut result = empty_result(Some(mission.clone()), recovered_at);
@@ -262,7 +397,11 @@ impl TowerStore {
                     ..Default::default()
                 },
                 state,
-                options,
+                MissionUpdateOptions {
+                    completion_tip,
+                    completion_key_artifacts: Some(key_artifacts.to_vec()),
+                    ..options
+                },
             )
             .await?;
         if validate_only {

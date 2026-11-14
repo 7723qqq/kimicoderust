@@ -1,0 +1,71 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/product. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/product",
+  "redEntries": [
+    {
+      "tsPath": "client-configs/node/client-configs.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "client-configs/node/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/common/gates.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/common/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/common/survey-popup-config.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/common/types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/cooldown-store.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/engine.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/event-properties.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/kfc.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/ledger.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/session-rating-host.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/survey-popup-config-feed.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-rating/node/survey-turns.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "shared/node/json-file.ts",
+      "verdict": "unported"
+    }
+  ]
+}

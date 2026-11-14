@@ -10,7 +10,7 @@
 //! split point that cannot orphan a tool exchange, and the most recent
 //! tail is kept verbatim.
 
-pub mod micro;
+pub use crate::agent::micro_compaction::micro_compaction_service as micro;
 pub(crate) mod window;
 
 use crate::rpc::types::TokenUsage;
@@ -176,6 +176,10 @@ pub fn estimate_message_tokens(message: &LLMMessage) -> u32 {
 /// Total estimated tokens of a message list.
 pub fn estimate_messages_tokens(messages: &[LLMMessage]) -> u32 {
     messages.iter().map(estimate_message_tokens).sum()
+}
+
+pub fn estimate_tokens_for_messages(messages: &[LLMMessage]) -> usize {
+    estimate_messages_tokens(messages) as usize
 }
 
 /// The post-compaction token total (v2 `buildContextCompactionShape`'s
@@ -577,7 +581,7 @@ fn compaction_elision_text(omitted_tokens: u32) -> String {
 ///
 /// The selection itself lives in [`window::select_user_messages`]; this only
 /// assembles the chosen slices back into messages.
-fn select_kept_user_messages(user_messages: &[LLMMessage]) -> Vec<LLMMessage> {
+pub(crate) fn select_kept_user_messages(user_messages: &[LLMMessage]) -> Vec<LLMMessage> {
     let selection = window::select_user_messages(
         user_messages,
         COMPACT_USER_MESSAGE_MAX_TOKENS,
@@ -692,37 +696,21 @@ fn render_compaction_instruction(instruction: Option<&str>) -> String {
 
 /// Build the prompt messages for the summarizer LLM call.
 ///
-/// The system message instructs the model to summarize; the user message
-/// carries the omitted conversation as a flat `role: content` transcript,
-/// *followed by* the handoff instruction. v2 appends that instruction as the
-/// last message after the history (`fullCompactionService.ts`: `[...
-/// messagesToCompact, createUserMessage(instruction)]`), which is also the
-/// only position where the template's own "This message is a direct task, not
-/// part of the above conversation" reads correctly. Tool calls are serialized
-/// inline so the summarizer can see what was done.
-fn summarization_prompt(omitted: &[LLMMessage], instruction: Option<&str>) -> Vec<LLMMessage> {
-    let mut transcript = String::new();
-    for m in omitted {
-        if !transcript.is_empty() {
-            transcript.push('\n');
-        }
-        transcript.push_str(&m.role);
-        transcript.push_str(": ");
-        transcript.push_str(&m.content);
-        for call in &m.tool_calls {
-            transcript.push_str(&format!(" [tool_call: {}({})]", call.name, call.arguments));
-        }
-    }
-
-    let rendered = render_compaction_instruction(instruction);
-    let user_content = format!("{transcript}\n\n{rendered}");
-
-    vec![
-        LLMMessage::system(
-            "You are a conversation summarizer. Produce a concise, self-contained summary.",
-        ),
-        LLMMessage::user(user_content),
-    ]
+/// v2 sends the history as N messages followed by one user message carrying the
+/// handoff instruction (`fullCompactionService.ts`:
+/// `[...messagesToCompact, createUserMessage(instruction)]`), so the instruction
+/// stays the last message where the template's "This message is a direct task,
+/// not part of the above conversation" reads correctly.
+fn summarization_prompt(
+    omitted: &[LLMMessage],
+    instruction: Option<&str>,
+    system_prompt: &str,
+) -> Vec<LLMMessage> {
+    let mut messages = Vec::with_capacity(omitted.len() + 2);
+    messages.push(LLMMessage::system(system_prompt));
+    messages.extend(omitted.iter().cloned());
+    messages.push(LLMMessage::user(render_compaction_instruction(instruction)));
+    messages
 }
 
 /// The compaction's failure modes. `Display` renders through the engine i18n
@@ -819,6 +807,7 @@ pub async fn summarize_with_llm(
         "",
         None,
         None,
+        None,
     )
     .await?
     .summary)
@@ -847,8 +836,14 @@ pub async fn summarize_with_llm_budgeted(
     cache_probe_baseline: Option<&crate::session::cache_observation::CacheProbeRequest>,
     // The turn that triggered compaction (v2 `request.source.turnId`).
     cache_probe_turn_id: Option<&str>,
+    emit: Option<&(dyn Fn(serde_json::Value) + Send + Sync)>,
 ) -> Result<SummaryOutcome, CompactionError> {
-    let pre_shrunk = pre_shrink_to_window_budget(omitted, instruction, effective_max_tokens);
+    let pre_shrunk = pre_shrink_to_window_budget(
+        omitted,
+        instruction,
+        llm.system_prompt(),
+        effective_max_tokens,
+    );
     let mut dropped_count = match &pre_shrunk {
         Some(shrunken) => omitted.len().saturating_sub(shrunken.len()) as u32,
         None => 0,
@@ -879,12 +874,13 @@ pub async fn summarize_with_llm_budgeted(
         // built: a single 5000-line log must not push the summarization
         // request over the window it is meant to relieve.
         let snipped = snip_large_tool_results(history);
-        let prompt = summarization_prompt(&snipped, instruction);
+        let prompt = summarization_prompt(&snipped, instruction, llm.system_prompt());
         // The summarizer request as `prompt_cache_probe` records it. The
-        // request has no tools and its own system prompt, so those hashes are
-        // the empty-set/empty-prompt ones; the history hash is the full
-        // message list, and the prefix check compares its head with the
-        // last turn request (v2 `historyPrefixMatch`).
+        // request has no tools, and its system prompt is the agent's own
+        // profile prompt, so those hashes are the empty-set/agent-prompt ones;
+        // the history hash is the full message list, and the prefix check
+        // compares its head with the last turn request (v2
+        // `historyPrefixMatch`).
         let probe_message_count = prompt.len();
         let probe_history_hash = crate::session::cache_observation::fingerprint(
             &serde_json::to_string(&prompt).unwrap_or_default(),
@@ -915,7 +911,22 @@ pub async fn summarize_with_llm_budgeted(
             cancel: cancel.cloned(),
             used_context_tokens,
             max_context_tokens: effective_max_tokens,
+            max_output_tokens: None,
+            max_output_size: None,
         };
+        if let Some(emit) = emit {
+            emit(crate::session::agent_records::llm_request_record(
+                llm,
+                &params,
+                crate::session::agent_records::LlmRequestSpec {
+                    agent_id,
+                    kind: "compaction",
+                    turn_step: None,
+                    tool_select: false,
+                    dropped_count: Some(dropped_count),
+                },
+            ));
+        }
         let response = match cancel {
             Some(token) => tokio::select! {
                 biased;
@@ -962,7 +973,9 @@ pub async fn summarize_with_llm_budgeted(
                             .unwrap_or_else(|| llm.model_name())
                             .to_string(),
                         tools_hash: crate::session::cache_observation::fingerprint("[]"),
-                        system_prompt_hash: crate::session::cache_observation::fingerprint(""),
+                        system_prompt_hash: crate::session::cache_observation::fingerprint(
+                            llm.system_prompt(),
+                        ),
                         message_count: probe_message_count,
                         history_hash: probe_history_hash.clone(),
                         input_tokens: usage
@@ -1023,7 +1036,11 @@ pub async fn summarize_with_llm_budgeted(
                 // still refuse the summarization request — shrink the history
                 // by this attempt's ratio and retry instead of failing the
                 // compaction.
-                let prompt = summarization_prompt(&snip_large_tool_results(&current), instruction);
+                let prompt = summarization_prompt(
+                    &snip_large_tool_results(&current),
+                    instruction,
+                    llm.system_prompt(),
+                );
                 let estimated_request_tokens = prompt
                     .iter()
                     .map(estimate_message_tokens)
@@ -1128,6 +1145,7 @@ const COMPACTION_OVERFLOW_SHRINK_RATIOS: [f64; 3] = [0.7, 0.5, 0.35];
 fn pre_shrink_to_window_budget(
     history: &[LLMMessage],
     instruction: Option<&str>,
+    system_prompt: &str,
     effective_max_tokens: Option<u32>,
 ) -> Option<Vec<LLMMessage>> {
     let effective_max_tokens = effective_max_tokens.filter(|tokens| *tokens > 0)?;
@@ -1135,10 +1153,11 @@ fn pre_shrink_to_window_budget(
     let input_limit = effective_max_tokens - output_reserve;
 
     let instruction_tokens = instruction.map(estimate_tokens).unwrap_or(0);
-    let total: u32 = history
-        .iter()
-        .map(estimate_message_tokens)
-        .fold(instruction_tokens, u32::saturating_add);
+    let system_tokens = estimate_tokens(system_prompt);
+    let total: u32 = history.iter().map(estimate_message_tokens).fold(
+        instruction_tokens.saturating_add(system_tokens),
+        u32::saturating_add,
+    );
     // v2 #4456: gate on the real input limit (window − output reserve), not
     // the safety budget. The budget (~0.74·window) sits below the
     // auto-compaction trigger (min(0.85W, W−50k)), so gating on it dropped
@@ -1385,6 +1404,7 @@ pub async fn force_compact_messages_with_summary_budgeted(
         in_flight,
         None,
         None,
+        None,
     )
     .await?
     .0)
@@ -1483,6 +1503,7 @@ pub async fn force_compact_messages_with_summary_report(
     cache_probe_baseline: Option<&crate::session::cache_observation::CacheProbeRequest>,
     // The turn that triggered compaction (v2 `request.source.turnId`).
     cache_probe_turn_id: Option<&str>,
+    emit: Option<&(dyn Fn(serde_json::Value) + Send + Sync)>,
 ) -> Result<(Vec<LLMMessage>, CompactionReport), CompactionError> {
     let count = compute_compact_count(messages, config);
     if count == 0 {
@@ -1527,6 +1548,7 @@ pub async fn force_compact_messages_with_summary_report(
         agent_id,
         cache_probe_baseline,
         cache_probe_turn_id,
+        emit,
     )
     .await?;
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -1613,6 +1635,7 @@ pub async fn force_compact_messages_manual_with_summary_report(
         agent_id,
         None,
         None,
+        None,
     )
     .await?;
     let usage = outcome.usage.clone();
@@ -1669,6 +1692,7 @@ pub async fn compact_messages_with_summary_at(
         false,
         None,
         None,
+        None,
     )
     .await?
     .map(|(messages, _)| messages))
@@ -1693,6 +1717,7 @@ pub async fn compact_messages_with_summary_at_report(
     in_flight: bool,
     cache_probe_baseline: Option<&crate::session::cache_observation::CacheProbeRequest>,
     cache_probe_turn_id: Option<&str>,
+    emit: Option<&(dyn Fn(serde_json::Value) + Send + Sync)>,
 ) -> Result<Option<(Vec<LLMMessage>, CompactionReport)>, CompactionError> {
     if !should_compact(used_tokens, config) {
         return Ok(None);
@@ -1711,6 +1736,7 @@ pub async fn compact_messages_with_summary_at_report(
             in_flight,
             cache_probe_baseline,
             cache_probe_turn_id,
+            emit,
         )
         .await?,
     ))

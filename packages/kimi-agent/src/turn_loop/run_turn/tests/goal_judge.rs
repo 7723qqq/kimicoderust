@@ -2,10 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// v2 `AgentGoalJudgeService` through `UpdateGoal`
-/// (`features/goal/tools/update-goal/updateGoalTool.ts:68-83`): a `complete`
-/// request is judged against the transcript before the write. A rejection
-/// answers the call and never reaches the goal service.
 #[tokio::test]
 async fn a_rejected_completion_never_writes_the_goal() {
     struct JudgeLlm {
@@ -48,7 +44,7 @@ async fn a_rejected_completion_never_writes_the_goal() {
                         usage: TokenUsage::default(),
                         timing: None,
                     }),
-                    // The judge request.
+
                     1 => Ok(LLMChatResponse {
                         content: r#"{"ok": false, "reason": "tests were never run"}"#.into(),
                         thinking: vec![],
@@ -135,6 +131,7 @@ async fn a_rejected_completion_never_writes_the_goal() {
         requests: requests.clone(),
     };
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-goal-judge".into(),
@@ -160,8 +157,7 @@ async fn a_rejected_completion_never_writes_the_goal() {
 
     let recorded = requests.lock().unwrap_or_else(|e| e.into_inner()).clone();
     assert_eq!(recorded.len(), 3, "goal step, judge request, closing step");
-    // The judge is its own request with the judge system prompt and the
-    // objective/criterion as the last user message.
+
     let judge_request = &recorded[1];
     assert!(
         judge_request[0].content.contains("independent judge"),
@@ -175,7 +171,7 @@ async fn a_rejected_completion_never_writes_the_goal() {
         "{:?}",
         judge_request.last()
     );
-    // The next step sees the rejection as the tool result.
+
     assert!(
         recorded[2].iter().any(|message| message.role == "tool"
             && message
@@ -195,10 +191,6 @@ async fn a_rejected_completion_never_writes_the_goal() {
     );
 }
 
-/// An `impossible` verdict turns the write into `blocked` (v2
-/// `markBlocked({reason})`), so the goal stops instead of staying active.
-/// In this host-forwarded setup the rewrite is visible as the
-/// `host/execute_tool` request the engine sends.
 #[tokio::test]
 async fn an_impossible_verdict_blocks_the_goal() {
     struct ImpossibleLlm {
@@ -237,7 +229,6 @@ async fn an_impossible_verdict_blocks_the_goal() {
                         timing: None,
                     })
                 } else if call == 1 {
-                    // The judge request.
                     Ok(LLMChatResponse {
                         content: r#"{"ok": false, "impossible": true, "reason": "contradictory"}"#
                             .into(),
@@ -298,8 +289,7 @@ async fn an_impossible_verdict_blocks_the_goal() {
             serde_json::to_value(&resp).map_err(|e| JsonRpcError::internal_error(e.to_string()))
         })
     });
-    // The host owns this tool call in the forwarded path; record what the
-    // engine asked it to do and answer like a blocked goal write would.
+
     let executed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let executed_log = executed.clone();
     RpcServer::register_arc(&server, types::methods::HOST_EXECUTE_TOOL, move |params| {
@@ -320,6 +310,7 @@ async fn an_impossible_verdict_blocks_the_goal() {
         call: AtomicU32::new(0),
     };
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-goal-judge-impossible".into(),

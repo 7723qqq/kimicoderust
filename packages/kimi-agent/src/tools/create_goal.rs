@@ -75,12 +75,13 @@ pub async fn execute_create_goal(
         ));
     }
 
-    if args.get("replace").is_some() {
-        return err_result(
-            "Invalid CreateGoal arguments: `replace` is not supported by the connected host."
-                .into(),
-        );
+    if args.get("replace").is_some_and(|value| !value.is_boolean()) {
+        return arg_error("CreateGoal", "replace", "engine.tools.argMustBeBoolean");
     }
+    let replace = args
+        .get("replace")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let completion_criterion = match args.get("completionCriterion") {
         None => None,
         Some(value) => match value.as_str() {
@@ -112,6 +113,9 @@ pub async fn execute_create_goal(
     if let Some(criterion) = completion_criterion {
         value.insert("completion_criterion".into(), criterion.into());
     }
+    if replace {
+        value.insert("replace".into(), Value::Bool(true));
+    }
     let request = StateWriteRequest {
         domain: "goal".into(),
         key: "goal".into(),
@@ -129,9 +133,38 @@ pub async fn execute_create_goal(
             .to_string(),
     };
     match callbacks.state_write(request).await {
-        Ok(response) => render_goal(&response.value),
+        Ok(response) => {
+            emit_goal_create(callbacks, caller_agent_id, objective, &response.value);
+            render_goal(&response.value)
+        }
         Err(error) => map_state_error(error),
     }
+}
+
+fn emit_goal_create(callbacks: &dyn HostCallbacks, agent_id: &str, objective: &str, value: &Value) {
+    let Some(goal) = value.get("goal").filter(|goal| goal.is_object()) else {
+        return;
+    };
+    let Some(goal_id) = goal.get("goalId").and_then(Value::as_str) else {
+        return;
+    };
+    let mut record = serde_json::json!({
+        "type": "goal.create",
+        "agent_id": agent_id,
+        "goalId": goal_id,
+        "objective": goal.get("objective").and_then(Value::as_str).unwrap_or(objective),
+    });
+    for key in [
+        "completionCriterion",
+        "wallClockResumedAt",
+        "createdAt",
+        "updatedAt",
+    ] {
+        if let Some(field) = goal.get(key).filter(|field| !field.is_null()) {
+            record[key] = field.clone();
+        }
+    }
+    callbacks.emit_event(record);
 }
 
 fn render_goal(value: &Value) -> ExecutableToolResult {
@@ -160,7 +193,7 @@ fn map_state_error(error: String) -> ExecutableToolResult {
 pub fn create_goal_tool_def() -> crate::turn_loop::types::ToolInfo {
     crate::turn_loop::types::ToolInfo {
         name: "CreateGoal".into(),
-        description: "Create a durable, structured goal that the runtime will pursue across multiple turns.\n\nCall `CreateGoal` only when:\n\n- the user explicitly asks you to start a goal or work autonomously toward an outcome, or\n- a host goal-intake prompt asks you to create one.\n\nDo NOT create a goal for greetings, ordinary questions, or vague requests that lack a\nverifiable completion condition. A goal needs a checkable end state.\n\nWhen the request is vague, ask the user for the missing completion criterion before creating\nthe goal. If the user clearly insists after you warn them that the wording is vague or risky,\nrespect that and create the goal.\n\nInclude a `completionCriterion` when the user provides one, or when it can be stated without\ninventing new requirements. Keep `objective` concise; reference long task descriptions by file\npath rather than pasting them.\n\nCreating a goal fails if one already exists. To start a new one, call UpdateGoal with `complete` (or `blocked`) on the current goal first, then call CreateGoal with the new objective.".into(),
+        description: "Create a durable, structured goal that the runtime will pursue across multiple turns.\n\nCall `CreateGoal` only when:\n\n- the user explicitly asks you to start a goal or work autonomously toward an outcome, or\n- a host goal-intake prompt asks you to create one.\n\nDo NOT create a goal for greetings, ordinary questions, or vague requests that lack a\nverifiable completion condition. A goal needs a checkable end state.\n\nWhen the request is vague, ask the user for the missing completion criterion before creating\nthe goal. If the user clearly insists after you warn them that the wording is vague or risky,\nrespect that and create the goal.\n\nInclude a `completionCriterion` when the user provides one, or when it can be stated without\ninventing new requirements. Keep `objective` concise; reference long task descriptions by file\npath rather than pasting them.\n\nCreating fails if a goal already exists; pass `replace: true` only when the user explicitly\nwants to abandon the current goal and start a new one.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -172,6 +205,10 @@ pub fn create_goal_tool_def() -> crate::turn_loop::types::ToolInfo {
                 "completionCriterion": {
                     "type": "string",
                     "description": "How to verify the goal is complete. Include when the user provides one."
+                },
+                "replace": {
+                    "type": "boolean",
+                    "description": "Replace an existing active, paused, or blocked goal instead of failing."
                 }
             },
             "required": ["objective"],
@@ -192,6 +229,7 @@ mod tests {
         read_response: Result<StateReadResponse, String>,
         write_response: Result<StateWriteResponse, String>,
         write_received: Arc<std::sync::Mutex<Option<StateWriteRequest>>>,
+        events: Arc<std::sync::Mutex<Vec<Value>>>,
     }
 
     impl HostCallbacks for ScriptedCallbacks {
@@ -232,6 +270,10 @@ mod tests {
             let response = self.write_response.clone();
             Box::pin(async move { response })
         }
+
+        fn emit_event(&self, event: Value) {
+            self.events.lock().unwrap().push(event);
+        }
     }
 
     fn scripted(
@@ -247,6 +289,7 @@ mod tests {
                 read_response,
                 write_response,
                 write_received: write_received.clone(),
+                events: Arc::new(std::sync::Mutex::new(Vec::new())),
             },
             write_received,
         )
@@ -343,6 +386,17 @@ mod tests {
         assert_eq!(request.value["objective"], "Do the thing");
         assert_eq!(request.value["completion_criterion"], "tests pass");
         assert!(!request.undoable);
+        let events = callbacks.events.lock().unwrap();
+        let record = events
+            .iter()
+            .find(|event| event["type"] == "goal.create")
+            .expect("the goal creation must be recorded");
+        assert_eq!(record["agent_id"], "main");
+        assert_eq!(record["goalId"], "goal-1");
+        assert_eq!(record["objective"], "Do the thing");
+        assert_eq!(record["completionCriterion"], "tests pass");
+        assert_eq!(record["createdAt"], 1700000000000i64);
+        assert_eq!(record["updatedAt"], 1700000000000i64);
     }
 
     #[tokio::test]
@@ -359,6 +413,31 @@ mod tests {
         assert_eq!(request.value["action"], "create");
         assert_eq!(request.value["objective"], "Do the thing");
         assert!(request.value.get("completion_criterion").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_replace_is_forwarded_and_absent_by_default() {
+        let (callbacks, write_received) = scripted(read_ok(Value::Null), write_ok(created_goal()));
+        let result = execute_create_goal(
+            &callbacks,
+            "main",
+            &serde_json::json!({ "objective": "Do the thing", "replace": true }),
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        let request = write_received.lock().unwrap().clone().unwrap();
+        assert_eq!(request.value["replace"], true);
+
+        let (callbacks, write_received) = scripted(read_ok(Value::Null), write_ok(created_goal()));
+        let result = execute_create_goal(
+            &callbacks,
+            "main",
+            &serde_json::json!({ "objective": "Do the thing" }),
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        let request = write_received.lock().unwrap().clone().unwrap();
+        assert!(request.value.get("replace").is_none());
     }
 
     #[tokio::test]
@@ -384,7 +463,7 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({ "objective": "" }),
             serde_json::json!({ "objective": 42 }),
-            serde_json::json!({ "objective": "x", "replace": true }),
+            serde_json::json!({ "objective": "x", "replace": "yes" }),
             serde_json::json!({ "objective": "x", "completionCriterion": 42 }),
         ] {
             let result = execute_create_goal(&callbacks, "main", &bad).await;
@@ -553,8 +632,8 @@ mod tests {
         assert_eq!(def.input_schema["required"][0], "objective");
         assert_eq!(def.input_schema["properties"]["objective"]["minLength"], 1);
         assert!(def.input_schema["properties"]["completionCriterion"].is_object());
-
-        assert!(def.input_schema["properties"].get("replace").is_none());
+        assert_eq!(def.input_schema["properties"]["replace"]["type"], "boolean");
+        assert!(def.description.contains("replace: true"));
         assert!(def.description.contains("verifiable completion condition"));
     }
 }

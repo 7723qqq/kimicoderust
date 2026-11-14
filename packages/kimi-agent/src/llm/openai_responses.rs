@@ -695,6 +695,7 @@ mod tests {
                 ],
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call_1".into()),
+                tools: Vec::new(),
             },
         ];
 
@@ -804,6 +805,7 @@ mod tests {
             blocks: response.thinking,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
         }];
         let req = build_request_full("o3-mini", &messages, &[], true, Some("high"));
         assert_eq!(req["include"], json!(["reasoning.encrypted_content"]));
@@ -846,6 +848,7 @@ mod tests {
             blocks: response.thinking,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
         }];
         let req = build_request_full("o3-mini", &messages, &[], true, Some("high"));
         let input = req["input"].as_array().unwrap();

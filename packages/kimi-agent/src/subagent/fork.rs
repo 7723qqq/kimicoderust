@@ -174,6 +174,7 @@ pub fn close_trailing_open_tool_exchange(history: &[LLMMessage]) -> Vec<LLMMessa
             tool_call_id: Some(tc.id.clone()),
             prompt_id: None,
             origin: None,
+            tools: Vec::new(),
         });
     }
     result
@@ -214,6 +215,7 @@ mod tests {
                 blocks: Vec::new(),
                 tool_calls: vec![read_call],
                 tool_call_id: None,
+                tools: Vec::new(),
 
                 prompt_id: None,
                 origin: None,
@@ -224,6 +226,7 @@ mod tests {
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call_read".into()),
+                tools: Vec::new(),
                 prompt_id: None,
                 origin: None,
             },
@@ -248,6 +251,7 @@ mod tests {
                 blocks: Vec::new(),
                 tool_calls: vec![agent_call],
                 tool_call_id: None,
+                tools: Vec::new(),
 
                 prompt_id: None,
                 origin: None,
@@ -286,6 +290,7 @@ mod tests {
                 blocks: Vec::new(),
                 tool_calls: vec![read_call, agent_call],
                 tool_call_id: None,
+                tools: Vec::new(),
 
                 prompt_id: None,
                 origin: None,
@@ -296,6 +301,7 @@ mod tests {
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call_read".into()),
+                tools: Vec::new(),
                 prompt_id: None,
                 origin: None,
             },

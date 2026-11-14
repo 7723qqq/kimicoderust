@@ -638,9 +638,7 @@ fn collapse_whitespace(chars: &[char]) -> String {
 
 fn render_session_search(hits: &[SessionHit], capped: bool) -> String {
     if hits.is_empty() {
-        return "No matching sessions found.\nNext: run event_search on the current session, \
-                or widen the created_at/event filters."
-            .to_string();
+        return "No matching sessions found.".to_string();
     }
     let mut lines = vec![format!("Session search results ({}):", hits.len())];
     for (index, hit) in hits.iter().enumerate() {
@@ -679,21 +677,13 @@ fn render_session_search(hits: &[SessionHit], capped: bool) -> String {
             "Result cap reached. Narrow the query or add filters to find additional matches."
                 .to_string(),
         );
-        lines.push(
-            "Next: add event_types or a narrower created_at range to rank the remaining \
-             sessions."
-                .to_string(),
-        );
     }
     lines.join("\n")
 }
 
 fn render_event_search(session_id: &str, hits: &[(EventDocument, String)], capped: bool) -> String {
     if hits.is_empty() {
-        return format!(
-            "No matching events in session {session_id}.\nNext: run session_search with the \
-             same query to search across sessions, or widen the seq/time/type filters."
-        );
+        return format!("No matching events in session {session_id}.");
     }
     let mut lines = vec![format!(
         "Event search results for session {session_id} ({}):",
@@ -715,9 +705,6 @@ fn render_event_search(session_id: &str, hits: &[(EventDocument, String)], cappe
         lines.push(
             "Result cap reached. Narrow the query or add filters to find additional matches."
                 .to_string(),
-        );
-        lines.push(
-            "Next: raise precision with event_types or a narrower seq/time range.".to_string(),
         );
     }
     lines.join("\n")
@@ -1147,11 +1134,7 @@ mod tests {
             json!({"operation": "session_search", "operationArgs": {"query": "zzz"}}),
         )
         .unwrap();
-        assert!(
-            output.starts_with("No matching sessions found."),
-            "{output}"
-        );
-        assert!(output.contains("Next: run event_search"), "{output}");
+        assert_eq!(output, "No matching sessions found.");
     }
 
     #[test]
@@ -1219,7 +1202,10 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("Result cap reached"), "{output}");
-        assert!(output.contains("Next: raise precision"), "{output}");
+        assert!(
+            !output.contains("Next:"),
+            "v2 appends no follow-up hint: {output}"
+        );
     }
 
     #[test]

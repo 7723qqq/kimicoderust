@@ -12,6 +12,14 @@ const MS_PER_DAY: f64 = 24.0 * 60.0 * 60.0 * 1000.0;
 
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot manage cron jobs.";
 
+const CRON_DISABLED_MESSAGE: &str = "Cron scheduling is disabled (KIMI_DISABLE_CRON=1).";
+
+fn cron_scheduling_disabled() -> bool {
+    crate::config::KimiConfig::discover()
+        .map(|(config, _)| config.cron_disabled())
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CronTaskWire {
@@ -95,7 +103,11 @@ fn render_record(task: &CronTaskWire, now_ms: i64) -> String {
 pub async fn execute_cron_create(
     callbacks: &dyn HostCallbacks,
     args: &Value,
+    agent_id: &str,
 ) -> ExecutableToolResult {
+    if cron_scheduling_disabled() {
+        return err_result(CRON_DISABLED_MESSAGE.into());
+    }
     let Some(cron) = args.get("cron").and_then(|c| c.as_str()) else {
         return arg_error("CronCreate", "cron", "engine.tools.argMustBeString");
     };
@@ -120,8 +132,35 @@ pub async fn execute_cron_create(
     };
 
     let normalized = cron.split_whitespace().collect::<Vec<_>>().join(" ");
-    if let Err(message) = validate_create(&normalized, prompt, recurring, now_ms()) {
+    let turn_id = args
+        .get("turn_id")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tool_call_id = args
+        .get("tool_call_id")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string();
+    // v2 `cronCreateTool.ts:76-84`: the session cap is checked against the
+    // current list before the write, so the refusal never depends on a
+    // store-specific error shape.
+    let scheduled = callbacks
+        .state_read(StateReadRequest {
+            domain: "cron".into(),
+            key: "cron".into(),
+            turn_id: turn_id.clone(),
+            tool_call_id: tool_call_id.clone(),
+        })
+        .await
+        .ok()
+        .and_then(|response| response.value.as_array().map(Vec::len))
+        .unwrap_or(0);
+    if let Err(message) = validate_create(&normalized, prompt, recurring, now_ms(), scheduled) {
         return err_result(message);
+    }
+    if scheduled >= crate::cron::MAX_CRON_JOBS_PER_SESSION {
+        return err_result(crate::cron::CRON_JOB_CAP_MESSAGE.to_string());
     }
     let request = StateWriteRequest {
         domain: "cron".into(),
@@ -133,19 +172,18 @@ pub async fn execute_cron_create(
             "recurring": recurring,
         }),
         undoable: false,
-        turn_id: args
-            .get("turn_id")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string(),
-        tool_call_id: args
-            .get("tool_call_id")
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
-            .to_string(),
+        turn_id,
+        tool_call_id,
     };
     match callbacks.state_write(request).await {
-        Ok(response) => render_cron_create(&response.value),
+        Ok(response) => {
+            callbacks.telemetry(serde_json::json!({
+                "event": "cron_scheduled",
+                "recurring": recurring,
+                "agent_id": agent_id,
+            }));
+            render_cron_create(&response.value)
+        }
         Err(error) => map_state_error(error),
     }
 }
@@ -155,6 +193,7 @@ fn validate_create(
     prompt: &str,
     recurring: bool,
     now_ms: i64,
+    scheduled: usize,
 ) -> Result<(), String> {
     let parsed = match crate::cron::parse(normalized) {
         Ok(parsed) => parsed,
@@ -165,6 +204,9 @@ fn validate_create(
             "Cron expression {} has no fire within 5 years; refusing to schedule.",
             json_string(normalized)
         ));
+    }
+    if scheduled >= crate::cron::MAX_CRON_JOBS_PER_SESSION {
+        return Err(crate::cron::CRON_JOB_CAP_MESSAGE.to_string());
     }
     if let Err(error) = crate::cron::validate_prompt_bytes(prompt, crate::cron::MAX_PROMPT_BYTES) {
         return Err(error.0);
@@ -198,6 +240,7 @@ fn render_cron_create(value: &Value) -> ExecutableToolResult {
 pub async fn execute_cron_delete(
     callbacks: &dyn HostCallbacks,
     args: &Value,
+    agent_id: &str,
 ) -> ExecutableToolResult {
     let Some(id) = args.get("id").and_then(|i| i.as_str()) else {
         return arg_error("CronDelete", "id", "engine.tools.argMustBeString");
@@ -225,7 +268,14 @@ pub async fn execute_cron_delete(
             .to_string(),
     };
     match callbacks.state_write(request).await {
-        Ok(_) => ok_result(format!("Deleted cron job {id}.")),
+        Ok(_) => {
+            callbacks.telemetry(serde_json::json!({
+                "event": "cron_deleted",
+                "task_id": id,
+                "agent_id": agent_id,
+            }));
+            ok_result(format!("Deleted cron job {id}."))
+        }
         Err(error) => map_state_error(error),
     }
 }
@@ -519,6 +569,7 @@ Guidelines:
 mod tests {
     use super::*;
     use crate::rpc::types::{BoxFuture, PermissionDecision, StateReadResponse, StateWriteResponse};
+    use std::path::Path;
     use std::sync::Arc;
 
     struct ScriptedCallbacks {
@@ -526,6 +577,13 @@ mod tests {
         write_response: Result<StateWriteResponse, String>,
         read_received: Arc<std::sync::Mutex<Option<StateReadRequest>>>,
         write_received: Arc<std::sync::Mutex<Option<StateWriteRequest>>>,
+        telemetry_received: Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    impl ScriptedCallbacks {
+        fn telemetry_events(&self) -> Vec<Value> {
+            self.telemetry_received.lock().unwrap().clone()
+        }
     }
 
     impl HostCallbacks for ScriptedCallbacks {
@@ -567,6 +625,10 @@ mod tests {
             let response = self.write_response.clone();
             Box::pin(async move { response })
         }
+
+        fn telemetry(&self, event: Value) {
+            self.telemetry_received.lock().unwrap().push(event);
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -586,6 +648,7 @@ mod tests {
                 write_response,
                 read_received: read_received.clone(),
                 write_received: write_received.clone(),
+                telemetry_received: Arc::new(std::sync::Mutex::new(Vec::new())),
             },
             read_received,
             write_received,
@@ -598,6 +661,22 @@ mod tests {
 
     fn write_ok(value: Value) -> Result<StateWriteResponse, String> {
         Ok(StateWriteResponse { ok: true, value })
+    }
+
+    fn cron_test_config() -> &'static Path {
+        static CONFIG: std::sync::OnceLock<tempfile::NamedTempFile> = std::sync::OnceLock::new();
+        CONFIG
+            .get_or_init(|| tempfile::NamedTempFile::new().unwrap())
+            .path()
+    }
+
+    async fn pin_cron_env() -> tokio::sync::MutexGuard<'static, ()> {
+        let guard = crate::env::ENV_TEST_LOCK.lock().await;
+        unsafe {
+            std::env::remove_var("KIMI_DISABLE_CRON");
+            std::env::set_var("KIMI_CONFIG_PATH", cron_test_config());
+        }
+        guard
     }
 
     fn sample_task() -> Value {
@@ -773,6 +852,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_sends_action_and_renders() {
+        let _env = pin_cron_env().await;
         let (callbacks, read_received, write_received) = scripted(
             read_ok(Value::Null),
             write_ok(serde_json::json!({
@@ -790,6 +870,7 @@ mod tests {
                 "cron": " */5   * * * * ",
                 "prompt": "check the deploy",
             }),
+            "main",
         )
         .await;
         assert!(!result.is_error);
@@ -797,7 +878,16 @@ mod tests {
             result.content,
             "id: 01H0Z8X7YJ3K5Q9R2T4V6W8XAZ\ncron: */5 * * * *\nhumanSchedule: every 5 minutes\nrecurring: true\nnextFireAt: 2024-06-01T14:30:45.123+08:00"
         );
-        assert!(read_received.lock().unwrap().is_none());
+        let telemetry = callbacks.telemetry_events();
+        assert_eq!(telemetry.len(), 1, "{telemetry:?}");
+        assert_eq!(telemetry[0]["event"], "cron_scheduled");
+        assert_eq!(telemetry[0]["recurring"], true);
+        assert_eq!(telemetry[0]["agent_id"], "main");
+        assert_eq!(
+            read_received.lock().unwrap().as_ref().unwrap().domain,
+            "cron",
+            "the session-cap probe reads the cron domain before the create"
+        );
         let request = write_received.lock().unwrap().clone().unwrap();
         assert_eq!(request.domain, "cron");
         assert_eq!(request.key, "cron");
@@ -811,6 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_one_shot_passes_recurring_false() {
+        let _env = pin_cron_env().await;
         let (callbacks, _, write_received) = scripted(
             read_ok(Value::Null),
             write_ok(serde_json::json!({
@@ -829,6 +920,7 @@ mod tests {
                 "prompt": "remind me",
                 "recurring": false
             }),
+            "main",
         )
         .await;
         assert!(!result.is_error);
@@ -840,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_validate_create_rejects_bad_expression() {
-        let err = validate_create("not a cron", "p", true, 0).unwrap_err();
+        let err = validate_create("not a cron", "p", true, 0, 0).unwrap_err();
         assert_eq!(
             err,
             "Invalid cron expression: cron expression must have exactly 5 fields (minute hour day-of-month month day-of-week); got 3"
@@ -849,7 +941,7 @@ mod tests {
 
     #[test]
     fn test_validate_create_rejects_never_firing() {
-        let err = validate_create("0 0 30 2 *", "p", true, 0).unwrap_err();
+        let err = validate_create("0 0 30 2 *", "p", true, 0, 0).unwrap_err();
         assert_eq!(
             err,
             "Cron expression \"0 0 30 2 *\" has no fire within 5 years; refusing to schedule."
@@ -858,22 +950,36 @@ mod tests {
 
     #[test]
     fn test_validate_create_rejects_oversized_prompt() {
-        let err = validate_create("* * * * *", &"x".repeat(8193), true, 0).unwrap_err();
+        let err = validate_create("* * * * *", &"x".repeat(8193), true, 0, 0).unwrap_err();
         assert_eq!(err, "Prompt exceeds 8192 bytes (got 8193).");
     }
 
     #[test]
+    fn test_validate_create_reports_the_session_cap_before_the_prompt_size() {
+        let err = validate_create(
+            "* * * * *",
+            &"x".repeat(8193),
+            true,
+            0,
+            crate::cron::MAX_CRON_JOBS_PER_SESSION,
+        )
+        .unwrap_err();
+        assert_eq!(err, crate::cron::CRON_JOB_CAP_MESSAGE);
+    }
+
+    #[test]
     fn test_validate_create_rejects_far_one_shot() {
-        let err = validate_create("0 0 1 1 *", "p", false, 1_704_067_200_000).unwrap_err();
+        let err = validate_create("0 0 1 1 *", "p", false, 1_704_067_200_000, 0).unwrap_err();
         assert!(err.starts_with(
             "One-shot cron \"0 0 1 1 *\" would not fire until 2025-01-01T00:00:00.000+00:00"
         ));
 
-        assert!(validate_create("0 0 1 1 *", "p", true, 1_704_067_200_000).is_ok());
+        assert!(validate_create("0 0 1 1 *", "p", true, 1_704_067_200_000, 0).is_ok());
     }
 
     #[tokio::test]
     async fn test_create_invalid_args_return_error_without_calling_host() {
+        let _env = pin_cron_env().await;
         let (callbacks, read_received, write_received) =
             scripted(read_ok(Value::Null), write_ok(Value::Null));
         for bad in [
@@ -883,7 +989,7 @@ mod tests {
             serde_json::json!({ "cron": 42, "prompt": "p" }),
             serde_json::json!({ "cron": "* * * * *", "prompt": "p", "recurring": "yes" }),
         ] {
-            let result = execute_cron_create(&callbacks, &bad).await;
+            let result = execute_cron_create(&callbacks, &bad, "main").await;
             assert!(result.is_error, "args: {bad}");
             assert!(result.content.contains("Invalid CronCreate arguments"));
         }
@@ -892,7 +998,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_refuses_while_cron_scheduling_is_disabled() {
+        let _env = pin_cron_env().await;
+        unsafe { std::env::set_var("KIMI_DISABLE_CRON", "1") };
+        let (callbacks, read_received, write_received) =
+            scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let result = execute_cron_create(
+            &callbacks,
+            &serde_json::json!({ "cron": "* * * * *", "prompt": "p" }),
+            "main",
+        )
+        .await;
+        assert!(result.is_error);
+        assert_eq!(result.content, CRON_DISABLED_MESSAGE);
+        assert!(read_received.lock().unwrap().is_none());
+        assert!(write_received.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_refuses_when_only_the_config_section_disables_cron() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[cron]\ndisabled = true\n").unwrap();
+        let _env = pin_cron_env().await;
+        unsafe { std::env::set_var("KIMI_CONFIG_PATH", &config) };
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let result = execute_cron_create(
+            &callbacks,
+            &serde_json::json!({ "cron": "* * * * *", "prompt": "p" }),
+            "main",
+        )
+        .await;
+        assert!(result.is_error);
+        assert_eq!(result.content, CRON_DISABLED_MESSAGE);
+    }
+
+    #[tokio::test]
     async fn test_create_unsupported_host_returns_failure_message() {
+        let _env = pin_cron_env().await;
         let (callbacks, _, _) = scripted(
             read_ok(Value::Null),
             Err("State write error: [-32603] host does not support state bridge".into()),
@@ -900,6 +1043,7 @@ mod tests {
         let result = execute_cron_create(
             &callbacks,
             &serde_json::json!({ "cron": "* * * * *", "prompt": "p" }),
+            "main",
         )
         .await;
         assert!(result.is_error);
@@ -907,19 +1051,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_host_rejection_passes_through() {
-        let (callbacks, _, _) = scripted(
-            read_ok(Value::Null),
-            Err("State write error: [-32004] Cron job cap reached (max 50 per session).".into()),
+    async fn test_create_refuses_once_the_session_cap_is_reached() {
+        let _env = pin_cron_env().await;
+        let tasks: Vec<Value> = (0..crate::cron::MAX_CRON_JOBS_PER_SESSION)
+            .map(|_| sample_task())
+            .collect();
+        let (callbacks, read_received, write_received) = scripted(
+            read_ok(Value::Array(tasks)),
+            write_ok(serde_json::json!({})),
         );
         let result = execute_cron_create(
             &callbacks,
             &serde_json::json!({ "cron": "* * * * *", "prompt": "p" }),
+            "main",
         )
         .await;
         assert!(result.is_error);
-        assert!(result.content.contains("-32004"));
-        assert!(result.content.contains("Cron job cap reached"));
+        assert_eq!(result.content, crate::cron::CRON_JOB_CAP_MESSAGE);
+        assert_eq!(
+            read_received.lock().unwrap().as_ref().unwrap().domain,
+            "cron"
+        );
+        assert!(write_received.lock().unwrap().is_none());
+        assert!(
+            callbacks.telemetry_events().is_empty(),
+            "a refused create must not emit cron_scheduled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_host_rejection_passes_through() {
+        let _env = pin_cron_env().await;
+        let (callbacks, _, _) = scripted(
+            read_ok(Value::Null),
+            Err("State write error: [-32003] invalid cron create value".into()),
+        );
+        let result = execute_cron_create(
+            &callbacks,
+            &serde_json::json!({ "cron": "* * * * *", "prompt": "p" }),
+            "main",
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("-32003"));
+        assert!(result.content.contains("invalid cron create value"));
     }
 
     #[tokio::test]
@@ -931,6 +1106,7 @@ mod tests {
         let result = execute_cron_delete(
             &callbacks,
             &serde_json::json!({ "id": "01H0Z8X7YJ3K5Q9R2T4V6W8XAZ" }),
+            "main",
         )
         .await;
         assert!(!result.is_error);
@@ -938,6 +1114,11 @@ mod tests {
             result.content,
             "Deleted cron job 01H0Z8X7YJ3K5Q9R2T4V6W8XAZ."
         );
+        let telemetry = callbacks.telemetry_events();
+        assert_eq!(telemetry.len(), 1, "{telemetry:?}");
+        assert_eq!(telemetry[0]["event"], "cron_deleted");
+        assert_eq!(telemetry[0]["task_id"], "01H0Z8X7YJ3K5Q9R2T4V6W8XAZ");
+        assert_eq!(telemetry[0]["agent_id"], "main");
         assert!(read_received.lock().unwrap().is_none());
         let request = write_received.lock().unwrap().clone().unwrap();
         assert_eq!(request.domain, "cron");
@@ -955,7 +1136,8 @@ mod tests {
             "not-a-ulid-0123456789",
             "01H123456789ABCDEFGHIJKLMNOP",
         ] {
-            let result = execute_cron_delete(&callbacks, &serde_json::json!({ "id": bad })).await;
+            let result =
+                execute_cron_delete(&callbacks, &serde_json::json!({ "id": bad }), "main").await;
             assert!(result.is_error, "id: {bad}");
             assert_eq!(
                 result.content,
@@ -985,6 +1167,7 @@ mod tests {
         let result = execute_cron_delete(
             &callbacks,
             &serde_json::json!({ "id": "01H0Z8X7YJ3K5Q9R2T4V6W8XAZ" }),
+            "main",
         )
         .await;
         assert!(result.is_error);
@@ -1003,6 +1186,7 @@ mod tests {
         let result = execute_cron_delete(
             &callbacks,
             &serde_json::json!({ "id": "01H0Z8X7YJ3K5Q9R2T4V6W8XAZ" }),
+            "main",
         )
         .await;
         assert!(result.is_error);

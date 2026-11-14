@@ -1,32 +1,3 @@
-//! HTTP/1.1 transport for the native REST surface: TCP accept loop, strict
-//! request parsing, response serialization.
-//!
-//! Zero new crates — `httparse` and tokio's `net` feature are already in the
-//! build graph (the latter via reqwest, now declared explicitly so a reqwest
-//! feature change cannot silently break this file).
-//!
-//! Deliberately minimal, in the direction of refusing work rather than guessing
-//! at it:
-//!
-//! - **One request per connection.** Every REST response carries
-//!   `Connection: close`, so there is no keep-alive state machine, no
-//!   pipelining, and no framing ambiguity between two requests on one socket.
-//!   The sole exception is a WebSocket upgrade, which keeps the socket and
-//!   hands its framing to [`ws`].
-//! - **`Content-Length` only.** Any `Transfer-Encoding` is rejected, which
-//!   closes the CL.TE / TE.CL request-smuggling family outright instead of
-//!   implementing both framings and deciding which one wins.
-//! - **CRLF required.** A bare LF anywhere in the header block is refused —
-//!   mixed line endings are how two parsers disagree about where a request ends.
-//! - **Origin-form targets only.** Absolute-URI targets (`GET http://…`) are
-//!   rejected: this is an origin server, not a proxy.
-//! - **Bounded reads.** Header block and body each have a hard cap, and a
-//!   connection that stops talking is dropped on a timeout.
-//!
-//! The query string is stripped before dispatch so a route cannot be reached by
-//! appending `?x=1`; nothing downstream sees it yet, because `HttpRequest` has no
-//! query field.
-
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -40,20 +11,16 @@ use crate::server::HttpServer;
 use crate::server::router::{HttpRequest, HttpResponse};
 use crate::server::ws;
 
-/// Hard cap on the request header block, including the request line.
 const MAX_HEADER_BYTES: usize = 16 * 1024;
-/// Hard cap on a request body.
+
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
-/// The upload route buffers its body, so this is the whole-file cap: larger
-/// than the 4 MiB control-plane limit, below kap-server's streamed 1 GiB.
 const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
-/// How long a connection may take to send a complete request.
+
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
-/// Read granularity while filling in a body.
+
 const CHUNK_BYTES: usize = 8 * 1024;
 
-/// Why a request was refused. Rendered as a `400` with no engine involvement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RejectReason {
     Malformed(&'static str),
@@ -77,8 +44,6 @@ impl RejectReason {
     }
 }
 
-/// A running accept loop. Shutting it down stops new connections; in-flight
-/// connections finish on their own.
 pub struct ServerHandle {
     pub local_addr: SocketAddr,
     task: tokio::task::JoinHandle<()>,
@@ -90,14 +55,7 @@ impl ServerHandle {
     }
 }
 
-/// Bind `addr` and serve the REST surface until the handle is shut down.
-///
-/// Binding to port `0` works: the OS-assigned port comes back in
-/// [`ServerHandle::local_addr`], which is how the tests drive a real socket.
 pub async fn serve(addr: &str, server: Arc<HttpServer>) -> io::Result<ServerHandle> {
-    // Fail closed. `HttpServer` defaults to no auth (tests, local development),
-    // so reaching a non-loopback interface requires a credential. The CLI-level
-    // check is convenience; this one is the gate.
     let host = addr.rsplit_once(':').map_or(addr, |(host, _)| host);
     if !crate::server::is_loopback_host(host) && server.auth().is_disabled() {
         return Err(io::Error::new(
@@ -106,8 +64,6 @@ pub async fn serve(addr: &str, server: Arc<HttpServer>) -> io::Result<ServerHand
         ));
     }
 
-    // Install once at the composition root, where Arc<HttpServer> is available.
-    // Every subsequent turn binds its session-cached runtime into a fresh toolset.
     server.install_tower_wake_driver();
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
@@ -126,8 +82,8 @@ pub async fn serve(addr: &str, server: Arc<HttpServer>) -> io::Result<ServerHand
                             });
                         }
                         Err(error) => {
-                            // A failed accept (descriptor limit, peer gone mid-handshake)
-                            // is not fatal: keep listening.
+
+
                             tracing::warn!(%error, "accept failed");
                         }
                     }
@@ -153,9 +109,7 @@ async fn serve_connection(mut stream: TcpStream, server: Arc<HttpServer>) -> io:
 
     if ws::is_upgrade(&received.request) {
         let Received { request, leftover } = received;
-        // The handshake never reaches `handle_request`, so the DNS-rebinding
-        // guard has to be applied here too — otherwise a rebinding page could
-        // simply open a WebSocket instead of a REST call.
+
         if !server.host_allowed(request.header("host")) {
             let response = HttpResponse::forbidden(crate::server::host_guard::rejection_message(
                 request.header("host"),
@@ -190,34 +144,24 @@ async fn serve_connection(mut stream: TcpStream, server: Arc<HttpServer>) -> io:
             Ok(()) => Ok(()),
             Err(ws::WsError::Io(error)) => Err(error),
             Err(error) => {
-                // The ws layer already answered a framing violation with a
-                // Close frame; there is nothing left for the caller to do.
                 tracing::debug!(?error, "websocket connection closed");
                 Ok(())
             }
         };
     }
 
-    // Auth for REST lives in `HttpServer::handle_request`, so every host that
-    // dispatches through it is gated; only the WebSocket handshake needs a
-    // credential checked here, because it never reaches that dispatcher.
     let response = server.handle_request(&received.request).await;
-    // kap-server envelope convention: the Web client's REST transport reads
-    // only `data` from an enveloped body, so JSON responses are wrapped here
-    // (assets, downloads and already-enveloped bodies pass through).
+
     let response =
         crate::server::envelope::envelope_response(&received.request.request_id(), response);
     write_response(&mut stream, &response).await
 }
 
-/// One parsed request plus the bytes that arrived in the same packet after it.
 struct Received {
     request: HttpRequest,
     leftover: Vec<u8>,
 }
 
-/// Read exactly one request off the socket. `None` means the peer closed the
-/// connection before sending anything.
 async fn read_request(stream: &mut TcpStream) -> Result<Option<Received>, RejectReason> {
     let mut buffered: Vec<u8> = Vec::with_capacity(CHUNK_BYTES);
     let mut chunk = vec![0_u8; CHUNK_BYTES];
@@ -264,9 +208,6 @@ async fn read_request(stream: &mut TcpStream) -> Result<Option<Received>, Reject
         }
     }
 
-    // Bytes past `expected` are either a WebSocket frame that shared the
-    // handshake packet or a pipelined request; hand them on rather than drop
-    // them, since the ws path reads frames from this same socket.
     let leftover = if body.len() > expected {
         body.split_off(expected)
     } else {
@@ -276,12 +217,10 @@ async fn read_request(stream: &mut TcpStream) -> Result<Option<Received>, Reject
     Ok(Some(Received { request, leftover }))
 }
 
-/// Locate the blank line that ends the header block.
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-/// True when a LF is not preceded by CR, or a CR is not followed by LF.
 fn has_bare_line_feed(buffer: &[u8]) -> bool {
     buffer.iter().enumerate().any(|(index, byte)| match byte {
         b'\n' => index == 0 || buffer[index - 1] != b'\r',
@@ -350,7 +289,6 @@ fn declared_body_len(headers: &HashMap<String, String>) -> Result<usize, RejectR
     }
 }
 
-/// Serialize a response and close the connection.
 async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> io::Result<()> {
     let mut head = format!(
         "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -423,8 +361,6 @@ mod tests {
 
     #[test]
     fn rejects_a_bare_lf_line_ending() {
-        // Two parsers disagreeing about where a request ends is how smuggling
-        // happens, so a mixed line ending must never reach the dispatcher.
         let error = parse(b"GET /a HTTP/1.1\nHost: x\r\n\r\n").unwrap_err();
         assert!(matches!(error, RejectReason::Malformed(_)), "{error:?}");
     }
@@ -513,12 +449,9 @@ mod tests {
         stream.read_to_end(&mut response).await.unwrap();
         let text = String::from_utf8_lossy(&response).into_owned();
 
-        // v2's create route carries no `statusCode` override, so the envelope
-        // ships as 200 (`success: { data: sessionSchema }`).
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
         assert!(text.contains("over TCP"), "{text}");
 
-        // The session persisted, so the list route sees it.
         let mut second = TcpStream::connect(handle.local_addr).await.unwrap();
         second
             .write_all(b"GET /api/v1/sessions HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -557,8 +490,6 @@ mod tests {
         handle.shutdown();
     }
 
-    /// A listener on an ephemeral loopback port where every state route needs
-    /// `Bearer tok3n`.
     async fn serve_with_token() -> ServerHandle {
         let server = Arc::new(
             HttpServer::in_memory()
@@ -614,8 +545,6 @@ mod tests {
         .await;
         assert!(listed.starts_with("HTTP/1.1 200 OK\r\n"), "{listed}");
 
-        // A wrong token is refused the same way a missing one is, so the
-        // response cannot be probed for what the server expected.
         let wrong = exchange(
             handle.local_addr,
             "GET /api/v1/sessions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer nope\r\n\r\n",
@@ -654,8 +583,6 @@ mod tests {
             "a refusal must not negotiate a protocol: {refused}"
         );
 
-        // A successful handshake leaves the stream open, so read the response
-        // head once rather than to the end.
         let mut stream = TcpStream::connect(handle.local_addr).await.unwrap();
         stream
             .write_all(upgrade_request("chrome-v1, kimi-code.bearer.tok3n").as_bytes())

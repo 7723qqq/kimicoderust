@@ -1,12 +1,3 @@
-//! Managed Kimi Code model discovery, porting v2 `refreshProviderModels`
-//! branches 1 (OAuth-managed provider) and 2.5 (hand-written provider on the
-//! managed endpoint with an API key).
-//!
-//! The refresh re-reads `GET {base}/models` and rewrites the provider's
-//! upstream-owned aliases (`<prefix>/<model id>`), preserving user-authored
-//! aliases under the same provider. Open-platform and custom-registry
-//! branches are not ported.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -20,14 +11,12 @@ use crate::config::write::{
 use crate::server::custom_registry::RegistrySource;
 use crate::server::oauth::OAuthManager;
 
-/// The managed provider name (`KIMI_CODE_PROVIDER_NAME`).
 pub const KIMI_CODE_PROVIDER_NAME: &str = "managed:kimi-code";
-/// The alias prefix managed models live under (`KIMI_CODE_PLATFORM_ID`).
+
 pub const KIMI_CODE_PLATFORM_ID: &str = "kimi-code";
 
 const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// One `/models` entry, mapped to the fields the alias carries.
 #[derive(Debug, Clone, PartialEq)]
 struct DiscoveredModel {
     id: String,
@@ -49,12 +38,6 @@ fn string_array(value: Option<&Value>) -> Option<Vec<String>> {
     })
 }
 
-/// `parseModelReasoning`: the unified `reasoning` object —
-/// `{ type: "only"|"both"|"none", effort: { valid: [...], default: "..." } }`.
-/// A missing object and `type: "none"` both mean the model cannot think and
-/// map to the internal 'no' state so a stale thinking default gets cleared;
-/// an unrecognized type stays None. A default not listed in `valid` is
-/// dropped.
 fn parse_model_reasoning(
     value: Option<&Value>,
 ) -> (bool, Option<String>, Option<Vec<String>>, Option<String>) {
@@ -64,8 +47,7 @@ fn parse_model_reasoning(
     let supports_thinking_type = match record.get("type").and_then(Value::as_str) {
         Some("only") => Some("only".to_string()),
         Some("both") => Some("both".to_string()),
-        // The unified schema names the non-thinking state 'none'; the internal
-        // three-state keeps the legacy 'no'.
+
         Some("none") => Some("no".to_string()),
         _ => None,
     };
@@ -92,9 +74,6 @@ fn parse_model_reasoning(
     )
 }
 
-/// `toModelInfo` + `capabilitiesForModel` + `toManagedModelAlias` (unified
-/// /models schema: `limit.context` / `modalities.input` / `reasoning` /
-/// `tools.dynamic_load`; v2 #4209).
 fn parse_model(item: &Value) -> Result<Option<DiscoveredModel>, String> {
     let Some(id) = item
         .get("id")
@@ -167,9 +146,7 @@ fn parse_model(item: &Value) -> Result<Option<DiscoveredModel>, String> {
     if supports_tool_use {
         capabilities.push("tool_use".into());
     }
-    // v2 `capabilitiesForModel` adds this from `tools.dynamic_load`; it is
-    // the model-side half of the on-demand tool-loading gate (the other half
-    // is the `tool_select` experimental flag).
+
     if supports_dynamic_tools {
         capabilities.push("dynamically_loaded_tools".into());
     }
@@ -223,7 +200,6 @@ fn alias_from_model(
     }
 }
 
-/// The comparable shape of an existing alias (for the unchanged check).
 fn alias_snapshot(alias: &crate::config::ModelAliasConfig) -> Value {
     json!({
         "model": alias.model,
@@ -317,8 +293,6 @@ async fn fetch_models(
     Ok(models)
 }
 
-/// One refresh target: the provider to refresh, its alias prefix and the
-/// credential/base URL to fetch with.
 struct Target {
     provider_id: String,
     provider_name: String,
@@ -327,9 +301,6 @@ struct Target {
     credential: String,
 }
 
-/// Pick the providers this server can discover: the OAuth-managed provider
-/// (branch 1) and `type = "kimi"` providers on the managed endpoint with an
-/// API key (branch 2.5).
 async fn resolve_targets(
     config: &KimiConfig,
     oauth: &OAuthManager,
@@ -365,7 +336,7 @@ async fn resolve_targets(
             }
             continue;
         }
-        // Branch 2.5: a hand-written managed-endpoint provider with a key.
+
         if provider.provider_type.as_deref() != Some("kimi") || provider.oauth.is_some() {
             continue;
         }
@@ -399,9 +370,6 @@ async fn resolve_targets(
     targets
 }
 
-/// `POST /providers/{id}:refresh` and `POST /providers:refresh`.
-/// The refresh report the branches accumulate into (v2's
-/// `{changed, unchanged, failed}` result shape).
 #[derive(Default)]
 struct RefreshReport {
     changed: Vec<Value>,
@@ -417,9 +385,6 @@ pub async fn refresh(
     scope: &str,
     provider_id: Option<&str>,
 ) -> Value {
-    // v2 `refreshChain`: serialize refreshes end to end. The config lock only
-    // covers each individual read/write, so overlapping runs would both fetch
-    // and then race their rewrites of the provider/model sections.
     let _chain = chain.lock().await;
     let client = match reqwest::Client::builder().build() {
         Ok(client) => client,
@@ -525,9 +490,6 @@ pub async fn refresh(
             .filter(|(key, _)| !desired_keys.iter().any(|desired| desired == *key))
             .count() as u64;
 
-        // Preserve the global default when it still points at a surviving
-        // alias; otherwise fall back to the first fetched model (v2
-        // `selectDefaultModel`).
         let keep_default = before
             .default_model
             .as_deref()
@@ -571,9 +533,6 @@ pub async fn refresh(
         }
     }
 
-    // Branch 3 (v2 `refreshProviderModels`): custom-registry providers,
-    // grouped by source URL. The oauth scope stops before it, exactly where
-    // v2's gate sits.
     if scope != "oauth" {
         refresh_custom_registries(
             config_lock,
@@ -593,8 +552,6 @@ pub async fn refresh(
     })
 }
 
-/// The distinct model ids an alias set carries (v2 `collectModelIdsForAliases`):
-/// the change counts are reported in models, not alias keys.
 fn model_ids_of(config: &KimiConfig, provider_id: &str) -> Vec<String> {
     let mut ids: Vec<String> = config
         .models
@@ -608,9 +565,6 @@ fn model_ids_of(config: &KimiConfig, provider_id: &str) -> Vec<String> {
     ids
 }
 
-/// v2 `fetchCustomRegistryFromSources`: try each credential configured for
-/// the registry URL until one serves the document (key rotation), and report
-/// which source answered.
 async fn fetch_from_sources(
     client: &reqwest::Client,
     sources: &[RegistrySource],
@@ -631,12 +585,6 @@ async fn fetch_from_sources(
     Err(last_error.unwrap_or_else(|| "no registry sources configured".to_string()))
 }
 
-/// Branch 3 of v2 `refreshProviderModels`: the providers carrying a
-/// `source` blob, grouped by registry URL. The URL is the registry's stable
-/// identity, so a group may carry several API keys (rotation) and the fetch
-/// tries each until one succeeds. A scoped refresh touches only the target's
-/// group and only that provider; an unscoped one also pulls in providers the
-/// registry newly lists and drops the ones it no longer does.
 async fn refresh_custom_registries(
     config_lock: &Mutex<Option<KimiConfig>>,
     config_path: Option<&Path>,
@@ -667,7 +615,7 @@ async fn refresh_custom_registries(
         {
             continue;
         }
-        // v2 `fetchCustomRegistryFromSources`: the first key that works wins.
+
         let (entries, source) = match fetch_from_sources(client, &sources).await {
             Ok(fetched) => fetched,
             Err(reason) => {
@@ -683,8 +631,6 @@ async fn refresh_custom_registries(
             }
         };
 
-        // The sync set: the group's providers, plus the registry's new
-        // entries when the refresh is unscoped.
         let mut sync: Vec<String> = provider_ids.clone();
         if provider_id.is_none() {
             for entry in entries.values() {
@@ -694,9 +640,6 @@ async fn refresh_custom_registries(
             }
         }
 
-        // Classify before writing: a group whose every provider already says
-        // what the registry says is reported unchanged without touching the
-        // config file.
         let mut any_change = false;
         for id in &sync {
             match entries.values().find(|entry| &entry.id == id) {
@@ -842,7 +785,6 @@ mod tests {
         assert_eq!(model.default_effort.as_deref(), Some("high"));
         assert_eq!(model.protocol.as_deref(), Some("anthropic"));
 
-        // The alias carries the anthropic routing overrides.
         let alias = alias_from_model("managed:kimi-code", "kimi-code/", &model);
         assert_eq!(alias.alias_id, "kimi-code/k3");
         assert_eq!(alias.provider, "managed:kimi-code");
@@ -876,8 +818,6 @@ mod tests {
         );
         assert_eq!(default, None);
 
-        // A missing reasoning object means the model cannot think ('no'), so a
-        // stale thinking default gets cleared.
         let (supports_reasoning, thinking_type, _, _) = parse_model_reasoning(None);
         assert!(!supports_reasoning);
         assert_eq!(thinking_type.as_deref(), Some("no"));
@@ -900,10 +840,6 @@ mod tests {
         );
     }
 
-    /// A registry server whose response is chosen per request by the Bearer
-    /// key, so key rotation can be exercised: the stale key 401s and the
-    /// fresh one serves the document. Each entry is `(key marker, status
-    /// line, body)`; the last entry is the fallback for an unknown key.
     struct RegistryServer {
         url: String,
         requests: Arc<std::sync::Mutex<Vec<String>>>,
@@ -976,7 +912,6 @@ mod tests {
             }
         }
 
-        /// Fail every later request regardless of key.
         fn set_response_failure(&self) {
             *self.override_response.lock().unwrap() =
                 Some(("500 Internal Server Error".to_string(), String::new()));
@@ -1064,11 +999,9 @@ capabilities = ["tool_use"]
         let text = std::fs::read_to_string(&config_path).unwrap();
         assert!(text.contains("[models.\"acme/small\"]"), "{text}");
         assert!(text.contains("model = \"small-1\""), "{text}");
-        // The default still points at the surviving alias.
+
         assert!(text.contains("default_model = \"acme/big\""), "{text}");
 
-        // A second refresh with the same document reports unchanged and does
-        // not rewrite the file.
         let before = std::fs::read_to_string(&config_path).unwrap();
         let result = refresh(
             &tokio::sync::Mutex::new(()),
@@ -1120,8 +1053,7 @@ capabilities = ["tool_use"]
                         peak.fetch_max(now, Ordering::SeqCst);
                         let mut buf = [0u8; 8192];
                         let _ = sock.read(&mut buf).await;
-                        // Hold the request so an unserialized second refresh
-                        // overlaps instead of running back to back.
+
                         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                         in_flight.fetch_sub(1, Ordering::SeqCst);
                         let raw = format!(
@@ -1151,7 +1083,7 @@ capabilities = ["tool_use"]
         );
         assert_eq!(first["changed"].as_array().unwrap().len(), 1, "{first}");
         assert_eq!(second["unchanged"], json!(["acme"]), "{second}");
-        // v2 `refreshChain`: one refresh at a time, never overlapping fetches.
+
         assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 
@@ -1159,8 +1091,7 @@ capabilities = ["tool_use"]
     async fn refreshes_a_registry_group_through_key_rotation() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.toml");
-        // Two providers share the registry URL with different keys: the
-        // stale one 401s, the fresh one serves the document.
+
         let upstream = RegistryServer::spawn(vec![
             (
                 "sk-fresh",
@@ -1189,7 +1120,7 @@ capabilities = ["tool_use"]
             ("sk-stale", "401 Unauthorized", String::new()),
         ])
         .await;
-        // Two providers share the registry URL with different keys.
+
         std::fs::write(
             &config_path,
             format!(
@@ -1243,17 +1174,13 @@ capabilities = ["tool_use"]
             None,
         )
         .await;
-        // Both providers of the group are synced from the one successful
-        // fetch; the stale key was tried first.
+
         let changed = result["changed"].as_array().unwrap();
         assert_eq!(changed.len(), 1, "{result}");
         assert_eq!(changed[0]["provider_id"], "beta");
         assert_eq!(changed[0]["added"], 1);
         assert_eq!(result["unchanged"], json!(["acme"]));
-        // The group's credential order follows the config's provider order,
-        // so either key may be tried first; what matters is that the one that
-        // answered was the fresh key and the sync used its document. The
-        // retry itself is pinned by `fetch_from_sources` below.
+
         let keys = upstream.keys();
         assert!(keys.iter().all(|key| key.contains("sk-")), "{keys:?}");
         assert_eq!(
@@ -1300,13 +1227,12 @@ capabilities = ["tool_use"]
             .expect("the fresh key serves the document");
         assert_eq!(source.api_key, "sk-fresh");
         assert_eq!(entries.len(), 1);
-        // The stale key was tried first and failed, then the fresh one won.
+
         assert_eq!(
             upstream.keys(),
             vec!["sk-stale".to_string(), "sk-fresh".to_string()]
         );
 
-        // Every key failing reports the last error.
         upstream.set_response_failure();
         let error = fetch_from_sources(&client, &sources)
             .await
@@ -1379,7 +1305,7 @@ capabilities = ["tool_use"]
         let text = std::fs::read_to_string(&config_path).unwrap();
         assert!(!text.contains("[providers.acme]"), "{text}");
         assert!(!text.contains("acme/big"), "{text}");
-        // The default pointed into the removed provider, so it goes too.
+
         assert!(!text.contains("default_model"), "{text}");
     }
 
@@ -1417,7 +1343,7 @@ capabilities = ["tool_use"]
             None,
         )
         .await;
-        // v2's gate: the oauth scope stops before the registry branch.
+
         assert_eq!(
             result,
             json!({ "changed": [], "unchanged": [], "failed": [] })
@@ -1452,7 +1378,7 @@ capabilities = ["tool_use"]
             failed[0]["reason"].as_str().unwrap().contains("401"),
             "{result}"
         );
-        // The config is untouched.
+
         let text = std::fs::read_to_string(&config_path).unwrap();
         assert!(text.contains("[providers.acme]"), "{text}");
     }

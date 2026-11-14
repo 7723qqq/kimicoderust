@@ -204,7 +204,10 @@ async fn lifecycle_events_mirror_the_v2_surface() {
         vec![
             "subagent.spawned".to_string(),
             "subagent.started".to_string(),
+            "turn.prompt".to_string(),
+            "context.append_message".to_string(),
             "llm.step.begin".to_string(),
+            "llm.request".to_string(),
             "llm.step.end".to_string(),
             "subagent.completed".to_string(),
         ]
@@ -219,9 +222,19 @@ async fn lifecycle_events_mirror_the_v2_surface() {
     assert!(agent_id.starts_with("agent-"));
     assert_eq!(events[1]["subagent_id"], spawned["subagent_id"]);
 
-    assert_eq!(events[2]["type"], "llm.step.begin");
-    assert_eq!(events[3]["type"], "llm.step.end");
-    assert!(events[3]["step"].is_number());
+    assert_eq!(events[2]["type"], "turn.prompt");
+    assert_eq!(events[2]["agent_id"], spawned["subagent_id"]);
+    assert_eq!(events[2]["input"][0]["text"], "go");
+    assert_eq!(events[2]["origin"]["kind"], "system_trigger");
+    assert_eq!(events[2]["origin"]["name"], "subagent");
+    assert_eq!(events[3]["message"]["origin"]["kind"], "injection");
+    assert_eq!(events[4]["type"], "llm.step.begin");
+    assert_eq!(events[4]["agent_id"], spawned["subagent_id"]);
+    assert_eq!(events[5]["type"], "llm.request");
+    assert_eq!(events[5]["agent_id"], spawned["subagent_id"]);
+    assert_eq!(events[5]["kind"], "loop");
+    assert_eq!(events[6]["type"], "llm.step.end");
+    assert!(events[6]["step"].is_number());
     let completed = events.last().unwrap();
     assert_eq!(completed["result_summary"], "findings: all done");
     assert!(completed["usage"]["total_tokens"].is_number());

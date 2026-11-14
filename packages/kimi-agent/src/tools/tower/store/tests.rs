@@ -325,6 +325,8 @@ fn mission(id: &str, branch: &str, status: TowerMissionStatus) -> TowerMission {
         tasks: Vec::new(),
         notes: Vec::new(),
         blockers: Vec::new(),
+        completion_tip: None,
+        key_artifacts: None,
     }
 }
 
@@ -611,6 +613,7 @@ async fn a_colliding_branch_slug_does_not_stand_in_for_another_branch() {
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -654,6 +657,7 @@ async fn review_rounds_cap_after_the_max() {
         findings: "f".into(),
         checks: None,
         decision: "d".into(),
+        acceptance_tip: None,
     };
 
     for expected in 1..=MAX_REVIEW_ROUNDS {
@@ -693,6 +697,7 @@ async fn a_retried_review_recovers_the_written_file_instead_of_burning_a_round()
         findings: "f".into(),
         checks: Some(vec!["cargo test".into()]),
         decision: "d".into(),
+        acceptance_tip: None,
     };
 
     let first = store.submit_review("reviewer-1", review()).await.unwrap();
@@ -750,6 +755,7 @@ async fn a_non_clean_review_reopens_a_completed_mission() {
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -813,7 +819,7 @@ async fn completion_validates_git_before_acquiring_the_state_lock() {
     .await
     .unwrap();
 
-    let error = store.complete("worker-a", "report").await.unwrap_err();
+    let error = store.complete("worker-a", "report", &[]).await.unwrap_err();
 
     assert!(error.contains("not available"), "{error}");
     assert!(!error.contains("timed out"), "{error}");
@@ -863,6 +869,7 @@ async fn review_prepares_before_acquiring_the_state_lock() {
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -1458,6 +1465,7 @@ async fn shared_branch_merge_requires_a_review_for_the_open_mission() {
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -1498,6 +1506,7 @@ async fn shared_branch_merge_rejects_an_unbound_legacy_review() {
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -1534,6 +1543,7 @@ async fn clean_review_must_explicitly_approve_merge() {
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -1571,6 +1581,7 @@ async fn merge_requires_the_mission_to_be_completed() {
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -1629,7 +1640,7 @@ async fn complete_persists_mission_and_deduplicates_its_standard_notification() 
     store.save(&state).await.unwrap();
 
     let first = store
-        .complete("worker-a", "  final report  ")
+        .complete("worker-a", "  final report  ", &[])
         .await
         .unwrap();
     assert_eq!(first.mission.unwrap().status, TowerMissionStatus::Completed);
@@ -1642,7 +1653,10 @@ async fn complete_persists_mission_and_deduplicates_its_standard_notification() 
     assert!(!message.delivery.message_id.is_empty());
     assert_eq!(message.delivery.mission_id.as_deref(), Some("M1"));
 
-    let retry = store.complete("worker-a", "final report").await.unwrap();
+    let retry = store
+        .complete("worker-a", "final report", &[])
+        .await
+        .unwrap();
     assert!(!retry.notification_created);
     let mut entries = tokio::fs::read_dir(store.abs(INBOX_DIR)).await.unwrap();
     let mut count = 0;
@@ -1651,7 +1665,10 @@ async fn complete_persists_mission_and_deduplicates_its_standard_notification() 
     }
     assert_eq!(count, 1, "the retry must reuse the stored notification");
 
-    let changed = store.complete("worker-a", "updated report").await.unwrap();
+    let changed = store
+        .complete("worker-a", "updated report", &[])
+        .await
+        .unwrap();
     assert!(changed.notification_created);
 }
 
@@ -1659,7 +1676,7 @@ async fn complete_persists_mission_and_deduplicates_its_standard_notification() 
 async fn complete_rejects_an_empty_report() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with_record_dirs(dir.path()).await;
-    let error = store.complete("worker-a", " \n ").await.unwrap_err();
+    let error = store.complete("worker-a", " \n ", &[]).await.unwrap_err();
     assert_eq!(error, "TowerComplete report must not be empty");
 }
 
@@ -1680,19 +1697,22 @@ async fn complete_distinguishes_a_missing_mission_from_a_non_worker() {
         .await
         .unwrap();
 
-    let error = store.complete("worker-a", "report").await.unwrap_err();
+    let error = store.complete("worker-a", "report", &[]).await.unwrap_err();
     assert_eq!(error, "unknown mission \"M9\"");
 
-    let error = store.complete("reviewer-a", "report").await.unwrap_err();
+    let error = store
+        .complete("reviewer-a", "report", &[])
+        .await
+        .unwrap_err();
     assert!(
         error.contains("cannot use TowerComplete"),
         "a non-worker is refused by role, not by mission: {error}"
     );
 
-    let error = store.complete(TOWER_NAME, "report").await.unwrap_err();
+    let error = store.complete(TOWER_NAME, "report", &[]).await.unwrap_err();
     assert!(error.contains("cannot use TowerComplete"), "{error}");
 
-    let error = store.complete("other", "report").await.unwrap_err();
+    let error = store.complete("other", "report", &[]).await.unwrap_err();
     assert!(error.contains("cannot use TowerComplete"), "{error}");
 }
 
@@ -1780,7 +1800,7 @@ async fn complete_recovers_lost_state_and_degrades_to_a_report() {
     let store = store_with_record_dirs(root).await;
 
     let recovered = store
-        .complete_agent("agent-0", "recovered report")
+        .complete_agent("agent-0", "recovered report", &[])
         .await
         .unwrap();
     assert!(recovered.recovered_at.is_some());
@@ -1807,7 +1827,7 @@ async fn complete_recovers_lost_state_and_degrades_to_a_report() {
     );
 
     let retry = store
-        .complete_agent("agent-0", "recovered report")
+        .complete_agent("agent-0", "recovered report", &[])
         .await
         .unwrap();
     assert!(!retry.notification_created);
@@ -1840,6 +1860,7 @@ async fn non_clean_review_notifies_the_owner_and_tower_with_full_metadata() {
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -1902,6 +1923,7 @@ async fn store_ready_to_merge(root: &Path, branch: &str) -> (TowerStore, String)
                 findings: "f".into(),
                 checks: None,
                 decision: "d".into(),
+                acceptance_tip: None,
             },
         )
         .await
@@ -2165,35 +2187,53 @@ async fn status_reader_exposes_gate_reasons_binding_and_unread_count() {
     state.roster.agents.push(worker);
     store.save(&state).await.unwrap();
 
-    let status = crate::tools::tower::status_reader::read_tower_status(&store, "main", None, None)
+    let input = crate::features::tower::tools::status::statusReader::ReadTowerStatusInput {
+        active: true,
+        cwd: root,
+        agent_id: "main",
+        running_agent_ids: &|| std::collections::HashSet::new(),
+        concurrency: &|| {
+            crate::features::tower::tools::status::statusReader::TowerStatusConcurrency {
+                budget: 256.0,
+                inflight: 0.0,
+                blocked_until: None,
+            }
+        },
+    };
+    let status = crate::features::tower::tools::status::statusReader::read_tower_status(&input)
         .await
         .unwrap();
-    assert!(status.initialized);
+    let crate::features::tower::tools::status::statusReader::TowerStatus::Initialized(status) =
+        status
+    else {
+        panic!("expected an initialized tower status");
+    };
     assert_eq!(status.caller, TOWER_NAME);
-    assert_eq!(status.gates.len(), 1);
-    assert!(
-        status.gates[0]
-            .reasons
-            .contains(&"worker-unknown".to_string())
+    assert_eq!(status.gate.len(), 1);
+    assert!(status.gate[0].ready);
+    assert_eq!(
+        status.gate[0].review_binding,
+        Some(crate::features::tower::protocol::missionGate::TowerReviewBinding::ExactTip)
     );
-    assert_eq!(status.gates[0].binding.as_deref(), Some("exact-tip"));
-    assert!(status.inbox_count >= 1);
+    assert!(status.inbox.count >= 1);
 }
 
 #[tokio::test]
 async fn wake_digest_preparation_preserves_mission_order_without_calling_a_wake_api() {
     let dir = tempfile::tempdir().unwrap();
     let (store, _) = store_ready_to_merge(dir.path(), "feat/wake-digest").await;
-    let state = store.load().await.unwrap();
+    let new_store = crate::features::tower::protocol::store::TowerStore::new(dir.path());
+    let state = new_store.load().await.unwrap();
     let mission_ids = vec!["M404".to_string(), "M1".to_string()];
 
-    let digests = crate::tools::tower::status_reader::read_tower_wake_gate_digests(
-        &store,
-        &state,
-        &mission_ids,
-        None,
-    )
-    .await;
+    let digests =
+        crate::features::tower::tools::status::statusReader::read_tower_wake_gate_digests(
+            &new_store,
+            &state,
+            &mission_ids,
+            None,
+        )
+        .await;
 
     assert_eq!(digests.len(), 2);
     assert_eq!(digests[0].mission_id, "M404");
@@ -2211,11 +2251,30 @@ async fn status_reader_reports_state_loss_without_recovering() {
     repo_with_commit(root).await;
     let store = store_with_record_dirs(root).await;
 
-    let status = crate::tools::tower::status_reader::read_tower_status(&store, "main", None, None)
+    let input = crate::features::tower::tools::status::statusReader::ReadTowerStatusInput {
+        active: false,
+        cwd: root,
+        agent_id: "main",
+        running_agent_ids: &|| std::collections::HashSet::new(),
+        concurrency: &|| {
+            crate::features::tower::tools::status::statusReader::TowerStatusConcurrency {
+                budget: 256.0,
+                inflight: 0.0,
+                blocked_until: None,
+            }
+        },
+    };
+    let status = crate::features::tower::tools::status::statusReader::read_tower_status(&input)
         .await
         .unwrap();
-    assert!(!status.initialized);
-    assert!(status.state_lost);
+    let crate::features::tower::tools::status::statusReader::TowerStatus::NotInitialized {
+        state_lost,
+        ..
+    } = status
+    else {
+        panic!("expected an uninitialized tower status");
+    };
+    assert!(state_lost);
     assert!(!store.is_initialized().await.unwrap());
 }
 
@@ -2406,5 +2465,459 @@ async fn worker_branch_starts_from_a_wip_snapshot_without_touching_the_base() {
         )
         .unwrap(),
         "wip content"
+    );
+}
+
+#[test]
+fn artifact_paths_are_normalized_and_deduped() {
+    let normalized = normalize_artifact_paths(&[
+        " src/a.txt ".into(),
+        "src\\b.txt".into(),
+        "./src/c.txt".into(),
+        "src/a.txt".into(),
+    ])
+    .unwrap();
+    assert_eq!(normalized, vec!["src/a.txt", "src/b.txt", "src/c.txt"]);
+
+    for bad in [
+        "",
+        "   ",
+        "/abs.txt",
+        "../escape.txt",
+        "src/../../escape.txt",
+        "a\0b",
+        "line\nbreak",
+    ] {
+        let error = normalize_artifact_paths(&[bad.into()]).unwrap_err();
+        assert!(
+            error.contains("must be non-empty relative file paths"),
+            "{bad:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn artifact_acceptance_report_matches_v2() {
+    let report = artifact_acceptance_report(
+        "did the thing",
+        &["src/a.txt".into(), "src/b.txt".into()],
+        &["src/a.txt".into(), "src/b.txt".into(), "src/c.txt".into()],
+        "abc1234567890",
+    );
+    let expected = [
+        "Key artifacts for human acceptance:",
+        "- src/a.txt",
+        "- src/b.txt",
+        "",
+        "Completion tip: abc1234567890",
+        "Approval authorizes the entire current mission tip presented for acceptance, not only these key artifacts.",
+        "Additional committed files included in this approval: 1.",
+        "Optional full manifest: inspect the current mission branch diff on request; reading every path is not required.",
+        "",
+        "did the thing",
+    ]
+    .join("\n");
+    assert_eq!(report, expected);
+    assert!(!same_artifact_paths(None, &["src/a.txt".into()]));
+    assert!(same_artifact_paths(
+        Some(&vec!["src/a.txt".to_string()]),
+        &["src/a.txt".into()]
+    ));
+    assert!(!same_artifact_paths(
+        Some(&vec!["src/a.txt".to_string()]),
+        &["src/b.txt".into()]
+    ));
+}
+
+#[tokio::test]
+async fn artifact_complete_records_the_tip_and_stores_the_acceptance_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = repo_with_branch_diff(root, "feat/artifact").await;
+    let tip = git::branch_tip(root, "feat/artifact").await.unwrap();
+    let store = store_with_record_dirs(root).await;
+    let mut worker = entry("worker-a", "agent-0");
+    worker.mission_id = Some("M1".into());
+    let mut artifact = mission("M1", "feat/artifact", TowerMissionStatus::Active);
+    artifact.kind = TowerMissionKind::Artifact;
+    artifact.scope = vec!["src/**".into()];
+    artifact.owner = Some("worker-a".into());
+    let mut state = state_with_missions(&base, vec![artifact]);
+    state.roster.agents.push(worker);
+    store.save(&state).await.unwrap();
+
+    let result = store
+        .complete(
+            "worker-a",
+            "delivered the artifact",
+            &[" src\\feature.txt ".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result.mission.as_ref().unwrap().status,
+        TowerMissionStatus::Completed
+    );
+    assert!(result.notification_created);
+
+    let stored = store.load().await.unwrap();
+    assert_eq!(
+        stored.missions[0].completion_tip.as_deref(),
+        Some(tip.as_str())
+    );
+    assert_eq!(
+        stored.missions[0].key_artifacts.as_deref(),
+        Some(&["src/feature.txt".to_string()][..])
+    );
+
+    let message = result.message.unwrap();
+    assert_eq!(message.item.subject, "acceptance-request");
+    assert_eq!(message.item.scope.as_deref(), Some("M1"));
+    let body = message.item.body;
+    assert!(
+        body.contains("Key artifacts for human acceptance:"),
+        "{body}"
+    );
+    assert!(body.contains("- src/feature.txt"), "{body}");
+    assert!(body.contains(&format!("Completion tip: {tip}")), "{body}");
+    assert!(
+        body.contains("Additional committed files included in this approval: 0."),
+        "{body}"
+    );
+    assert!(body.contains("delivered the artifact"), "{body}");
+
+    let retry = store
+        .complete(
+            "worker-a",
+            "delivered the artifact",
+            &["src/feature.txt".into()],
+        )
+        .await
+        .unwrap();
+    assert!(!retry.notification_created);
+    let mut entries = tokio::fs::read_dir(store.abs(INBOX_DIR)).await.unwrap();
+    let mut count = 0;
+    while entries.next_entry().await.unwrap().is_some() {
+        count += 1;
+    }
+    assert_eq!(
+        count, 1,
+        "the same tip and artifacts must reuse the notification"
+    );
+}
+
+#[tokio::test]
+async fn artifact_complete_refuses_uncommitted_out_of_scope_and_missing_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = repo_with_branch_diff(root, "feat/artifact").await;
+    let store = store_with_record_dirs(root).await;
+    let mut worker = entry("worker-a", "agent-0");
+    worker.mission_id = Some("M1".into());
+
+    let mut build = mission("M1", "feat/artifact", TowerMissionStatus::Active);
+    build.owner = Some("worker-a".into());
+    let mut state = state_with_missions(&base, vec![build]);
+    state.roster.agents.push(worker.clone());
+    store.save(&state).await.unwrap();
+    let error = store
+        .complete("worker-a", "report", &["src/feature.txt".into()])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "TowerComplete key_artifacts is only supported for artifact missions"
+    );
+
+    let mut artifact = mission("M1", "feat/artifact", TowerMissionStatus::Active);
+    artifact.kind = TowerMissionKind::Artifact;
+    artifact.scope = vec!["src/**".into()];
+    artifact.owner = Some("worker-a".into());
+    let mut state = state_with_missions(&base, vec![artifact]);
+    state.roster.agents.push(worker.clone());
+    store.save(&state).await.unwrap();
+    let error = store.complete("worker-a", "report", &[]).await.unwrap_err();
+    assert!(
+        error.contains("must name at least one committed key deliverable"),
+        "{error}"
+    );
+
+    let error = store
+        .complete("worker-a", "report", &["src/other.txt".into()])
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("must name paths from the committed branch diff"),
+        "{error}"
+    );
+    assert!(error.contains("src/other.txt"), "{error}");
+
+    let mut narrow = mission("M1", "feat/artifact", TowerMissionStatus::Active);
+    narrow.kind = TowerMissionKind::Artifact;
+    narrow.scope = vec!["docs/**".into()];
+    narrow.owner = Some("worker-a".into());
+    let mut state = state_with_missions(&base, vec![narrow]);
+    state.roster.agents.push(worker.clone());
+    store.save(&state).await.unwrap();
+    let error = store
+        .complete("worker-a", "report", &["src/feature.txt".into()])
+        .await
+        .unwrap_err();
+    assert!(error.contains("must stay inside its scope"), "{error}");
+    assert!(error.contains("docs/**"), "{error}");
+}
+
+#[tokio::test]
+async fn artifact_complete_refuses_a_path_absent_from_the_net_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git::git(root, &["init", "-q"]).await.unwrap();
+    let _ = git::git(root, &["config", "user.email", "t@e.test"]).await;
+    let _ = git::git(root, &["config", "user.name", "t"]).await;
+    std::fs::write(root.join("f.txt"), "base").unwrap();
+    git::git(root, &["add", "."]).await.unwrap();
+    git::git(root, &["commit", "-qm", "init"]).await.unwrap();
+    let base = git::git(root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .unwrap();
+    git::git(root, &["checkout", "-qb", "feat/artifact"])
+        .await
+        .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/gone.txt"), "temp").unwrap();
+    git::git(root, &["add", "."]).await.unwrap();
+    git::git(root, &["commit", "-qm", "add then remove"])
+        .await
+        .unwrap();
+    git::git(root, &["rm", "-q", "src/gone.txt"]).await.unwrap();
+    git::git(root, &["commit", "-qm", "remove it"])
+        .await
+        .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/kept.txt"), "kept").unwrap();
+    git::git(root, &["add", "."]).await.unwrap();
+    git::git(root, &["commit", "-qm", "keep one"])
+        .await
+        .unwrap();
+    git::git(root, &["checkout", "-q", &base]).await.unwrap();
+    let exclude = root.join(".git/info/exclude");
+    let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+    std::fs::write(&exclude, format!("{existing}\n.tower/\n")).unwrap();
+
+    let store = store_with_record_dirs(root).await;
+    let mut worker = entry("worker-a", "agent-0");
+    worker.mission_id = Some("M1".into());
+    let mut artifact = mission("M1", "feat/artifact", TowerMissionStatus::Active);
+    artifact.kind = TowerMissionKind::Artifact;
+    artifact.scope = vec!["src/**".into()];
+    artifact.owner = Some("worker-a".into());
+    let mut state = state_with_missions(&base, vec![artifact]);
+    state.roster.agents.push(worker);
+    store.save(&state).await.unwrap();
+
+    let error = store
+        .complete("worker-a", "report", &["src/gone.txt".into()])
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("must name paths from the committed branch diff"),
+        "{error}"
+    );
+    assert!(error.contains("src/gone.txt"), "{error}");
+}
+
+#[tokio::test]
+async fn artifact_acceptance_requires_the_recorded_completion_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = repo_with_branch_diff(root, "feat/artifact").await;
+    let tip = git::branch_tip(root, "feat/artifact").await.unwrap();
+    let store = store_with_record_dirs(root).await;
+    let mut artifact = mission("M1", "feat/artifact", TowerMissionStatus::Active);
+    artifact.kind = TowerMissionKind::Artifact;
+    artifact.scope = vec!["src/**".into()];
+    artifact.owner = Some("worker-a".into());
+    let mut state = state_with_missions(&base, vec![artifact]);
+    let mut worker = entry("worker-a", "agent-0");
+    worker.mission_id = Some("M1".into());
+    state.roster.agents.push(worker);
+    store.save(&state).await.unwrap();
+    store
+        .complete("worker-a", "report", &["src/feature.txt".into()])
+        .await
+        .unwrap();
+
+    let review = |acceptance_tip: Option<&str>| TowerReviewInput {
+        target: "feat/artifact".into(),
+        status: "clean".into(),
+        merge: "merge".into(),
+        findings: "f".into(),
+        checks: None,
+        decision: "d".into(),
+        acceptance_tip: acceptance_tip.map(str::to_string),
+    };
+
+    let error = store
+        .submit_review(TOWER_NAME, review(None))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("requires acceptance_tip from the TowerComplete acceptance-request"),
+        "{error}"
+    );
+
+    let mut stale = tip.clone();
+    stale.pop();
+    let error = store
+        .submit_review(TOWER_NAME, review(Some(&stale)))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("the approval is tied to a different presentation"),
+        "{error}"
+    );
+
+    store
+        .submit_review(TOWER_NAME, review(Some(&tip)))
+        .await
+        .unwrap();
+    let latest = store.latest_review("feat/artifact").await.unwrap().unwrap();
+    assert_eq!(latest.reviewer, "tower");
+    assert_eq!(latest.reviewed_commit, tip);
+}
+
+#[tokio::test]
+async fn artifact_merge_waits_for_tower_acceptance_on_the_completion_tip() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = repo_with_branch_diff(root, "feat/artifact").await;
+    let tip = git::branch_tip(root, "feat/artifact").await.unwrap();
+    let store = store_with_record_dirs(root).await;
+    let mut worker = entry("worker-a", "agent-0");
+    worker.mission_id = Some("M1".into());
+    let mut reviewer = review_entry("reviewer-1", "feat/artifact");
+    reviewer.review_mission_id = Some("M1".into());
+    let mut artifact = mission("M1", "feat/artifact", TowerMissionStatus::Active);
+    artifact.kind = TowerMissionKind::Artifact;
+    artifact.scope = vec!["src/**".into()];
+    artifact.owner = Some("worker-a".into());
+    let mut state = state_with_missions(&base, vec![artifact]);
+    state.roster.agents.push(worker);
+    state.roster.agents.push(reviewer);
+    store.save(&state).await.unwrap();
+    store
+        .complete("worker-a", "report", &["src/feature.txt".into()])
+        .await
+        .unwrap();
+
+    let error = store
+        .merge_with_workers("feat/artifact", Some(HashSet::new()))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("waiting for explicit human acceptance"),
+        "{error}"
+    );
+
+    store
+        .submit_review(
+            "reviewer-1",
+            TowerReviewInput {
+                target: "feat/artifact".into(),
+                status: "clean".into(),
+                merge: "merge".into(),
+                findings: "f".into(),
+                checks: None,
+                decision: "d".into(),
+                acceptance_tip: None,
+            },
+        )
+        .await
+        .unwrap();
+    let error = store
+        .merge_with_workers("feat/artifact", Some(HashSet::new()))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("waiting for mission-matching explicit human acceptance"),
+        "{error}"
+    );
+
+    store
+        .submit_review(
+            TOWER_NAME,
+            TowerReviewInput {
+                target: "feat/artifact".into(),
+                status: "clean".into(),
+                merge: "merge".into(),
+                findings: "f".into(),
+                checks: None,
+                decision: "d".into(),
+                acceptance_tip: Some(tip.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+    let merged = store
+        .merge_with_workers("feat/artifact", Some(HashSet::new()))
+        .await
+        .unwrap();
+    assert_eq!(merged.status, TowerMergeStatus::Merged);
+}
+
+#[tokio::test]
+async fn artifact_merge_blocks_a_tip_that_moved_after_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let base = repo_with_branch_diff(root, "feat/artifact").await;
+    let tip = git::branch_tip(root, "feat/artifact").await.unwrap();
+    let store = store_with_record_dirs(root).await;
+    let mut worker = entry("worker-a", "agent-0");
+    worker.mission_id = Some("M1".into());
+    let mut artifact = mission("M1", "feat/artifact", TowerMissionStatus::Active);
+    artifact.kind = TowerMissionKind::Artifact;
+    artifact.scope = vec!["src/**".into()];
+    artifact.owner = Some("worker-a".into());
+    let mut state = state_with_missions(&base, vec![artifact]);
+    state.roster.agents.push(worker);
+    store.save(&state).await.unwrap();
+    store
+        .complete("worker-a", "report", &["src/feature.txt".into()])
+        .await
+        .unwrap();
+    store
+        .submit_review(
+            TOWER_NAME,
+            TowerReviewInput {
+                target: "feat/artifact".into(),
+                status: "clean".into(),
+                merge: "merge".into(),
+                findings: "f".into(),
+                checks: None,
+                decision: "d".into(),
+                acceptance_tip: Some(tip.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+    git::git(root, &["checkout", "-q", "feat/artifact"])
+        .await
+        .unwrap();
+    std::fs::write(root.join("src/feature.txt"), "moved").unwrap();
+    git::git(root, &["add", "."]).await.unwrap();
+    git::git(root, &["commit", "-qm", "move the tip"])
+        .await
+        .unwrap();
+    git::git(root, &["checkout", "-q", &base]).await.unwrap();
+
+    let error = store
+        .merge_with_workers("feat/artifact", Some(HashSet::new()))
+        .await
+        .unwrap_err();
+    assert!(
+        error.contains("moved since the human acceptance"),
+        "{error}"
     );
 }

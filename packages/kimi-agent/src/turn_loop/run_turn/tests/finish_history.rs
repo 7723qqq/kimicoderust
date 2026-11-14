@@ -15,6 +15,7 @@ async fn test_run_turn_no_tool_calls_with_messages() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-turn-3".into(),
@@ -53,7 +54,6 @@ async fn test_run_turn_no_tool_calls_with_messages() {
     assert_eq!(turn.steps, 1);
 }
 
-/// LLM that always completes with a fixed finish reason (no tool calls).
 struct FinishReasonLlm {
     finish_reason: &'static str,
 }
@@ -90,9 +90,6 @@ impl LLM for FinishReasonLlm {
     }
 }
 
-/// The provider finish-reason vocabulary mapped onto stop reasons, as a
-/// direct unit test of the table (the per-reason turn tests below drive
-/// the same function through a full turn for the two common cases).
 #[test]
 fn finish_reason_vocabulary_maps_to_stop_reasons() {
     use super::super::turn_stop_reason_from_finish;
@@ -105,9 +102,7 @@ fn finish_reason_vocabulary_maps_to_stop_reasons() {
             "{reason} must map to MaxTokens"
         );
     }
-    // The filtered family: OpenAI's content_filter, Anthropic's refusal,
-    // and Google's safety vocabulary (lowercased by the transport) — v2's
-    // kosong adapters map every one of them to `filtered`.
+
     for reason in [
         "content_filter",
         "refusal",
@@ -151,6 +146,7 @@ async fn test_finish_reason_length_maps_to_max_tokens() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-finish-length".into(),
@@ -187,6 +183,7 @@ async fn test_finish_reason_max_tokens_maps_to_max_tokens() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-finish-max-tokens".into(),
@@ -223,6 +220,7 @@ async fn test_finish_reason_content_filter_maps_to_filtered() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-finish-filtered".into(),
@@ -253,9 +251,6 @@ async fn test_finish_reason_content_filter_maps_to_filtered() {
 
 #[tokio::test]
 async fn test_truncation_on_exhausted_steps_surfaces_max_tokens() {
-    // The LLM always returns tool calls with a `length` finish reason;
-    // the turn ends by max_steps exhaustion and must report MaxTokens,
-    // not EndTurn.
     struct AlwaysToolTruncatedLlm;
     impl LLM for AlwaysToolTruncatedLlm {
         fn system_prompt(&self) -> &str {
@@ -297,8 +292,7 @@ async fn test_truncation_on_exhausted_steps_surfaces_max_tokens() {
     }
     let llm = AlwaysToolTruncatedLlm;
     let server = Arc::new(RpcServer::new());
-    // Register a stub tool handler so the loop's per-step tool execution
-    // does not block waiting for a host response.
+
     RpcServer::register_arc(&server, types::methods::HOST_EXECUTE_TOOL, |_params| {
         Box::pin(async move {
             let resp = ToolExecuteResponse {
@@ -313,6 +307,7 @@ async fn test_truncation_on_exhausted_steps_surfaces_max_tokens() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-exhausted-truncated".into(),
@@ -422,6 +417,7 @@ async fn test_cache_usage_accumulates_across_steps() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-cache-usage".into(),
@@ -453,13 +449,6 @@ async fn test_cache_usage_accumulates_across_steps() {
     assert_eq!(turn.usage.input_cache_creation, 4);
 }
 
-/// Regression (found via the napi-integration suite after a fresh
-/// `.node` build): the compaction rebind inside the step loop
-/// (`let mut messages = compacted;`) shadowed the outer history
-/// binding, so every step restarted from `[system] + user` and the
-/// model never saw tool results. The history must accumulate across
-/// steps: the second request carries the assistant tool_calls message
-/// and the tool result.
 #[tokio::test]
 async fn test_history_accumulates_across_steps() {
     struct RecordingLlm {
@@ -531,6 +520,7 @@ async fn test_history_accumulates_across_steps() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-history-accumulation".into(),
@@ -558,7 +548,7 @@ async fn test_history_accumulates_across_steps() {
     run_turn(input, &callbacks).await.unwrap();
     let requests = llm.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    // Step 2's history: system + user + assistant(tool_calls) + tool result.
+
     let second = &requests[1];
     assert!(
         second
@@ -574,12 +564,6 @@ async fn test_history_accumulates_across_steps() {
     );
 }
 
-/// A failed tool result reaches the model wrapped in v2's status sentinel.
-///
-/// The wrapper's own unit tests only exercise `render_status`; nothing
-/// observed that the turn loop applies it. Replacing the call with the raw
-/// content left this whole module, `server::` and both e2e tests green — the
-/// feature could be switched off entirely without a red test.
 #[tokio::test]
 async fn a_failed_tool_result_reaches_the_model_wrapped() {
     struct OneToolLlm {
@@ -638,7 +622,7 @@ async fn a_failed_tool_result_reaches_the_model_wrapped() {
         requests: std::sync::Mutex::new(Vec::new()),
     };
     let server = Arc::new(RpcServer::new());
-    // A tool that fails. `is_error` is what selects the error arm.
+
     RpcServer::register_arc(&server, types::methods::HOST_EXECUTE_TOOL, |_params| {
         Box::pin(async move {
             let resp = ToolExecuteResponse {
@@ -653,6 +637,7 @@ async fn a_failed_tool_result_reaches_the_model_wrapped() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-tool-error-wrapper".into(),
@@ -691,13 +676,6 @@ async fn a_failed_tool_result_reaches_the_model_wrapped() {
     );
 }
 
-/// The tool note reaches the model, appended after the status wrapper.
-///
-/// v2 `renderToolResultForModel` appends it last. This engine put it only in
-/// an event, and the note is not decoration: Read fills it with the guidance
-/// the model needs ("use Bash to read the elided content", "Edit and Write
-/// expect UTF-8"), so hiding it left the model holding a truncated file with
-/// no idea why.
 #[tokio::test]
 async fn a_tool_note_reaches_the_model_after_the_status() {
     struct NotingToolLlm {
@@ -756,7 +734,7 @@ async fn a_tool_note_reaches_the_model_after_the_status() {
         requests: std::sync::Mutex::new(Vec::new()),
     };
     let server = Arc::new(RpcServer::new());
-    // The note is what Read puts its model-facing guidance in.
+
     RpcServer::register_arc(&server, types::methods::HOST_EXECUTE_TOOL, |_params| {
         Box::pin(async move {
             let resp = ToolExecuteResponse {
@@ -771,6 +749,7 @@ async fn a_tool_note_reaches_the_model_after_the_status() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-tool-note".into(),
@@ -808,10 +787,6 @@ async fn a_tool_note_reaches_the_model_after_the_status() {
     );
 }
 
-/// Upstream #3966: the persisted (model-facing) tool result of a
-/// wall-time tool (Bash here) opens with a `Wall time: X.XXX seconds`
-/// header; the `read` case above (outside the set) keeps the bare
-/// content.
 #[tokio::test]
 async fn test_tool_result_history_carries_wall_time_header_for_the_set() {
     struct OneShotToolLlm;
@@ -863,6 +838,7 @@ async fn test_tool_result_history_carries_wall_time_header_for_the_set() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-wall-time-header".into(),
@@ -900,9 +876,6 @@ async fn test_tool_result_history_carries_wall_time_header_for_the_set() {
     );
 }
 
-/// Thinking round-trip: step 1's reasoning (with provider signature) must
-/// reach step 2 inside the assistant history message — providers that
-/// attested the thinking reject follow-ups without it.
 #[tokio::test]
 async fn test_thinking_blocks_round_trip_into_assistant_history() {
     use crate::rpc::types::ContentBlock;
@@ -981,6 +954,7 @@ async fn test_thinking_blocks_round_trip_into_assistant_history() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-thinking-round-trip".into(),

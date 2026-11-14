@@ -10,10 +10,6 @@ use super::model::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnHeader {
-    /// v2's `turnHeaderSchema` is `transcriptTurnSchema` minus `steps`
-    /// (contract/schema.ts:390), and that base opens with `kind: z.literal
-    /// ('turn')` (:181). The client validates every op against it, so the tag
-    /// is part of the wire contract, not decoration.
     pub kind: TurnKind,
     pub turn_id: TurnId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,13 +31,11 @@ pub struct TurnHeader {
     pub duration_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Upstream #4280 `turnHeaderSchema.wedged` (additive optional, same
-    /// contract reasoning as the field on `TranscriptTurn`).
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wedged: Option<bool>,
 }
 
-/// The `kind` tag a turn header carries (v2 `kind: z.literal('turn')`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnKind {
@@ -51,7 +45,6 @@ pub enum TurnKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepHeader {
-    /// Same contract as [`TurnHeader::kind`] (schema.ts:164).
     pub kind: StepKind,
     pub step_id: StepId,
     pub turn_id: TurnId,
@@ -75,7 +68,6 @@ pub struct StepHeader {
     pub end_message: Option<String>,
 }
 
-/// The `kind` tag a step header carries (v2 `kind: z.literal('step')`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {

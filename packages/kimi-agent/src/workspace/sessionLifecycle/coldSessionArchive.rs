@@ -1,0 +1,182 @@
+use futures_util::{StreamExt, stream};
+
+use crate::_base::di::instantiation::ServicesAccessor;
+use crate::app::bootstrap::bootstrap::IBootstrapService;
+use crate::app::event::event::IEventService;
+use crate::app::session_index::session_index::{ISessionIndex, ISessionIndexMirror};
+use crate::app::session_index::session_index_source::build_session_summary;
+use crate::app::session_manager::session_lookup::get_live_session_by_id;
+use crate::app::session_manager::session_manager::ISessionManager;
+use crate::persistence::interface::atomic_document_store::IAtomicDocumentStore;
+use crate::persistence::interface::session_lock::ISessionLockService;
+use crate::session::session_metadata::session_metadata::SessionMeta;
+use crate::session::session_metadata::session_metadata_service::{
+    encode_session_meta, normalize_session_meta,
+};
+use crate::wire::record::WireAsyncError;
+
+use super::internal::addressing::{
+    legacy_session_meta_scope_of, session_scope_of, workspace_persistence_scope,
+};
+use super::session_lifecycle_events::{SessionArchived, SessionRestored};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColdSessionArchiveOutcome {
+    Updated,
+    NotFound,
+}
+
+impl ColdSessionArchiveOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Updated => "updated",
+            Self::NotFound => "not_found",
+        }
+    }
+}
+
+pub async fn set_cold_session_archived(
+    accessor: &dyn ServicesAccessor,
+    session_id: &str,
+    archived: bool,
+) -> Result<ColdSessionArchiveOutcome, WireAsyncError> {
+    let summary = accessor.get::<ISessionIndex>().get(session_id).await?;
+    let Some(summary) = summary else {
+        return Ok(ColdSessionArchiveOutcome::NotFound);
+    };
+    let lease = accessor.get::<ISessionLockService>().lease(session_id);
+    let result = async {
+        let docs = accessor.get::<IAtomicDocumentStore>();
+        let meta_scope = session_scope_of(
+            &workspace_persistence_scope(
+                &accessor.get::<IBootstrapService>().scope("sessions"),
+                &summary.workspace_id,
+            ),
+            session_id,
+        );
+        let mut raw = docs.get(&meta_scope, "state.json").await?;
+        let mut legacy_meta_scope = None;
+        if raw.is_none() {
+            let legacy = legacy_session_meta_scope_of(&meta_scope);
+            raw = docs.get(&legacy, "state.json").await?;
+            legacy_meta_scope = Some(legacy);
+        }
+        let Some(raw) = raw else {
+            return Ok(ColdSessionArchiveOutcome::NotFound);
+        };
+        let persisted = normalize_session_meta(raw, session_id);
+        let archived_at = archived.then(|| chrono::Utc::now().timestamp_millis());
+        let next_meta = SessionMeta {
+            archived,
+            archived_at,
+            ..persisted.clone()
+        };
+        docs.set(&meta_scope, "state.json", encode_session_meta(&next_meta))
+            .await?;
+        if let Some(legacy_meta_scope) = legacy_meta_scope {
+            docs.delete(&legacy_meta_scope, "state.json").await?;
+        }
+        accessor.get::<ISessionIndexMirror>().record(build_session_summary(
+            crate::app::session_index::session_index_source::SessionSummaryInput {
+                id: session_id.to_string(),
+                workspace_id: summary.workspace_id.clone(),
+                cwd: next_meta.cwd.clone().or(summary.cwd.clone()),
+                environment_id: next_meta.environment_id.clone(),
+                environment_cwd: next_meta.environment_cwd.clone(),
+                title: next_meta.title.clone(),
+                last_prompt: next_meta.last_prompt.clone(),
+                created_at: next_meta.created_at,
+                updated_at: next_meta.updated_at,
+                archived,
+                archived_at,
+                custom: next_meta.custom.clone(),
+                last_turn_reason: next_meta.last_turn_reason.clone(),
+            },
+        ));
+        if archived {
+            accessor.get::<IEventService>().publish(SessionArchived::new(
+                super::session_lifecycle_events::SessionArchivedPayload {
+                    session_id: session_id.to_string(),
+                    workspace_id: summary.workspace_id.clone(),
+                },
+            ));
+        } else if persisted.archived {
+            accessor.get::<IEventService>().publish(SessionRestored::new(
+                super::session_lifecycle_events::SessionRestoredPayload {
+                    session_id: session_id.to_string(),
+                    workspace_id: summary.workspace_id.clone(),
+                },
+            ));
+        }
+        Ok(ColdSessionArchiveOutcome::Updated)
+    }
+    .await;
+    lease.release();
+    result
+}
+
+pub async fn set_session_archived(
+    accessor: &dyn ServicesAccessor,
+    session_id: &str,
+    archived: bool,
+) -> Result<ColdSessionArchiveOutcome, WireAsyncError> {
+    let manager = accessor.get::<ISessionManager>();
+    let _ = manager.when_resume_settled(session_id).await;
+    manager
+        .with_lifecycle_serialization(session_id, move |unguarded| async move {
+            if get_live_session_by_id(accessor, session_id).is_some() {
+                if archived {
+                    unguarded.archive(session_id).await?;
+                } else {
+                    unguarded.restore(session_id, None).await?;
+                }
+                return Ok(ColdSessionArchiveOutcome::Updated);
+            }
+            set_cold_session_archived(accessor, session_id, archived).await
+        })
+        .await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionArchiveBatchFailureReason {
+    NotFound,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionArchiveBatchItemOutcome {
+    Ok { id: String },
+    Error {
+        id: String,
+        reason: SessionArchiveBatchFailureReason,
+        message: String,
+    },
+}
+
+pub async fn set_session_archived_batch(
+    accessor: &dyn ServicesAccessor,
+    ids: &[String],
+    archived: bool,
+) -> Result<Vec<SessionArchiveBatchItemOutcome>, WireAsyncError> {
+    let outcomes = stream::iter(ids.iter().map(|id| async move {
+        match set_session_archived(accessor, id, archived).await {
+            Ok(ColdSessionArchiveOutcome::Updated) => SessionArchiveBatchItemOutcome::Ok {
+                id: id.clone(),
+            },
+            Ok(ColdSessionArchiveOutcome::NotFound) => SessionArchiveBatchItemOutcome::Error {
+                id: id.clone(),
+                reason: SessionArchiveBatchFailureReason::NotFound,
+                message: format!("session {id} does not exist"),
+            },
+            Err(error) => SessionArchiveBatchItemOutcome::Error {
+                id: id.clone(),
+                reason: SessionArchiveBatchFailureReason::Error,
+                message: error.to_string(),
+            },
+        }
+    }))
+    .buffered(8)
+    .collect::<Vec<_>>()
+    .await;
+    Ok(outcomes)
+}

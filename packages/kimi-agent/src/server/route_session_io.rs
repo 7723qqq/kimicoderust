@@ -26,8 +26,6 @@ impl HttpServer {
                             Ok(archive) => HttpResponse::bytes(200, "application/zip", archive)
                                 .with_header(
                                     "Content-Disposition",
-                                    // v2 `defaultExportZipName`:
-                                    // `kimi-debug-<id8>-<YYYYMMDD-HHMMSS>.zip`.
                                     format!(
                                         "attachment; filename=\"kimi-debug-{}-{}.zip\"",
                                         session_id.chars().take(8).collect::<String>(),
@@ -58,13 +56,7 @@ impl HttpServer {
                     Ok(None) => return HttpResponse::not_found(),
                     Err(e) => return HttpResponse::internal_error(format!("Database error: {e}")),
                 };
-                // v2 `GET /sessions/{session_id}/profile` answers the bare
-                // session (`success: { data: sessionSchema }`,
-                // kap-server/src/routes/sessions.ts:455). `agent_config` is part
-                // of that document — `format_wire_session` fills it, including
-                // the model / thinking fallbacks — so the fork's separate
-                // `agent_config` / `sessionId` / `session` keys were answering a
-                // shape nothing asked for.
+
                 let wire_session = format_wire_session(
                     &session,
                     &self.store,
@@ -108,13 +100,7 @@ impl HttpServer {
                     } else {
                         current = cfg.clone();
                     }
-                    // v2 `applySessionAgentConfig` (kap-server
-                    // `routes/sessionAgentConfig.ts:50-56`): `swarm_mode` is
-                    // not a stored fact, it is a call into the agent's swarm
-                    // service. Merging it into `agent_config` alone leaves the
-                    // mode off — the `swarm_mode` reminder and the turn-end
-                    // auto-exit both read the registry, so a profile write that
-                    // never reached it flipped a status flag and nothing else.
+
                     if let Some(swarm_mode) = cfg.get("swarm_mode").and_then(Value::as_bool) {
                         let registry = crate::swarm::mode::swarm_mode_registry();
                         let changed = if swarm_mode {
@@ -135,6 +121,64 @@ impl HttpServer {
                             });
                         }
                     }
+                    if let Some(hello_world_mode) =
+                        cfg.get("hello_world_mode").and_then(Value::as_bool)
+                    {
+                        let agent_id = crate::callbacks::MAIN_AGENT_ID;
+                        if let Some(engine) = self.engine.as_ref() {
+                            let callbacks = engine.session_callbacks_for(session_id);
+                            if hello_world_mode {
+                                let workdir =
+                                    fs_routes::resolve_session_workdir(&self.store, session_id)
+                                        .unwrap_or_else(|| {
+                                            std::env::current_dir().unwrap_or_default()
+                                        });
+                                crate::features::helloWorld::agent::helloWorldService::HelloWorldService::enter_scoped(
+                                    callbacks.as_ref(),
+                                    crate::features::helloWorld::agent::helloWorldService::HelloWorldScope {
+                                        agent_id,
+                                        session_id,
+                                        workspace_root: &workdir,
+                                    },
+                                    crate::features::helloWorld::agent::helloWorld::HelloWorldModeTrigger::Manual,
+                                    None,
+                                )
+                                .await
+                            } else {
+                                crate::features::helloWorld::agent::helloWorldService::HelloWorldService::exit(
+                                    callbacks.as_ref(),
+                                    agent_id,
+                                )
+                            }
+                        } else {
+                            let events = if hello_world_mode {
+                                crate::features::helloWorld::agent::helloWorldService::HelloWorldService::enter_events(
+                                    agent_id,
+                                    crate::features::helloWorld::agent::helloWorld::HelloWorldModeTrigger::Manual,
+                                    None,
+                                )
+                            } else {
+                                crate::features::helloWorld::agent::helloWorldService::HelloWorldService::exit_events(
+                                    agent_id,
+                                )
+                                .map(|(_, events)| events)
+                            };
+                            let changed = events.is_some();
+                            for event in events.into_iter().flatten() {
+                                self.hub
+                                    .bus_for(session_id)
+                                    .publish(&crate::events::EngineEvent::Custom(event));
+                            }
+                            if changed {
+                                self.emit_session_telemetry_named(if hello_world_mode {
+                                    "hello_world_mode_entered"
+                                } else {
+                                    "hello_world_mode_exited"
+                                });
+                            }
+                            changed
+                        };
+                    }
                     if let Err(e) = self.store.put_session_state(
                         "agent_config",
                         session_id,
@@ -153,10 +197,6 @@ impl HttpServer {
                     .flatten()
                     .unwrap_or(session);
 
-                // v2 `SessionMetaUpdated` carries the main agent id, the
-                // (possibly updated) title, and the host patch. Derive
-                // `isCustomTitle` from the stored kind rather than trusting the
-                // patch, so a client that omits it still folds the right state.
                 let mut meta_patch = body.clone();
                 if let Some(patch_object) = meta_patch.as_object_mut() {
                     patch_object.insert(
@@ -185,10 +225,6 @@ impl HttpServer {
                     .bus_for(session_id)
                     .publish(&crate::events::EngineEvent::Custom(meta_event));
 
-                // The profile write may have changed model / thinking /
-                // permission mode / plan mode; refresh the status fact the
-                // Web client's status bar folds. The dedup inside the engine
-                // keeps an unchanged payload silent.
                 if let Some(engine) = self.engine.as_ref() {
                     engine.publish_status_updated(session_id).await;
                 }
@@ -200,12 +236,6 @@ impl HttpServer {
                     self.default_workspace_root().as_deref(),
                 );
 
-                // v2 `POST /sessions/{session_id}/profile` answers the bare
-                // updated session (`success: { data: sessionSchema }`, and the
-                // handler does `reply.send(okEnvelope(session, …))`,
-                // kap-server/src/routes/sessions.ts:497-529) — the same document
-                // the GET variant serves, taken from the wire session so
-                // `agent_config.model` is always populated.
                 HttpResponse::ok(&wire_session)
             }
             ("POST", p) if extract_session_fs_action(p).is_some() => {
@@ -214,9 +244,7 @@ impl HttpServer {
                     Some(d) => d,
                     None => return HttpResponse::not_found(),
                 };
-                // An empty body is legitimate (every fs action treats a
-                // missing body as its defaults); only an unparsable one is a
-                // client error.
+
                 let body: Value = if req.body.iter().all(|b| b.is_ascii_whitespace()) {
                     json!({})
                 } else {

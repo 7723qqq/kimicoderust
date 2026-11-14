@@ -1,21 +1,11 @@
-//! WebSearch — Bing HTML scraping without API keys.
-//!
-//! GETs a search query to `www.bing.com/search`, parses the result page
-//! with `scraper`, and extracts titles, URLs, and snippets.
-//! Runs on a blocking thread via `tokio::task::spawn_blocking`.
-
 use scraper::{Html, Selector};
 use std::time::Duration;
-
-// ── Configuration ────────────────────────────────────────────────────────────
 
 const BING_HTML_URL: &str = "https://www.bing.com/search";
 const BING_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
      (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36";
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_RESULTS: usize = 10;
-
-// ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct WebSearchConfig {
@@ -34,17 +24,13 @@ impl Default for WebSearchConfig {
     }
 }
 
-/// One Bing HTML result. Shared by the workflow `SearchProvider`
-/// (this module) and the LLM `WebSearch` tool (`tools/web_search.rs`), so
-/// the scraping selectors have a single home.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub snippet: String,
     pub site_name: Option<String>,
-    /// Publication date parsed from the snippet's leading date prefix
-    /// (`"1 day ago · …"`, `"Apr 16, 2026 · …"`), when present.
+
     pub date: Option<String>,
 }
 
@@ -54,18 +40,11 @@ pub struct WebSearchResult {
     pub error: Option<String>,
 }
 
-// ── Public entry point ───────────────────────────────────────────────────────
-
-/// Chinese Q&A / encyclopedia domains Bing falls back to when it cannot match
-/// a query to its web index. For an English technical query, results from these
-/// domains are the "hot feed" fallback — irrelevant content that looks like
-/// real results. Detecting it lets the tool report failure instead of feeding
-/// garbage to the model.
 pub fn is_hot_feed_fallback(query: &str, urls: &[String]) -> bool {
     if urls.is_empty() {
         return false;
     }
-    // The query must be predominantly English (technical terms).
+
     let letters = query.chars().filter(|c| c.is_ascii_alphabetic()).count();
     if letters < 5 {
         return false;
@@ -119,7 +98,6 @@ fn web_search_inner(config: &WebSearchConfig) -> Result<Vec<SearchResult>, Strin
         .user_agent(BING_USER_AGENT)
         .build();
 
-    // GET the Bing search page (query in the URL, form-encoded).
     let url = format!(
         "{}?q={}&setlang=en",
         BING_HTML_URL,
@@ -137,16 +115,12 @@ fn web_search_inner(config: &WebSearchConfig) -> Result<Vec<SearchResult>, Strin
             ureq::Error::Transport(t) => format!("Network error: {t}"),
         })?;
 
-    // Read response body
     let body = response
         .into_string()
         .map_err(|e| format!("Failed to read response: {e}"))?;
 
-    // Parse HTML and extract results
     parse_bing_results(&body, config.max_results)
 }
-
-// ── HTML Parsing ─────────────────────────────────────────────────────────────
 
 pub fn parse_bing_results(html: &str, max_results: usize) -> Result<Vec<SearchResult>, String> {
     let document = Html::parse_document(html);
@@ -166,7 +140,6 @@ pub fn parse_bing_results(html: &str, max_results: usize) -> Result<Vec<SearchRe
             break;
         }
 
-        // Extract title and URL from the h2 link (title may contain <strong>).
         let title_el = match element.select(&title_sel).next() {
             Some(el) => el,
             None => continue,
@@ -178,22 +151,18 @@ pub fn parse_bing_results(html: &str, max_results: usize) -> Result<Vec<SearchRe
             continue;
         }
 
-        // Extract snippet
         let snippet = element
             .select(&snippet_sel)
             .next()
             .map(|el| el.text().collect::<String>().trim().to_string())
             .unwrap_or_default();
 
-        // Extract site name (thumbnail text; absent when no thumbnail).
         let site_name = element
             .select(&site_sel)
             .next()
             .map(|el| el.text().collect::<String>().trim().to_string())
             .filter(|s| !s.is_empty());
 
-        // Split a leading date prefix ("1 day ago ·", "Apr 16, 2026 ·") off
-        // the snippet so the date field is populated and the snippet is clean.
         let (date, snippet) = split_bing_snippet(&snippet);
 
         results.push(SearchResult {
@@ -208,8 +177,6 @@ pub fn parse_bing_results(html: &str, max_results: usize) -> Result<Vec<SearchRe
     Ok(results)
 }
 
-/// Parse DuckDuckGo HTML results (`div.result` containers). DDG carries no
-/// publication date, so `date` is always `None`.
 pub fn parse_ddg_results(html: &str, max_results: usize) -> Result<Vec<SearchResult>, String> {
     let document = Html::parse_document(html);
 
@@ -229,7 +196,6 @@ pub fn parse_ddg_results(html: &str, max_results: usize) -> Result<Vec<SearchRes
             break;
         }
 
-        // Skip ads
         let classes = element.value().attr("class").unwrap_or("");
         if classes.contains("result--ad") {
             continue;
@@ -270,9 +236,6 @@ pub fn parse_ddg_results(html: &str, max_results: usize) -> Result<Vec<SearchRes
     Ok(results)
 }
 
-/// Parse Sogou HTML results (`div.vrwrap` containers). Sogou marks up query
-/// terms with `<em>`; the direct URL is in a `data-url` attribute when present,
-/// otherwise the title link's redirect href is used.
 pub fn parse_sogou_results(html: &str, max_results: usize) -> Result<Vec<SearchResult>, String> {
     let document = Html::parse_document(html);
 
@@ -299,7 +262,6 @@ pub fn parse_sogou_results(html: &str, max_results: usize) -> Result<Vec<SearchR
             continue;
         }
 
-        // Prefer the direct URL from data-url; fall back to the redirect href.
         let url = title_el
             .value()
             .attr("data-url")
@@ -335,10 +297,6 @@ pub fn parse_sogou_results(html: &str, max_results: usize) -> Result<Vec<SearchR
     Ok(results)
 }
 
-/// Split a leading date prefix off a Bing snippet. Bing prefixes snippets with
-/// the publication date followed by `" · "`: relative (`"1 day ago · …"`) or
-/// absolute (`"Apr 16, 2026 · …"`). Returns `(date, rest)`; `date` is `None`
-/// when the snippet has no recognizable prefix.
 fn split_bing_snippet(snippet: &str) -> (Option<String>, String) {
     const SEP: &str = " · ";
     let Some(sep_at) = snippet.find(SEP) else {
@@ -352,11 +310,7 @@ fn split_bing_snippet(snippet: &str) -> (Option<String>, String) {
     (None, snippet.to_string())
 }
 
-/// Whether a snippet prefix is a Bing relative (`"N day ago"`) or absolute
-/// (`"Apr 16, 2026"`) date.
 fn is_bing_date_prefix(prefix: &str) -> bool {
-    // Relative: "<number> <unit> ago" where unit is second/minute/hour/day/
-    // week/month/year (singular or plural).
     if let Some(ago_at) = prefix.find(" ago") {
         let lead = &prefix[..ago_at];
         let mut parts = lead.rsplit(' ');
@@ -385,7 +339,7 @@ fn is_bing_date_prefix(prefix: &str) -> bool {
         );
         return is_unit && num.chars().all(|c| c.is_ascii_digit()) && !num.is_empty();
     }
-    // Absolute: "Mon DD, YYYY" (e.g., "Apr 16, 2026").
+
     let mut parts = prefix.split(' ');
     let Some(mon) = parts.next() else {
         return false;
@@ -420,8 +374,6 @@ fn is_bing_date_prefix(prefix: &str) -> bool {
     is_mon && day_ok && year_ok && parts.next().is_none()
 }
 
-// ── URL encoding ─────────────────────────────────────────────────────────────
-
 pub fn urlencoded(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
@@ -442,8 +394,6 @@ pub fn urlencoded(s: &str) -> String {
 
 const HEX_CHARS: &[u8; 16] = b"0123456789ABCDEF";
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,11 +407,10 @@ mod tests {
 
     #[test]
     fn test_urlencoded_reserved_and_unicode() {
-        // Unreserved characters pass through unchanged.
         assert_eq!(urlencoded("abc-._~XYZ012"), "abc-._~XYZ012");
-        // Empty input stays empty.
+
         assert_eq!(urlencoded(""), "");
-        // CJK and emoji are percent-encoded byte-by-byte (uppercase hex).
+
         assert_eq!(urlencoded("你好"), "%E4%BD%A0%E5%A5%BD");
         assert_eq!(urlencoded("🔥"), "%F0%9F%94%A5");
     }
@@ -536,7 +485,7 @@ mod tests {
             <li class="b_algo"><h2><a href="https://1.com">R1</a></h2></li>
         </body></html>
         "#;
-        // max_results = 0 returns nothing; larger than available returns all.
+
         assert!(parse_bing_results(html, 0).unwrap().is_empty());
         assert_eq!(parse_bing_results(html, 100).unwrap().len(), 1);
     }
@@ -662,7 +611,6 @@ mod tests {
 
     #[test]
     fn test_is_hot_feed_fallback() {
-        // English technical query + Chinese Q&A domains → fallback.
         let urls = vec![
             "https://zhidao.baidu.com/question/1".to_string(),
             "https://zhuanlan.zhihu.com/p/1".to_string(),
@@ -670,17 +618,14 @@ mod tests {
         ];
         assert!(is_hot_feed_fallback("noUncheckedIndexedAccess", &urls));
 
-        // English query + relevant domains → not a fallback.
         let good = vec![
             "https://realpython.com/async-io-python".to_string(),
             "https://docs.python.org/3/library/asyncio".to_string(),
         ];
         assert!(!is_hot_feed_fallback("python async best practices", &good));
 
-        // Chinese query → never a fallback (legitimate Chinese results).
         assert!(!is_hot_feed_fallback("rust 编程语言", &urls));
 
-        // Empty results → not a fallback.
         assert!(!is_hot_feed_fallback("noUncheckedIndexedAccess", &[]));
     }
 
@@ -704,16 +649,16 @@ mod tests {
         "#;
         let results = parse_sogou_results(html, 10).unwrap();
         assert_eq!(results.len(), 3);
-        // data-url preferred over redirect href.
+
         assert_eq!(results[0].url, "https://realpython.com/async-io-python");
         assert_eq!(results[0].title, "Python's asyncio Walkthrough");
         assert_eq!(
             results[0].snippet,
             "Learn how Python asyncio works with async/await."
         );
-        // Second result.
+
         assert_eq!(results[1].url, "https://docs.python.org/3/library/asyncio");
-        // Third falls back to redirect href.
+
         assert_eq!(results[2].url, "/link?url=ghi");
     }
 }

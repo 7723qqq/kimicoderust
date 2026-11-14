@@ -2,8 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// An LLM that runs `silent_rounds` rounds of one host tool call without ever
-/// calling NotifyUser, then answers.
 struct SilentRoundsLlm {
     call: AtomicU32,
     rounds: u32,
@@ -79,6 +77,7 @@ fn tool_execution_server() -> Arc<RpcServer> {
 
 fn input<'a>(llm: &'a SilentRoundsLlm, tool_defs: Vec<ToolInfo>) -> RunTurnInput<'a> {
     RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-notify-user-nudge".into(),
@@ -106,10 +105,6 @@ fn input<'a>(llm: &'a SilentRoundsLlm, tool_defs: Vec<ToolInfo>) -> RunTurnInput
     }
 }
 
-/// v2 `notifyUserNudgeService`: after eight silent tool-call rounds the next
-/// request carries the nudge. This goes through the real turn loop — the
-/// provider is registered on the live registry and its text reaches the LLM
-/// request, not just the pure decision functions.
 #[tokio::test]
 async fn eight_silent_rounds_inject_the_nudge_into_the_live_request() {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -148,9 +143,6 @@ async fn eight_silent_rounds_inject_the_nudge_into_the_live_request() {
     );
 }
 
-/// The same eight rounds stay silent when NotifyUser was not advertised: the
-/// provider is never registered, so the model is not told to use a tool it
-/// cannot call.
 #[tokio::test]
 async fn an_unadvertised_notify_user_keeps_the_nudge_silent() {
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));

@@ -1,43 +1,21 @@
-//! Wire protocol migrations (v2 `wire/migration/*`).
-//!
-//! v2's journal carries a leading `metadata` record; this engine stamps every
-//! row with the protocol version that wrote it. The migration discipline is the
-//! same either way: a reader that understands only the current record shape
-//! must upgrade older rows step by step, and a version with no step must fail
-//! loudly (`wire.migration_missing`) instead of being read as if it were
-//! current.
-//!
-//! The record split follows the storage: v2 puts `type` beside the payload,
-//! this engine keeps `type` in the `event_type` column and the rest in the
-//! `payload` JSON column, so every migration here takes `(event_type, payload)`
-//! and may rewrite either half.
-
 use serde_json::{Map, Value};
 
 use super::{WIRE_PROTOCOL_VERSION, compare_wire_versions};
 
-/// v2 `WireErrors.codes.WIRE_MIGRATION_MISSING` (`wire/errors.ts:8`).
 pub const WIRE_MIGRATION_MISSING: &str = "wire.migration_missing";
 
-/// v2 `WireErrors.codes.WIRE_CYCLE` (`wire/errors.ts:9`).
 pub const WIRE_CYCLE: &str = "wire.cycle";
 
-/// A log version the reader cannot bring forward.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WireMigrationError {
-    /// No migration starts at the version the log was written with, so the
-    /// reader cannot reach the current shape (v2 `resolveWireMigrations`).
-    /// Reading anyway would reinterpret old fields as current ones.
     #[error("Missing wire migration for version {version}")]
     Missing { version: String },
-    /// The chain loops: a step's target is a version already visited (v2
-    /// `WIRE_CYCLE`). A malformed chain must terminate, not spin.
+
     #[error("Wire migration chain cycles at version {version}")]
     Cycle { version: String },
 }
 
 impl WireMigrationError {
-    /// The v2 error code the failure maps to.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
@@ -47,7 +25,6 @@ impl WireMigrationError {
     }
 }
 
-/// One step of the chain (`sourceVersion` → `targetVersion`).
 #[derive(Debug)]
 pub struct WireMigration {
     pub source_version: &'static str,
@@ -56,13 +33,11 @@ pub struct WireMigration {
 }
 
 impl WireMigration {
-    /// Apply this step to one record in place.
     pub fn migrate_record(&self, event_type: &mut String, payload: &mut Value) {
         (self.migrate)(event_type, payload);
     }
 }
 
-/// The full chain, oldest step first (v2 `MIGRATIONS`).
 pub const MIGRATIONS: [WireMigration; 5] = [
     WireMigration {
         source_version: "1.0",
@@ -91,20 +66,12 @@ pub const MIGRATIONS: [WireMigration; 5] = [
     },
 ];
 
-/// The steps needed to lift `read_version` to the current protocol version.
-///
-/// A log written by a newer engine needs none (its reader gate has already
-/// refused it), a log at the current version needs none, and any gap in the
-/// chain is `wire.migration_missing` rather than a silent partial upgrade.
 pub fn resolve_wire_migrations(
     read_version: &str,
 ) -> Result<Vec<&'static WireMigration>, WireMigrationError> {
     resolve_chain(&MIGRATIONS, read_version)
 }
 
-/// [`resolve_wire_migrations`] against an explicit chain, so the malformed
-/// chain cases (missing step, duplicate step, cycle) can be exercised without
-/// mutating the compiled-in table.
 fn resolve_chain<'a>(
     chain: &'a [WireMigration],
     read_version: &str,
@@ -117,8 +84,6 @@ fn resolve_chain<'a>(
     let mut version = read_version.to_string();
     let mut visited = vec![version.clone()];
     while compare_wire_versions(&version, WIRE_PROTOCOL_VERSION) < 0 {
-        // v2 `findMigration` takes the first step whose source matches
-        // (`wire/migration/migration.ts:104-108`).
         let Some(migration) = chain
             .iter()
             .find(|migration| migration.source_version == version)
@@ -136,11 +101,6 @@ fn resolve_chain<'a>(
     Ok(migrations)
 }
 
-/// Bring one record to the current shape.
-///
-/// `read_version` is the row's own stamp. `None` means the row predates the
-/// version column; the table has only ever had one shape, so a NULL is this
-/// engine's current version, not a very old record.
 pub fn migrate_wire_record(
     event_type: &mut String,
     payload: &mut Value,
@@ -156,9 +116,6 @@ pub fn migrate_wire_record(
     Ok(())
 }
 
-/// v1.0 → v1.1: flatten `context.append_message` tool calls from
-/// `{type, function: {name, arguments}}` to `{type, name, arguments}`
-/// (v2 `migration/v1.1.ts`).
 fn migrate_v1_0_to_v1_1(event_type: &mut String, payload: &mut Value) {
     if event_type != "context.append_message" {
         return;
@@ -185,8 +142,6 @@ fn migrate_v1_0_to_v1_1(event_type: &mut String, payload: &mut Value) {
     }
 }
 
-/// Legacy approval action → the pattern the rule would have stored
-/// (v2 `v1.2.ts` `LEGACY_SESSION_APPROVAL_ACTION_TO_PATTERN`).
 const LEGACY_SESSION_APPROVAL_ACTION_TO_PATTERN: [(&str, &str); 5] = [
     ("run command", "Bash"),
     ("stop background task", "TaskStop"),
@@ -195,14 +150,9 @@ const LEGACY_SESSION_APPROVAL_ACTION_TO_PATTERN: [(&str, &str); 5] = [
     ("write file", "Write"),
 ];
 
-/// Actions whose approval was never convertible into a session rule
-/// (v2 `LEGACY_SESSION_APPROVAL_UNRESTORABLE_ACTIONS`).
 const LEGACY_SESSION_APPROVAL_UNRESTORABLE_ACTIONS: [&str; 2] =
     ["run command in plan mode", "run background command"];
 
-/// v1.1 → v1.2: give an old session-wide approval its missing
-/// `sessionApprovalRule`, leaving unrestorable actions without one
-/// (v2 `migration/v1.2.ts`).
 fn migrate_v1_1_to_v1_2(event_type: &mut String, payload: &mut Value) {
     if event_type != "permission.record_approval_result" {
         return;
@@ -247,12 +197,8 @@ fn migrate_v1_1_to_v1_2(event_type: &mut String, payload: &mut Value) {
     );
 }
 
-/// v1.2 → v1.3: identity. The version exists to hold the slot in the chain
-/// (v2 `migration/v1.3.ts`).
 fn migrate_v1_2_to_v1_3(_event_type: &mut String, _payload: &mut Value) {}
 
-/// v1.3 → v1.4: rewrite `goal.*` records to their whitelisted field set, and
-/// fold the two usage records into `goal.update` (v2 `migration/v1.4.ts`).
 fn migrate_v1_3_to_v1_4(event_type: &mut String, payload: &mut Value) {
     let Some(record) = payload.as_object() else {
         return;
@@ -290,8 +236,6 @@ fn migrate_v1_3_to_v1_4(event_type: &mut String, payload: &mut Value) {
     *payload = Value::Object(rewritten);
 }
 
-/// v1.4 → v1.5: stamp `wallClockResumedAt = time` on the records that advance
-/// an active goal interval (v2 `migration/v1.5.ts`).
 fn migrate_v1_4_to_v1_5(event_type: &mut String, payload: &mut Value) {
     let Some(record) = payload.as_object_mut() else {
         return;

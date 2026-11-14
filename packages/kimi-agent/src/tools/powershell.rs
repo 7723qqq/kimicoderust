@@ -1,7 +1,9 @@
 use super::*;
+
+use crate::features::operationLog::operationService;
+use crate::native::environment_probe::ProbeShellNotFound;
 use crate::native::powershell::{
-    POWER_SHELL_ENV, PowerShellExecutable, PowerShellNotFound, ResolveDeps, build_args,
-    normalize_output, resolve,
+    POWER_SHELL_ENV, PowerShellExecutable, ResolveDeps, build_args, normalize_output, resolve,
 };
 
 pub const POWERSHELL_TOOL_NAME: &str = "PowerShell";
@@ -33,6 +35,21 @@ If `run_in_background=true`, the script will be started as a background task and
 
 **Safety:** do not use this tool to escape the working directory, to modify files outside of it unless instructed, or to run commands that require superuser privileges unless explicitly instructed.
 "#;
+
+pub fn without_background_description(description: &str) -> String {
+    static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"\r?\n\r?\nIf `run_in_background=true`,[\s\S]*?point them to the background-task panel\.",
+        )
+        .expect("PowerShell background description pattern compiles")
+    });
+    PATTERN
+        .replace(
+            description,
+            "\n\nBackground execution is disabled for this agent. Do not set `run_in_background=true`.",
+        )
+        .to_string()
+}
 
 fn render_description() -> String {
     DESCRIPTION_TEMPLATE
@@ -115,14 +132,21 @@ fn background_timeout(args: &Value) -> Option<Duration> {
     )))
 }
 
-pub(super) fn resolve_powershell() -> Result<PowerShellExecutable, PowerShellNotFound> {
+pub(super) fn resolve_powershell() -> Result<PowerShellExecutable, ProbeShellNotFound> {
     let pwsh_override = std::env::var("KIMI_PWSH_PATH").ok();
     let path_env = std::env::var("PATH").ok();
     let system_root = std::env::var("SystemRoot").ok();
+    let kimi_code_home = std::env::var("KIMI_CODE_HOME").ok();
+    let os_home = crate::default_workspace::user_home_dir().unwrap_or_default();
+    let kimi_home = crate::native::shell_payload::resolve_shell_payload_home(
+        kimi_code_home.as_deref(),
+        &os_home,
+    );
     resolve(ResolveDeps {
         pwsh_override: pwsh_override.as_deref(),
         path_env: path_env.as_deref(),
         system_root: system_root.as_deref(),
+        kimi_home: &kimi_home,
         is_file: &|path| path.is_file(),
     })
 }
@@ -195,7 +219,7 @@ async fn run_background(
     runner: Arc<crate::storage::TaskRunner>,
     task_id: String,
     timeout: Option<Duration>,
-) -> String {
+) -> (String, Option<i32>) {
     let streams = BackgroundStreams {
         throttle: Arc::new(ProgressThrottle::new()),
         runner,
@@ -226,18 +250,21 @@ async fn run_background(
     };
 
     let wait_and_drain = async {
-        let _ = child.wait().await;
+        let exit_code = child.wait().await.ok().and_then(|status| status.code());
         let _ = tokio::time::timeout(Duration::from_millis(250), drained).await;
-        (out_sink.take(), err_sink.take())
+        (out_sink.take(), err_sink.take(), exit_code)
     };
-    let (out, err) = match timeout {
+    let (out, err, exit_code) = match timeout {
         Some(limit) => match tokio::time::timeout(limit, wait_and_drain).await {
             Ok(result) => result,
             Err(_) => {
                 crate::native::bash::kill_process_tree_async(&mut child).await;
-                return format!(
-                    "Background command timed out after {}s and was stopped.",
-                    limit.as_secs()
+                return (
+                    format!(
+                        "Background command timed out after {}s and was stopped.",
+                        limit.as_secs()
+                    ),
+                    None,
                 );
             }
         },
@@ -249,7 +276,7 @@ async fn run_background(
         .load(std::sync::atomic::Ordering::Relaxed)
     {
         crate::native::bash::kill_process_tree_async(&mut child).await;
-        return output_limit_reason();
+        return (output_limit_reason(), None);
     }
 
     let mut combined = normalize_output(&String::from_utf8_lossy(&out));
@@ -260,7 +287,7 @@ async fn run_background(
         }
         combined.push_str(err_text.trim_end());
     }
-    combined
+    (combined, exit_code)
 }
 
 impl NativeToolset {
@@ -268,6 +295,7 @@ impl NativeToolset {
         &self,
         args: &Value,
         on_update: Option<OutputUpdate<'_>>,
+        tool_call_id: Option<&str>,
     ) -> Option<ExecutableToolResult> {
         let Some(command) = args.get("command") else {
             return Some(err_result(arg_error_text(
@@ -285,6 +313,12 @@ impl NativeToolset {
         };
         let runs_in_background =
             args.get("run_in_background").and_then(Value::as_bool) == Some(true);
+        if runs_in_background && operationService::operation_log_enabled() {
+            return Some(err_result(
+                "Background execution is not available for this agent because TaskOutput and TaskStop are not enabled."
+                    .to_string(),
+            ));
+        }
         if let Some(timeout) = args.get("timeout").and_then(Value::as_u64) {
             let max = if runs_in_background {
                 MAX_BACKGROUND_TIMEOUT_S
@@ -321,7 +355,7 @@ impl NativeToolset {
         let agent_env = self.execution_environment();
         let exe = match resolve_powershell() {
             Ok(exe) => exe,
-            Err(error) => return Some(err_result(error.message())),
+            Err(error) => return Some(err_result(error.coded_message())),
         };
 
         if runs_in_background {
@@ -349,13 +383,14 @@ impl NativeToolset {
             let runner_task = Arc::clone(runner);
             let progress_runner = Arc::clone(runner);
             let progress_task_id = task_id.clone();
+            let pid = child.id();
 
             let bg_fut = async move {
-                crate::storage::TaskOutcome::Completed(
-                    run_background(child, progress_runner, progress_task_id, timeout).await,
-                )
+                let (output, exit_code) =
+                    run_background(child, progress_runner, progress_task_id, timeout).await;
+                crate::storage::TaskOutcome::Process { output, exit_code }
             };
-            if let Err(e) = runner_task.spawn_task_with_meta(
+            if let Err(e) = runner_task.spawn_process_task(
                 crate::storage::TaskSpawnMeta {
                     session_id: self.session_id.as_deref(),
                     kind: "bash",
@@ -363,6 +398,9 @@ impl NativeToolset {
                     agent_id: None,
                     timeout_ms: timeout.map(|limit| limit.as_millis() as u64),
                 },
+                command,
+                pid,
+                tool_call_id,
                 task_id.clone(),
                 desc.clone(),
                 bg_fut,
@@ -459,6 +497,7 @@ impl NativeToolset {
             }
             Err(_) => {
                 if self.bash_auto_background
+                    && !operationService::operation_log_enabled()
                     && let Some(runner) = &self.task_runner
                 {
                     let task_id = crate::storage::generate_task_id("bash");
@@ -472,24 +511,36 @@ impl NativeToolset {
                     let bg_fut = async move {
                         match detach_timeout {
                             Some(limit) => match tokio::time::timeout(limit, child.wait()).await {
-                                Ok(_) => "Background command execution finished".to_string(),
+                                Ok(status) => (
+                                    "Background command execution finished".to_string(),
+                                    status.ok().and_then(|status| status.code()),
+                                ),
                                 Err(_) => {
                                     crate::native::bash::kill_process_tree_async(&mut child).await;
-                                    format!(
-                                        "Background command timed out after {}s and was stopped.",
-                                        limit.as_secs()
+                                    (
+                                        format!(
+                                            "Background command timed out after {}s and was stopped.",
+                                            limit.as_secs()
+                                        ),
+                                        None,
                                     )
                                 }
                             },
                             None => {
-                                let _ = child.wait().await;
-                                "Background command execution finished".to_string()
+                                let exit_code =
+                                    child.wait().await.ok().and_then(|status| status.code());
+                                (
+                                    "Background command execution finished".to_string(),
+                                    exit_code,
+                                )
                             }
                         }
                     };
-                    let bg_fut =
-                        async move { crate::storage::TaskOutcome::Completed(bg_fut.await) };
-                    if let Err(e) = runner.spawn_task_with_meta(
+                    let bg_fut = async move {
+                        let (output, exit_code) = bg_fut.await;
+                        crate::storage::TaskOutcome::Process { output, exit_code }
+                    };
+                    if let Err(e) = runner.spawn_process_task(
                         crate::storage::TaskSpawnMeta {
                             session_id: self.session_id.as_deref(),
                             kind: "bash",
@@ -497,6 +548,9 @@ impl NativeToolset {
                             agent_id: None,
                             timeout_ms: detach_timeout.map(|d| d.as_millis() as u64),
                         },
+                        command,
+                        detached_pid,
+                        tool_call_id,
                         task_id.clone(),
                         desc,
                         bg_fut,

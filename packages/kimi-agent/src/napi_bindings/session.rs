@@ -34,6 +34,63 @@ pub(crate) fn live_session_for_workspace(workspace: &str) -> Option<SessionEntry
         .cloned()
 }
 
+static SESSION_STORES: LazyLock<
+    Mutex<HashMap<std::path::PathBuf, Arc<crate::session::sqlite_store::SqliteSessionStore>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn session_store(
+    data_dir: Option<&str>,
+) -> Option<Arc<crate::session::sqlite_store::SqliteSessionStore>> {
+    let data_dir = data_dir.map(str::trim).filter(|dir| !dir.is_empty())?;
+    let path = std::path::Path::new(data_dir).join("sessions.db");
+    let mut stores = SESSION_STORES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(store) = stores.get(&path) {
+        return Some(store.clone());
+    }
+    match crate::session::sqlite_store::SqliteSessionStore::open(&path) {
+        Ok(store) => {
+            let store = Arc::new(store);
+            stores.insert(path, store.clone());
+            Some(store)
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "could not open the session store");
+            None
+        }
+    }
+}
+
+fn apply_recorded_permission_mode(
+    policy_snapshot_json: &mut Option<String>,
+    session_id: Option<&str>,
+    store: &crate::session::sqlite_store::SqliteSessionStore,
+) {
+    use crate::agent::permission_mode::permission_mode_ops::{mode_as_str, recorded_mode};
+    let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let Some(mode) = recorded_mode(store, session_id, crate::callbacks::MAIN_AGENT_ID) else {
+        return;
+    };
+    let Some(raw) = policy_snapshot_json.as_deref() else {
+        return;
+    };
+    let Ok(mut snapshot) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return;
+    };
+    let Some(object) = snapshot.as_object_mut() else {
+        return;
+    };
+    let recorded = serde_json::json!(mode_as_str(mode));
+    if object.get("mode") == Some(&recorded) {
+        return;
+    }
+    object.insert("mode".to_string(), recorded);
+    if let Ok(raw) = serde_json::to_string(&snapshot) {
+        *policy_snapshot_json = Some(raw);
+    }
+}
+
 // ── EngineSession handle (M1d) ─────────────────────────────────────────────
 // The napi boundary upgrades from "one call per turn" to a session handle:
 // the pipeline is built once, and admission (four modes), the pending FIFO,
@@ -72,6 +129,8 @@ static SESSION_NEXT_ID: AtomicU32 = AtomicU32::new(1);
 #[derive(Clone)]
 pub(crate) struct SessionEntry {
     pub(crate) session: Arc<EngineSession>,
+    host_session_id: String,
+    store: Option<Arc<crate::session::sqlite_store::SqliteSessionStore>>,
     /// The live permission engine, so a host can switch the mode mid-turn
     /// (`session_set_permission_mode`) without rebuilding the session. `None`
     /// when the pipeline built without a policy snapshot.
@@ -221,6 +280,15 @@ pub fn create_engine_session(
             // the pipeline and refreshed per turn by the session pump.
             let steer_slot: Arc<std::sync::Mutex<Option<crate::subagent::types::ParentCancel>>> =
                 Arc::new(std::sync::Mutex::new(None));
+            let mut params = params;
+            let store = session_store(params.data_dir.as_deref());
+            if let Some(store) = store.as_deref() {
+                apply_recorded_permission_mode(
+                    &mut params.policy_snapshot_json,
+                    params.session_id.as_deref(),
+                    store,
+                );
+            }
             let (pipeline, mcp_status) = build_engine_pipeline(
                 &params,
                 EngineCallbackTsfns {
@@ -306,6 +374,7 @@ pub fn create_engine_session(
                         params.max_context_tokens,
                     ),
                     compaction_max_attempts: params.compaction_max_attempts,
+                    llm_request_byte_budget: pipeline.llm_request_byte_budget,
                     permission_mode: pipeline.permission_mode,
                     tool_defs: tool_defs_provider,
                     goal: goal_provider,
@@ -341,7 +410,7 @@ pub fn create_engine_session(
                 ));
                 let handler = toolset.bind_tower_wake_driver(driver);
                 session.set_wake_replay_handler(
-                    crate::tools::tower::wake::TOWER_INBOX_WAKE_VARIANT,
+                    crate::features::tower::wake::TOWER_INBOX_WAKE_VARIANT,
                     handler,
                 );
             }
@@ -373,6 +442,7 @@ pub fn create_engine_session(
             spawn_cron_dispatcher(params.workspace_root.as_deref().unwrap_or_default());
             if let Some(runner) = pipeline.task_runner.clone() {
                 let weak = Arc::downgrade(&session);
+                let liveness_session_id = host_session_id.clone();
                 runner.set_liveness_check(Arc::new(move |session: Option<&str>| {
                     let Some(live) = weak.upgrade() else {
                         return false;
@@ -382,7 +452,7 @@ pub fn create_engine_session(
                     }
                     match session {
                         None => true,
-                        Some(s) => s == host_session_id.as_str(),
+                        Some(s) => s == liveness_session_id.as_str(),
                     }
                 }));
             }
@@ -393,6 +463,8 @@ pub fn create_engine_session(
                     session_id.clone(),
                     SessionEntry {
                         session,
+                        host_session_id,
+                        store,
                         permission_engine: pipeline.permission_engine.clone(),
                         skill_scan: pipeline.skill_scan.clone(),
                         turn_event_count: pipeline.turn_event_count,
@@ -617,9 +689,6 @@ pub fn session_takeover_lock(session_id: String) -> napi::Result<()> {
 pub fn session_set_permission_mode(session_id: String, mode: String) -> napi::Result<bool> {
     guard_sync_panic(|| {
         let entry = session_entry(&session_id)?;
-        let Some(engine) = entry.permission_engine.as_ref() else {
-            return Ok(false);
-        };
         let new_mode = match mode.as_str() {
             "manual" => crate::permission::PermissionMode::Manual,
             "yolo" => crate::permission::PermissionMode::Yolo,
@@ -629,6 +698,27 @@ pub fn session_set_permission_mode(session_id: String, mode: String) -> napi::Re
                     "unknown permission mode: {other}"
                 )));
             }
+        };
+        if let Some(store) = entry.store.as_deref()
+            && !entry.host_session_id.is_empty()
+        {
+            let now = chrono::Utc::now().timestamp_millis();
+            if let Err(error) = crate::agent::permission_mode::permission_mode_ops::record_mode(
+                store,
+                &entry.host_session_id,
+                crate::callbacks::MAIN_AGENT_ID,
+                new_mode,
+                now,
+            ) {
+                tracing::warn!(
+                    session_id = %entry.host_session_id,
+                    %error,
+                    "failed to persist the durable permission.set_mode record"
+                );
+            }
+        }
+        let Some(engine) = entry.permission_engine.as_ref() else {
+            return Ok(false);
         };
         engine.set_mode(new_mode);
         // v2 `broadcastPermissionMode`: agents that inherited the session mode
@@ -759,127 +849,138 @@ pub struct JsTowerStatus {
 }
 
 fn tower_status_to_napi(
-    snapshot: crate::tools::tower::status_reader::TowerStatusSnapshot,
+    status: crate::features::tower::tools::status::statusReader::TowerStatus,
 ) -> JsTowerStatus {
-    let crate::tools::tower::status_reader::TowerStatusSnapshot {
-        active,
-        initialized,
-        state_lost,
-        state,
-        recovered_at,
-        caller,
-        gates,
-        inbox_count,
-        concurrency,
-        recent_activity,
-    } = snapshot;
-    let state = state.map(|state| JsTowerStatusState {
-        base: state.base,
-        mode: state.mode,
-        recovered_at,
-        missions: state
-            .missions
-            .into_iter()
-            .map(|mission| JsTowerStatusMission {
-                id: mission.id,
-                title: mission.title,
-                slug: mission.slug,
-                kind: mission.kind.as_str().to_string(),
-                scope: mission.scope,
-                branch: mission.branch,
-                worktree: mission.worktree,
-                spawn_base: mission.spawn_base,
-                deps: mission.deps,
-                status: mission.status.as_str().to_string(),
-                owner: mission.owner,
-                context: mission.context,
-                tasks: mission
-                    .tasks
+    use crate::features::tower::tools::status::statusReader::TowerStatus;
+    match status {
+        TowerStatus::NotInitialized { active, state_lost } => JsTowerStatus {
+            active,
+            initialized: false,
+            state_lost,
+            state: None,
+            caller: None,
+            gate: None,
+            inbox: None,
+            concurrency: None,
+            recent_activity: None,
+        },
+        TowerStatus::Initialized(status) => {
+            let state = JsTowerStatusState {
+                base: status.state.base,
+                mode: status.state.mode,
+                recovered_at: status.state.recovered_at,
+                missions: status
+                    .state
+                    .missions
                     .into_iter()
-                    .map(|task| JsTowerStatusMissionTask {
-                        text: task.text,
-                        done: task.done,
-                        dropped: task.dropped,
+                    .map(|mission| JsTowerStatusMission {
+                        id: mission.id,
+                        title: mission.title,
+                        slug: mission.slug,
+                        kind: mission.kind.as_str().to_string(),
+                        scope: mission.scope,
+                        branch: mission.branch,
+                        worktree: mission.worktree,
+                        spawn_base: mission.spawn_base,
+                        deps: mission.deps,
+                        status: mission.status.as_str().to_string(),
+                        owner: mission.owner,
+                        context: mission.context,
+                        tasks: mission
+                            .tasks
+                            .into_iter()
+                            .map(|task| JsTowerStatusMissionTask {
+                                text: task.text,
+                                done: task.done,
+                                dropped: task.dropped,
+                            })
+                            .collect(),
+                        notes: mission.notes,
+                        blockers: mission.blockers,
                     })
                     .collect(),
-                notes: mission.notes,
-                blockers: mission.blockers,
-            })
-            .collect(),
-        roster: JsTowerStatusRoster {
-            agents: state
-                .roster
-                .agents
-                .into_iter()
-                .map(|agent| JsTowerStatusRosterEntry {
-                    name: agent.name,
-                    agent_id: agent.agent_id,
-                    session_id: agent.session_id,
-                    kind: agent.kind.as_str().to_string(),
-                    mission_id: agent.mission_id,
-                    review_target: agent.review_target,
-                    review_mission_id: agent.review_mission_id,
-                    worktree: agent.worktree,
-                    branch: agent.branch,
-                    spawned_at: agent.spawned_at,
-                    died_at: agent.died_at,
-                    death_status: agent.death_status,
-                    death_reason: agent.death_reason,
-                    status: agent.status,
-                })
-                .collect(),
-        },
-    });
-    JsTowerStatus {
-        active,
-        initialized,
-        state_lost,
-        state,
-        caller: initialized.then_some(caller),
-        gate: initialized.then(|| {
-            gates
-                .into_iter()
-                .map(|gate| JsTowerStatusGate {
-                    mission_id: gate.mission_id,
-                    branch: gate.branch,
-                    status: gate.status,
-                    ready: gate.ready,
-                    noop: gate.noop,
-                    reasons: gate.reasons,
-                    blocks: gate
-                        .blocks
+                roster: JsTowerStatusRoster {
+                    agents: status
+                        .state
+                        .roster
+                        .agents
                         .into_iter()
-                        .map(|block| JsTowerStatusGateBlock {
-                            reason: block.reason.to_string(),
-                            message: block.message,
+                        .map(|agent| JsTowerStatusRosterEntry {
+                            name: agent.name,
+                            agent_id: agent.agent_id,
+                            session_id: agent.session_id,
+                            kind: agent.kind.as_str().to_string(),
+                            mission_id: agent.mission_id,
+                            review_target: agent.review_target,
+                            review_mission_id: agent.review_mission_id,
+                            worktree: agent.worktree,
+                            branch: agent.branch,
+                            spawned_at: agent.spawned_at,
+                            died_at: agent.died_at,
+                            death_status: agent.death_status,
+                            death_reason: agent.death_reason,
+                            status: agent.status,
                         })
                         .collect(),
-                    selected_review: gate.selected_review.map(|review| JsTowerStatusReview {
-                        reviewer: review.reviewer,
-                        target: review.target,
-                        round: review.round,
-                        status: review.status,
-                        merge: review.merge,
-                        reviewed_commit: review.reviewed_commit,
-                        date: review.date,
-                        file: review.file,
-                        mission: review.mission,
-                        seq: review.seq.map(|seq| seq as f64),
-                        modified_at_ms: review.modified_at_ms as f64,
-                    }),
-                    review_binding: gate.binding,
-                })
-                .collect()
-        }),
-        inbox: initialized.then_some(JsTowerStatusInbox {
-            count: inbox_count as u32,
-        }),
-        concurrency: initialized.then_some(JsTowerStatusConcurrency {
-            budget: concurrency.budget as u32,
-            inflight: concurrency.inflight as u32,
-            blocked_until: concurrency.blocked_until.map(|until| until as f64),
-        }),
-        recent_activity: initialized.then_some(recent_activity),
+                },
+            };
+            JsTowerStatus {
+                active: status.active,
+                initialized: true,
+                state_lost: false,
+                state: Some(state),
+                caller: Some(status.caller),
+                gate: Some(
+                    status
+                        .gate
+                        .into_iter()
+                        .map(|gate| JsTowerStatusGate {
+                            mission_id: gate.mission_id,
+                            branch: gate.branch,
+                            status: gate.status,
+                            ready: gate.ready,
+                            noop: gate.noop,
+                            reasons: gate.reasons,
+                            blocks: gate
+                                .blocks
+                                .into_iter()
+                                .map(|block| JsTowerStatusGateBlock {
+                                    reason: block.reason.to_string(),
+                                    message: block.message,
+                                })
+                                .collect(),
+                            selected_review: gate.selected_review.map(|review| {
+                                JsTowerStatusReview {
+                                    reviewer: review.reviewer,
+                                    target: review.target,
+                                    round: review.round,
+                                    status: review.status,
+                                    merge: review.merge,
+                                    reviewed_commit: review.reviewed_commit,
+                                    date: review.date,
+                                    file: review.file,
+                                    mission: review.mission,
+                                    seq: review.seq.map(|seq| seq as f64),
+                                    modified_at_ms: review.mtime_ms as f64,
+                                }
+                            }),
+                            review_binding: gate
+                                .review_binding
+                                .map(|binding| binding.as_str().to_string()),
+                        })
+                        .collect(),
+                ),
+                inbox: Some(JsTowerStatusInbox {
+                    count: status.inbox.count as u32,
+                }),
+                concurrency: Some(JsTowerStatusConcurrency {
+                    budget: status.concurrency.budget as u32,
+                    inflight: status.concurrency.inflight as u32,
+                    blocked_until: status.concurrency.blocked_until,
+                }),
+                recent_activity: Some(status.recent_activity),
+            }
+        }
     }
 }
 
@@ -894,25 +995,44 @@ pub fn session_tower_status(
     max_running_tasks: Option<u32>,
 ) -> napi::Result<JsObject> {
     let entry = session_entry(&session_id)?;
-    let repo_root = crate::tools::tower::paths::resolve_tower_repo_root(&entry.workspace);
-    let store = crate::tools::tower::store::TowerStore::new(std::path::PathBuf::from(repo_root));
+    let workspace = entry.workspace.clone();
     let task_runner = SUBAGENT_MANAGER.get_task_runner_sync();
     env.execute_tokio_future(
         async move {
+            let repo_root =
+                crate::features::tower::protocol::paths::resolve_tower_repo_root(&workspace);
+            let store =
+                crate::features::tower::protocol::store::TowerStore::new(std::path::PathBuf::from(
+                    repo_root,
+                ));
             let state_lock = store.state_lock();
             let _state_guard = state_lock.lock().await;
-            let active_agent_ids =
-                crate::tools::tower::active_tower_agent_ids(task_runner.as_deref());
-            let mut snapshot = crate::tools::tower::status_reader::read_tower_status(
-                &store,
-                "main",
-                active_agent_ids.as_ref(),
-                max_running_tasks,
+            let running_agent_ids =
+                crate::features::tower::towerService::active_tower_agent_ids(task_runner.as_deref())
+                    .unwrap_or_default();
+            let snapshot =
+                crate::features::tower::towerRateLimitService::TowerRateLimitService::global()
+                    .snapshot(max_running_tasks);
+            let concurrency =
+                crate::features::tower::tools::status::statusReader::TowerStatusConcurrency {
+                    budget: snapshot.budget as f64,
+                    inflight: snapshot.inflight as f64,
+                    blocked_until: snapshot.blocked_until.map(|until| until as f64),
+                };
+            let running_agent_ids = move || running_agent_ids.clone();
+            let concurrency = move || concurrency.clone();
+            let status = crate::features::tower::tools::status::statusReader::read_tower_status(
+                &crate::features::tower::tools::status::statusReader::ReadTowerStatusInput {
+                    active,
+                    cwd: std::path::Path::new(&workspace),
+                    agent_id: "main",
+                    running_agent_ids: &running_agent_ids,
+                    concurrency: &concurrency,
+                },
             )
             .await
             .map_err(napi::Error::from_reason)?;
-            snapshot.active = active;
-            Ok(tower_status_to_napi(snapshot))
+            Ok(tower_status_to_napi(status))
         },
         |_env, status| Ok(status),
     )
@@ -1586,12 +1706,14 @@ async fn compact_session_with_summary(
 #[cfg(test)]
 mod tower_status_tests {
     use super::*;
-    use crate::tools::tower::mission_gate::TowerGateBlock;
-    use crate::tools::tower::rate_limit::TowerRateLimitSnapshot;
-    use crate::tools::tower::status_reader::{TowerStatusGate, TowerStatusSnapshot};
-    use crate::tools::tower::types::{
+    use crate::features::tower::protocol::missionGate::{TowerGateBlock, TowerReviewBinding};
+    use crate::features::tower::protocol::types::{
         TowerAgentKind, TowerMission, TowerMissionStatus, TowerReviewInfo, TowerRoster,
         TowerRosterEntry, TowerState,
+    };
+    use crate::features::tower::tools::status::statusReader::{
+        InitializedTowerStatus, TowerStatus, TowerStatusConcurrency, TowerStatusGate,
+        TowerStatusInbox, TowerStatusReview, TowerStatusState,
     };
 
     #[test]
@@ -1606,12 +1728,15 @@ mod tower_status_tests {
             worktree: "wt-build".into(),
             spawn_base: Some("base123".into()),
             deps: vec!["M0".into()],
+            last_rebase: None,
             status: TowerMissionStatus::Active,
             owner: Some("w1".into()),
             context: Some("briefing".into()),
             tasks: Vec::new(),
             notes: vec!["note".into()],
             blockers: vec!["blocker".into()],
+            completion_tip: Some("abc1234".into()),
+            key_artifacts: Some(vec!["src/a.txt".into()]),
         };
         let agent = TowerRosterEntry {
             name: "w1".into(),
@@ -1624,6 +1749,8 @@ mod tower_status_tests {
             worktree: Some("wt-build".into()),
             branch: Some("feat/build".into()),
             spawned_at: "2026-11-04T00:00:00Z".into(),
+            last_inbox_read_at: None,
+            inbox_ack_ids: None,
             died_at: Some("2026-11-04T01:00:00Z".into()),
             death_status: Some("failed".into()),
             death_reason: Some("provider blew up".into()),
@@ -1640,26 +1767,21 @@ mod tower_status_tests {
             file: "reviews/1.md".into(),
             mission: Some("M1".into()),
             seq: Some(1),
-            modified_at_ms: 42,
+            mtime_ms: 42,
         };
-        let snapshot = TowerStatusSnapshot {
+        let status = TowerStatus::Initialized(InitializedTowerStatus {
             active: true,
-            initialized: true,
-            state_lost: false,
-            state: Some(TowerState {
-                version: 1,
+            state: TowerStatusState {
                 base: "main".into(),
                 mode: "branch".into(),
-                created_at: "2026-11-04T00:00:00Z".into(),
-                session_id: Some("session-main".into()),
+                recovered_at: Some("2026-11-04T02:00:00Z".into()),
                 roster: TowerRoster {
                     agents: vec![agent],
                 },
                 missions: vec![mission],
-            }),
-            recovered_at: Some("2026-11-04T02:00:00Z".into()),
+            },
             caller: "tower".into(),
-            gates: vec![TowerStatusGate {
+            gate: vec![TowerStatusGate {
                 mission_id: "M1".into(),
                 branch: "feat/build".into(),
                 status: "active".into(),
@@ -1670,19 +1792,31 @@ mod tower_status_tests {
                     "not-clean",
                     "merge blocked: fix findings",
                 )],
-                selected_review: Some(review),
-                binding: Some("exact-tip".into()),
+                selected_review: Some(TowerStatusReview {
+                    reviewer: review.reviewer.clone(),
+                    target: review.target.clone(),
+                    round: review.round,
+                    status: review.status.clone(),
+                    merge: review.merge.clone(),
+                    reviewed_commit: review.reviewed_commit.clone(),
+                    date: review.date.clone(),
+                    file: review.file.clone(),
+                    mission: review.mission.clone(),
+                    seq: review.seq,
+                    mtime_ms: review.mtime_ms,
+                }),
+                review_binding: Some(TowerReviewBinding::ExactTip),
             }],
-            inbox_count: 3,
-            concurrency: TowerRateLimitSnapshot {
-                budget: 2,
-                inflight: 1,
-                blocked_until: Some(1_800_000),
+            inbox: TowerStatusInbox { count: 3 },
+            concurrency: TowerStatusConcurrency {
+                budget: 2.0,
+                inflight: 1.0,
+                blocked_until: Some(1_800_000.0),
             },
             recent_activity: vec!["tower init".into()],
-        };
+        });
 
-        let status = tower_status_to_napi(snapshot);
+        let status = tower_status_to_napi(status);
         assert!(status.active);
         assert!(status.initialized);
         assert!(!status.state_lost);
@@ -1708,5 +1842,69 @@ mod tower_status_tests {
         assert_eq!(concurrency.inflight, 1);
         assert_eq!(concurrency.blocked_until, Some(1_800_000.0));
         assert_eq!(status.recent_activity, Some(vec!["tower init".into()]));
+    }
+}
+
+#[cfg(test)]
+mod permission_mode_tests {
+    use super::*;
+    use crate::agent::permission_mode::permission_mode_ops::record_mode;
+    use crate::callbacks::MAIN_AGENT_ID;
+    use crate::permission::PermissionMode;
+    use crate::session::sqlite_store::SqliteSessionStore;
+
+    #[test]
+    fn a_recorded_permission_mode_overrides_the_host_snapshot_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteSessionStore::open(dir.path().join("sessions.db")).unwrap();
+        store.create_session("sess-mode", None).unwrap();
+        let mut snapshot =
+            Some(serde_json::json!({"mode": "yolo", "deny_rules": ["Bash(rm *)"]}).to_string());
+
+        apply_recorded_permission_mode(&mut snapshot, Some("sess-mode"), &store);
+        let applied: serde_json::Value =
+            serde_json::from_str(snapshot.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            applied["mode"],
+            serde_json::json!("yolo"),
+            "without a record the host snapshot still decides"
+        );
+
+        record_mode(&store, "sess-mode", MAIN_AGENT_ID, PermissionMode::Auto, 1).unwrap();
+        apply_recorded_permission_mode(&mut snapshot, Some("sess-mode"), &store);
+        let applied: serde_json::Value =
+            serde_json::from_str(snapshot.as_deref().unwrap()).unwrap();
+        assert_eq!(applied["mode"], serde_json::json!("auto"));
+        assert_eq!(
+            applied["deny_rules"],
+            serde_json::json!(["Bash(rm *)"]),
+            "overriding the mode keeps the rest of the snapshot"
+        );
+
+        let mut absent: Option<String> = None;
+        apply_recorded_permission_mode(&mut absent, Some("sess-mode"), &store);
+        assert_eq!(absent, None, "a snapshot-less session stays snapshot-less");
+
+        let mut malformed = Some("{not json}".to_string());
+        apply_recorded_permission_mode(&mut malformed, Some("sess-mode"), &store);
+        assert_eq!(malformed, Some("{not json}".to_string()));
+
+        let mut unidentified = Some(serde_json::json!({"mode": "manual"}).to_string());
+        apply_recorded_permission_mode(&mut unidentified, Some(""), &store);
+        assert_eq!(
+            unidentified,
+            Some(serde_json::json!({"mode": "manual"}).to_string()),
+            "a session without a host id has no durable record to read"
+        );
+    }
+
+    #[test]
+    fn the_session_store_is_opened_once_per_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = session_store(dir.path().to_str()).expect("a writable data dir opens a store");
+        let second = session_store(dir.path().to_str()).expect("the second call reuses the handle");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(session_store(None).is_none());
+        assert!(session_store(Some("   ")).is_none());
     }
 }

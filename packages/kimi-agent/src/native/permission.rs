@@ -1,23 +1,8 @@
-//! Permission rule DSL parser — pure computation.
-//!
-//! Ported from `packages/agent-core-v2/src/agent/permissionRules/matchesRule.ts`.
-//!
-//! The napi export for this lives in `native/napi_bindings.rs`
-//! (`native_parse_permission_pattern`, a thin forwarder). It used to be
-//! `#[napi]`-exported here as well, which produced two same-named declarations
-//! in the generated contract — and, with the `napi` feature off, an unresolved
-//! `use napi_derive` that broke the pure-Rust build.
-
-/// Parsed permission rule pattern.
 pub struct ParsedPattern {
     pub tool_name: String,
     pub arg_pattern: Option<String>,
 }
 
-/// Parse a permission rule DSL pattern.
-///
-/// Grammar: `toolName` or `toolName(argPattern)`.
-/// Returns JSON `{"toolName":"...","argPattern":...}` or `"ERROR: ..."` on failure.
 pub fn native_parse_permission_pattern(pattern: String) -> String {
     match parse_pattern(&pattern) {
         Ok(p) => serde_json::json!({

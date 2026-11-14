@@ -6,58 +6,174 @@ use serde_json::{Value, json};
 use super::err_result;
 use super::moonshot_service::{self, MoonshotServiceConfig};
 use crate::i18n::{LocalizedText, i18n_params};
-use crate::native::web_search::{
-    SearchResult, parse_bing_results, parse_ddg_results, parse_sogou_results, urlencoded,
-};
+use crate::native::web_search::{SearchResult, urlencoded};
 use crate::turn_loop::types::ExecutableToolResult;
 
-const BING_HTML_URL: &str = "https://www.bing.com/search";
-const BING_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-     (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36";
-const DDG_HTML_URL: &str = "https://html.duckduckgo.com/html/";
-const DDG_USER_AGENT: &str = BING_USER_AGENT;
-const SOGOU_HTML_URL: &str = "https://www.sogou.com/web";
+mod engines;
+
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const MAX_RESULTS: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchEngine {
+    Baidu,
     Bing,
+    Brave,
+    Csdn,
     Ddg,
+    Exa,
+    Juejin,
+    LinuxDo,
     Sogou,
+    Startpage,
+    Zhihu,
 }
 
 impl SearchEngine {
     pub fn from_name(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("ddg") {
+            return Some(Self::Ddg);
+        }
+        Self::from_registry_name(s)
+    }
+
+    fn from_registry_name(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
+            "baidu" => Some(Self::Baidu),
             "bing" => Some(Self::Bing),
-            "ddg" | "duckduckgo" => Some(Self::Ddg),
+            "brave" => Some(Self::Brave),
+            "csdn" => Some(Self::Csdn),
+            "duckduckgo" => Some(Self::Ddg),
+            "exa" => Some(Self::Exa),
+            "juejin" => Some(Self::Juejin),
+            "linuxdo" => Some(Self::LinuxDo),
             "sogou" => Some(Self::Sogou),
+            "startpage" => Some(Self::Startpage),
+            "zhihu" => Some(Self::Zhihu),
             _ => None,
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Bing => "bing",
             Self::Ddg => "ddg",
+            _ => self.registry_name(),
+        }
+    }
+
+    pub fn registry_name(&self) -> &'static str {
+        match self {
+            Self::Baidu => "baidu",
+            Self::Bing => "bing",
+            Self::Brave => "brave",
+            Self::Csdn => "csdn",
+            Self::Ddg => "duckduckgo",
+            Self::Exa => "exa",
+            Self::Juejin => "juejin",
+            Self::LinuxDo => "linuxdo",
             Self::Sogou => "sogou",
+            Self::Startpage => "startpage",
+            Self::Zhihu => "zhihu",
         }
     }
 }
 
-static ACTIVE_ENGINE: LazyLock<Mutex<SearchEngine>> =
-    LazyLock::new(|| Mutex::new(SearchEngine::Bing));
+const ENGINE_REGISTRY: &[SearchEngine] = &[
+    SearchEngine::Baidu,
+    SearchEngine::Bing,
+    SearchEngine::Brave,
+    SearchEngine::Csdn,
+    SearchEngine::Ddg,
+    SearchEngine::Exa,
+    SearchEngine::Juejin,
+    SearchEngine::LinuxDo,
+    SearchEngine::Sogou,
+    SearchEngine::Startpage,
+    SearchEngine::Zhihu,
+];
 
-static BING_COOKIES: LazyLock<std::sync::Arc<reqwest::cookie::Jar>> =
-    LazyLock::new(|| std::sync::Arc::new(reqwest::cookie::Jar::default()));
+static ACTIVE_ENGINE: LazyLock<Mutex<Option<SearchEngine>>> = LazyLock::new(|| Mutex::new(None));
 
 pub fn set_active_engine(engine: SearchEngine) {
-    *ACTIVE_ENGINE.lock().unwrap() = engine;
+    *ACTIVE_ENGINE.lock().unwrap() = Some(engine);
 }
 
 pub fn active_engine() -> SearchEngine {
+    configured_engine().unwrap_or(SearchEngine::Bing)
+}
+
+fn configured_engine() -> Option<SearchEngine> {
     *ACTIVE_ENGINE.lock().unwrap()
+}
+
+pub fn resolve_search_engines(env: &dyn Fn(&str) -> Option<String>) -> Vec<SearchEngine> {
+    let preferred = env("KIMI_CODE_SEARCH_ENGINE")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .and_then(|value| SearchEngine::from_registry_name(&value));
+    let allowed: Vec<SearchEngine> = match env("KIMI_CODE_ALLOWED_SEARCH_ENGINES") {
+        None => ENGINE_REGISTRY.to_vec(),
+        Some(raw) if raw.trim().is_empty() => ENGINE_REGISTRY.to_vec(),
+        Some(raw) => raw
+            .split(',')
+            .filter_map(|name| SearchEngine::from_registry_name(name.trim()))
+            .collect(),
+    };
+    let mut ordered = vec![preferred.unwrap_or(SearchEngine::Bing)];
+    ordered.extend(
+        allowed
+            .into_iter()
+            .filter(|engine| Some(*engine) != preferred && *engine != SearchEngine::Bing),
+    );
+    if ordered.is_empty() {
+        vec![SearchEngine::Bing]
+    } else {
+        ordered
+    }
+}
+
+pub fn resolve_result_limit(env: &dyn Fn(&str) -> Option<String>) -> usize {
+    let Some(raw) = env("KIMI_CODE_SEARCH_RESULTS") else {
+        return 10;
+    };
+    let Some(value) = parse_js_number(&raw) else {
+        return 10;
+    };
+    if value.is_finite() && value > 0.0 && value <= 20.0 {
+        value.floor() as usize
+    } else {
+        10
+    }
+}
+
+fn parse_js_number(raw: &str) -> Option<f64> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Some(0.0);
+    }
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return u64::from_str_radix(hex, 16)
+            .ok()
+            .map(|number| number as f64);
+    }
+    if let Some(binary) = value
+        .strip_prefix("0b")
+        .or_else(|| value.strip_prefix("0B"))
+    {
+        return u64::from_str_radix(binary, 2)
+            .ok()
+            .map(|number| number as f64);
+    }
+    if let Some(octal) = value
+        .strip_prefix("0o")
+        .or_else(|| value.strip_prefix("0O"))
+    {
+        return u64::from_str_radix(octal, 8)
+            .ok()
+            .map(|number| number as f64);
+    }
+    value.parse::<f64>().ok()
 }
 
 #[derive(Debug, Clone)]
@@ -126,7 +242,7 @@ pub fn moonshot_search_request_parts(
     api_key: &str,
     tool_call_id: Option<&str>,
 ) -> (String, String, Vec<(String, String)>) {
-    let body = json!({ "text_query": query }).to_string();
+    let body = json!({ "text_query": query, "search_mode": "links" }).to_string();
     let headers =
         moonshot_service::bearer_headers(api_key, &config.custom_headers, &[], tool_call_id);
     (config.base_url.clone(), body, headers)
@@ -475,168 +591,110 @@ pub async fn execute_web_search(
         });
     }
 
-    if let Some(config) = service_config() {
-        return search_via_moonshot(&config, query, tool_call_id).await;
+    let configured_result = match service_config() {
+        Some(config) => search_via_moonshot(&config, query, tool_call_id).await,
+        None => None,
+    };
+    if configured_result
+        .as_ref()
+        .is_some_and(|result| !result.is_error && !is_empty_search_result(result))
+    {
+        return configured_result;
     }
 
-    let html_result = match active_engine() {
-        SearchEngine::Bing => search_via_bing_html(query).await,
-        SearchEngine::Ddg => search_via_ddg_html(query).await,
-        SearchEngine::Sogou => search_via_sogou_html(query).await,
-    };
-    if html_result.as_ref().is_some_and(|r| !r.is_error) {
-        return html_result;
+    let local_result = execute_local_search(query, tool_call_id).await;
+    if local_result
+        .as_ref()
+        .is_some_and(|result| !result.is_error && !is_empty_search_result(result))
+        || local_result.as_ref().is_some_and(|result| result.is_error)
+    {
+        return local_result;
     }
+    if configured_result
+        .as_ref()
+        .is_some_and(|result| result.is_error)
+    {
+        return configured_result;
+    }
+    local_result
+}
+
+async fn execute_local_search(
+    query: &str,
+    tool_call_id: Option<&str>,
+) -> Option<ExecutableToolResult> {
+    let limit = resolve_result_limit(&|name| std::env::var(name).ok());
+    let engines = configured_engine().map_or_else(
+        || resolve_search_engines(&|name| std::env::var(name).ok()),
+        |engine| vec![engine],
+    );
+    let mut failures = Vec::new();
+    for engine in &engines {
+        let result = execute_engine(*engine, query, limit).await;
+        if result
+            .as_ref()
+            .is_some_and(|result| !result.is_error && !is_empty_search_result(result))
+        {
+            return result;
+        }
+        if let Some(result) = result {
+            if result.is_error {
+                failures.push(format!("{}: {}", engine.registry_name(), result.content));
+            }
+        }
+    }
+
     if let Some(api_result) = search_via_bing_api(query, tool_call_id).await {
-        return Some(api_result);
+        if !api_result.is_error && !is_empty_search_result(&api_result) {
+            return Some(api_result);
+        }
+        if api_result.is_error {
+            return Some(api_result);
+        }
     }
-    html_result
+    if !engines.is_empty() && failures.len() == engines.len() {
+        return Some(err_result(format!(
+            "All search engines failed ({})",
+            failures.join("; ")
+        )));
+    }
+    structured_search_result(Ok(Vec::new()))
 }
 
-async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
-    let client = match reqwest::Client::builder()
-        .user_agent(BING_USER_AGENT)
-        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-        .cookie_store(true)
-        .cookie_provider(BING_COOKIES.clone())
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.clientInitFailed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
+async fn execute_engine(
+    engine: SearchEngine,
+    query: &str,
+    limit: usize,
+) -> Option<ExecutableToolResult> {
+    match engine {
+        SearchEngine::Bing => structured_search_result(engines::bing::search(query, limit).await),
+        SearchEngine::Ddg => {
+            structured_search_result(engines::duckduckgo::search(query, limit).await)
         }
-    };
-
-    let url = format!("{}?q={}&setlang=en", BING_HTML_URL, urlencoded(query));
-    let response = match client
-        .get(&url)
-        .header("Accept", "text/html")
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .header("Referer", "https://www.bing.com/")
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            let msg = if e.is_timeout() {
-                LocalizedText::with_params(
-                    "engine.tools.webSearch.timedOut",
-                    i18n_params!["e" => e],
-                )
-                .render()
-            } else {
-                LocalizedText::with_params(
-                    "engine.tools.webSearch.networkFailed",
-                    i18n_params!["e" => e],
-                )
-                .render()
-            };
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: msg,
-                is_error: true,
-                note: None,
-                display: None,
-            });
+        SearchEngine::Sogou => structured_search_result(engines::sogou::search(query, limit).await),
+        SearchEngine::Baidu => structured_search_result(engines::baidu::search(query, limit).await),
+        SearchEngine::Brave => structured_search_result(engines::brave::search(query, limit).await),
+        SearchEngine::Csdn => structured_search_result(engines::csdn::search(query, limit).await),
+        SearchEngine::Exa => structured_search_result(engines::exa::search(query, limit).await),
+        SearchEngine::Juejin => {
+            structured_search_result(engines::juejin::search(query, limit).await)
         }
-    };
-
-    let status = response.status();
-    if !status.is_success() {
-        return Some(ExecutableToolResult {
-            spill: None,
-            parts: Vec::new(),
-            delivery: None,
-            stop_turn: false,
-            content: LocalizedText::with_params(
-                "engine.tools.webSearch.bingHttpFailed",
-                i18n_params!["status" => status],
-            )
-            .render(),
-            is_error: true,
-            note: None,
-            display: None,
-        });
+        SearchEngine::LinuxDo => {
+            structured_search_result(engines::linuxdo::search(query, limit).await)
+        }
+        SearchEngine::Startpage => {
+            structured_search_result(engines::startpage::search(query, limit).await)
+        }
+        SearchEngine::Zhihu => structured_search_result(engines::zhihu::search(query, limit).await),
     }
+}
 
-    let body = match response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.readBodyFailed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    let results = match parse_bing_results(&body, MAX_RESULTS).map(|rs| {
-        rs.into_iter()
-            .map(WebSearchResultEntry::from)
-            .collect::<Vec<_>>()
-    }) {
-        Ok(res) => res,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.failed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    if crate::native::web_search::is_hot_feed_fallback(
-        query,
-        &results.iter().map(|r| r.url.clone()).collect::<Vec<_>>(),
-    ) {
-        return Some(ExecutableToolResult {
-            spill: None,
-            parts: Vec::new(),
-            delivery: None,
-            stop_turn: false,
-            content: LocalizedText::new("engine.tools.webSearch.hotFeedFallback").render(),
-            is_error: true,
-            note: None,
-            display: None,
-        });
-    }
-
-    if results.is_empty() {
-        return Some(ExecutableToolResult {
+fn structured_search_result(
+    result: Result<Vec<WebSearchResultEntry>, String>,
+) -> Option<ExecutableToolResult> {
+    match result {
+        Err(error) => Some(err_result(error)),
+        Ok(results) if results.is_empty() => Some(ExecutableToolResult {
             spill: None,
             parts: Vec::new(),
             delivery: None,
@@ -645,318 +703,22 @@ async fn search_via_bing_html(query: &str) -> Option<ExecutableToolResult> {
             is_error: false,
             note: None,
             display: None,
-        });
-    }
-
-    Some(ExecutableToolResult {
-        spill: None,
-        parts: Vec::new(),
-        delivery: None,
-        stop_turn: false,
-        content: format_search_results(results),
-        is_error: false,
-        note: None,
-        display: None,
-    })
-}
-
-async fn search_via_ddg_html(query: &str) -> Option<ExecutableToolResult> {
-    let client = match reqwest::Client::builder()
-        .user_agent(DDG_USER_AGENT)
-        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.clientInitFailed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    let form_body = format!("q={}", urlencoded(query));
-    let response = match client
-        .post(DDG_HTML_URL)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Accept", "*/*")
-        .body(form_body)
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            let msg = if e.is_timeout() {
-                LocalizedText::with_params(
-                    "engine.tools.webSearch.timedOut",
-                    i18n_params!["e" => e],
-                )
-                .render()
-            } else {
-                LocalizedText::with_params(
-                    "engine.tools.webSearch.networkFailed",
-                    i18n_params!["e" => e],
-                )
-                .render()
-            };
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: msg,
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    let status = response.status();
-    if !status.is_success() {
-        return Some(ExecutableToolResult {
+        }),
+        Ok(results) => Some(ExecutableToolResult {
             spill: None,
             parts: Vec::new(),
             delivery: None,
             stop_turn: false,
-            content: LocalizedText::with_params(
-                "engine.tools.webSearch.ddgHttpFailed",
-                i18n_params!["status" => status],
-            )
-            .render(),
-            is_error: true,
-            note: None,
-            display: None,
-        });
-    }
-
-    let body = match response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.readBodyFailed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    let results = match parse_ddg_results(&body, MAX_RESULTS).map(|rs| {
-        rs.into_iter()
-            .map(WebSearchResultEntry::from)
-            .collect::<Vec<_>>()
-    }) {
-        Ok(res) => res,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.failed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    if results.is_empty() {
-        return Some(ExecutableToolResult {
-            spill: None,
-            parts: Vec::new(),
-            delivery: None,
-            stop_turn: false,
-            content: "No search results found.".to_string(),
+            content: format_search_results(results),
             is_error: false,
             note: None,
             display: None,
-        });
+        }),
     }
-
-    Some(ExecutableToolResult {
-        spill: None,
-        parts: Vec::new(),
-        delivery: None,
-        stop_turn: false,
-        content: format_search_results(results),
-        is_error: false,
-        note: None,
-        display: None,
-    })
 }
 
-async fn search_via_sogou_html(query: &str) -> Option<ExecutableToolResult> {
-    let client = match reqwest::Client::builder()
-        .user_agent(BING_USER_AGENT)
-        .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-        .cookie_store(true)
-        .cookie_provider(BING_COOKIES.clone())
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.clientInitFailed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    let url = format!("{}?query={}", SOGOU_HTML_URL, urlencoded(query));
-    let response = match client
-        .get(&url)
-        .header("Accept", "text/html")
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            let msg = if e.is_timeout() {
-                LocalizedText::with_params(
-                    "engine.tools.webSearch.timedOut",
-                    i18n_params!["e" => e],
-                )
-                .render()
-            } else {
-                LocalizedText::with_params(
-                    "engine.tools.webSearch.networkFailed",
-                    i18n_params!["e" => e],
-                )
-                .render()
-            };
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: msg,
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    let status = response.status();
-    if !status.is_success() {
-        return Some(ExecutableToolResult {
-            spill: None,
-            parts: Vec::new(),
-            delivery: None,
-            stop_turn: false,
-            content: LocalizedText::with_params(
-                "engine.tools.webSearch.sogouHttpFailed",
-                i18n_params!["status" => status],
-            )
-            .render(),
-            is_error: true,
-            note: None,
-            display: None,
-        });
-    }
-
-    let body = match response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.readBodyFailed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    let results = match parse_sogou_results(&body, MAX_RESULTS).map(|rs| {
-        rs.into_iter()
-            .map(WebSearchResultEntry::from)
-            .collect::<Vec<_>>()
-    }) {
-        Ok(res) => res,
-        Err(e) => {
-            return Some(ExecutableToolResult {
-                spill: None,
-                parts: Vec::new(),
-                delivery: None,
-                stop_turn: false,
-                content: LocalizedText::with_params(
-                    "engine.tools.webSearch.failed",
-                    i18n_params!["e" => e],
-                )
-                .render(),
-                is_error: true,
-                note: None,
-                display: None,
-            });
-        }
-    };
-
-    if results.is_empty() {
-        return Some(ExecutableToolResult {
-            spill: None,
-            parts: Vec::new(),
-            delivery: None,
-            stop_turn: false,
-            content: "No search results found.".to_string(),
-            is_error: false,
-            note: None,
-            display: None,
-        });
-    }
-
-    Some(ExecutableToolResult {
-        spill: None,
-        parts: Vec::new(),
-        delivery: None,
-        stop_turn: false,
-        content: format_search_results(results),
-        is_error: false,
-        note: None,
-        display: None,
-    })
+fn is_empty_search_result(result: &ExecutableToolResult) -> bool {
+    !result.is_error && result.content == "No search results found."
 }
 
 #[cfg(test)]
@@ -983,7 +745,7 @@ mod tests {
         let (url, body, headers) =
             moonshot_search_request_parts(&config, "rust tokio", "sk-test", Some("call-1"));
         assert_eq!(url, "https://api.example.test/coding/v1/search");
-        assert_eq!(body, r#"{"text_query":"rust tokio"}"#);
+        assert_eq!(body, r#"{"search_mode":"links","text_query":"rust tokio"}"#);
         assert!(headers.contains(&("Authorization".to_string(), "Bearer sk-test".to_string())));
         assert!(headers.contains(&("Content-Type".to_string(), "application/json".to_string())));
         assert!(headers.contains(&("X-Msh-Tool-Call-Id".to_string(), "call-1".to_string())));
@@ -1070,11 +832,76 @@ mod tests {
 
     #[test]
     fn test_set_and_active_engine() {
-        let prev = active_engine();
+        let prev = configured_engine();
         set_active_engine(SearchEngine::Ddg);
         assert_eq!(active_engine(), SearchEngine::Ddg);
         set_active_engine(SearchEngine::Bing);
         assert_eq!(active_engine(), SearchEngine::Bing);
-        set_active_engine(prev);
+        *ACTIVE_ENGINE.lock().unwrap() = prev;
+    }
+
+    #[test]
+    fn test_resolve_search_engines_uses_v2_order_and_filters() {
+        let empty = |_name: &str| None;
+        assert_eq!(
+            resolve_search_engines(&empty),
+            vec![
+                SearchEngine::Bing,
+                SearchEngine::Baidu,
+                SearchEngine::Brave,
+                SearchEngine::Csdn,
+                SearchEngine::Ddg,
+                SearchEngine::Exa,
+                SearchEngine::Juejin,
+                SearchEngine::LinuxDo,
+                SearchEngine::Sogou,
+                SearchEngine::Startpage,
+                SearchEngine::Zhihu,
+            ]
+        );
+        let custom = |name: &str| match name {
+            "KIMI_CODE_SEARCH_ENGINE" => Some(" Brave ".to_string()),
+            "KIMI_CODE_ALLOWED_SEARCH_ENGINES" => Some("bing,brave,exa,unknown,exa".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_search_engines(&custom),
+            vec![SearchEngine::Brave, SearchEngine::Exa, SearchEngine::Exa]
+        );
+        let none_allowed =
+            |name: &str| (name == "KIMI_CODE_ALLOWED_SEARCH_ENGINES").then(|| ",".to_string());
+        assert_eq!(
+            resolve_search_engines(&none_allowed),
+            vec![SearchEngine::Bing]
+        );
+        let legacy_ddg =
+            |name: &str| (name == "KIMI_CODE_SEARCH_ENGINE").then(|| "ddg".to_string());
+        assert_eq!(
+            resolve_search_engines(&legacy_ddg),
+            resolve_search_engines(&empty)
+        );
+    }
+
+    #[test]
+    fn test_resolve_result_limit_matches_js_number_rules() {
+        for (raw, expected) in [
+            ("", 10),
+            ("0", 10),
+            ("0.5", 0),
+            ("5.9", 5),
+            ("20", 20),
+            ("20.1", 10),
+            ("0x10", 16),
+            ("0b101", 5),
+            ("0o10", 8),
+            ("NaN", 10),
+            ("Infinity", 10),
+            ("-2", 10),
+        ] {
+            let env = |name: &str| (name == "KIMI_CODE_SEARCH_RESULTS").then(|| raw.to_string());
+            assert_eq!(resolve_result_limit(&env), expected, "raw={raw:?}");
+        }
+        let missing = |_name: &str| None;
+        assert_eq!(resolve_result_limit(&missing), 10);
     }
 }

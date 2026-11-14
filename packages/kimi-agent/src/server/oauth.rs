@@ -1,11 +1,3 @@
-//! OAuth device-code flow and managed account status for the native server.
-//!
-//! Real HTTP implementation mirroring `packages/oauth` (src/oauth.ts): the
-//! three form endpoints against the OAuth host, the pending/expired/denied
-//! poll taxonomy, refresh-on-401 for managed API reads, and the
-//! `~/.kimi-code/credentials/<name>.json` token persistence (storage.ts wire
-//! format, shared with the TS host).
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,15 +16,7 @@ const DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
 const DEFAULT_FLOW_TTL_SECS: u64 = 900;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const REFRESH_MAX_ATTEMPTS: u32 = 3;
-/// Retryable statuses for the **token refresh** grant, mirroring TS
-/// `RETRYABLE_STATUSES` (`packages/oauth/src/oauth.ts:29`).
-///
-/// Deliberately *narrower* than the LLM request policy
-/// (`crate::llm::http::is_retryable_status_code`) and not to be merged with it:
-/// 408/409/425 answer a different question here — a refresh that conflicts or
-/// is too early will do the same thing on the next attempt — and 529 is an
-/// Anthropic-overload signal that means nothing to a token endpoint. Unifying
-/// the two would change refresh behaviour, not just tidy it.
+
 const REFRESH_RETRYABLE_STATUSES: [u16; 5] = [429, 500, 502, 503, 504];
 
 fn oauth_host() -> String {
@@ -51,12 +35,11 @@ fn credentials_dir() -> Option<PathBuf> {
     Some(home.join(".kimi-code").join("credentials"))
 }
 
-/// What REST clients poll while a device login runs (kap-server contract).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthFlowSnapshot {
     pub provider: String,
-    pub status: String, // "pending", "success", "expired", "denied", "cancelled", "error"
+    pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,7 +62,6 @@ struct StoredToken {
     expires_in: i64,
 }
 
-/// The managed credential relay device management exchanges for a cloud session.
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedToken {
     pub storage_name: String,
@@ -93,8 +75,7 @@ struct FlowState {
     device_code: String,
     interval: u64,
     ttl_secs: u64,
-    /// Bumped on cancel/logout so a live poller stops instead of resurrecting
-    /// a cancelled flow.
+
     generation: u64,
 }
 
@@ -102,24 +83,15 @@ struct FlowState {
 struct OAuthManagerInner {
     flows: Mutex<HashMap<String, FlowState>>,
     tokens: Mutex<HashMap<String, StoredToken>>,
-    /// One async lock per provider: a refresh in flight is the only one
-    /// allowed to hit the token endpoint (v2 `refreshChain`). Without it two
-    /// concurrent callers both spend the same refresh token, and rotating
-    /// servers invalidate the loser.
+
     refresh_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     generation: AtomicU64,
 }
 
-/// Cleanup the server runs around a managed Kimi logout, wrapping the
-/// credential wipe. Upstream serialises the logout and clears the relay
-/// session cache on both sides of it; the fork hook does the same without
-/// moving the route handler out of its own module.
 pub trait RemoteControlLogoutHook: Send + Sync {
-    /// Run `logout` between the remote-control session-cache clears.
     fn around_logout(&self, logout: &mut dyn FnMut());
 }
 
-/// Drives real device-code logins against the Kimi OAuth host.
 pub struct OAuthManager {
     inner: OAuthManagerInner,
     client: reqwest::Client,
@@ -152,13 +124,10 @@ impl OAuthManager {
         }
     }
 
-    /// Install the server's remote-control cleanup for managed Kimi logouts.
     pub fn set_remote_control_logout_hook(&self, hook: Arc<dyn RemoteControlLogoutHook>) {
         let _ = self.remote_control_logout.set(hook);
     }
 
-    /// Test seam: point the flow at a local mock authorization server and a
-    /// temp credentials dir.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn with_hosts(
         oauth_host: String,
@@ -172,9 +141,6 @@ impl OAuthManager {
         manager
     }
 
-    /// POST form-encoded to the OAuth host, mirroring TS `postForm`
-    /// (oauth.ts:71-125): JSON-accepting, 30s timeout, and credentials are
-    /// refused on non-HTTPS endpoints outside loopback.
     async fn post_form(&self, path: &str, params: &[(&str, &str)]) -> Result<(u16, Value), String> {
         if let Some(host) = self.oauth_host.strip_prefix("http://") {
             let authority = host.split('/').next().unwrap_or(host);
@@ -247,7 +213,7 @@ impl OAuthManager {
 
     fn credentials_path(&self, provider: &str) -> Option<PathBuf> {
         let dir = self.credentials_dir.as_ref()?;
-        // Guard against path traversal, mirroring storage.ts `pathFor`.
+
         let safe: String = provider
             .chars()
             .map(|c| {
@@ -300,29 +266,18 @@ impl OAuthManager {
         Some(token)
     }
 
-    /// Whether a cached OAuth token exists for the provider (v2
-    /// `hasCachedAccessToken`): in memory or as `<credentials dir>/<provider>.json`.
     pub fn has_cached_token(&self, provider: &str) -> bool {
         self.load_token(provider).is_some()
     }
 
-    /// The credential names the managed Kimi Code token may live under: the
-    /// Web UI signs in without a provider (the server default `kimi`), while
-    /// the TS CLI basenames its `oauth/kimi-code` key to `kimi-code.json`.
     pub const MANAGED_TOKEN_NAMES: [&'static str; 2] = ["kimi", "kimi-code"];
 
-    /// Whether any managed-token alias is stored.
     pub fn has_managed_token(&self) -> bool {
         Self::MANAGED_TOKEN_NAMES
             .iter()
             .any(|name| self.has_cached_token(name))
     }
 
-    /// Load the managed credential used by the relay device-management client.
-    /// Unlike API reads, the relay exchange consumes the stored access/refresh
-    /// pair directly and performs its own 401 session renewal. Read the file on
-    /// every call: upstream's FileTokenStorage observes account changes made by
-    /// another process, and the cookie cache key must change with the token.
     pub(crate) fn managed_remote_control_token(
         &self,
         preferred_storage_name: &str,
@@ -354,8 +309,6 @@ impl OAuthManager {
         Err("Remote Control requires a Kimi login.".into())
     }
 
-    /// A usable managed access token under any alias, refreshing when the
-    /// cached one is stale (v2 `resolveOAuthToken`).
     pub async fn managed_access_token(&self) -> Result<String, String> {
         for name in Self::MANAGED_TOKEN_NAMES {
             if let Some(token) = self.load_usable_token(name) {
@@ -370,14 +323,10 @@ impl OAuthManager {
         Err("no cached managed credential; sign in first".into())
     }
 
-    /// The managed API base URL this server is configured against.
     pub fn managed_base_url(&self) -> &str {
         &self.managed_base_url
     }
 
-    /// Start a real device-code login: request a device authorization, then
-    /// poll the token endpoint in the background until the user approves,
-    /// the code expires, or the flow is cancelled.
     pub async fn start_login(
         self: Arc<Self>,
         provider: &str,
@@ -478,8 +427,6 @@ impl OAuthManager {
             },
         );
 
-        // Background poller (the TS OAuthManager drives the same loop): stop
-        // on success / expiry / denial / cancellation / flow replacement.
         let manager = self.clone();
         let provider_owned = provider.to_string();
         tokio::spawn(async move {
@@ -628,7 +575,6 @@ impl OAuthManager {
         state.snapshot.error_message = error_message.map(str::to_string);
     }
 
-    /// Get current login flow snapshot for polling.
     pub fn get_flow(&self, provider: &str) -> Option<OAuthFlowSnapshot> {
         self.inner
             .flows
@@ -638,7 +584,6 @@ impl OAuthManager {
             .map(|s| s.snapshot.clone())
     }
 
-    /// Cancel current login flow.
     pub fn cancel_login(&self, provider: &str) -> bool {
         let generation = self.inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let mut flows = self.inner.flows.lock().unwrap();
@@ -650,11 +595,6 @@ impl OAuthManager {
         true
     }
 
-    /// Log out the specified provider: drop the flow, the in-memory token,
-    /// and the persisted credentials file.
-    ///
-    /// A managed Kimi logout also runs the server's remote-control cleanup
-    /// around the wipe (upstream couples the two in the logout route).
     pub fn logout(&self, provider: &str) -> bool {
         if let Some(hook) = self.remote_control_logout.get()
             && Self::MANAGED_TOKEN_NAMES.contains(&provider)
@@ -676,8 +616,6 @@ impl OAuthManager {
         had_flow || had_token
     }
 
-    /// One async lock per provider, so concurrent refreshes serialize instead
-    /// of spending the same refresh token twice (v2 `refreshChain`).
     fn refresh_lock(&self, provider: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.inner
             .refresh_locks
@@ -688,9 +626,6 @@ impl OAuthManager {
             .clone()
     }
 
-    /// Refresh the stored token via the refresh grant, mirroring TS
-    /// `refreshAccessToken` (oauth.ts:246-306): unauthorized/invalid_grant
-    /// drops the token, retryable statuses back off and retry.
     async fn refresh_token(
         &self,
         provider: &str,
@@ -698,8 +633,7 @@ impl OAuthManager {
     ) -> Result<StoredToken, String> {
         let lock = self.refresh_lock(provider);
         let _guard = lock.lock().await;
-        // A caller that queued behind a successful refresh reuses that result
-        // instead of rotating the token a second time.
+
         if let Some(current) = self.load_usable_token(provider)
             && current.access_token != token.access_token
         {
@@ -747,12 +681,7 @@ impl OAuthManager {
 
     fn load_usable_token(&self, provider: &str) -> Option<StoredToken> {
         let token = self.load_token(provider)?;
-        // Proactively treat near-expiry tokens as stale; the caller refreshes
-        // via the refresh grant (mirrors TS expires_at bookkeeping).
-        //
-        // `expires_at` comes from a credentials file on disk, so it can be
-        // corrupt or hostile: a raw `- 60` underflowed on `i64::MIN` (panic in
-        // debug, a bogus "never expired" value in release).
+
         let refresh_deadline = token.expires_at.saturating_sub(60);
         if refresh_deadline < chrono::Utc::now().timestamp() && !token.refresh_token.is_empty() {
             return None;
@@ -762,7 +691,6 @@ impl OAuthManager {
 
     async fn managed_get(&self, provider: &str, path: &str) -> Value {
         let Some(token) = self.load_usable_token(provider) else {
-            // No usable token: try a refresh path only if credentials exist.
             if let Some(stored) = self.load_token(provider)
                 && let Ok(refreshed) = self.refresh_token(provider, &stored).await
             {
@@ -782,7 +710,7 @@ impl OAuthManager {
             .header("Accept", "application/json")
             .send()
             .await;
-        // 401 → the cached token went stale; refresh once and retry.
+
         if let Ok(res) = &response
             && res.status().as_u16() == 401
         {
@@ -821,41 +749,24 @@ impl OAuthManager {
         }
     }
 
-    /// Get managed usage stats from the real `/usages` endpoint.
     pub async fn get_usage(&self, provider: &str) -> Value {
         self.managed_get(provider, "usages").await
     }
 
-    /// Get user info from the real `/me` endpoint.
     pub async fn get_user_info(&self, provider: &str) -> Value {
         self.managed_get(provider, "me").await
     }
 }
 
-// ── Region resolution (v2 `resolveKimiRegion`, packages/oauth/src/region.ts) ─
-//
-// The client resolves a region (`mainland-cn` | `global`) to pick CDN/site
-// hosts; the standalone server serves the same decision through
-// `GET /api/v1/oauth/region` so a fresh client lands on the right one.
-
-/// Marker file under the Kimi home dir: install scripts write a single line
-/// (`mainland-cn` or `global`) so a fresh client defaults to the region
-/// matching its install channel. Only consulted while the user has never
-/// logged in.
 pub const KIMI_REGION_MARKER_FILENAME: &str = "region";
 
 const OAUTH_HOST_MAINLAND_CN: &str = "https://auth.kimi.com";
 const OAUTH_HOST_GLOBAL: &str = "https://auth.kimi.ai";
 
-/// Normalize a host for comparison: trim, strip trailing slashes (v2
-/// `normalizeHost`).
 fn normalize_host(value: &str) -> &str {
     value.trim().trim_end_matches('/')
 }
 
-/// Map an OAuth host onto its region (v2 `regionForOAuthHost`): an exact match
-/// against a region profile's host; anything else (custom/internal hosts) is
-/// `None`, which the resolver treats as "env keeps control, default applies".
 pub fn region_for_oauth_host(oauth_host: &str) -> Option<&'static str> {
     let normalized = normalize_host(oauth_host);
     match normalized {
@@ -865,8 +776,6 @@ pub fn region_for_oauth_host(oauth_host: &str) -> Option<&'static str> {
     }
 }
 
-/// Read the install-channel marker (`<kimi_home>/region`). Unreadable or
-/// unknown values mean "no signal", never an error (v2 `readRegionMarker`).
 fn read_region_marker(home_dir: &std::path::Path) -> Option<&'static str> {
     let raw = std::fs::read_to_string(home_dir.join(KIMI_REGION_MARKER_FILENAME)).ok()?;
     match raw.trim() {
@@ -876,19 +785,6 @@ fn read_region_marker(home_dir: &std::path::Path) -> Option<&'static str> {
     }
 }
 
-/// Resolve the region, mirroring v2 `resolveKimiRegion`'s precedence:
-///
-/// 1. An env OAuth host that matches a profile pins the region. An **unknown**
-///    env host means a custom/internal environment — the per-endpoint env
-///    overrides keep working regardless of region, so skip straight to the
-///    default instead of letting a stale config/marker point CDN links
-///    somewhere odd.
-/// 2. A configured (config.toml) OAuth host that matches a profile wins next.
-/// 3. The default managed credential slot only ever holds a mainland-China
-///    login, so its presence is an explicit-mainland-cn signal that outranks
-///    the install-channel marker.
-/// 4. The install-channel marker file.
-/// 5. Default `mainland-cn`.
 pub fn resolve_kimi_region(
     env_oauth_host: Option<&str>,
     configured_oauth_host: Option<&str>,
@@ -913,8 +809,6 @@ pub fn resolve_kimi_region(
 mod tests {
     use super::*;
 
-    // ── Region resolution ────────────────────────────────────────────────────
-
     fn marker_home(region: Option<&str>) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         if let Some(region) = region {
@@ -938,8 +832,6 @@ mod tests {
 
     #[test]
     fn an_unknown_env_host_skips_config_and_marker() {
-        // A custom/internal environment: env keeps control of endpoints, so a
-        // stale marker must not point CDN links somewhere odd (v2 comment).
         let dir = marker_home(Some("global"));
         assert_eq!(
             resolve_kimi_region(
@@ -959,7 +851,7 @@ mod tests {
             resolve_kimi_region(None, Some("https://auth.kimi.ai"), None, dir.path()),
             "global"
         );
-        // The default slot only ever holds a mainland-China login.
+
         assert_eq!(
             resolve_kimi_region(None, None, Some("oauth/kimi-code"), dir.path()),
             "mainland-cn"
@@ -973,13 +865,13 @@ mod tests {
             resolve_kimi_region(None, None, None, global.path()),
             "global"
         );
-        // An unknown marker value is no signal at all.
+
         let junk = marker_home(Some("antarctica"));
         assert_eq!(
             resolve_kimi_region(None, None, None, junk.path()),
             "mainland-cn"
         );
-        // No marker file either → default.
+
         let empty = marker_home(None);
         assert_eq!(
             resolve_kimi_region(None, None, None, empty.path()),
@@ -987,10 +879,6 @@ mod tests {
         );
     }
 
-    /// One mock authorization server answering the three endpoints in
-    /// sequence: device_authorization → pending ×2 → token success, plus
-    /// /me and /usages reads. A sequential accept loop suffices — the flow
-    /// issues its requests one at a time.
     async fn spawn_mock_oauth_server(deny: bool) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1120,8 +1008,7 @@ content-length: {}
                 let request = String::from_utf8_lossy(&buf[..n]).to_string();
                 let body = if request.starts_with("POST /api/oauth/token") {
                     observed.fetch_add(1, Ordering::SeqCst);
-                    // Long enough that the second caller reaches the refresh
-                    // path while the first exchange is still in flight.
+
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     json!({
                         "access_token": "at-refreshed",
@@ -1166,7 +1053,7 @@ content-length: {}
 
         assert_eq!(first.unwrap(), "at-refreshed");
         assert_eq!(second.unwrap(), "at-refreshed");
-        // v2 `refreshChain`: one exchange, shared by both callers.
+
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1200,29 +1087,24 @@ content-length: {}
             Some("https://example.test/device?code=WDJB-MJHT")
         );
 
-        // The poller runs at interval=1s: authorization_pending twice, then
-        // the token lands on the third poll.
         let status = wait_for_terminal_status(&manager, "kimi").await;
         assert_eq!(
             status, "success",
             "flow must reach success via real exchange"
         );
 
-        // Token persisted to the credentials file in storage.ts wire format.
         let body = std::fs::read_to_string(dir.join("kimi.json")).expect("credentials file");
         let wire: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(wire["access_token"], "at-real-1");
         assert_eq!(wire["refresh_token"], "rt-real-1");
         assert!(wire["expires_at"].is_number());
 
-        // Managed /me and /usages reads with the real bearer token.
         let user = manager.get_user_info("kimi").await;
         assert_eq!(user["user_id"], "user-1");
         assert_eq!(user["name"], "Mock User");
         let usage = manager.get_usage("kimi").await;
         assert_eq!(usage["usage"]["total_tokens"], 42);
 
-        // Logout drops flow, token, and the file.
         assert!(manager.logout("kimi"));
         assert!(manager.get_flow("kimi").is_none());
         assert!(!dir.join("kimi.json").exists());
@@ -1277,21 +1159,16 @@ content-length: {}
             Some(dir),
         ));
         manager.clone().start_login("kimi", None).await;
-        // The generation the spawned poller captured before its first sleep.
+
         let poller_generation = manager.current_generation("kimi").unwrap();
         assert!(manager.cancel_login("kimi"));
-        // The poller wakes up, compares this captured generation against the
-        // flow's and returns without polling again. Replay that wake-up here
-        // instead of sleeping out a whole poll interval: the bump is the
-        // condition the loop exits on.
+
         assert_ne!(
             manager.current_generation("kimi"),
             Some(poller_generation),
             "a cancel must make the poller's captured generation stale"
         );
-        // A poll already in flight when the cancel landed calls `finish_flow`
-        // with the generation it captured. Even a successful exchange must not
-        // overwrite the cancelled status.
+
         manager.finish_flow("kimi", poller_generation, "success", None);
         let flow = manager.get_flow("kimi").unwrap();
         assert_eq!(
@@ -1308,8 +1185,7 @@ content-length: {}
             "https://api.example.test".into(),
             Some(dir),
         );
-        // No token stored → the managed reads must say so instead of
-        // returning canned success payloads like the old mock did.
+
         let user = manager.get_user_info("kimi").await;
         assert_eq!(user["authenticated"], false);
         let usage = manager.get_usage("kimi").await;

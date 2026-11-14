@@ -158,6 +158,7 @@ fn test_stdio_wire_contract_roundtrip() {
             input_schema: serde_json::json!({"type": "object"}),
         }],
         request_id: Some("req-1".into()),
+        max_output_tokens: Some(4096),
     };
     let wire = serde_json::to_value(&request).unwrap();
     assert_eq!(wire["request_id"], "req-1");
@@ -354,6 +355,7 @@ fn test_llm_chat_request_roundtrip() {
             input_schema: serde_json::json!({"type": "object"}),
         }],
         request_id: None,
+        max_output_tokens: None,
     };
     let json = serde_json::to_value(&req).unwrap();
     assert_eq!(json["system_prompt"], "You are helpful.");
@@ -375,6 +377,7 @@ fn test_llm_chat_request_carries_request_id() {
         messages: vec![],
         tools: vec![],
         request_id: Some("llm-slow-7".to_string()),
+        max_output_tokens: Some(4096),
     };
     let json = serde_json::to_value(&req).unwrap();
     assert_eq!(json["request_id"], "llm-slow-7");
@@ -828,6 +831,8 @@ fn test_ask_question_request_roundtrip() {
         question_id: "question_9f2c".to_string(),
         turn_id: "turn-42".to_string(),
         tool_call_id: "call_abc".to_string(),
+        agent_id: Some("main".to_string()),
+        session_id: Some("sess-1".to_string()),
         background: false,
         timeout_ms: None,
         questions: vec![AskQuestionItem {
@@ -850,6 +855,8 @@ fn test_ask_question_request_roundtrip() {
     assert_eq!(json["question_id"], "question_9f2c");
     assert_eq!(json["turn_id"], "turn-42");
     assert_eq!(json["tool_call_id"], "call_abc");
+    assert_eq!(json["agent_id"], "main");
+    assert_eq!(json["session_id"], "sess-1");
     assert_eq!(json["background"], false);
     assert!(json["timeout_ms"].is_null());
     assert_eq!(
@@ -871,6 +878,8 @@ fn test_ask_question_request_roundtrip() {
     let deserialized: AskQuestionRequest = serde_json::from_value(json).unwrap();
     assert_eq!(deserialized.question_id, req.question_id);
     assert_eq!(deserialized.turn_id, "turn-42");
+    assert_eq!(deserialized.agent_id.as_deref(), Some("main"));
+    assert_eq!(deserialized.session_id.as_deref(), Some("sess-1"));
     assert_eq!(deserialized.questions.len(), 1);
     assert_eq!(deserialized.questions[0].options.len(), 2);
     assert_eq!(deserialized.questions[0].options[1].description, None);
@@ -883,6 +892,8 @@ fn test_ask_question_request_background_and_timeout() {
         question_id: "question_1".to_string(),
         turn_id: "turn-1".to_string(),
         tool_call_id: "call_1".to_string(),
+        agent_id: None,
+        session_id: None,
         background: true,
         timeout_ms: Some(30_000),
         questions: vec![],

@@ -3,11 +3,11 @@
 //! Groups discovered skills by scope (Project, User, Built-in) and formats
 //! them into Markdown following product conventions.
 
-use crate::skills::{SkillDescriptor, scan_all_skills_with_extra_merge_and_plugins};
-use std::path::Path;
+use crate::skills::{SkillDescriptor, SkillScanRoots};
+use std::path::{Path, PathBuf};
 
 pub const SKILLS_SECTION_PROSE: &str = "Skills are reusable, composable capabilities that enhance your abilities. Each skill is either a self-contained directory with a `SKILL.md` file or a standalone `.md` file that contains instructions, examples, and/or reference material.\n\n\
-Identify the skills relevant to your current task and read the skill file for its instructions; only read further skill details when needed, to conserve the context window.\n\n\
+Identify the skills relevant to your current task and invoke them with the `Skill` tool; only read further skill details when needed, to conserve the context window.\n\n\
 ## Available skills\n\n\
 Skills are grouped by scope (`Project`, `User`, `Extra`, `Built-in`) so you can tell where each came from. When the user refers to \"the skill in this project\" or \"the user-scope skill\", use the scope heading to disambiguate. When multiple scopes define a skill with the same name, the more specific scope takes precedence: **Project overrides User overrides Extra overrides Built-in**.\n\n\
 DISREGARD any earlier skill listings. Current available skills:";
@@ -18,6 +18,13 @@ const LISTING_DESC_MAX: usize = 250;
 
 /// Render a list of skill descriptors into the formatted Markdown `# Skills` section.
 pub fn render_skills_markdown(skills: &[SkillDescriptor]) -> String {
+    render_skills_markdown_with_roots(skills, &[])
+}
+
+pub fn render_skills_markdown_with_roots(
+    skills: &[SkillDescriptor],
+    roots: &[PathBuf],
+) -> String {
     // v2's `listInvocableSkills` (`registry.ts:96-101`) keeps exactly what the
     // `Skill` tool will load — `disableModelInvocation` off and an inline type
     // (`None` | `prompt` | `inline`) — and `getModelSkillListing` then drops
@@ -66,14 +73,20 @@ pub fn render_skills_markdown(skills: &[SkillDescriptor]) -> String {
             if let Some(when_to_use) = s.when_to_use.as_deref().filter(|text| !text.is_empty()) {
                 buf.push_str(&format!("  When to use: {when_to_use}\n"));
             }
-            buf.push_str(&format!("  Path: {}\n", s.path));
         }
     };
 
     format_group("Project", &project_skills, &mut out);
     format_group("User", &user_skills, &mut out);
-    format_group("Built-in", &builtin_skills, &mut out);
     format_group("Extra", &other_skills, &mut out);
+    format_group("Built-in", &builtin_skills, &mut out);
+
+    if !roots.is_empty() {
+        out.push_str("\n### Skill roots\n");
+        for root in roots {
+            out.push_str(&format!("- `{}`\n", root.display()));
+        }
+    }
 
     out
 }
@@ -122,13 +135,15 @@ pub fn generate_skills_section_with_options(
     plugin_dirs: &[crate::skills::PluginSkillDir],
     merge_all_available_skills: bool,
 ) -> String {
-    let skills = scan_all_skills_with_extra_merge_and_plugins(
-        workspace_root,
-        extra_dirs,
-        plugin_dirs,
+    let scan = SkillScanRoots {
+        root: workspace_root.map(PathBuf::from),
+        extra_dirs: extra_dirs.to_vec(),
+        plugin_dirs: plugin_dirs.to_vec(),
         merge_all_available_skills,
-    );
-    render_skills_markdown(&skills)
+    };
+    let roots = scan.scanned_roots();
+    let skills = scan.catalog();
+    render_skills_markdown_with_roots(&skills, &roots)
 }
 
 #[cfg(test)]
@@ -272,24 +287,19 @@ mod tests {
         assert!(md.contains("## Available skills"));
 
         // Verify Project section and entry format
-        assert!(md.contains(
-            "### Project\n- proj-tool: Project analysis\n  Path: G:/ws/skills/proj-tool\n"
-        ));
+        assert!(md.contains("### Project\n- proj-tool: Project analysis\n"));
         assert!(!md.contains("secret-tool"));
         assert!(!md.contains("Should not appear"));
+        assert!(!md.contains("Path:"));
 
         // Verify User section
-        assert!(md.contains(
-            "### User\n- user-helper: User automation\n  Path: C:/Users/name/.skills/user-helper\n"
-        ));
+        assert!(md.contains("### User\n- user-helper: User automation\n"));
 
         // Verify Built-in section with description fallback
-        assert!(md.contains(
-            "### Built-in\n- builtin-exec: No description provided.\n  Path: builtin://exec\n"
-        ));
+        assert!(md.contains("### Built-in\n- builtin-exec: No description provided.\n"));
 
         // Verify Extra section
-        assert!(md.contains("### Extra\n- plugin-custom: External plugin skill\n  Path: plugins/marketplace/custom\n"));
+        assert!(md.contains("### Extra\n- plugin-custom: External plugin skill\n"));
     }
 
     /// v2's catalog drops `isSubSkill` from the model-facing list: a sub-skill
@@ -346,7 +356,7 @@ mod tests {
 
         let md = render_skills_markdown(&skills);
         assert!(md.contains("### User"));
-        assert!(md.contains("- only-user: Solo user skill\n  Path: path/user\n"));
+        assert!(md.contains("- only-user: Solo user skill\n"));
 
         // Empty groups must not be rendered
         assert!(

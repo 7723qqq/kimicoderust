@@ -1,24 +1,13 @@
-//! Generic notification-wake payloads and batching primitives.
-//!
-//! The caller owns rendering: this module carries references and gate facts,
-//! but deliberately contains no product-specific wake wording. A wake turn's
-//! model input is the already-rendered [`WakePayload::message`].
-
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::{Value, json};
 
 use super::*;
 
-/// Maximum number of references carried by one wake batch (v2
-/// `WAKE_BATCH_LIMIT`). Overflow is represented by [`WakePayload::omitted`].
 pub const WAKE_BATCH_LIMIT: usize = 6;
-/// Maximum number of keys retained for duplicate suppression (v2
-/// `WAKE_TRACKED_KEY_LIMIT`).
+
 pub const WAKE_TRACKED_KEY_LIMIT: usize = 100;
 
-/// One caller-renderable wake reference. `key` is the dedup identity; the
-/// remaining fields are opaque metadata for the caller's renderer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WakeItem {
     pub key: String,
@@ -30,8 +19,6 @@ pub struct WakeItem {
     pub mission_id: Option<String>,
 }
 
-/// Gate state attached to a wake batch. The engine carries this value through
-/// cancellation/requeue but never interprets its status or reasons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WakeGateDigest {
     pub mission_id: String,
@@ -40,18 +27,12 @@ pub struct WakeGateDigest {
     pub binding: Option<String>,
 }
 
-/// Async owner of a delegated wake replay. The handler receives the original
-/// payload and is responsible for any re-render and re-enqueue. On `Err`, the
-/// engine restores that payload and exposes the error through wake status;
-/// an error return must therefore leave the re-enqueue undone.
 pub type WakeReplayHandler = Arc<
     dyn Fn(WakePayload) -> futures_util::future::BoxFuture<'static, Result<(), String>>
         + Send
         + Sync,
 >;
 
-/// Observable state of one wake channel. `pending` covers both a delegated
-/// handler in flight and a payload retained after a failed replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WakeReplayStatus {
     pub variant: String,
@@ -59,8 +40,6 @@ pub struct WakeReplayStatus {
     pub error: Option<String>,
 }
 
-/// Tool-facing wake transport. Implementations are bound to their native
-/// session or standalone server; `session_id` scopes the requested operation.
 pub trait TowerWakeDriver: Send + Sync {
     fn enqueue(&self, session_id: &str, payload: WakePayload) -> Result<(), String>;
     fn drop_wakes(&self, session_id: &str, variant: &str) -> bool;
@@ -73,9 +52,6 @@ pub trait TowerWakeDriver: Send + Sync {
     }
 }
 
-/// A fully rendered notification turn plus the generic data needed to replay
-/// it. `variant` becomes the injection origin's variant, allowing cancellation
-/// logic to distinguish wake turns without inspecting their text.
 #[derive(Debug, Clone)]
 pub struct WakePayload {
     pub variant: String,
@@ -97,7 +73,6 @@ impl WakePayload {
         }
     }
 
-    /// v2 `PromptOrigin`: an injection identified by a caller-owned variant.
     #[must_use]
     pub fn origin(&self) -> Value {
         json!({ "kind": "injection", "variant": self.variant })
@@ -108,9 +83,6 @@ impl WakePayload {
     }
 }
 
-/// Per-producer wake batching state. Use one buffer per session and variant.
-/// The buffer owns dedup, bounded coalescing, and replay after a dropped wake;
-/// the session owns turn admission and user-prompt interruption.
 #[derive(Debug)]
 pub struct WakeBuffer {
     variant: String,
@@ -134,9 +106,6 @@ impl WakeBuffer {
         }
     }
 
-    /// Add one reference. Returns `false` for a key already queued or recently
-    /// notified. An empty key receives a unique legacy identity, matching the
-    /// upstream fallback for events without message/file identifiers.
     pub fn push(&mut self, mut item: WakeItem) -> bool {
         if item.key.is_empty() {
             self.legacy_sequence += 1;
@@ -182,8 +151,6 @@ impl WakeBuffer {
         self.omitted
     }
 
-    /// Take the current batch. The caller renders `items()` / `omitted()` (and
-    /// computes fresh gate digests) before calling this method.
     pub fn take(
         &mut self,
         message: LLMMessage,
@@ -201,9 +168,6 @@ impl WakeBuffer {
         })
     }
 
-    /// Requeue a dropped batch without suppressing its keys as duplicates.
-    /// Digests are intentionally not restored: the caller recomputes them from
-    /// current state before the replay, as v2 does.
     pub fn requeue(&mut self, payload: WakePayload) {
         assert_eq!(payload.variant, self.variant);
         for item in payload.items {
@@ -212,7 +176,6 @@ impl WakeBuffer {
         self.omitted += payload.omitted;
     }
 
-    /// Forget queued and recently notified work when the producer is torn down.
     pub fn clear(&mut self) {
         self.items.clear();
         self.omitted = 0;
@@ -222,12 +185,6 @@ impl WakeBuffer {
 }
 
 impl EngineSession {
-    /// Enqueue a caller-rendered notification turn (v2 `loop.notify`). The
-    /// returned receipt is the notification-seeded prompt waiter: it resolves
-    /// when this turn completes, or immediately when cancelled before start.
-    /// A later user prompt interrupts this wake and replays its payload after
-    /// the user queue drains; the replay gets a fresh turn id and an internal
-    /// waiter, while the original receipt settles with the interrupted turn.
     pub fn enqueue_wake(&self, payload: WakePayload) -> Result<TurnReceipt, String> {
         let (outcome_tx, outcome_rx) = oneshot::channel();
         let request = TurnRequest {
@@ -277,9 +234,6 @@ impl EngineSession {
         })
     }
 
-    /// Replace the replay owner for one variant. Registration affects deferred
-    /// payloads too: their next replay is delegated instead of enqueued by the
-    /// engine. Variants without a handler keep the original direct replay.
     pub fn set_wake_replay_handler(&self, variant: &str, handler: WakeReplayHandler) {
         self.core
             .lock()
@@ -288,9 +242,6 @@ impl EngineSession {
             .insert(variant.to_string(), handler);
     }
 
-    /// Inspect a channel's pending payload and most recent delegated failure.
-    /// `None` means the channel has no deferred or in-flight replay and no
-    /// unconsumed error.
     pub fn wake_replay_status(&self, variant: &str) -> Option<WakeReplayStatus> {
         let core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         let pending = core.wake_replay_inflight.contains_key(variant)
@@ -359,10 +310,6 @@ impl EngineSession {
         interruption
     }
 
-    /// A wake interrupted by user input or by producer teardown is cancelled by
-    /// the engine, not by the user pressing cancel: v2 aborts those turns with
-    /// `abortError('Interrupted by user prompt')` and `cancelReasonFor` maps any
-    /// non-user cancellation to `aborted` (`loopService.ts:876-894`).
     pub(super) fn emit_wake_interruption(&self, interruption: WakeInterruption) {
         if interruption.active.is_some()
             && let Some(slot) = &self.agent_cancel_slot
@@ -386,9 +333,6 @@ impl EngineSession {
         }
     }
 
-    /// Discard every wake in one producer channel, including payloads deferred
-    /// for replay. Producer teardown uses the variant rather than a turn id:
-    /// user interruption replaces that id when the payload is requeued.
     pub fn drop_wakes(&self, variant: &str) -> bool {
         let mut interruption = WakeInterruption::default();
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
@@ -464,16 +408,10 @@ impl EngineSession {
     }
 }
 
-/// Keep an internally generated notification's waiter alive until the pump
-/// settles it. Public callers hold the receipt themselves; task notifications
-/// and user-interruption replays use this equivalent internal prompt waiter.
 pub(super) fn spawn_notification_waiter(mut receipt: TurnReceipt) {
     tokio::spawn(async move {
         let turn_id = receipt.turn_id;
-        // The waiter exists so the pump can settle the turn; its outcome is
-        // still inspected because "the waiter vanished" and "the turn was
-        // cancelled" are conditions an operator needs to see, not values to
-        // drop on the floor.
+
         match receipt.outcome().await {
             Ok(TurnOutcome::Ran(_)) => {}
             Ok(TurnOutcome::CancelledBeforeStart) => {
@@ -537,10 +475,6 @@ pub(super) fn enqueue_replayed_wake_locked(
     enqueue_notification_locked(core, wakeup, payload.message.clone(), origin, Some(payload))
 }
 
-/// Queue this session's completed background tasks as a synthetic turn
-/// (v2 `taskService.notifyAgentTask` → `loop.notify`). Like upstream's
-/// notification-seeded turn, it owns a prompt waiter whose launched/completion
-/// settles with the turn; the internal receiver is awaited by the pump caller.
 pub(super) fn enqueue_task_notification_turn(
     ctx: &SessionContext,
     core: &mut Core,
@@ -573,9 +507,6 @@ pub(super) fn enqueue_task_notification_turn(
     ))
 }
 
-/// Tool-facing driver bound to one native [`EngineSession`]. Every enqueued
-/// receipt is owned by a task until its outcome resolves; completed and
-/// cancelled turns remove their task from `receipt_tasks` automatically.
 #[derive(Clone)]
 pub struct EngineSessionWakeDriver {
     session: EngineSession,
@@ -591,8 +522,6 @@ impl EngineSessionWakeDriver {
         }
     }
 
-    /// Number of receipts still owned by driver tasks. Exposed for diagnostics
-    /// and lifecycle tests; zero means every enqueued turn has settled.
     #[must_use]
     pub fn pending_receipt_count(&self) -> usize {
         self.receipt_tasks
@@ -607,13 +536,9 @@ impl TowerWakeDriver for EngineSessionWakeDriver {
         let mut receipt = self.session.enqueue_wake(payload)?;
         let turn_id = receipt.turn_id;
         let receipt_tasks = self.receipt_tasks.clone();
-        // Hold the map lock through insertion so a fast turn cannot remove its
-        // entry before the JoinHandle has been installed.
+
         let mut pending = self.receipt_tasks.lock().unwrap_or_else(|e| e.into_inner());
         let task = tokio::spawn(async move {
-            // Same rule as `spawn_notification_waiter`: the receipt is held so
-            // the pump can settle the turn, but a dropped waiter is reported
-            // rather than discarded.
             if let Err(error) = receipt.outcome().await {
                 tracing::warn!(
                     turn_id,

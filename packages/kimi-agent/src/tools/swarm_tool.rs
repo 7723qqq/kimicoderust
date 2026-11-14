@@ -583,7 +583,8 @@ pub fn agent_swarm_tool_def(
                 "description": "When true, start each item-spawned subagent from a snapshot of the calling agent's completed conversation history."
             }
         },
-        "required": ["description"]
+        "required": ["description"],
+        "additionalProperties": false
     });
     if let Some(pool) = pool
         && pool.exposes_choice()

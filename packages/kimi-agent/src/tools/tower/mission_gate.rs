@@ -11,6 +11,7 @@ pub const REASON_NOT_CLEAN: &str = "not-clean";
 pub const REASON_REVIEW_NOT_APPROVED: &str = "review-not-approved";
 pub const REASON_TIP_MOVED: &str = "tip-moved";
 pub const REASON_REVIEW_MISSION_MISMATCH: &str = "review-mission-mismatch";
+pub const REASON_COMPLETION_TIP_MISMATCH: &str = "completion-tip-mismatch";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TowerGateBlock {
@@ -316,59 +317,115 @@ pub fn evaluate_mission_gate(
         );
     }
     if !branch.base_is_ancestor {
+        let message = if mission.kind == TowerMissionKind::Artifact {
+            format!(
+                "merge blocked: {} is behind base \"{}\" — run TowerRebase(mission=\"{}\") first, then have the worker run TowerComplete with the current report and key_artifacts at the rebased tip, present that new request for fresh explicit human acceptance of the entire tip, and retry the merge",
+                mission.branch, state.base, mission.id
+            )
+        } else {
+            format!(
+                "merge blocked: {} is behind base \"{}\" — run TowerRebase(mission=\"{}\") first, then retry the merge",
+                mission.branch, state.base, mission.id
+            )
+        };
         return gate_result(
             mission,
-            vec![TowerGateBlock::new(
-                REASON_STALE_BASE,
-                format!(
-                    "merge blocked: {} is behind base \"{}\" — run TowerRebase(mission=\"{}\") first, then retry the merge",
-                    mission.branch, state.base, mission.id
-                ),
-            )],
+            vec![TowerGateBlock::new(REASON_STALE_BASE, message)],
             selected_review,
             review_binding,
             observations,
         );
     }
+    let is_artifact = mission.kind == TowerMissionKind::Artifact;
     let review_block = match selected_review.as_ref() {
-        None => Some(TowerGateBlock::new(
-            REASON_NO_REVIEW,
-            format!(
-                "merge blocked: {} has no review for mission {} — assign a reviewer first",
-                mission.branch, mission.id
-            ),
-        )),
-        Some(review) if review.merge == "hold" => Some(TowerGateBlock::new(
-            REASON_REVIEW_HOLD,
-            format!(
-                "merge blocked: latest review (round {} by {}) is on hold",
-                review.round, review.reviewer
-            ),
-        )),
-        Some(review) if review.status != "clean" => Some(TowerGateBlock::new(
-            REASON_NOT_CLEAN,
-            format!(
-                "merge blocked: latest review (round {} by {}) is \"{}\" — a clean round is required",
-                review.round, review.reviewer, review.status
-            ),
-        )),
-        Some(review) if review.merge != "merge" && !review.merge.is_empty() => {
-            Some(TowerGateBlock::new(
-                REASON_REVIEW_NOT_APPROVED,
+        None => {
+            let message = if is_artifact {
                 format!(
-                    "merge blocked: latest review recommends \"{}\" rather than merge",
-                    review.merge
+                    "merge blocked: {} is waiting for explicit human acceptance — present the key artifacts and explain that approval covers the entire committed tip, then record acceptance with TowerReview(status=\"clean\", merge=\"merge\") only after the user approves; an independent reviewer is not required",
+                    mission.branch
+                )
+            } else {
+                format!(
+                    "merge blocked: {} has no review for mission {} — assign a reviewer first",
+                    mission.branch, mission.id
+                )
+            };
+            Some(TowerGateBlock::new(REASON_NO_REVIEW, message))
+        }
+        Some(review)
+            if is_artifact
+                && (review.reviewer != "tower"
+                    || review.mission.as_deref() != Some(mission.id.as_str())) =>
+        {
+            Some(TowerGateBlock::new(
+                REASON_NO_REVIEW,
+                format!(
+                    "merge blocked: {} is still waiting for mission-matching explicit human acceptance recorded by reviewer=tower — the latest applicable review by {} cannot substitute for it; present the key artifacts and the whole-tip approval scope, and record TowerReview only after the user approves",
+                    mission.branch, review.reviewer
                 ),
             ))
         }
+        Some(review) if review.merge == "hold" => {
+            let message = if is_artifact {
+                format!(
+                    "merge blocked: latest artifact acceptance record (round {} by {}) says hold — do not merge until later clean human acceptance with merge approval supersedes it",
+                    review.round, review.reviewer
+                )
+            } else {
+                format!(
+                    "merge blocked: latest review (round {} by {}) is on hold",
+                    review.round, review.reviewer
+                )
+            };
+            Some(TowerGateBlock::new(REASON_REVIEW_HOLD, message))
+        }
+        Some(review) if review.status != "clean" => {
+            let message = if is_artifact {
+                format!(
+                    "merge blocked: latest artifact feedback (round {} by {}) is \"{}\" — rework and fresh clean human acceptance are required",
+                    review.round, review.reviewer, review.status
+                )
+            } else {
+                format!(
+                    "merge blocked: latest review (round {} by {}) is \"{}\" — a clean round is required",
+                    review.round, review.reviewer, review.status
+                )
+            };
+            Some(TowerGateBlock::new(REASON_NOT_CLEAN, message))
+        }
+        Some(review) if review.merge != "merge" && (!is_artifact || !review.merge.is_empty()) => {
+            let message = if is_artifact {
+                format!(
+                    "merge blocked: latest clean artifact acceptance (round {} by {}) has merge verdict \"{}\" — only explicit human acceptance with merge verdict \"merge\" can pass",
+                    review.round,
+                    review.reviewer,
+                    if review.merge.is_empty() {
+                        "(missing)"
+                    } else {
+                        review.merge.as_str()
+                    }
+                )
+            } else {
+                format!(
+                    "merge blocked: latest review recommends \"{}\" rather than merge",
+                    review.merge
+                )
+            };
+            Some(TowerGateBlock::new(REASON_REVIEW_NOT_APPROVED, message))
+        }
         Some(_) if review_binding == Some(TowerReviewBinding::StaleTip) => {
-            Some(TowerGateBlock::new(
-                REASON_TIP_MOVED,
+            let message = if is_artifact {
+                format!(
+                    "merge blocked: {} moved since the human acceptance — have the worker run TowerComplete with the current report and key_artifacts at the moved tip, present that new request for fresh explicit human acceptance of the entire tip, and retry the merge; rebase never waives artifact acceptance",
+                    mission.branch
+                )
+            } else {
                 format!(
                     "merge blocked: {} moved since the clean review — re-review required",
                     mission.branch
-                ),
-            ))
+                )
+            };
+            Some(TowerGateBlock::new(REASON_TIP_MOVED, message))
         }
         Some(review) if shared_branch && review.mission.is_none() => Some(TowerGateBlock::new(
             REASON_REVIEW_MISSION_MISMATCH,
@@ -387,6 +444,32 @@ pub fn evaluate_mission_gate(
             review_binding,
             observations,
         );
+    }
+    if is_artifact {
+        let tip_mismatch = match (mission.completion_tip.as_deref(), selected_review.as_ref()) {
+            (None, _) => Some(format!(
+                "merge blocked: {} has explicit human acceptance but no recorded completion tip — the acceptance cannot be tied to the delivery the user approved; ask the worker to run TowerComplete at the current tip with key_artifacts, present those key artifacts and the whole-tip approval scope, then record fresh acceptance",
+                mission.branch
+            )),
+            (Some(recorded), Some(review)) if review.reviewed_commit != recorded => {
+                let accepted = &review.reviewed_commit[..review.reviewed_commit.len().min(7)];
+                let recorded = &recorded[..recorded.len().min(7)];
+                Some(format!(
+                    "merge blocked: {} was accepted at {} but its acceptance-request covered {} — the user approved a different tip; ask the worker to run TowerComplete at the current tip with key_artifacts, present those key artifacts and the whole-tip approval scope, then record fresh acceptance",
+                    mission.branch, accepted, recorded
+                ))
+            }
+            _ => None,
+        };
+        if let Some(message) = tip_mismatch {
+            return gate_result(
+                mission,
+                vec![TowerGateBlock::new(REASON_COMPLETION_TIP_MISMATCH, message)],
+                selected_review,
+                review_binding,
+                observations,
+            );
+        }
     }
     let out_of_scope: Vec<String> = branch
         .changed_files
@@ -553,7 +636,7 @@ pub fn add_auto_dependencies(missions: &mut [TowerMission], target_index: usize)
 pub fn assert_scopes_disjoint(missions: &[TowerMission]) -> Result<(), String> {
     for mission in missions
         .iter()
-        .filter(|mission| mission.status.is_open() && mission.kind == TowerMissionKind::Build)
+        .filter(|mission| mission.status.is_open() && mission.kind != TowerMissionKind::Survey)
     {
         for raw in &mission.scope {
             if scope_stem(raw).is_empty() {
@@ -567,7 +650,7 @@ pub fn assert_scopes_disjoint(missions: &[TowerMission]) -> Result<(), String> {
 
     let builds: Vec<&TowerMission> = missions
         .iter()
-        .filter(|mission| mission.status.is_open() && mission.kind == TowerMissionKind::Build)
+        .filter(|mission| mission.status.is_open() && mission.kind != TowerMissionKind::Survey)
         .collect();
     for (index, left) in builds.iter().enumerate() {
         for right in &builds[index + 1..] {

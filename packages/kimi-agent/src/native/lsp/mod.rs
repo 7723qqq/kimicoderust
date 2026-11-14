@@ -1,15 +1,11 @@
-//! Native Language Server process management.
-
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 use which::which;
 
-/// Language server management tool
 pub struct LanguageServerManager;
 
 impl LanguageServerManager {
-    /// Look up the language server executable for a language on this system
     pub fn locate_server(language: &str) -> Option<String> {
         let binary_name = match language {
             "typescript" | "javascript" => "typescript-language-server",
@@ -22,7 +18,6 @@ impl LanguageServerManager {
             .map(|p| p.to_string_lossy().to_string())
     }
 
-    /// Start the given language server process
     pub fn start_server(binary_path: &str) -> Result<Child, std::io::Error> {
         Command::new(binary_path)
             .stdin(Stdio::piped())
@@ -31,7 +26,6 @@ impl LanguageServerManager {
             .spawn()
     }
 
-    /// Shut the language server child process down gracefully
     pub async fn stop_server(child: &mut Child) -> Result<(), std::io::Error> {
         let _ = child.kill().await;
         let _ = child.wait().await?;
@@ -39,14 +33,19 @@ impl LanguageServerManager {
     }
 }
 
-/// LSP protocol message frame encoder and decoder
+pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 pub struct LspFraming;
 
 impl LspFraming {
-    /// Encode a JSON payload into a standard LSP protocol byte stream with a
-    /// Content-Length header
-    pub fn encode(payload: &serde_json::Value) -> Result<Vec<u8>, serde_json::Error> {
-        let body = serde_json::to_vec(payload)?;
+    pub fn encode(payload: &serde_json::Value) -> Result<Vec<u8>, String> {
+        let body = serde_json::to_vec(payload).map_err(|error| error.to_string())?;
+        if body.len() > MAX_FRAME_BYTES {
+            return Err(format!(
+                "message body of {} bytes exceeds the {MAX_FRAME_BYTES}-byte frame limit",
+                body.len()
+            ));
+        }
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
         let mut msg = Vec::with_capacity(header.len() + body.len());
         msg.extend_from_slice(header.as_bytes());
@@ -54,30 +53,21 @@ impl LspFraming {
         Ok(msg)
     }
 
-    /// Try to decode one complete LSP JSON message out of the byte-stream buffer
-    /// (handling both a coalesced batch and a split frame)
     pub fn decode(buffer: &mut Vec<u8>) -> Result<Option<serde_json::Value>, String> {
         let header_end_marker = b"\r\n\r\n";
         let marker_pos = match buffer.windows(4).position(|w| w == header_end_marker) {
             Some(pos) => pos,
-            None => return Ok(None),
-        };
-
-        let header_bytes = &buffer[..marker_pos];
-        let header_str = std::str::from_utf8(header_bytes)
-            .map_err(|e| format!("Invalid UTF-8 in LSP headers: {e}"))?;
-
-        let mut content_length: Option<usize> = None;
-        for line in header_str.split("\r\n") {
-            if let Some(val_str) = line.strip_prefix("Content-Length: ") {
-                content_length = val_str.trim().parse::<usize>().ok();
+            None => {
+                if buffer.len() > MAX_FRAME_BYTES {
+                    return Err("header exceeds the frame limit without a terminator".into());
+                }
+                return Ok(None);
             }
-        }
-
-        let length = match content_length {
-            Some(len) => len,
-            None => return Err("Missing or invalid Content-Length header in LSP frame".into()),
         };
+
+        let header_str = std::str::from_utf8(&buffer[..marker_pos])
+            .map_err(|e| format!("Invalid UTF-8 in LSP headers: {e}"))?;
+        let length = parse_content_length(header_str)?;
 
         let body_start = marker_pos + 4;
         let body_end = body_start + length;
@@ -95,9 +85,27 @@ impl LspFraming {
     }
 }
 
+fn parse_content_length(header: &str) -> Result<usize, String> {
+    let malformed = || format!("malformed LSP frame header: {header:?}");
+    let prefix = header.get(..15).ok_or_else(malformed)?;
+    if !prefix.eq_ignore_ascii_case("Content-Length:") {
+        return Err(malformed());
+    }
+    let value = header.get(15..).ok_or_else(malformed)?.trim();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(malformed());
+    }
+    let length: usize = value
+        .parse()
+        .map_err(|_| format!("invalid Content-Length: {value}"))?;
+    if length > MAX_FRAME_BYTES {
+        return Err(format!("invalid Content-Length: {value}"));
+    }
+    Ok(length)
+}
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// LSP client session handle (wrapping the child process and its two-way pipes)
 pub struct LspClientSession {
     child: Child,
     stdin: tokio::process::ChildStdin,
@@ -108,8 +116,6 @@ pub struct LspClientSession {
 }
 
 impl LspClientSession {
-    /// Take over the stdin/stdout of an already-started language server child
-    /// process to build a session
     pub fn from_child(mut child: Child) -> Result<Self, std::io::Error> {
         let stdin = child.stdin.take().ok_or_else(|| {
             std::io::Error::new(
@@ -134,7 +140,6 @@ impl LspClientSession {
         })
     }
 
-    /// Send a one-way notification (e.g. initialized, textDocument/didOpen — no id)
     pub async fn send_notification(
         &mut self,
         method: &str,
@@ -152,7 +157,6 @@ impl LspClientSession {
         Ok(())
     }
 
-    /// Send a request with an auto-incrementing id and return the id assigned
     pub async fn send_request(
         &mut self,
         method: &str,
@@ -174,8 +178,6 @@ impl LspClientSession {
         Ok(id)
     }
 
-    /// Try to parse a chunk out of the buffer, or read one asynchronously from
-    /// the pipe
     pub async fn read_message(&mut self) -> Result<Option<serde_json::Value>, String> {
         if let Some(msg) = LspFraming::decode(&mut self.buffer)? {
             return Ok(Some(msg));
@@ -196,8 +198,6 @@ impl LspClientSession {
         LspFraming::decode(&mut self.buffer)
     }
 
-    /// Loop until the response for a given request id arrives, erroring on
-    /// timeout
     pub async fn wait_response(
         &mut self,
         target_id: i64,
@@ -227,13 +227,10 @@ impl LspClientSession {
         Err(format!("Timeout waiting for LSP response ID {target_id}"))
     }
 
-    /// Take the accumulated list of server notifications
     pub fn take_pending_notifications(&mut self) -> Vec<serde_json::Value> {
         std::mem::take(&mut self.pending_notifications)
     }
 
-    /// Perform the handshake: send the initialize request, then the initialized
-    /// notification
     pub async fn initialize(
         &mut self,
         root_path: &Path,
@@ -261,8 +258,6 @@ impl LspClientSession {
 
         let response = self.wait_response(req_id, timeout).await?;
 
-        // Once the initialize response arrives, the spec requires sending the
-        // initialized notification immediately to complete the handshake
         self.send_notification("initialized", serde_json::json!({}))
             .await
             .map_err(|e| format!("Failed to send initialized notification: {e}"))?;
@@ -270,7 +265,6 @@ impl LspClientSession {
         Ok(response)
     }
 
-    /// Tell the server a document is open (syncing its content and language)
     pub async fn notify_did_open(
         &mut self,
         file_path: &Path,
@@ -289,7 +283,6 @@ impl LspClientSession {
         self.send_notification("textDocument/didOpen", params).await
     }
 
-    /// Issue a go-to-definition request to the server
     pub async fn goto_definition(
         &mut self,
         file_path: &Path,
@@ -316,7 +309,6 @@ impl LspClientSession {
         self.wait_response(req_id, timeout).await
     }
 
-    /// Issue a find-references request to the server
     pub async fn find_references(
         &mut self,
         file_path: &Path,
@@ -347,7 +339,6 @@ impl LspClientSession {
         self.wait_response(req_id, timeout).await
     }
 
-    /// Issue a hover-info request to the server
     pub async fn get_hover(
         &mut self,
         file_path: &Path,
@@ -374,7 +365,6 @@ impl LspClientSession {
         self.wait_response(req_id, timeout).await
     }
 
-    /// Issue a document-symbols request to the server
     pub async fn get_document_symbols(
         &mut self,
         file_path: &Path,
@@ -395,7 +385,6 @@ impl LspClientSession {
         self.wait_response(req_id, timeout).await
     }
 
-    /// Close the session and wait for the child process to exit
     pub async fn shutdown(mut self) -> Result<(), std::io::Error> {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await?;
@@ -403,7 +392,6 @@ impl LspClientSession {
     }
 }
 
-/// Normalize a local file path into a standard LSP `file:///` URI
 pub fn path_to_uri(path: &Path) -> String {
     let raw = path.to_string_lossy().replace('\\', "/");
     if raw.starts_with('/') {
@@ -455,12 +443,11 @@ mod tests {
         let encoded = LspFraming::encode(&payload).unwrap();
 
         let mut buffer = Vec::new();
-        // Feed the first 10 bytes (the frame is not complete yet)
+
         buffer.extend_from_slice(&encoded[..10]);
         let res1 = LspFraming::decode(&mut buffer).unwrap();
         assert!(res1.is_none());
 
-        // Complete the remaining bytes
         buffer.extend_from_slice(&encoded[10..]);
         let res2 = LspFraming::decode(&mut buffer).unwrap();
         assert_eq!(res2, Some(payload));
@@ -476,15 +463,68 @@ mod tests {
         combined.extend_from_slice(&LspFraming::encode(&msg2).unwrap());
 
         let mut buffer = combined;
-        // The first read parses the first frame
+
         let res1 = LspFraming::decode(&mut buffer).unwrap();
         assert_eq!(res1, Some(msg1));
 
-        // The second read parses the second frame
         let res2 = LspFraming::decode(&mut buffer).unwrap();
         assert_eq!(res2, Some(msg2));
 
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_lsp_framing_rejects_oversized_body() {
+        let payload = json!({ "pad": "x".repeat(MAX_FRAME_BYTES + 1) });
+        let error = LspFraming::encode(&payload).unwrap_err();
+        assert!(
+            error.contains("exceeds the"),
+            "the limit is reported, got {error:?}"
+        );
+        assert!(LspFraming::encode(&json!({ "pad": "x".repeat(1024) })).is_ok());
+    }
+
+    #[test]
+    fn test_lsp_framing_rejects_oversized_header() {
+        let mut buffer = vec![b'C'; MAX_FRAME_BYTES + 1];
+        let error = LspFraming::decode(&mut buffer).unwrap_err();
+        assert_eq!(error, "header exceeds the frame limit without a terminator");
+    }
+
+    #[test]
+    fn test_lsp_framing_rejects_malformed_headers() {
+        for header in [
+            "Content-Type: application/json",
+            "Content-Length: abc",
+            "Content-Length: -1",
+            "Content-Length: 2\r\nContent-Type: application/json",
+        ] {
+            let mut buffer = format!("{header}\r\n\r\n{{}}").into_bytes();
+            let error = LspFraming::decode(&mut buffer).unwrap_err();
+            assert!(
+                error.starts_with("malformed LSP frame header:"),
+                "{header:?} -> {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lsp_framing_rejects_oversized_content_length() {
+        let mut buffer = format!("Content-Length: {}\r\n\r\n", MAX_FRAME_BYTES + 1).into_bytes();
+        let error = LspFraming::decode(&mut buffer).unwrap_err();
+        assert_eq!(
+            error,
+            format!("invalid Content-Length: {}", MAX_FRAME_BYTES + 1)
+        );
+    }
+
+    #[test]
+    fn test_lsp_framing_accepts_case_insensitive_header_name() {
+        let mut buffer = b"content-length: 2\r\n\r\n{}".to_vec();
+        assert_eq!(
+            LspFraming::decode(&mut buffer).unwrap(),
+            Some(json!({}))
+        );
     }
 
     #[test]

@@ -1,24 +1,13 @@
-/// List directory — compact 2-level directory tree for LLM context.
-///
-/// Mirrors the TS `listDirectory` helper in
-/// `packages/agent-core-v2/src/agent/profile/context.ts`.
-///
-/// Width caps keep the system-prompt token budget bounded:
-///   - Depth 0 (root):  up to LIST_DIR_ROOT_WIDTH entries
-///   - Depth 1 (children of root dirs): up to LIST_DIR_CHILD_WIDTH entries
-///   - Truncated levels show "... and N more" so the LLM knows more exists.
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
 use std::fs;
 use std::path::Path;
 
-/// Maximum number of entries at the root level.
 pub const LIST_DIR_ROOT_WIDTH: usize = 30;
-/// Maximum number of entries per child directory.
+
 pub const LIST_DIR_CHILD_WIDTH: usize = 10;
 
-/// Result of a list-directory operation.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct ListDirectoryResult {
@@ -26,7 +15,6 @@ pub struct ListDirectoryResult {
     pub error: Option<String>,
 }
 
-/// Configuration for list_directory.
 #[derive(Default)]
 pub struct ListDirectoryConfig {
     pub path: Option<String>,
@@ -39,8 +27,6 @@ struct Entry {
     is_dir: bool,
 }
 
-/// Collect sorted entries from a directory, capped at `max_width`.
-/// Returns (entries, total_count, readable).
 fn collect_entries(dir_path: &Path, max_width: usize) -> (Vec<Entry>, usize, bool) {
     let mut all: Vec<Entry> = Vec::new();
 
@@ -48,7 +34,7 @@ fn collect_entries(dir_path: &Path, max_width: usize) -> (Vec<Entry>, usize, boo
         Ok(iter) => {
             for entry in iter.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                // Use the entry's file_type to avoid an extra stat call.
+
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
                 all.push(Entry { name, is_dir });
             }
@@ -60,7 +46,6 @@ fn collect_entries(dir_path: &Path, max_width: usize) -> (Vec<Entry>, usize, boo
 
     let total = all.len();
 
-    // Sort: directories first, then alphabetically (case-insensitive).
     all.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
@@ -80,9 +65,6 @@ fn should_collapse_directory(entry: &Entry, collapse_hidden_dirs: bool) -> bool 
     collapse_hidden_dirs && entry.is_dir && entry.name.starts_with('.')
 }
 
-/// Return a 2-level tree listing of `work_dir` suitable for inclusion in a
-/// tool error message. Returns `"(empty directory)"` if the directory is
-/// empty, or an error marker line if the directory itself is unreadable.
 pub fn list_directory(config: &ListDirectoryConfig) -> ListDirectoryResult {
     let work_dir = config
         .path
@@ -187,14 +169,14 @@ mod tests {
 
     fn setup_test_dir() -> TempDir {
         let dir = TempDir::new().unwrap();
-        // Create some files and directories.
+
         fs::write(dir.path().join("README.md"), "# Test").unwrap();
         fs::write(dir.path().join("package.json"), "{}").unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src").join("main.ts"), "// main").unwrap();
         fs::create_dir(dir.path().join("test")).unwrap();
         fs::write(dir.path().join("test").join("main.test.ts"), "// test").unwrap();
-        // Hidden directory (collapsed by default).
+
         fs::create_dir(dir.path().join(".git")).unwrap();
         fs::write(dir.path().join(".git").join("config"), "").unwrap();
         dir
@@ -210,12 +192,12 @@ mod tests {
         let result = list_directory(&config);
         assert!(result.error.is_none());
         let output = result.output;
-        // Should contain the directories and files we created.
+
         assert!(output.contains("src/"));
         assert!(output.contains("test/"));
         assert!(output.contains("README.md"));
         assert!(output.contains("package.json"));
-        // .git should be listed when not collapsing hidden dirs.
+
         assert!(output.contains(".git/"));
     }
 
@@ -229,9 +211,9 @@ mod tests {
         let result = list_directory(&config);
         assert!(result.error.is_none());
         let output = result.output;
-        // .git should be listed but its children should not be expanded.
+
         assert!(output.contains(".git/"));
-        // The children of .git should not appear (collapsed).
+
         assert!(!output.contains("config"));
     }
 
@@ -277,7 +259,7 @@ mod tests {
     #[test]
     fn test_list_directory_child_truncation() {
         let dir = TempDir::new().unwrap();
-        // Create a directory with more than LIST_DIR_CHILD_WIDTH files.
+
         let sub = dir.path().join("many");
         fs::create_dir(&sub).unwrap();
         for i in 0..(LIST_DIR_CHILD_WIDTH + 5) {
@@ -290,7 +272,7 @@ mod tests {
         let result = list_directory(&config);
         assert!(result.error.is_none());
         let output = result.output;
-        // Should show truncation message.
+
         assert!(output.contains("... and 5 more"));
     }
 }

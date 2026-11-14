@@ -26,7 +26,7 @@
           "description": "ACP stdio protocol server"
         }
       ],
-      "fingerprint": "dbf188b6518afcef"
+      "fingerprint": "dc606b4b0bbc56a3"
     },
     {
       "id": "node-sdk",
@@ -49,7 +49,7 @@
           "description": "Public SDK package"
         }
       ],
-      "fingerprint": "d5597650a9f55915"
+      "fingerprint": "d6d3119e1a651b6f"
     },
     {
       "id": "kimi-code",
@@ -143,7 +143,7 @@
       "source": "packages/i18n-catalog/src",
       "layer": "shared",
       "deps": [],
-      "fingerprint": "fb233b3dd7834d26"
+      "fingerprint": "51a68474ad1bea20"
     },
     {
       "id": "i18n-runtime",
@@ -218,7 +218,7 @@
         "kimi-ui-core"
       ],
       "_depsNote": "The one crate allowed to name both sides: it builds the engine session and hands it to the widget stack, which is why neither kimi-tui-app nor kimi-agent links the other. Its edges are the two crates it composes (kimi-agent for the session, projection and native toolset; kimi-tui-app for UiState, the UiTransport seam and run_terminal) plus kimi-ui-core for the EntryOp vocabulary it applies. A composition root is an app-layer module by the same rule that puts kimi-code there: it may depend on the engine, never the reverse.",
-      "fingerprint": "89dd8b21409cc0ea"
+      "fingerprint": "a0bc6f8ffbaa9c6a"
     },
     {
       "id": "vis-server",

@@ -41,7 +41,10 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    MediaRef { file_id: String, kind: MediaKind },
+    MediaRef {
+        file_id: String,
+        kind: MediaKind,
+    },
     ImageUrl {
         url: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,7 +241,6 @@ impl Default for AntigravityLimits {
     }
 }
 
-
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     #[serde(default)]
@@ -387,7 +389,6 @@ pub struct TelemetryContext {
     pub enabled_plugins: Option<String>,
 }
 
-
 impl std::fmt::Debug for NativeLlmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeLlmConfig")
@@ -453,26 +454,39 @@ pub trait LLM: Send + Sync {
     fn thinking_effort(&self) -> Option<&str> {
         None
     }
+    fn last_trace_id(&self) -> Option<String> {
+        None
+    }
     fn media_target(&self) -> Option<crate::types::MediaTarget> {
         None
     }
     fn media_upload_credential(&self) -> Option<crate::types::CredentialFuture<'_>> {
         None
     }
-    fn set_tool_call_ids(
-        &self,
-        _ledger: Arc<crate::tool_call_id::ToolCallIdNormalizer>,
-    ) {
+    fn request_parameters(&self) -> Option<LlmRequestParameters> {
+        None
     }
+    fn effective_max_tokens(&self, _params: &LLMChatParams) -> Option<u32> {
+        None
+    }
+    fn set_tool_call_ids(&self, _ledger: Arc<crate::tool_call_id::ToolCallIdNormalizer>) {}
     fn set_stream_agent_id(&self, _agent_id: &str) {}
     fn set_turn_watch(&self, _watch: Option<Arc<crate::watch::TurnWatchState>>) {}
+    fn take_interrupted_response(&self) -> Option<LLMChatResponse> {
+        None
+    }
     fn chat(
         &self,
         params: LLMChatParams,
-    ) -> BoxFuture<
-        '_,
-        Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>,
-    >;
+    ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LlmRequestParameters {
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub beta_api: Option<bool>,
+    pub thinking_keep: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -482,6 +496,24 @@ pub struct LLMChatParams {
     pub cancel: Option<tokio_util::sync::CancellationToken>,
     pub used_context_tokens: Option<u32>,
     pub max_context_tokens: Option<u32>,
+
+    pub max_output_tokens: Option<u32>,
+    pub max_output_size: Option<u32>,
+}
+
+impl LLMChatParams {
+    pub fn effective_max_output_tokens(&self) -> Option<u32> {
+        self.max_output_size.or(self.max_output_tokens)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDescription {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -498,6 +530,8 @@ pub struct LLMMessage {
     pub prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolDescription>,
 }
 
 impl LLMMessage {
@@ -510,6 +544,7 @@ impl LLMMessage {
             tool_call_id: None,
             prompt_id: None,
             origin: None,
+            tools: Vec::new(),
         }
     }
 
@@ -534,6 +569,7 @@ impl LLMMessage {
             tool_call_id: Some(tool_call_id.into()),
             prompt_id: None,
             origin: None,
+            tools: Vec::new(),
         }
     }
 }
@@ -564,9 +600,6 @@ pub struct ArgsParseError {
     pub raw: String,
     pub error: String,
 }
-
-
-
 
 pub type CredentialFuture<'a> = BoxFuture<'a, Result<String, String>>;
 

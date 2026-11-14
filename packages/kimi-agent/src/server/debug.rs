@@ -1,8 +1,3 @@
-//! Debug RPC and reflection surface for Kimi Agent (/api/v1/debug/*).
-//!
-//! Provides service reflection, business snapshot endpoints, and dynamic RPC dispatch
-//! for `apps/kimi-inspect` and developer introspection tools.
-
 use serde_json::{Value, json};
 
 use crate::server::HttpServer;
@@ -31,7 +26,6 @@ fn session_cwd(store: &SqliteSessionStore, session_id: &str) -> String {
         })
 }
 
-/// The live engine -> workspace -> session graph for the debug graph service.
 fn debug_graph(server: &HttpServer) -> (Vec<Value>, Vec<Value>) {
     let mut nodes = vec![json!({ "id": "engine", "kind": "engine", "label": "kimi-agent" })];
     let mut edges = Vec::new();
@@ -63,10 +57,6 @@ fn debug_graph(server: &HttpServer) -> (Vec<Value>, Vec<Value>) {
     (nodes, edges)
 }
 
-/// `IModelCatalog.ping`: one minimal chat request to `model`, timed, carrying
-/// the provider's own error text on failure. It reuses the engine's LLM
-/// selection (`ServerEngine::llm_for_model`) instead of a second transport, so
-/// a ping exercises the same base URL, credential and protocol a turn would.
 async fn ping_model(engine: &ServerEngine, model: &str) -> Value {
     let Some(llm) = engine.llm_for_model(model).await else {
         return json!({
@@ -103,8 +93,6 @@ async fn ping_model(engine: &ServerEngine, model: &str) -> Value {
     }
 }
 
-/// The v2 `TokenUsage` shape kimi-inspect reads: `input` is the prompt total,
-/// `inputOther` the uncached remainder the engine's `input_tokens` holds.
 fn usage_wire(usage: &crate::rpc::types::TokenUsage) -> Value {
     json!({
         "input": usage.input_tokens + usage.input_cache_read + usage.input_cache_creation,
@@ -115,11 +103,6 @@ fn usage_wire(usage: &crate::rpc::types::TokenUsage) -> Value {
     })
 }
 
-/// `IModelService.list`: the raw `[models.*]` records keyed by alias id. The
-/// inspector groups models by `providerId` when `listModels`' own `provider`
-/// is absent, so the resolved provider id is the field that matters here.
-/// Credentials are never projected: the record shape has an `apiKey` slot and
-/// this surface has no reason to fill it.
 fn model_records(config: &crate::config::KimiConfig) -> Value {
     let mut records = serde_json::Map::new();
     for (id, alias) in &config.models {
@@ -151,7 +134,6 @@ fn model_records(config: &crate::config::KimiConfig) -> Value {
     Value::Object(records)
 }
 
-/// Describe wire channels matching `ChannelDescriptor` in `apps/kimi-inspect`.
 pub fn describe_all_channels() -> Value {
     json!([
         {
@@ -262,12 +244,8 @@ pub fn describe_all_channels() -> Value {
     ])
 }
 
-/// The engine's scope depth: app -> workspace -> session. The DI surface reports
-/// it as the cascade "tier" count.
 const SCOPE_TIER_COUNT: usize = 3;
 
-/// The live scope tree the DI view renders: the app scope owns one unit per
-/// registered service, workspaces own their sessions.
 fn build_ledger_tree(server: &HttpServer) -> Value {
     let mut service_units: Vec<Value> = Vec::new();
     if let Some(services) = describe_all_channels().as_array() {
@@ -315,7 +293,7 @@ fn build_ledger_tree(server: &HttpServer) -> Value {
             "children": owned,
         }));
     }
-    // A session whose workspace row is gone still belongs to the tree.
+
     for (_, owned) in by_workspace {
         children.extend(owned);
     }
@@ -330,10 +308,6 @@ fn build_ledger_tree(server: &HttpServer) -> Value {
     })
 }
 
-/// Scope-lifecycle history derived from the persisted sessions: each session is
-/// a scope provided on creation (and unprovided when archived). The Rust engine
-/// has no DI cascade journal, so this is the real persisted lifecycle, not a
-/// fabricated teardown trace.
 fn session_lifecycle_history(server: &HttpServer) -> Value {
     let mut entries: Vec<Value> = Vec::new();
     for (seq, session) in server
@@ -376,8 +350,6 @@ fn session_lifecycle_history(server: &HttpServer) -> Value {
     json!(entries)
 }
 
-/// Sessions blocked on a live interaction: each pending question/approval is a
-/// unit waiting for its missing input.
 fn pending_cascade_groups(server: &HttpServer) -> Value {
     let interactions = server.interaction_manager();
     let mut groups: Vec<Value> = Vec::new();
@@ -409,17 +381,14 @@ fn pending_cascade_groups(server: &HttpServer) -> Value {
     json!(groups)
 }
 
-/// Handle `/api/v1/debug/*` routes.
 pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Option<HttpResponse> {
     let path = req.path.trim_end_matches('/');
     let req_id = req.request_id();
 
-    // 1. Channel descriptor listing
     if path == "/api/v1/debug/channels" {
         return Some(HttpResponse::envelope_ok(&describe_all_channels(), &req_id));
     }
 
-    // 2. Business snapshot routes
     if path == "/api/v1/debug/workspaces" {
         let list = server.store().list_workspaces().unwrap_or_default();
         return Some(HttpResponse::envelope_ok(
@@ -455,8 +424,8 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                 },
                 "lifecycle": "active",
                 "program": Value::Null,
-                // Placeholders: no runtime/program registry exists server-side;
-                // only `metadata` and `sessions` below are read from the store.
+
+
                 "runtimes": [],
                 "sessions": matching_sessions,
             }),
@@ -507,10 +476,7 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                 .clone()
                 .unwrap_or_else(|| encode_workdir_key(&cwd));
             let available = server.engine().is_some();
-            // Contract-shaped constants, not measured values: a standalone
-            // engine has exactly one in-process local environment, so the ids,
-            // generation and capabilities are literals rather than probed
-            // facts. `available` is the only field derived from real state.
+
             let status = if available { "ready" } else { "unavailable" };
             let data = if method == "environment-binding" {
                 json!({
@@ -550,8 +516,6 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
         }
     }
 
-    // 3. Dynamic service dispatcher:
-    // /api/v1/debug[/session/:sid[/agent/:aid]]/:service/:method
     let subpath = path.strip_prefix("/api/v1/debug/")?;
     let segments: Vec<&str> = subpath.split('/').collect();
     let (service, method, session_id) = match segments.as_slice() {
@@ -580,8 +544,7 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let config = server.config().await;
-            // `userValue` is the configured section (or the whole document for
-            // an empty section); there is no separate "default" tier to report.
+
             let user_value = match section {
                 "" => serde_json::to_value(&config).unwrap_or(Value::Null),
                 "agent" => serde_json::to_value(&config.agent).unwrap_or(Value::Null),
@@ -620,15 +583,7 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                 .and_then(|a| a.first())
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            // A standalone server keeps no per-session runtime to materialize:
-            // every session-scoped route reads the store on demand, so
-            // "resumed" means the session exists and is reachable. A missing
-            // one is an error rather than a silent no-op — the caller's next
-            // step is a session-scoped call that would fail anyway. 400, not
-            // 404: this surface reserves 404 for an unknown method.
-            // v2 `resume` funnels every resume of one id through the same
-            // lifecycle chain (`serializeLifecycle`): two concurrent resumes
-            // must not interleave their scope rebuild / watermark reset.
+
             let slot = server.resume_slot(session_id);
             let _guard = slot.lock().await;
             let session = match server.store().get_session(session_id) {
@@ -642,11 +597,7 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                     ));
                 }
             };
-            // v2 `sessionMetadataService.load`: importing a session written by
-            // an earlier build folds the legacy title/workDir fields into the
-            // normalized columns and writes the document back before anyone
-            // reads it. A failed import must not fail the resume (v2 logs it
-            // and keeps the load).
+
             if let Err(error) = server.store().migrate_legacy_session_metadata(session_id) {
                 tracing::warn!(
                     session_id,
@@ -656,9 +607,6 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
             }
             match session {
                 Some(session) => {
-                    // v2 `resume`: a closed session comes back with
-                    // `reclaimed`, and the reopened scope's first read is the
-                    // truth, so the journal watermark restarts here.
                     if let Some(engine) = server.engine() {
                         engine.observe_journal_head(session_id);
                     }
@@ -701,8 +649,6 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                 })
                 .collect();
             if models.is_empty() {
-                // No `[models]` aliases: report the active engine model so the
-                // inspector still has something real to show.
                 let active = server
                     .engine()
                     .map(|e| e.model_name().to_string())
@@ -722,9 +668,7 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
         ("modelCatalog", "listProviders") => {
             let config = server.config().await;
             let has_cached_token = |provider: &str| server.has_cached_token(provider);
-            // The contract-shaped projection (`ProviderCatalogItem`): the
-            // inspector's provider badge and default marker read `status` and
-            // `default_model`, which the REST route already serves.
+
             crate::server::model_catalog::providers(&config, &has_cached_token)["items"].clone()
         }
         ("modelCatalog", "ping") => {
@@ -787,12 +731,16 @@ pub async fn handle_debug_route(server: &HttpServer, req: &HttpRequest) -> Optio
                 .lane_session_ids()
                 .into_iter()
                 .map(|sid| {
-                    let (all, per_type) = hub.bus_for(&sid).subscriber_snapshot();
-                    json!({ "scopePath": sid, "all": all, "perType": per_type })
+                    let (all, per_type, per_agent) = hub.bus_for(&sid).subscriber_snapshot();
+                    json!({
+                        "scopePath": sid,
+                        "all": all,
+                        "perType": per_type,
+                        "perAgent": per_agent,
+                    })
                 })
                 .collect();
-            // A live WS connection is the subscriber behind every lane it
-            // registered; `unit`/`label` name that connection.
+
             let subscriptions: Vec<Value> = hub
                 .connections()
                 .into_iter()
@@ -1015,7 +963,6 @@ mod tests {
     async fn test_debug_surface_endpoints() {
         let server = HttpServer::in_memory().unwrap().with_debug_endpoints(true);
 
-        // 1. GET /api/v1/debug/channels
         let res_channels = server
             .handle_request(&HttpRequest {
                 method: "GET".into(),
@@ -1033,7 +980,6 @@ mod tests {
         assert!(data.iter().any(|c| c["name"] == "sessionIndex"));
         assert!(data.iter().any(|c| c["name"] == "debugEventsService"));
 
-        // 2. GET /api/v1/debug/workspaces
         let res_ws = server
             .handle_request(&HttpRequest {
                 method: "GET".into(),
@@ -1048,7 +994,6 @@ mod tests {
         assert_eq!(val_ws["code"], 0);
         assert!(val_ws["data"]["workspaces"].is_array());
 
-        // 3. POST /api/v1/debug/configService/getConfig
         let res_cfg = server
             .handle_request(&HttpRequest {
                 method: "POST".into(),
@@ -1062,7 +1007,6 @@ mod tests {
         let val_cfg: Value = serde_json::from_slice(&res_cfg.body).unwrap();
         assert_eq!(val_cfg["code"], 0);
 
-        // 4. POST /api/v1/debug/modelCatalog/listModels
         let res_models = server
             .handle_request(&HttpRequest {
                 method: "POST".into(),
@@ -1077,7 +1021,6 @@ mod tests {
         assert_eq!(val_models["code"], 0);
         assert!(!val_models["data"].as_array().unwrap().is_empty());
 
-        // 5. POST /api/v1/debug/session/s1/agent/main/agentLoopService/status
         let res_agent = server
             .handle_request(&HttpRequest {
                 method: "POST".into(),
@@ -1093,10 +1036,6 @@ mod tests {
         assert_eq!(val_agent["data"]["status"], "idle");
     }
 
-    /// The channel descriptor is the wire protocol kimi-inspect loads before
-    /// it can call anything: every advertised `(service, method)` must dispatch,
-    /// and every dispatched method must be advertised. Drift in either
-    /// direction silently breaks the inspector's panels, so this is the gate.
     #[tokio::test]
     async fn debug_channel_descriptor_matches_dispatch() {
         let server = HttpServer::in_memory().unwrap().with_debug_endpoints(true);
@@ -1109,7 +1048,6 @@ mod tests {
             }
         }
 
-        // Advertised => must dispatch (a 404 is the "unknown debug method" 404).
         for (service, method) in &advertised {
             let res = server
                 .handle_request(&HttpRequest {
@@ -1126,8 +1064,6 @@ mod tests {
             );
         }
 
-        // Dispatched => must be advertised. Mirrors the match arms in
-        // `handle_debug_route`; keep this list in sync with them.
         let dispatched: &[(&str, &str)] = &[
             ("configService", "getConfig"),
             ("configService", "inspect"),
@@ -1166,13 +1102,14 @@ mod tests {
         }
     }
 
-    /// `debugEventsService.subscriptions` must report the live hub, not an
-    /// empty placeholder: a lane with a bus subscriber shows up in `buses`,
-    /// and a live WS connection bumps `globalListeners`.
     #[tokio::test]
     async fn debug_event_subscriptions_reflect_live_hub() {
         let server = HttpServer::in_memory().unwrap().with_debug_endpoints(true);
         let _bus_sub = server.hub().bus_for("sess-live").subscribe(|_| {});
+        let _agent_sub = server
+            .hub()
+            .bus_for("sess-live")
+            .subscribe_for_agent("main", |_| {});
         let _conn = server.hub().attach();
 
         let res = server
@@ -1194,10 +1131,10 @@ mod tests {
             .find(|b| b["scopePath"] == "sess-live")
             .expect("sess-live bus present");
         assert!(lane["all"].as_u64().unwrap() >= 1);
+        assert!(lane["perType"].is_object(), "{lane}");
+        assert_eq!(lane["perAgent"]["main"], 1, "{lane}");
     }
 
-    /// `debugLedgerService.tree` reflects the live scopes: the app scope lists
-    /// the registered services and a created session appears as a child node.
     #[tokio::test]
     async fn debug_ledger_tree_reflects_live_scopes() {
         let server = HttpServer::in_memory().unwrap().with_debug_endpoints(true);
@@ -1227,8 +1164,6 @@ mod tests {
         assert!(has_session, "session node missing from ledger tree: {tree}");
     }
 
-    /// `debugCascadeService.history` reports the real persisted scope lifecycle
-    /// and `pending` reports a live waiting question.
     #[tokio::test]
     async fn debug_cascade_history_and_pending_are_real() {
         let server = HttpServer::in_memory().unwrap().with_debug_endpoints(true);
@@ -1239,6 +1174,8 @@ mod tests {
                 question_id: "q-cas".into(),
                 turn_id: "1".into(),
                 tool_call_id: "call-1".into(),
+                agent_id: None,
+                session_id: None,
                 background: false,
                 timeout_ms: None,
                 questions: vec![crate::rpc::types::AskQuestionItem {
@@ -1312,7 +1249,6 @@ mod tests {
         );
         *server.config_override.lock().await = Some(config);
 
-        // `configService.inspect` returns the configured section, not null.
         let res = server
             .handle_request(&HttpRequest {
                 method: "POST".into(),
@@ -1326,7 +1262,6 @@ mod tests {
         let val: Value = serde_json::from_slice(&res.body).unwrap();
         assert_eq!(val["data"]["userValue"]["effort"], "high");
 
-        // `modelCatalog.listProviders` lists the configured provider.
         let res = server
             .handle_request(&HttpRequest {
                 method: "POST".into(),
@@ -1371,9 +1306,6 @@ mod tests {
             .await
     }
 
-    /// An engine that resolves no model: the ping's "nothing to send from"
-    /// paths need a real `ServerEngine`, and every other field is irrelevant
-    /// to them.
     fn engine_without_a_model(
         store: Arc<SqliteSessionStore>,
         hub: Arc<crate::server::hub::EventHub>,
@@ -1406,6 +1338,7 @@ mod tests {
                 session_id: None,
                 secondary_model: None,
                 image_read_byte_budget: None,
+                llm_request_byte_budget: None,
                 image_max_edge_px: None,
                 model_capabilities: None,
                 skill_dirs: Vec::new(),
@@ -1418,9 +1351,6 @@ mod tests {
         )
     }
 
-    /// `modelService.list` projects the raw `[models.*]` records the inspector
-    /// groups by, and `sessionManager.resume` reports a real session as
-    /// resumed while refusing an unknown one.
     #[tokio::test]
     async fn debug_model_records_and_session_resume_are_real() {
         let server = HttpServer::in_memory().unwrap().with_debug_endpoints(true);
@@ -1453,9 +1383,9 @@ model = "gpt-y"
         assert_eq!(records["alias-2"]["model"], "gpt-x");
         assert_eq!(records["alias-2"]["maxContextSize"], 200000);
         assert_eq!(records["alias-2"]["capabilities"], json!(["tools"]));
-        // An alias with no provider of its own inherits the global default.
+
         assert_eq!(records["inherited"]["providerId"], "acme");
-        // Credentials are never projected onto this surface.
+
         assert!(records["alias-2"].get("apiKey").is_none());
 
         server.store().create_session("sess-resume", None).unwrap();
@@ -1470,8 +1400,6 @@ model = "gpt-y"
         assert_eq!(val["data"]["id"], "sess-resume");
         assert_eq!(val["data"]["resumed"], true);
 
-        // An unknown session is an error, not a silent success — and not a
-        // 404, which this surface reserves for an unknown method.
         let res = post(
             &server,
             "/api/v1/debug/sessionManager/resume",
@@ -1484,9 +1412,6 @@ model = "gpt-y"
         assert!(val["msg"].as_str().unwrap().contains("nope"));
     }
 
-    /// `modelCatalog.ping` reports an honest failure — never a fabricated
-    /// pong — when the server has no engine or the model resolves to no
-    /// reachable provider.
     #[tokio::test]
     async fn debug_model_ping_never_fakes_a_pong() {
         let no_engine = HttpServer::in_memory().unwrap().with_debug_endpoints(true);
@@ -1542,7 +1467,6 @@ model = "gpt-y"
             .put_state("metadata", "s1", &json!({ "cwd": root }))
             .unwrap();
 
-        // Session workspace association carries camelCase ids and cwd.
         let assoc = get(&server, "/api/v1/debug/session/s1/association").await;
         assert_eq!(assoc.status, 200);
         let assoc_val: Value = serde_json::from_slice(&assoc.body).unwrap();
@@ -1551,7 +1475,6 @@ model = "gpt-y"
         assert_eq!(assoc_val["data"]["workspaceId"], ws.id);
         assert_eq!(assoc_val["data"]["cwd"], root);
 
-        // Agent runtime binding exposes the binding + runtime descriptor.
         let binding = get(
             &server,
             "/api/v1/debug/session/s1/agent/main/runtime-binding",
@@ -1565,8 +1488,6 @@ model = "gpt-y"
         assert!(binding_val["data"]["runtime"]["generation"].is_number());
         assert!(binding_val["data"]["runtime"]["capabilities"].is_array());
 
-        // The user fork's environment-binding name answers the same local
-        // binding with the environment-shaped descriptor.
         let environment_binding = get(
             &server,
             "/api/v1/debug/session/s1/agent/main/environment-binding",
@@ -1590,7 +1511,6 @@ model = "gpt-y"
         );
         assert_eq!(environment_val["data"]["environment"]["cwd"], root);
 
-        // Workspace snapshot follows the WorkspaceInstanceSnapshot shape.
         let snapshot = get(
             &server,
             &format!("/api/v1/debug/workspace/{}/snapshot", ws.id),
@@ -1602,7 +1522,6 @@ model = "gpt-y"
         assert_eq!(snapshot_val["data"]["lifecycle"], "active");
         assert!(snapshot_val["data"]["sessions"].is_array());
 
-        // Missing session/workspace are honest 404s, not fake successes.
         let missing_session = get(&server, "/api/v1/debug/session/nope/association").await;
         assert_eq!(missing_session.status, 404);
         let missing_session_val: Value = serde_json::from_slice(&missing_session.body).unwrap();
@@ -1611,7 +1530,6 @@ model = "gpt-y"
         let missing_ws = get(&server, "/api/v1/debug/workspace/nope/snapshot").await;
         assert_eq!(missing_ws.status, 404);
 
-        // Unknown RPC methods are 404s (no more fake `{status:"ok"}`).
         let unknown = server
             .handle_request(&HttpRequest {
                 method: "POST".into(),

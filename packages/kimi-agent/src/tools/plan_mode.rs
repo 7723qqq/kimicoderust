@@ -107,7 +107,11 @@ mod tests {
     use super::*;
 
     fn bridge() -> ShellPathBridge {
-        ShellPathBridge::new(&crate::native::shell::resolve_shell(None).program)
+        ShellPathBridge::new(
+            &crate::native::shell::resolve_shell(None)
+                .expect("a shell resolves")
+                .program,
+        )
     }
 
     fn active_plan(path: &str) -> Value {

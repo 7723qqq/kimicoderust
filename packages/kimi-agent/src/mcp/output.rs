@@ -308,35 +308,60 @@ fn convert_block(block: &McpContent, provider_type: Option<&str>) -> ConvertedBl
             None => ConvertedBlock::text_only(dropped_block_notice("resource with empty payload")),
         },
         "resource_link" => {
-            let uri = block
-                .resource
-                .as_ref()
-                .and_then(|r| r.get("uri"))
-                .and_then(|v| v.as_str())
-                .or(block.text.as_deref())
-                .unwrap_or_default()
-                .to_string();
+            let Some(uri) = block.uri.clone() else {
+                return ConvertedBlock::text_only(dropped_block_notice(
+                    "content block of unsupported type \"resource_link\" was not delivered.",
+                ));
+            };
+            if uri.is_empty() {
+                return ConvertedBlock::text_only(dropped_block_notice(
+                    "resource_link carried an empty uri.",
+                ));
+            }
             let mime_type = mime.as_deref().unwrap_or("application/octet-stream");
             let normalized = strip_mime_params(mime_type);
             match media_kind_of(&normalized) {
-                Some(kind) => ConvertedBlock {
-                    text: None,
-                    // A `data:` URI on the link carries the bytes: it is
-                    // preserved like an inline part (v2 preserves the converted
-                    // part's URL, which is this same string).
-                    inline_url: parse_data_url(&uri),
-                    media: Some(match kind {
-                        MediaKind::Image => ContentBlock::ImageUrl {
+                Some(MediaKind::Image) => {
+                    if !crate::llm::image_policy::is_model_accepted_image_mime(
+                        &normalized,
+                        provider_type,
+                    ) {
+                        return ConvertedBlock::text_only(
+                            crate::llm::image_policy::build_unsupported_image_notice(
+                                &normalized,
+                                Some(&uri),
+                                provider_type,
+                            ),
+                        );
+                    }
+                    ConvertedBlock {
+                        text: None,
+                        inline_url: parse_data_url(&uri),
+                        media: Some(ContentBlock::ImageUrl {
                             url: uri,
                             id: None,
                             name: None,
-                        },
-                        // Audio and video are not part of the model-facing
-                        // block set yet; they are preserved, not inlined.
-                        _ => ContentBlock::Text {
-                            text: format!("MCP {} link: {uri}", kind.as_str()),
-                            meta: None,
-                        },
+                        }),
+                        undelivered: None,
+                    }
+                }
+                Some(MediaKind::Audio) => ConvertedBlock {
+                    text: None,
+                    inline_url: parse_data_url(&uri),
+                    media: Some(ContentBlock::AudioUrl {
+                        url: uri,
+                        id: None,
+                        name: None,
+                    }),
+                    undelivered: None,
+                },
+                Some(MediaKind::Video) => ConvertedBlock {
+                    text: None,
+                    inline_url: parse_data_url(&uri),
+                    media: Some(ContentBlock::VideoUrl {
+                        url: uri,
+                        id: None,
+                        name: None,
                     }),
                     undelivered: None,
                 },
@@ -755,6 +780,7 @@ mod tests {
             mime_type: Some("image/png".into()),
             data: Some(payload),
             resource: None,
+            uri: None,
         }
     }
 
@@ -780,6 +806,7 @@ mod tests {
                 mime_type: Some("image/png".into()),
                 data: Some(payload),
                 resource: None,
+                uri: None,
             },
             bytes,
         )
@@ -1027,6 +1054,7 @@ mod tests {
             mime_type: Some("image/png".into()),
             data: Some(payload),
             resource: None,
+            uri: None,
         }]);
 
         let output = mcp_result_to_output(&result, "mcp__srv__t", Some(&files), None, None);
@@ -1191,5 +1219,92 @@ mod tests {
         );
         assert!(output.parts.is_empty());
         assert!(files.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn resource_link_uses_the_top_level_uri_for_each_media_family() {
+        let image = result_with(vec![McpContent {
+            content_type: "resource_link".into(),
+            uri: Some("https://example.com/image.png".into()),
+            mime_type: Some("image/png".into()),
+            ..Default::default()
+        }]);
+        let output = mcp_result_to_output(&image, "mcp__srv__t", None, None, None);
+        assert!(output.parts.iter().any(|part| matches!(
+            part,
+            ContentBlock::ImageUrl { url, .. } if url == "https://example.com/image.png"
+        )));
+
+        let audio = result_with(vec![McpContent {
+            content_type: "resource_link".into(),
+            uri: Some("https://example.com/audio.mp3".into()),
+            mime_type: Some("audio/mpeg".into()),
+            ..Default::default()
+        }]);
+        let output = mcp_result_to_output(&audio, "mcp__srv__t", None, None, None);
+        assert!(output.parts.iter().any(|part| matches!(
+            part,
+            ContentBlock::AudioUrl { url, .. } if url == "https://example.com/audio.mp3"
+        )));
+
+        let video = result_with(vec![McpContent {
+            content_type: "resource_link".into(),
+            uri: Some("https://example.com/video.mp4".into()),
+            mime_type: Some("video/mp4".into()),
+            ..Default::default()
+        }]);
+        let output = mcp_result_to_output(&video, "mcp__srv__t", None, None, None);
+        assert!(output.parts.iter().any(|part| matches!(
+            part,
+            ContentBlock::VideoUrl { url, .. } if url == "https://example.com/video.mp4"
+        )));
+    }
+
+    #[test]
+    fn resource_link_distinguishes_empty_and_missing_uri() {
+        let empty = result_with(vec![McpContent {
+            content_type: "resource_link".into(),
+            uri: Some(String::new()),
+            ..Default::default()
+        }]);
+        let output = mcp_result_to_output(&empty, "mcp__srv__t", None, None, None);
+        assert!(
+            output
+                .content
+                .contains("resource_link carried an empty uri.")
+        );
+
+        let missing = result_with(vec![McpContent {
+            content_type: "resource_link".into(),
+            ..Default::default()
+        }]);
+        let output = mcp_result_to_output(&missing, "mcp__srv__t", None, None, None);
+        assert!(
+            output
+                .content
+                .contains("content block of unsupported type \"resource_link\" was not delivered.")
+        );
+    }
+
+    #[test]
+    fn resource_link_applies_the_provider_image_policy() {
+        let result = result_with(vec![McpContent {
+            content_type: "resource_link".into(),
+            uri: Some("https://example.com/image.heic".into()),
+            mime_type: Some("image/heic".into()),
+            ..Default::default()
+        }]);
+        let output = mcp_result_to_output(&result, "mcp__srv__t", None, Some("openai"), None);
+        assert!(
+            output
+                .content
+                .contains("unsupported image format image/heic")
+        );
+        assert!(
+            !output
+                .parts
+                .iter()
+                .any(|part| matches!(part, ContentBlock::ImageUrl { .. }))
+        );
     }
 }

@@ -96,7 +96,9 @@ pub(crate) fn plugin_skill_dirs() -> Vec<crate::skills::PluginSkillDir> {
 /// session workspace. `ServerEngine::session_spec` answers the same three cases
 /// for the server; keeping the logic here means every napi caller gets it
 /// without each host having to know about `prompt/system.md`.
-pub(crate) fn build_session_system_prompt(params: &JsRunTurnParams) -> String {
+pub(crate) fn build_session_system_prompt(
+    params: &JsRunTurnParams,
+) -> Result<String, crate::native::environment_probe::ProbeShellNotFound> {
     const STANDALONE_SERVICE_SENTINEL: &str =
         "You are kimi-agent, running as a standalone service.";
     if let Some(provider) = params
@@ -105,7 +107,7 @@ pub(crate) fn build_session_system_prompt(params: &JsRunTurnParams) -> String {
         .and_then(|providers| providers.first())
         && !provider.system_prompt.trim().is_empty()
     {
-        return provider.system_prompt.clone();
+        return Ok(provider.system_prompt.clone());
     }
     let supplied = params.system_prompt.trim();
     let is_placeholder = supplied.is_empty()
@@ -113,12 +115,12 @@ pub(crate) fn build_session_system_prompt(params: &JsRunTurnParams) -> String {
         || supplied.starts_with(STANDALONE_SERVICE_SENTINEL)
         || supplied.starts_with("You are Kimi Code, an intelligent AI coding assistant");
     if !is_placeholder {
-        return params.system_prompt.clone();
+        return Ok(params.system_prompt.clone());
     }
     let Some(root) = params.workspace_root.as_deref().filter(|r| !r.is_empty()) else {
         // No workspace to describe: keep whatever the host sent rather than
         // fabricating an environment section for an unknown root.
-        return params.system_prompt.clone();
+        return Ok(params.system_prompt.clone());
     };
     let plugin_dirs = plugin_skill_dirs();
     // The same roots the pipeline spec carries (`with_skill_scan`: empty
@@ -126,9 +128,18 @@ pub(crate) fn build_session_system_prompt(params: &JsRunTurnParams) -> String {
     // and the `Skill` tool's scan cannot disagree — plugin skills render
     // under their qualified `<plugin_id>:<skill>` names in both.
     let merge_all_available_skills = crate::config::resolved_merge_all_available_skills();
+    let mut adaptation_warnings = Vec::new();
+    let model_adaptation = crate::llm::model_adaptations::load_curated_adaptation(
+        &params.model_name,
+        &mut adaptation_warnings,
+    );
+    for warning in adaptation_warnings {
+        tracing::warn!("{warning}");
+    }
     let builder = crate::prompt::SystemPromptBuilder::new(root)
         .with_plugin_skill_dirs(plugin_dirs)
         .with_merge_all_available_skills(merge_all_available_skills)
+        .with_model_adaptation(model_adaptation)
         .with_memory(true);
     match params.agent_profile.as_deref().map(str::trim) {
         Some(profile) if !profile.is_empty() => builder.with_profile(profile).build(),

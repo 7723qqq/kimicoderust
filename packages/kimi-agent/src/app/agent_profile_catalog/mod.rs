@@ -1,0 +1,11 @@
+pub mod agent_profile_catalog;
+pub mod agent_profile_contribution;
+pub mod agent_profile_registry;
+pub mod agent_profile_registry_service;
+pub mod behavior_contract;
+pub mod builtin_agent_profile_loader;
+pub mod builtin_agent_profile_loader_service;
+pub mod contribution;
+pub mod model_adaptations;
+pub mod profile_shared;
+pub mod prompt_prefix;

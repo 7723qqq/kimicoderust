@@ -36,7 +36,7 @@ static CORRECTION_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         r"应该用.*不是",
         r"用\s*\S+\s*不要用",
         r"别用.*用",
-        r"must use|should use|don't use|do not use",
+        r"(?i-u)must use|should use|don't use|do not use",
         r"规范是|标准是|约定是",
         r"记住[：:]",
         r"以后.*要",
@@ -48,28 +48,28 @@ static CORRECTION_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
 
 /// v2 `extractSignals`'s file-path probe (`knowledgeInjection.ts:65`).
 static SCOPE_PATH_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?:[\w./\\-]+\.(?:ts|js|rs|vue|tsx|jsx|json|md))")
+    Regex::new(r"(?:[A-Za-z0-9_./\\-]+\.(?:ts|js|rs|vue|tsx|jsx|json|md))")
         .expect("valid scope path pattern")
 });
 
 /// v2 `learnFromCorrection`'s category and tag probes
 /// (`knowledgeLearner.ts:62-71`).
 static STYLE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)import|命名|格式|style|naming").expect("valid style pattern"));
+    Lazy::new(|| Regex::new(r"(?i-u)import|命名|格式|style|naming").expect("valid style pattern"));
 static ARCHITECTURE_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)架构|设计|依赖|architecture").expect("valid architecture pattern")
+    Regex::new(r"(?i-u)架构|设计|依赖|architecture").expect("valid architecture pattern")
 });
 static WORKFLOW_PATTERN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)流程|提交|commit|push|workflow").expect("valid workflow pattern")
+    Regex::new(r"(?i-u)流程|提交|commit|push|workflow").expect("valid workflow pattern")
 });
 static TYPESCRIPT_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)typescript|\.ts").expect("valid typescript pattern"));
+    Lazy::new(|| Regex::new(r"(?i-u)typescript|\.ts").expect("valid typescript pattern"));
 static RUST_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)rust|\.rs").expect("valid rust pattern"));
+    Lazy::new(|| Regex::new(r"(?i-u)rust|\.rs").expect("valid rust pattern"));
 static IMPORT_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)import").expect("valid import pattern"));
+    Lazy::new(|| Regex::new(r"(?i-u)import").expect("valid import pattern"));
 static GIT_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)git|commit|push").expect("valid git pattern"));
+    Lazy::new(|| Regex::new(r"(?i-u)git|commit|push").expect("valid git pattern"));
 
 #[derive(Deserialize)]
 struct InjectedEntry {
@@ -87,6 +87,31 @@ struct Signals {
     query: String,
     scope_path: Option<String>,
     tags: Vec<String>,
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn slice_utf16(text: &str, max: usize) -> String {
+    String::from_utf16_lossy(&text.encode_utf16().take(max).collect::<Vec<_>>())
+}
+
+fn is_js_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0009}'..='\u{000D}'
+            | ' '
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
 }
 
 /// Register the `knowledge` reminder provider.
@@ -110,10 +135,10 @@ pub fn register_knowledge_injection(
             // mid-assertion (the `total == 0` / 140-mismatch failure).
             #[cfg(test)]
             let _guard = {
-                crate::knowledge::isolate_test_db();
-                crate::knowledge::test_lock()
+                crate::agent::knowledge::sqlite_knowledge::isolate_test_db();
+                crate::agent::knowledge::sqlite_knowledge::test_lock()
             };
-            if !context.is_new_turn || context.injected.iter().any(|name| name == "knowledge") {
+            if !context.is_new_turn {
                 return None;
             }
             let root = workspace_root.as_deref()?;
@@ -121,15 +146,15 @@ pub fn register_knowledge_injection(
             if signals.query.is_empty() && signals.scope_path.is_none() {
                 return None;
             }
-            if !crate::knowledge::open_existing(root) {
+            if !crate::agent::knowledge::sqlite_knowledge::open_existing(root) {
                 return None;
             }
             let tags = (!signals.tags.is_empty()).then(|| signals.tags.join(","));
-            let json = match crate::knowledge::search(
-                signals.query,
-                signals.scope_path,
-                tags,
-                MAX_ENTRIES,
+            let json = match crate::agent::knowledge::sqlite_knowledge::knowledge_search(
+                &signals.query,
+                signals.scope_path.as_deref(),
+                tags.as_deref(),
+                MAX_ENTRIES as usize,
                 INJECTION_CONFIDENCE_FLOOR,
             ) {
                 Ok(json) => json,
@@ -168,11 +193,11 @@ fn extract_signals(history: &[LLMMessage]) -> Signals {
         .map(|message| message.content.as_str())
         .unwrap_or_default();
 
-    let head: String = last_user_text.chars().take(200).collect();
+    let head = slice_utf16(last_user_text, 200);
     let cleaned = head.replace(['`', '"', '\'', '(', ')', '[', ']', '{', '}'], " ");
     let query = cleaned
-        .split_whitespace()
-        .filter(|word| word.chars().count() > 2)
+        .split(is_js_whitespace)
+        .filter(|word| utf16_len(word) > 2)
         .take(8)
         .collect::<Vec<_>>()
         .join(" ");
@@ -218,7 +243,7 @@ fn format_injection(results: &[InjectedResult]) -> String {
             result.entry.title,
             first_line
         );
-        let line_tokens = line.chars().count().div_ceil(4);
+        let line_tokens = utf16_len(&line).div_ceil(4);
         if tokens_used + line_tokens > MAX_INJECTION_TOKENS {
             break;
         }
@@ -239,8 +264,8 @@ pub fn learn_from_turn(history: &[LLMMessage], workspace_root: &Path) {
     // global connection.
     #[cfg(test)]
     let _guard = {
-        crate::knowledge::isolate_test_db();
-        crate::knowledge::test_lock()
+        crate::agent::knowledge::sqlite_knowledge::isolate_test_db();
+        crate::agent::knowledge::sqlite_knowledge::test_lock()
     };
     let start = history.len().saturating_sub(5);
     for message in history[start..].iter().rev() {
@@ -259,18 +284,14 @@ pub fn learn_from_turn(history: &[LLMMessage], workspace_root: &Path) {
 
 /// v2 `learnFromCorrection` (`knowledgeLearner.ts:55-94`).
 fn learn_from_correction(text: &str, workspace_root: &Path) {
-    let title = text
-        .chars()
-        .take(60)
-        .collect::<String>()
-        .replace(['\n', '\r'], " ");
-    let title = title.trim();
-    if title.chars().count() < 5 {
+    let title = slice_utf16(text, 60).replace(['\n', '\r'], " ");
+    let title = title.trim_matches(is_js_whitespace);
+    if utf16_len(title) < 5 {
         return;
     }
     // v2 `add` goes through `ensureDatabase`, the write path that creates the
     // user database when neither the project nor the user one exists.
-    if !crate::knowledge::ensure_open(workspace_root) {
+    if !crate::agent::knowledge::sqlite_knowledge::ensure_open(workspace_root) {
         return;
     }
 
@@ -303,13 +324,13 @@ fn learn_from_correction(text: &str, workspace_root: &Path) {
         tags.push("git");
     }
 
-    match crate::knowledge::add(
-        title.to_string(),
-        category.to_string(),
-        text.to_string(),
-        tags.join(","),
+    match crate::agent::knowledge::sqlite_knowledge::knowledge_add(
+        title,
+        &category,
+        text,
+        &tags.join(","),
         None,
-        "ai-learned".to_string(),
+        "ai-learned",
         LEARNED_CONFIDENCE,
     ) {
         Ok(entry) => tracing::info!(entry = %entry, "knowledge learned from a user correction"),

@@ -1,12 +1,6 @@
 use super::super::*;
 use super::*;
 
-/// Helper: create an RpcHostCallbacks from an RpcServer.
-///
-/// Registers the per-step host seams (`list_tools`, `state_read`) with
-/// no-op answers: with no local handler the server falls back to a stdio
-/// round-trip that stalls for the full timeout, which used to cost every
-/// native-transport test 30s per step.
 pub(super) fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
     RpcServer::register_arc(&server, types::methods::HOST_LIST_TOOLS, |_params| {
         Box::pin(async move {
@@ -25,8 +19,6 @@ pub(super) fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
     Arc::new(RpcHostCallbacks { server })
 }
 
-/// HostCallbacks decorator that records emitted events so tests can
-/// assert on fire-and-forget notifications (e.g. goal budget limits).
 pub(super) struct EventCapturingCallbacks {
     pub(super) inner: Arc<dyn HostCallbacks>,
     pub(super) events: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -139,12 +131,6 @@ impl LLM for PredictTestLlm {
     }
 }
 
-/// A model that answers with a scripted sequence of responses, one per
-/// step, and repeats the last entry once the script runs out.
-///
-/// `PredictTestLlm` returns the same tool calls on every step, which cannot
-/// express "the model reads the refusal and complies next time" — the shape
-/// a veto needs to be tested in.
 pub(super) struct SequencedLlm {
     pub(super) system_prompt: String,
     pub(super) model_name: String,
@@ -166,10 +152,6 @@ impl LLM for SequencedLlm {
         &self,
         params: LLMChatParams,
     ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>> {
-        // Every completed step leaves exactly one assistant message behind,
-        // so that count is how far the script has advanced. Counting the
-        // tool results instead would skip a step whose batch was vetoed (no
-        // tool ran, but the refusal is still a tool message).
         let completed = params
             .messages
             .iter()
@@ -195,7 +177,6 @@ impl LLM for SequencedLlm {
     }
 }
 
-/// Portable `exit 2` with a reason on stderr for Stop-hook tests.
 pub(super) fn stop_veto_command(reason: &str) -> String {
     if cfg!(windows) {
         format!("echo {reason} 1>&2 & exit /b 2")
@@ -220,8 +201,6 @@ pub(super) fn stop_hook_guard() -> Arc<crate::tools::external_hooks::HookGuard> 
     ]))
 }
 
-/// An LLM that answers every request with one fixed response, so a test can
-/// choose the finish reason and whether the answer carries content.
 pub(super) struct FixedResponseLlm {
     pub(super) finish_reason: String,
     pub(super) content: String,

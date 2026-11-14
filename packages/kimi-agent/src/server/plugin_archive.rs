@@ -1,13 +1,3 @@
-//! Downloading and extracting a plugin archive.
-//!
-//! A catalog `source` that is not a local path is a GitHub repository or a zip
-//! URL. Both are fetched as a zip and extracted into the managed plugin root.
-//!
-//! The fetch reuses the FetchUrl SSRF guard (`native::fetch_url`): every hop is
-//! resolved, checked against the private-address rules, and pinned, so a
-//! rebinding host cannot swap the address between the check and the connect.
-//! Extraction refuses any entry that would land outside the destination.
-
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,21 +6,15 @@ use sha2::{Digest, Sha256};
 
 use crate::native::fetch_url::{PinnedHosts, resolve_redirect, validate_url};
 
-/// A zip larger than this is refused before it is read into memory.
 const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 const ARCHIVE_CACHE_LIMIT_BYTES: u64 = 500 * 1024 * 1024;
 const MAX_REDIRECTS: u32 = 10;
-/// Connecting is a fast operation, so a stalled connect fails quickly instead
-/// of holding the install for the full body timeout.
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Reading the body is bounded by [`MAX_ARCHIVE_BYTES`], which can take a while
-/// on a slow link.
+
 const IO_TIMEOUT: Duration = Duration::from_secs(300);
 const USER_AGENT: &str = "kimi-code-plugin-installer";
 
-/// The zip URL for a catalog `source`. A GitHub repository URL becomes its
-/// default-branch archive (GitHub redirects `/archive/HEAD.zip` to codeload);
-/// anything else is already a zip URL and is used as-is.
 pub fn archive_url_for(source: &str) -> String {
     match github_repo(source) {
         Some((owner, repo)) => format!("https://github.com/{owner}/{repo}/archive/HEAD.zip"),
@@ -38,7 +22,6 @@ pub fn archive_url_for(source: &str) -> String {
     }
 }
 
-/// `owner/repo` when `source` is a GitHub repository URL.
 fn github_repo(source: &str) -> Option<(String, String)> {
     let rest = source
         .strip_prefix("https://github.com/")
@@ -52,14 +35,10 @@ fn github_repo(source: &str) -> Option<(String, String)> {
     Some((owner.to_string(), repo.trim_end_matches(".git").to_string()))
 }
 
-/// Download `url` as bytes, applying the SSRF guard to every hop.
 pub fn download_archive(url: &str) -> Result<Vec<u8>, String> {
     download_archive_inner(url, false)
 }
 
-/// [`download_archive`] with the private-address rule relaxed. Only the
-/// in-crate tests use it, to serve an archive from loopback; production always
-/// goes through [`download_archive`].
 #[cfg(test)]
 pub(crate) fn download_archive_allowing_private(url: &str) -> Result<Vec<u8>, String> {
     download_archive_inner(url, true)
@@ -83,9 +62,7 @@ fn download_archive_inner(url: &str, allow_private: bool) -> Result<Vec<u8>, Str
         match agent.get(&current).call() {
             Ok(response) => {
                 let status = response.status();
-                // ureq returns a 3xx as `Ok` once `redirects(0)` stops it from
-                // following, so the hop has to be handled here as well as in
-                // the `Err(Status)` arm below.
+
                 if (300..400).contains(&status) {
                     let location = response.header("location").unwrap_or("").to_string();
                     if location.is_empty() {
@@ -143,9 +120,6 @@ fn download_archive_inner(url: &str, allow_private: bool) -> Result<Vec<u8>, Str
     }
 }
 
-/// Reuse a verified archive from `<home>/plugins/cache/archives`, or download,
-/// verify and cache it. The cache is keyed by the catalog's SHA-256 digest, as
-/// in v2's `PluginPackageCache`.
 pub fn load_verified_archive(
     home: &Path,
     url: &str,
@@ -229,7 +203,6 @@ fn prune_archive_cache(cache: &Path) {
     }
 }
 
-/// Extract a zip into `dest`, refusing any entry that escapes it.
 pub fn extract_archive(bytes: &[u8], dest: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dest).map_err(|e| format!("Cannot create {}: {e}", dest.display()))?;
     let dest = dest
@@ -285,9 +258,6 @@ pub fn extract_archive(bytes: &[u8], dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The plugin root inside an extracted archive: the destination itself when it
-/// holds a manifest, otherwise its single top-level directory (a GitHub zip
-/// wraps everything in `<repo>-<ref>/`).
 pub fn detect_plugin_root(dir: &Path) -> PathBuf {
     if has_manifest(dir) {
         return dir.to_path_buf();
@@ -308,14 +278,10 @@ pub fn detect_plugin_root(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
-/// Whether `dir` holds a plugin manifest.
 pub fn has_manifest(dir: &Path) -> bool {
     dir.join("kimi.plugin.json").is_file() || dir.join(".kimi-plugin/plugin.json").is_file()
 }
 
-/// Copy `source` into `dest`, replacing whatever was there. The previous copy
-/// is moved aside first and only removed once the new one is in place, so a
-/// failure leaves the old install intact.
 pub fn replace_directory(source: &Path, dest: &Path) -> Result<(), String> {
     let parent = dest
         .parent()
@@ -339,7 +305,6 @@ pub fn replace_directory(source: &Path, dest: &Path) -> Result<(), String> {
             .map_err(|e| format!("Cannot move {} aside: {e}", dest.display()))?;
     }
     if let Err(error) = std::fs::rename(&staging, dest) {
-        // Put the previous copy back so the install is not left half-done.
         if previous.exists() {
             let _ = std::fs::rename(&previous, dest);
         }
@@ -396,7 +361,7 @@ mod tests {
             archive_url_for("https://github.com/obra/superpowers/"),
             "https://github.com/obra/superpowers/archive/HEAD.zip"
         );
-        // A zip URL is already an archive.
+
         assert_eq!(
             archive_url_for("https://example.test/plugin.zip"),
             "https://example.test/plugin.zip"
@@ -408,18 +373,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
 
-        // A manifest at the top level wins.
         std::fs::write(root.join("kimi.plugin.json"), "{}").unwrap();
         assert_eq!(detect_plugin_root(root), root);
 
-        // A GitHub-style wrapper is unwrapped.
         let wrapped = tempfile::tempdir().unwrap();
         let inner = wrapped.path().join("repo-main");
         std::fs::create_dir_all(&inner).unwrap();
         std::fs::write(inner.join("kimi.plugin.json"), "{}").unwrap();
         assert_eq!(detect_plugin_root(wrapped.path()), inner);
 
-        // Two top-level directories with no manifest stay put.
         let ambiguous = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(ambiguous.path().join("a")).unwrap();
         std::fs::create_dir_all(ambiguous.path().join("b")).unwrap();
@@ -474,7 +436,6 @@ mod tests {
         assert!(!temp.path().join("escape.txt").exists());
     }
 
-    /// Serve `body` once from a loopback port and return its URL.
     fn serve_once(body: Vec<u8>) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -495,7 +456,6 @@ mod tests {
         format!("http://{addr}/plugin.zip")
     }
 
-    /// A GitHub-style archive: one wrapper directory holding the plugin.
     fn wrapped_plugin_zip() -> Vec<u8> {
         let mut buffer = Vec::new();
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buffer));
@@ -554,8 +514,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let url = serve_once(wrapped_plugin_zip());
 
-        // The production path refuses loopback; the test seam relaxes it so the
-        // whole download → extract → install chain runs against a real socket.
         let bytes = download_archive_allowing_private(&url).unwrap();
 
         let staging = temp.path().join("staging");
@@ -575,7 +533,6 @@ mod tests {
 
     #[test]
     fn the_production_download_refuses_loopback() {
-        // Nothing listens on port 9; the guard must refuse before connecting.
         let error = download_archive("http://127.0.0.1:9/plugin.zip").unwrap_err();
         assert!(error.contains("private"), "unexpected error: {error}");
     }
@@ -591,11 +548,10 @@ mod tests {
         replace_directory(&source, &dest).unwrap();
         assert!(dest.join("kimi.plugin.json").is_file());
 
-        // A second install replaces the content.
         std::fs::write(source.join("extra.txt"), "v2").unwrap();
         replace_directory(&source, &dest).unwrap();
         assert!(dest.join("extra.txt").is_file());
-        // No staging or previous directory is left behind.
+
         let leftovers: Vec<String> = std::fs::read_dir(dest.parent().unwrap())
             .unwrap()
             .flatten()

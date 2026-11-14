@@ -1,44 +1,11 @@
-/// In-memory file read-result cache keyed by the full read request
-/// `(path, line_offset, n_lines)` plus the file's invalidation metadata
-/// `(mtime, ctime, size)`.
-///
-/// Eliminates redundant disk reads in read-then-edit workflows:
-///   Read(A) => cache miss => read disk + cache
-///   Edit(A) => write => invalidate cache entry for A
-///   Read(A) => cache hit => return cached content instantly
-///
-/// The key is the whole read request, so any read — full-file or a specific
-/// range — can be cached, not just whole-file reads. Equivalent requests are
-/// normalized to one key (see `CacheKey`), so the common full-file read
-/// shares a single entry whether the caller passed `None` or explicit values.
-///
-/// Caching is TOCTOU-safe: the caller snapshots the file's invalidation
-/// metadata BEFORE reading (`snapshot`), and `put` re-checks after the read —
-/// a file modified during the read is never cached, so stale content can never
-/// be served under a fresh snapshot.
-///
-/// The snapshot is `(mtime, ctime, size)` rather than just `(mtime, size)`.
-/// On filesystems with coarse mtime granularity (e.g. FAT with 2s ticks), two
-/// writes that land in the same tick can share an mtime; if the content also
-/// has the same byte length, a `(mtime, size)` key would falsely report a hit
-/// and serve stale bytes. `ctime` (the inode change time) is bumped by every
-/// write and carries sub-second precision on Unix, closing that window. On
-/// Windows std cannot expose a change time, so `ctime` is `None` and the
-/// `(mtime, size)` pair is used — acceptable because NTFS mtime already has
-/// sub-second granularity (coarse granularity is the FAT case ctime covers).
 use crate::native::read::{MAX_LINES, ReadResult};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::sync::LazyLock;
 use std::time::SystemTime;
 
-/// Maximum number of cached file entries.
 const MAX_CACHE_ENTRIES: usize = 32;
 
-/// A file's invalidation metadata: `(mtime, ctime, size)`.
-///
-/// `ctime` is the inode change time on Unix and `None` where the platform
-/// cannot expose one (Windows). See the module docs for why it matters.
 #[derive(Clone, PartialEq, Debug)]
 pub struct FileSnapshot {
     mtime: SystemTime,
@@ -46,7 +13,6 @@ pub struct FileSnapshot {
     size: u64,
 }
 
-/// Capture a file's invalidation metadata before reading it.
 pub fn snapshot(path: &str) -> Option<FileSnapshot> {
     let meta = fs::metadata(path).ok()?;
     Some(FileSnapshot {
@@ -56,7 +22,6 @@ pub fn snapshot(path: &str) -> Option<FileSnapshot> {
     })
 }
 
-/// Inode change time on Unix (sub-second precision, bumped by every write).
 #[cfg(unix)]
 fn ctime_of(meta: &fs::Metadata) -> Option<SystemTime> {
     use std::os::unix::fs::MetadataExt;
@@ -69,25 +34,11 @@ fn ctime_of(meta: &fs::Metadata) -> Option<SystemTime> {
     )
 }
 
-/// No change-time signal outside Unix; fall back to (mtime, size).
 #[cfg(not(unix))]
 fn ctime_of(_meta: &fs::Metadata) -> Option<SystemTime> {
     None
 }
 
-/// Normalized cache key for a read request.
-///
-/// Equivalent requests collapse to one key so the common full-file read
-/// (offset 1, up to MAX_LINES) shares a single entry regardless of whether
-/// the caller passed `None` or explicit values:
-///
-///   - `line_offset` 0 or 1 (or None) → 1 (start of file; offset 0 also
-///     starts at line 1 in the reader)
-///   - `n_lines` None or >= MAX_LINES → MAX_LINES (the reader caps at
-///     MAX_LINES, so any such request returns the full default view)
-///
-/// Negative offsets (tail reads) and offsets > 1 (partial reads) are kept
-/// exact — their results depend on the precise value.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct CacheKey {
     path: String,
@@ -114,21 +65,19 @@ impl CacheKey {
     }
 }
 
-/// Cached read result with invalidation metadata.
 #[derive(Clone)]
 struct CacheEntry {
     result: ReadResult,
     snap: FileSnapshot,
 }
 
-/// Thread-safe file read cache using std::sync::Mutex and an LRU order.
 pub struct FileReadCache {
     inner: std::sync::Mutex<CacheInner>,
 }
 
 struct CacheInner {
     entries: HashMap<CacheKey, CacheEntry>,
-    /// Most-recently-used order: front = least recently used, back = most recently used.
+
     order: VecDeque<CacheKey>,
 }
 
@@ -142,7 +91,6 @@ impl FileReadCache {
         }
     }
 
-    /// Look up a cached read result. Returns None on miss or staleness.
     pub fn get(
         &self,
         path: &str,
@@ -154,8 +102,6 @@ impl FileReadCache {
         let mut inner = self.inner.lock().ok()?;
         match inner.entries.get(&key) {
             Some(entry) if entry.snap == current => {
-                // Clone the hit into owned data first so the `entries` borrow
-                // ends before `order` is mutated (LRU reordering).
                 let result = entry.result.clone();
                 if let Some(pos) = inner.order.iter().position(|k| *k == key)
                     && let Some(k) = inner.order.remove(pos)
@@ -165,8 +111,6 @@ impl FileReadCache {
                 Some(result)
             }
             Some(_) => {
-                // Stale entry (file changed since it was cached): drop it so
-                // it does not linger until the next put or LRU eviction.
                 inner.entries.remove(&key);
                 if let Some(pos) = inner.order.iter().position(|k| *k == key) {
                     inner.order.remove(pos);
@@ -177,11 +121,6 @@ impl FileReadCache {
         }
     }
 
-    /// Store a read result in the cache. `pre_read` is the metadata snapshot
-    /// taken before the content was read; if the file changed in between, the
-    /// read content may already be stale, so nothing is cached (and any old
-    /// entry is dropped) — caching stale content under a fresh mtime would
-    /// keep serving it until the next write.
     pub fn put(
         &self,
         path: String,
@@ -203,14 +142,14 @@ impl FileReadCache {
             Ok(c) => c,
             Err(_) => return,
         };
-        // Evict the least-recently-used entry when at capacity.
+
         if inner.entries.len() >= MAX_CACHE_ENTRIES
             && !inner.entries.contains_key(&key)
             && let Some(oldest) = inner.order.pop_front()
         {
             inner.entries.remove(&oldest);
         }
-        // Remove any stale position before pushing this key to the back.
+
         if let Some(pos) = inner.order.iter().position(|k| *k == key) {
             let _ = inner.order.remove(pos);
         }
@@ -220,7 +159,6 @@ impl FileReadCache {
         inner.order.push_back(key);
     }
 
-    /// Invalidate every cache entry for a path (called after file write/edit).
     pub fn invalidate(&self, path: &str) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.entries.retain(|k, _| k.path != path);
@@ -229,7 +167,6 @@ impl FileReadCache {
     }
 }
 
-/// Global file read cache instance.
 pub static FILE_CACHE: LazyLock<FileReadCache> = LazyLock::new(FileReadCache::new);
 
 #[cfg(test)]
@@ -269,7 +206,6 @@ mod tests {
             Some("hello".to_string())
         );
 
-        // Rewrite the file (different size + new mtime/ctime) and expect a miss.
         write_temp(&dir, "a.txt", b"world!");
         assert!(cache.get(&ps, None, None).is_none());
     }
@@ -282,10 +218,7 @@ mod tests {
         let cache = FileReadCache::new();
 
         let pre = snapshot(&ps).unwrap();
-        // File changes between the snapshot and put(). Sleep past the
-        // filesystem's mtime tick first: the contents are deliberately the
-        // same byte length, so on Windows (ctime unavailable) detection
-        // rides on mtime alone and two writes in one tick are identical.
+
         std::thread::sleep(std::time::Duration::from_millis(25));
         write_temp(&dir, "b.txt", b"v2");
         cache.put(ps.clone(), None, None, ok_result("v1", 1), pre);
@@ -311,8 +244,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = FileReadCache::new();
 
-        // Fill past MAX_CACHE_ENTRIES; the insertion that overflows evicts
-        // only the least-recently-used entry (the first one inserted).
         for i in 0..MAX_CACHE_ENTRIES + 1 {
             let path = write_temp(&dir, &format!("f{i:03}.txt"), b"x");
             let ps = path.to_string_lossy().to_string();
@@ -320,7 +251,6 @@ mod tests {
             cache.put(ps.clone(), None, None, ok_result(&format!("v{i}"), 1), pre);
         }
 
-        // The oldest entry is evicted; all newer entries remain cached.
         let first = dir.path().join(format!("f{:03}.txt", 0));
         let first_ps = first.to_string_lossy().to_string();
         assert!(
@@ -343,7 +273,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = FileReadCache::new();
         let ps = dir.path().join("nope.txt").to_string_lossy().to_string();
-        // No file → no snapshot → miss, without panicking.
+
         assert!(cache.get(&ps, None, None).is_none());
     }
 
@@ -352,8 +282,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = FileReadCache::new();
         let ps = dir.path().join("nope.txt").to_string_lossy().to_string();
-        // A pre-read snapshot that cannot be re-taken post-read → nothing
-        // cached, and later reads still miss.
+
         let pre = FileSnapshot {
             mtime: std::time::SystemTime::now(),
             ctime: None,
@@ -369,7 +298,7 @@ mod tests {
         let cache = FileReadCache::new();
         let ps = dir.path().join("ghost.txt").to_string_lossy().to_string();
         cache.invalidate(&ps);
-        // Cache still usable afterwards.
+
         let path = write_temp(&dir, "ok.txt", b"data");
         let ps2 = path.to_string_lossy().to_string();
         let pre = snapshot(&ps2).unwrap();
@@ -384,8 +313,6 @@ mod tests {
         let ps = path.to_string_lossy().to_string();
         let cache = FileReadCache::new();
 
-        // A full-file read via explicit (1, MAX_LINES) and via None/None
-        // normalize to the same key, so the second hits the first's entry.
         let pre = snapshot(&ps).unwrap();
         cache.put(
             ps.clone(),
@@ -398,7 +325,7 @@ mod tests {
             cache.get(&ps, None, None).map(|r| r.content),
             Some("full".to_string())
         );
-        // offset 0 and an n_lines above the cap also normalize to the same key.
+
         assert_eq!(
             cache
                 .get(&ps, Some(0), Some(MAX_LINES as u32 + 5))
@@ -416,9 +343,9 @@ mod tests {
 
         let pre = snapshot(&ps).unwrap();
         cache.put(ps.clone(), Some(2), Some(1), ok_result("line2", 3), pre);
-        // A different offset is a different key → miss.
+
         assert!(cache.get(&ps, Some(1), Some(1)).is_none());
-        // The exact same request hits.
+
         assert_eq!(
             cache.get(&ps, Some(2), Some(1)).map(|r| r.content),
             Some("line2".to_string())
@@ -432,9 +359,6 @@ mod tests {
         let ps = path.to_string_lossy().to_string();
         let cache = FileReadCache::new();
 
-        // A tail read with n_lines=None and one with n_lines=MAX_LINES both
-        // normalize to the same key (the reader caps at MAX_LINES), so the
-        // second hits the first's entry.
         let pre = snapshot(&ps).unwrap();
         cache.put(ps.clone(), Some(-3), None, ok_result("tail3", 5), pre);
         assert_eq!(
@@ -443,7 +367,7 @@ mod tests {
                 .map(|r| r.content),
             Some("tail3".to_string())
         );
-        // A different tail offset is a distinct key → miss.
+
         assert!(cache.get(&ps, Some(-2), None).is_none());
     }
 
@@ -456,12 +380,10 @@ mod tests {
 
         let pre = snapshot(&ps).unwrap();
         cache.put(ps.clone(), None, None, ok_result("v1", 1), pre);
-        // Rewrite the file with a different byte length so the snapshot
-        // (mtime, size) — and on Windows (mtime, size) alone — is guaranteed
-        // to differ even within the same mtime tick.
+
         write_temp(&dir, "stale.txt", b"v2-longer");
         assert!(cache.get(&ps, None, None).is_none());
-        // The stale entry was dropped, so a fresh put is not evicted by it.
+
         let pre2 = snapshot(&ps).unwrap();
         cache.put(ps.clone(), None, None, ok_result("v2-longer", 1), pre2);
         assert_eq!(

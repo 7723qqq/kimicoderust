@@ -67,6 +67,60 @@ pub fn is_loadable_tools_announcement(message: &LLMMessage) -> bool {
     is_retrieved_tools_announcement(message) || is_added_removed_announcement(message)
 }
 
+pub fn is_dynamic_tool_schema_message(message: &LLMMessage) -> bool {
+    !message.tools.is_empty()
+}
+
+pub fn collect_loaded_dynamic_tools(
+    messages: &[LLMMessage],
+    current: &[crate::tools::tool_select_ops::ToolSelectTool],
+) -> std::collections::HashMap<String, kimi_core::types::ToolDescription> {
+    use std::collections::HashMap;
+
+    let mut loaded: HashMap<String, kimi_core::types::ToolDescription> = HashMap::new();
+    for message in messages {
+        if is_loadable_tools_announcement(message) {
+            let disclosure = message.origin.as_ref().and_then(|origin| {
+                if origin.get("kind").and_then(|kind| kind.as_str()) != Some("injection") {
+                    return None;
+                }
+                serde_json::from_value::<ToolSelectAnnouncementDisclosure>(
+                    origin.get("disclosure")?.clone(),
+                )
+                .ok()
+            });
+            let removed = match disclosure {
+                Some(ToolSelectAnnouncementDisclosure::Delta { removed, .. }) => {
+                    removed.into_iter().map(|tool| tool.name).collect()
+                }
+                _ => match_tool_name_blocks(&message.content, "tools_removed"),
+            };
+            for name in removed {
+                loaded.remove(&name);
+            }
+            continue;
+        }
+        if !is_dynamic_tool_schema_message(message) {
+            continue;
+        }
+        for tool in &message.tools {
+            loaded.insert(tool.name.clone(), tool.clone());
+        }
+    }
+    let current_by_name: HashMap<&str, &crate::tools::tool_select_ops::ToolSelectTool> = current
+        .iter()
+        .map(|tool| (tool.name.as_str(), tool))
+        .collect();
+    loaded.retain(|name, schema| match current_by_name.get(name.as_str()) {
+        None => crate::native::tool_naming::is_mcp_tool_name(name),
+        Some(tool) => {
+            crate::tools::tool_select_ops::tool_description_schema_signature(schema)
+                == crate::tools::tool_select_ops::tool_select_schema_signature(tool)
+        }
+    });
+    loaded
+}
+
 pub fn strip_dynamic_tool_context(messages: Vec<LLMMessage>) -> Vec<LLMMessage> {
     let hidden_call_ids = messages
         .iter()
@@ -75,13 +129,7 @@ pub fn strip_dynamic_tool_context(messages: Vec<LLMMessage>) -> Vec<LLMMessage> 
         .filter(|call| call.name == crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME)
         .map(|call| call.id.clone())
         .collect::<std::collections::HashSet<_>>();
-    let is_schema = |message: &LLMMessage| {
-        message.origin.as_ref().is_some_and(|origin| {
-            origin.get("kind").and_then(|kind| kind.as_str()) == Some("injection")
-                && origin.get("variant").and_then(|variant| variant.as_str())
-                    == Some(DYNAMIC_TOOL_SCHEMA_VARIANT)
-        })
-    };
+    let is_schema = is_dynamic_tool_schema_message;
     if hidden_call_ids.is_empty()
         && !messages
             .iter()
@@ -120,11 +168,16 @@ pub fn strip_dynamic_tool_context(messages: Vec<LLMMessage>) -> Vec<LLMMessage> 
             message.content = crate::injection::wrap_system_reminder(
                 &render_runtime_tool_change_reminder(&added, &removed),
             );
+            message.blocks.clear();
             out.push(message);
             continue;
         }
         if is_schema(&message) {
-            if !message.content.is_empty() || !message.tool_calls.is_empty() {
+            if !message.content.is_empty()
+                || !message.blocks.is_empty()
+                || !message.tool_calls.is_empty()
+            {
+                message.tools.clear();
                 out.push(message);
             }
             continue;
@@ -149,7 +202,10 @@ pub fn strip_dynamic_tool_context(messages: Vec<LLMMessage>) -> Vec<LLMMessage> 
             .retain(|call| call.name != crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME);
         if message.tool_calls.len() == original_len {
             out.push(message);
-        } else if !message.tool_calls.is_empty() || !message.content.is_empty() {
+        } else if !message.tool_calls.is_empty()
+            || !message.content.is_empty()
+            || !message.blocks.is_empty()
+        {
             out.push(message);
         }
     }
@@ -200,7 +256,8 @@ pub fn render_retrieved_tools_announcement(
     let lines: Vec<String> = entries
         .iter()
         .map(|entry| {
-            let description: String = one_line(&entry.description).chars().take(120).collect();
+            let description = one_line(&entry.description);
+            let description = slice_utf16(&description, 120);
             if description.is_empty() {
                 entry.name.clone()
             } else {
@@ -232,7 +289,31 @@ name.",
 }
 
 fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    text.split(is_js_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn slice_utf16(text: &str, max: usize) -> String {
+    String::from_utf16_lossy(&text.encode_utf16().take(max).collect::<Vec<_>>())
+}
+
+fn is_js_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'..='\u{000D}'
+            | ' '
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
 }
 
 pub fn render_runtime_tool_change_reminder(added: &[String], removed: &[String]) -> String {
@@ -307,14 +388,7 @@ pub fn last_retrieved_announcement_text(messages: &[LLMMessage]) -> Option<Strin
         .iter()
         .rev()
         .find(|message| is_retrieved_tools_announcement(message))
-        .map(|message| {
-            message
-                .content
-                .strip_prefix(crate::injection::SYSTEM_REMINDER_PREFIX)
-                .and_then(|text| text.strip_suffix(crate::injection::SYSTEM_REMINDER_SUFFIX))
-                .unwrap_or(&message.content)
-                .to_string()
-        })
+        .map(|message| message.content.clone())
 }
 
 #[cfg(test)]
@@ -450,6 +524,12 @@ mod tests {
         let schema = LLMMessage {
             role: "system".into(),
             content: String::new(),
+            tools: vec![kimi_core::types::ToolDescription {
+                name: "mcp__s__alpha".into(),
+                description: "alpha".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                deferred: None,
+            }],
             origin: Some(serde_json::json!({
                 "kind": "injection",
                 "variant": "dynamic_tool_schema"

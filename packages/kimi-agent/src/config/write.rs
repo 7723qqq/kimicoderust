@@ -1,23 +1,9 @@
-//! Format-preserving `config.toml` writes (toml_edit).
-//!
-//! The REST provider routes mutate the same document the user edits, so
-//! comments, key order and sections this crate does not parse must survive.
-//! Writes go to [`config_write_path`] (the discovered file, or the default
-//! location when none exists yet) and are atomic: temp file + rename.
-//!
-//! New tables are re-parsed from their own serialized text before insertion:
-//! a programmatically built table carries no decor, and toml_edit renders the
-//! newline that separates a header from the previous entry from the parsed
-//! structure.
-
 use std::path::PathBuf;
 
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 use super::KimiConfig;
 
-/// The file writes target: the discovered config file, or the location a new
-/// file is created at, honoring the same env overrides as [`KimiConfig::discover`].
 pub fn config_write_path() -> Result<PathBuf, String> {
     if let Ok((_, path)) = KimiConfig::discover() {
         return Ok(path);
@@ -34,9 +20,6 @@ pub fn config_write_path() -> Result<PathBuf, String> {
     Err("cannot resolve a config.toml location: set KIMI_CODE_HOME or KIMI_CONFIG_PATH".into())
 }
 
-/// Read the target document (empty when the file does not exist), apply the
-/// mutation, write it back atomically and return the re-parsed config. An
-/// explicit `path` (the file the server loaded) wins over discovery.
 pub fn update_config<F>(path: Option<&std::path::Path>, mutate: F) -> Result<KimiConfig, String>
 where
     F: FnOnce(&mut DocumentMut) -> Result<(), String>,
@@ -67,7 +50,6 @@ where
     text.parse::<KimiConfig>()
 }
 
-/// One `[providers.<id>]` entry to write.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderWrite {
     pub provider_type: String,
@@ -75,12 +57,10 @@ pub struct ProviderWrite {
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
     pub default_model: Option<String>,
-    /// Custom-registry provenance (`providers.*.source`): parked verbatim so
-    /// the refresh can rediscover the registry this provider came from.
+
     pub source: Option<serde_json::Value>,
 }
 
-/// One `[models.<alias>]` entry to write.
 #[derive(Debug, Clone)]
 pub struct ModelAliasWrite {
     pub alias_id: String,
@@ -103,8 +83,6 @@ pub struct ModelAliasWrite {
 
 fn table_at<'a>(document: &'a mut DocumentMut, key: &str) -> Result<&'a mut Table, String> {
     if document.as_table_mut().get(key).is_none() {
-        // Implicit: only the children render headers, and their (parsed)
-        // decor carries the separating newlines.
         let mut table = Table::new();
         table.set_implicit(true);
         document.as_table_mut().insert(key, Item::Table(table));
@@ -114,8 +92,6 @@ fn table_at<'a>(document: &'a mut DocumentMut, key: &str) -> Result<&'a mut Tabl
         .ok_or_else(|| format!("`{key}` is not a TOML table"))
 }
 
-/// Serialize `table` under `path`, re-parse it and return the parsed item so
-/// the insertion carries the decor toml_edit only assigns when parsing.
 fn reparse_table(path: &[&str], table: Table) -> Result<Item, String> {
     let mut scratch = DocumentMut::new();
     let mut cursor: &mut Table = scratch.as_table_mut();
@@ -155,7 +131,6 @@ fn string_array(values: &[String]) -> Item {
     Item::Value(Value::Array(array))
 }
 
-/// Write (or replace) one `[providers.<id>]` entry.
 pub fn write_provider(
     document: &mut DocumentMut,
     id: &str,
@@ -182,9 +157,6 @@ pub fn write_provider(
         );
     }
     if let Some(source) = &provider.source {
-        // The blob rides as a sub-table (`[providers.<id>.source]`), the shape
-        // the refresh reads back. Serializing through TOML keeps nested
-        // objects as tables instead of inventing a second encoding.
         let text = toml::to_string(source)
             .map_err(|error| format!("source blob is not a TOML table: {error}"))?;
         let document: DocumentMut = text
@@ -197,7 +169,6 @@ pub fn write_provider(
     Ok(())
 }
 
-/// Drop `[providers.<id>]` when present.
 pub fn remove_provider(document: &mut DocumentMut, id: &str) {
     if let Some(providers) = document
         .as_table_mut()
@@ -208,7 +179,6 @@ pub fn remove_provider(document: &mut DocumentMut, id: &str) {
     }
 }
 
-/// Write (or replace) one `[models.<alias>]` entry.
 pub fn write_model_alias(
     document: &mut DocumentMut,
     alias: &ModelAliasWrite,
@@ -279,14 +249,10 @@ pub fn write_model_alias(
     Ok(())
 }
 
-/// Drop every `[models.<alias>]` whose `provider` is `provider_id`.
 pub fn remove_model_aliases_of(document: &mut DocumentMut, provider_id: &str) {
     remove_model_aliases_matching(document, provider_id, "", &[]);
 }
 
-/// Drop every alias of `provider_id` whose key starts with `key_prefix` and is
-/// not listed in `keep` (the refresh keeps vanished upstream models out while
-/// leaving user-authored aliases alone).
 pub fn remove_model_aliases_matching(
     document: &mut DocumentMut,
     provider_id: &str,
@@ -317,14 +283,11 @@ pub fn remove_model_aliases_matching(
     }
 }
 
-/// Set or clear the top-level `default_model` pointer.
 pub fn set_default_model(document: &mut DocumentMut, alias: Option<&str>) {
     match alias {
         Some(alias) => {
             let table = document.as_table_mut();
-            // Replace in place: a fresh `insert` would drop the key's decor
-            // (the comment line above it), and the value's suffix carries the
-            // newline that separates it from whatever follows.
+
             let mut value = Value::from(alias);
             let suffix = table
                 .get("default_model")
@@ -346,7 +309,6 @@ pub fn set_default_model(document: &mut DocumentMut, alias: Option<&str>) {
     }
 }
 
-/// Set the top-level `default_provider` pointer (provider rename migration).
 pub fn set_default_provider(document: &mut DocumentMut, provider_id: &str) {
     let table = document.as_table_mut();
     let mut value = Value::from(provider_id);
@@ -422,14 +384,13 @@ type = "openai"
         set_default_model(&mut document, Some("managed:kimi-code/k3"));
 
         let text = document.to_string();
-        // Special keys are quoted; the untouched sections survive.
+
         assert!(text.contains("[providers.\"managed:kimi-code\"]"), "{text}");
         assert!(text.contains("[models.\"managed:kimi-code/k3\"]"), "{text}");
         assert!(text.contains("# keep this comment"), "{text}");
         assert!(text.contains("[secondary_model]"), "{text}");
         assert!(text.contains("[providers.openai]"), "{text}");
 
-        // The re-parsed config sees the new entries.
         let config: KimiConfig = text.parse().unwrap();
         let provider = config.providers.get("managed:kimi-code").unwrap();
         assert_eq!(provider.provider_type.as_deref(), Some("kimi"));
@@ -468,7 +429,7 @@ type = "openai"
         set_default_model(&mut document, Some("kimi-code/k3"));
 
         let text = document.to_string();
-        // The rendered document is valid TOML (tables carry their newlines).
+
         let reparsed: DocumentMut = text
             .parse()
             .unwrap_or_else(|error| panic!("{error}\n---\n{text}"));
@@ -513,7 +474,7 @@ max_context_size = 2000
         remove_model_aliases_of(&mut document, "kimi");
 
         let text = document.to_string();
-        // The removed provider's table and aliases are gone; the other survives.
+
         assert!(!text.contains("[providers.kimi]"), "{text}");
         assert!(!text.contains("kimi/k3"), "{text}");
         assert!(text.contains("[providers.other]"), "{text}");

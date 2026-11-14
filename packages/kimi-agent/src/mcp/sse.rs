@@ -383,7 +383,10 @@ impl McpSseTransport {
         match tokio::time::timeout_at(budget.deadline, rx).await {
             Ok(Ok(val)) => {
                 if let Some(err) = val.get("error") {
-                    return Err(McpError::json_rpc(format!("MCP Server Error: {err}")));
+                    return Err(McpError::json_rpc(
+                        err.get("code").and_then(Value::as_i64),
+                        format!("MCP Server Error: {err}"),
+                    ));
                 }
                 Ok(val.get("result").cloned().unwrap_or(Value::Null))
             }

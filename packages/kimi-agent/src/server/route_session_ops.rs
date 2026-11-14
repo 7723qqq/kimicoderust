@@ -32,8 +32,7 @@ impl HttpServer {
                     Some(d) => d,
                     None => return HttpResponse::not_found(),
                 };
-                // v2 `fsDownloadQuerySchema`: `allow_external_symlinks=true`
-                // downloads through symlinks pointing outside the workspace.
+
                 let allow_external =
                     req.query_param("allow_external_symlinks").as_deref() == Some("true");
                 let target = match fs_routes::resolve_safe_path_with_symlinks(
@@ -56,11 +55,6 @@ impl HttpServer {
                 }
             }
             ("POST", p) if p == "/api/v1/workspace/fs:list" || p == "/workspace/fs:list" => {
-                // v2 `POST /workspace/fs::list` — the literal `/workspace/fs:list`
-                // (`::` escapes the colon, `kap-server/src/routes/fs.ts:333`):
-                // the session-less fs:list; the workspace reference travels in
-                // the body and `include_git_status` is omitted upstream (inert
-                // here).
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(v) => v,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
@@ -85,10 +79,6 @@ impl HttpServer {
                     || p == "/workspace/fs:search"
                     || p == "/api/v1/fs:suggest"
                     || p == "/fs:suggest"
-                    // v2 spells these `/workspace/fs::search` and
-                    // `/workspace/fs::suggest`; `::` escapes the colon, so the
-                    // literal paths are single-colon
-                    // (`kap-server/src/routes/fs.ts:383,478`).
                     || p == "/api/v1/workspace/fs:suggest"
                     || p == "/workspace/fs:suggest" =>
             {
@@ -112,7 +102,6 @@ impl HttpServer {
                 fs_routes::handle_search(&work_dir, &body)
             }
 
-            // Terminal endpoints
             ("GET", p) if p.starts_with("/api/v1/sessions/") && p.ends_with("/terminals") => {
                 let session_id = p
                     .strip_prefix("/api/v1/sessions/")
@@ -306,11 +295,6 @@ impl HttpServer {
                     .await
                 {
                     Ok((output, last_seq)) => {
-                        // `last_seq` is the absolute sequence of the newest
-                        // buffered frame (`total` is the same value: the total
-                        // number of frames the terminal has produced). It used to
-                        // report the buffer length, which stops matching the
-                        // sequence numbers as soon as frames are evicted.
                         let count = output.len();
                         HttpResponse::ok(&json!({
                             "output": output,
@@ -343,6 +327,60 @@ impl HttpServer {
                 let turn_id = req
                     .query_param("turn_id")
                     .and_then(|t| t.parse::<usize>().ok());
+                if crate::features::operationLog::operationService::operation_log_enabled() {
+                    let Some(workdir) = fs_routes::resolve_session_workdir(&self.store, session_id)
+                    else {
+                        return HttpResponse::internal_error(
+                            "Operation log requires a resolvable working directory",
+                        );
+                    };
+                    let store = match crate::features::operationLog::operationSnapshotStore::OperationSnapshotStore::open(
+                        &workdir,
+                        crate::features::operationLog::operationLogStore::PartialRetention::default(),
+                    )
+                    .await
+                    {
+                        Ok(store) => store,
+                        Err(error) => {
+                            return HttpResponse::internal_error(error.message);
+                        }
+                    };
+                    let changes = match turn_id {
+                        Some(turn_id) => {
+                            crate::features::fileHistory::fileHistoryService::operation_file_history_changes(
+                                &store,
+                                turn_id as u64,
+                                crate::callbacks::MAIN_AGENT_ID,
+                            )
+                            .await
+                        }
+                        None => {
+                            crate::features::fileHistory::fileHistoryService::operation_file_history_all_changes(
+                                &store,
+                                crate::callbacks::MAIN_AGENT_ID,
+                            )
+                            .await
+                        }
+                    };
+                    let recorded = store
+                        .operations(
+                            turn_id.map(|turn_id| turn_id as u64),
+                            Some(crate::callbacks::MAIN_AGENT_ID),
+                        )
+                        .await
+                        .map(|operations| !operations.is_empty());
+                    return match (changes, recorded) {
+                        (Ok(changes), Ok(recorded)) => HttpResponse::ok(&json!({
+                            "sessionId": session_id,
+                            "changes": changes,
+                            "enabled": true,
+                            "recorded": recorded,
+                        })),
+                        (Err(error), _) | (_, Err(error)) => {
+                            HttpResponse::internal_error(error.message)
+                        }
+                    };
+                }
                 match self.store.get_file_history_changes(session_id, turn_id) {
                     Ok((changes, recorded)) => HttpResponse::ok(&json!({
                         "sessionId": session_id,
@@ -386,6 +424,49 @@ impl HttpServer {
                     _ => return HttpResponse::bad_request("Query parameter 'path' is required"),
                 };
                 let phase = req.query_param("phase").unwrap_or_else(|| "end".into());
+
+                if crate::features::operationLog::operationService::operation_log_enabled() {
+                    let Some(workdir) = fs_routes::resolve_session_workdir(&self.store, session_id)
+                    else {
+                        return HttpResponse::internal_error(
+                            "Operation log requires a resolvable working directory",
+                        );
+                    };
+                    let store = match crate::features::operationLog::operationSnapshotStore::OperationSnapshotStore::open(
+                        &workdir,
+                        crate::features::operationLog::operationLogStore::PartialRetention::default(),
+                    )
+                    .await
+                    {
+                        Ok(store) => store,
+                        Err(error) => {
+                            return HttpResponse::internal_error(error.message);
+                        }
+                    };
+                    return match crate::features::fileHistory::fileHistoryService::operation_file_history_content(
+                        &store,
+                        turn_id as u64,
+                        crate::callbacks::MAIN_AGENT_ID,
+                        &file_path,
+                        &phase,
+                    )
+                    .await
+                    {
+                        Ok(Some(item)) => HttpResponse::ok(&json!({
+                            "sessionId": session_id,
+                            "version": item.version,
+                            "content": item.content,
+                            "binary": item.binary.unwrap_or(false),
+                        })),
+                        Ok(None) => HttpResponse::ok(&json!({
+                            "sessionId": session_id,
+                            "version": 0,
+                            "content": Value::Null,
+                            "binary": false,
+                        })),
+                        Err(error) => HttpResponse::internal_error(error.message),
+                    };
+                }
 
                 match self
                     .store
@@ -489,12 +570,6 @@ impl HttpServer {
                 }
                 match self.store.get_session(session_id) {
                     Ok(Some(session)) => {
-                        // v2 `GET /sessions/{session_id}` answers the session
-                        // document itself (`toWireSession` → `sessionSchema`,
-                        // kap-server/src/routes/sessions.ts:1024), wrapped only
-                        // in the standard envelope — messages live on their own
-                        // `/messages` route. Serving the document bare is what
-                        // lets a client map the response directly.
                         let wire_session = format_wire_session(
                             &session,
                             &self.store,
@@ -512,11 +587,7 @@ impl HttpServer {
                 if session_id.is_empty() || session_id.contains('/') || session_id.contains(':') {
                     return HttpResponse::not_found();
                 }
-                // The session's engine state directory (undo snapshots, wake
-                // state, per-session logs) does not cascade with the SQLite
-                // rows, so it is removed explicitly before the row delete. A
-                // failure aborts the delete: reporting `deleted: true` while the
-                // snapshots survive would leave orphan files behind.
+
                 if let Err(error) = self.run_session_cleanup_hooks(session_id) {
                     return HttpResponse::json(
                         500,
@@ -541,13 +612,7 @@ impl HttpServer {
                             engine.forget_change_notifier(session_id);
                             engine.forget_mcp_status(session_id);
                         }
-                        // v2 `sessionExternalHooksService.triggerSessionEnd`:
-                        // deleting the session archives it —the close
-                        // reason is `archive` (REPL exit is `exit`).
-                        // Observational: the deletion proceeds regardless.
-                        // Session-level hooks run in the session's workspace
-                        // (v2 #4242's session cwd, which session hooks always
-                        // had upstream).
+
                         let session_cwd = workspace_id
                             .as_deref()
                             .and_then(|wid| self.store.get_workspace(wid).ok().flatten())
@@ -571,8 +636,7 @@ impl HttpServer {
                         self.hub
                             .bus_for("global")
                             .publish(&crate::events::EngineEvent::Custom(del_event));
-                        // v2 #4281: deletion evicts the session's event state
-                        // (after the deletion notice went out).
+
                         self.hub.evict_lane(session_id);
                         HttpResponse::ok(&json!({ "deleted": true, "sessionId": session_id }))
                     }
@@ -595,14 +659,27 @@ impl HttpServer {
                     .get("summary")
                     .and_then(|s| s.as_str())
                     .unwrap_or("Context compaction boundary");
-                match self.store.checkpoint_compress(session_id, summary) {
-                    Ok(()) => HttpResponse::ok(&json!({
-                        "sessionId": session_id,
-                        "compacted": true,
-                        "summary": summary
-                    })),
-                    Err(e) => HttpResponse::internal_error(format!("Compaction error: {e}")),
-                }
+                let compacted_count = match self.store.fold_projection(session_id) {
+                    Ok(messages) => messages.len(),
+                    Err(e) => {
+                        return HttpResponse::internal_error(format!("Compaction error: {e}"));
+                    }
+                };
+                let event = json!({
+                    "type": "context.apply_compaction",
+                    "agentId": crate::callbacks::MAIN_AGENT_ID,
+                    "summary": summary,
+                    "compactedCount": compacted_count,
+                    "keptUserMessageCount": 0,
+                });
+                self.hub
+                    .bus_for(session_id)
+                    .publish(&crate::events::EngineEvent::Custom(event));
+                HttpResponse::ok(&json!({
+                    "sessionId": session_id,
+                    "compacted": true,
+                    "summary": summary
+                }))
             }
             ("POST", p)
                 if extract_session_action(p, "events:undo").is_some()
@@ -614,20 +691,19 @@ impl HttpServer {
                 if self.store.get_session(session_id).ok().flatten().is_none() {
                     return HttpResponse::not_found();
                 }
-                match self.store.undo_to_last_checkpoint(session_id) {
-                    Ok(count) => HttpResponse::ok(&json!({
-                        "sessionId": session_id,
-                        "undone": true,
-                        "deletedEvents": count
-                    })),
-                    Err(crate::native::event_store::EventStoreError::UndoCompactionBoundary) => {
-                        HttpResponse::bad_request("Cannot undo across compaction boundary")
-                    }
-                    Err(crate::native::event_store::EventStoreError::CheckpointNotFound) => {
-                        HttpResponse::bad_request("No checkpoint found to undo to")
-                    }
-                    Err(e) => HttpResponse::internal_error(format!("Undo error: {e}")),
-                }
+                let event = json!({
+                    "type": "context.undo",
+                    "agentId": crate::callbacks::MAIN_AGENT_ID,
+                    "count": 1,
+                });
+                self.hub
+                    .bus_for(session_id)
+                    .publish(&crate::events::EngineEvent::Custom(event));
+                HttpResponse::ok(&json!({
+                    "sessionId": session_id,
+                    "undone": true,
+                    "count": 1
+                }))
             }
             ("PATCH", p) if p.starts_with("/api/v1/sessions/") && !p.ends_with("/prompt") => {
                 let session_id = p.strip_prefix("/api/v1/sessions/").unwrap_or_default();

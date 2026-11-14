@@ -1,10 +1,3 @@
-//! Native HTTP LLM transport — calls the provider directly from Rust with
-//! SSE streaming, instead of proxying `llm_chat` back to the JS host.
-//!
-//! Request projection and stream accumulation live in `openai.rs` /
-//! `anthropic.rs` (pure functions); this module owns the transport:
-//! reqwest client, credentials, SSE decoding, and delta forwarding.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,37 +12,14 @@ use crate::llm::{anthropic, google_genai, openai, openai_responses, opencode_ada
 use crate::rpc::types::{BoxFuture, NativeLlmConfig};
 use kimi_core::types::{LLM, LLMChatParams, LLMChatResponse, ToolInfo};
 
-/// v2 `LLM_HEADERS_TIMEOUT_ENV` (`llm-requester/timeout.ts`): an explicit
-/// cap on the wait for a provider's response headers, for the gateway
-/// clients it supports — a gateway that accepts the socket and then goes
-/// silent otherwise burns the whole request budget before the retry layer
-/// can act.
 pub const LLM_HEADERS_TIMEOUT_ENV: &str = "KIMI_CODE_LLM_HEADERS_TIMEOUT_MS";
 
-/// v2 `LLM_BODY_TIMEOUT_ENV`: an explicit cap on the whole response body.
-/// Unset or blank falls back to [`DEFAULT_LLM_IO_TIMEOUT`]; `0` states "no
-/// body timeout" explicitly (undici's `bodyTimeout: 0`).
 pub const LLM_BODY_TIMEOUT_ENV: &str = "KIMI_CODE_LLM_BODY_TIMEOUT_MS";
 
-/// v2 `MAX_HEADERS_TIMEOUT_MS` (2**31-1, the undici ceiling).
 const MAX_HEADERS_TIMEOUT_MS: u64 = 2_147_483_647;
 
-/// The cap applied when neither env var is set: undici's own defaults
-/// (`headersTimeout` / `bodyTimeout`, both 300_000 ms). v2 leaves the
-/// dispatcher undefined in that case (`getLlmDispatcher` returns `undefined`),
-/// so every `fetch` there inherits these defaults — the wire is never left
-/// without a bound. The same 300 s applies here, to every protocol: an
-/// unanswered request fails visibly (and retryably) instead of holding the
-/// turn forever.
 const DEFAULT_LLM_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// The pure half of [`resolve_llm_headers_timeout_ms`]: unset or blank takes
-/// the undici default ([`DEFAULT_LLM_IO_TIMEOUT`]); anything else must be a
-/// positive integer within range, and a bad value fails the request the way
-/// v2 fails client construction. Testable without touching the process
-/// environment — the async transport test must not write
-/// `LLM_HEADERS_TIMEOUT_ENV` while other tests read the same process-global
-/// map.
 fn parse_llm_headers_timeout_ms(raw: Option<&str>) -> Result<Option<std::time::Duration>, String> {
     let Some(raw) = raw else {
         return Ok(Some(DEFAULT_LLM_IO_TIMEOUT));
@@ -70,10 +40,6 @@ fn parse_llm_headers_timeout_ms(raw: Option<&str>) -> Result<Option<std::time::D
     }
 }
 
-/// v2 `resolveLlmBodyTimeoutMs`: unset or blank takes the undici default
-/// ([`DEFAULT_LLM_IO_TIMEOUT`]), `0` explicitly disables the body timeout,
-/// and any other integer up to the undici ceiling is the cap. A bad value
-/// fails the request, like the headers timeout.
 fn parse_llm_body_timeout_ms(raw: Option<&str>) -> Result<Option<std::time::Duration>, String> {
     let Some(raw) = raw else {
         return Ok(Some(DEFAULT_LLM_IO_TIMEOUT));
@@ -103,8 +69,6 @@ fn resolve_llm_body_timeout_ms() -> Result<Option<std::time::Duration>, String> 
     parse_llm_body_timeout_ms(std::env::var(LLM_BODY_TIMEOUT_ENV).ok().as_deref())
 }
 
-/// Test-only hook for the body-timeout value, mirroring
-/// [`headers_timeout_override`] so tests never write the process-global env.
 #[cfg(test)]
 mod body_timeout_override {
     use std::cell::RefCell;
@@ -135,8 +99,6 @@ mod body_timeout_override {
     }
 }
 
-/// v2 `resolveLlmHeadersTimeoutMs`: the env value, unless a test has scoped
-/// an override for its own thread (see [`headers_timeout_override`]).
 fn resolve_llm_headers_timeout_ms() -> Result<Option<std::time::Duration>, String> {
     #[cfg(test)]
     if let Some(scoped) = headers_timeout_override::current() {
@@ -145,11 +107,6 @@ fn resolve_llm_headers_timeout_ms() -> Result<Option<std::time::Duration>, Strin
     parse_llm_headers_timeout_ms(std::env::var(LLM_HEADERS_TIMEOUT_ENV).ok().as_deref())
 }
 
-/// Test-only hook for the headers-timeout value. `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS`
-/// is process-global, so an env-writing test would poison every other test
-/// that calls `chat` concurrently (they resolve it inside `send_request`).
-/// Scoping the value to the test's own thread removes that window entirely;
-/// the production path above is unchanged when no override is set.
 #[cfg(test)]
 mod headers_timeout_override {
     use std::cell::RefCell;
@@ -164,7 +121,6 @@ mod headers_timeout_override {
         SLOT.with(|slot| slot.borrow().clone())
     }
 
-    /// Scoped override: clears itself on drop, even on panic.
     pub(super) struct Scoped;
 
     impl Scoped {
@@ -181,10 +137,6 @@ mod headers_timeout_override {
     }
 }
 
-/// `KIMI_SSE_DUMP=<path>`: append each raw SSE frame to a file while a
-/// request streams. Diagnostic for gateway field behavior — e.g. reasoning
-/// text re-emitted as content — that the typed event surface cannot show.
-/// Reading the env var per frame keeps the dump behind an explicit opt-in.
 fn dump_raw_frame(protocol: &str, data: &str) {
     use std::io::Write;
     let Ok(path) = std::env::var("KIMI_SSE_DUMP") else {
@@ -199,13 +151,8 @@ fn dump_raw_frame(protocol: &str, data: &str) {
     }
 }
 
-/// Fire-and-forget sink for streaming events (text or thinking deltas). The value is a
-/// JSON event object; the receiver forwards it to the JS host transcript.
 pub type EventSink = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
 
-/// Fetches a bearer token for an OAuth-managed provider. `force` asks the
-/// host to refresh past its cache — the transport calls it after a 401/403,
-/// mirroring the host's own `getAuth({ force: true })` retry.
 pub type AuthTokenProvider =
     Arc<dyn Fn(bool) -> BoxFuture<'static, Result<String, String>> + Send + Sync>;
 
@@ -226,7 +173,6 @@ impl Accumulator {
         }
     }
 
-    /// Tool-call argument fragments the last `feed` produced, in arrival order.
     fn take_tool_call_deltas(&mut self) -> Vec<StreamDelta> {
         match self {
             Self::OpenAI(acc) => acc.take_tool_call_deltas(),
@@ -245,8 +191,6 @@ impl Accumulator {
         }
     }
 
-    /// The reasoning dialect the stream was observed using (v2
-    /// `detectedReasoningKeys`); only the OpenAI accumulator detects.
     fn detected_reasoning_key(&self) -> Option<&'static str> {
         match self {
             Self::OpenAI(acc) => acc.detected_reasoning_key(),
@@ -254,8 +198,6 @@ impl Accumulator {
         }
     }
 
-    /// Terminal accumulation failure (e.g. truncated Responses function-call
-    /// arguments). Only the Responses accumulator can produce one today.
     fn take_error(&mut self) -> Option<String> {
         match self {
             Self::Responses(acc) => acc.take_error(),
@@ -264,12 +206,6 @@ impl Accumulator {
     }
 }
 
-/// An [`LLM`] implementation that talks to an OpenAI-compatible or
-/// Anthropic endpoint over HTTPS with SSE streaming.
-/// Process-wide HTTP client. TCP/TLS connections pool across turns; building
-/// a client per LLM instance dropped that pool on every rebuild, so each turn
-/// paid a fresh connect + TLS handshake before its first token. Keep-alive
-/// reuse is what lets the host transport (Node fetch) start streaming sooner.
 pub(crate) static SHARED_HTTP_CLIENT: once_cell::sync::Lazy<reqwest::Client> =
     once_cell::sync::Lazy::new(|| {
         reqwest::Client::builder()
@@ -283,56 +219,31 @@ pub struct NativeHttpLlm {
     system_prompt: String,
     client: reqwest::Client,
     sink: Option<EventSink>,
-    /// OAuth token channel for `auth_provider`-configured transports. Absent
-    /// means static-key auth (`config.api_key`).
+
     auth: Option<AuthTokenProvider>,
-    /// Last token fetched through `auth`, reused across requests until a
-    /// 401/403 forces a refresh — the host's OAuth manager keeps it fresh,
-    /// so re-asking per request would only add round-trips.
+
     cached_token: std::sync::Mutex<Option<String>>,
-    /// Single-flight gate for the cold token fetch and the forced refresh:
-    /// held across the host round-trip so N concurrent callers share one
-    /// fetch instead of each triggering an OAuth refresh. Async because the
-    /// round-trip it serializes is itself async.
+
     fetch_gate: tokio::sync::Mutex<()>,
-    /// The turn's tool-call-id ledger (v2 `ToolCallIdNormalizer`), installed by
-    /// the turn through [`LLM::set_tool_call_ids`]. Every request opens one
-    /// attempt on it.
-    tool_call_ids:
-        std::sync::Mutex<Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>>>,
-    /// The agent owning the turn in flight (v2 `scopeContext.agentId`),
-    /// installed by the turn through [`LLM::set_stream_agent_id`]. Streamed
-    /// deltas carry it so the host attributes a subagent's stream to the
-    /// subagent instead of the main transcript. `None` between turns.
+
+    tool_call_ids: std::sync::Mutex<Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>>>,
+
     stream_agent_id: std::sync::Mutex<Option<String>>,
-    /// The running turn's watchdog state (v2 `armTurnWatch`), installed by
-    /// the turn through [`LLM::set_turn_watch`]. Every streamed fragment
-    /// ticks it, so a turn that keeps receiving model output is never
-    /// reported as stalled. Replaced per turn like `stream_agent_id`.
+
     turn_watch: std::sync::Mutex<Option<Arc<kimi_core::watch::TurnWatchState>>>,
-    /// The session's stable prompt-cache key (v2 `cacheKey`: the session id).
-    /// OpenAI-compatible wires send it as `prompt_cache_key`, anthropic as
-    /// `metadata.user_id`. `None` for a transport with no session.
+
     cache_key: Option<String>,
-    /// The optional body knobs v2 carries on `ModelRequestInput` /
-    /// `modelOverrides` (`responseFormat`, `seed`, sampling, `extraParams`).
-    /// The host has no channel for them yet, so they default to inert and the
-    /// transport only translates what [`Self::with_request_options`] supplies.
+    last_trace_id: std::sync::Mutex<Option<String>>,
+
+    interrupted_response: std::sync::Mutex<Option<LLMChatResponse>>,
+
     request_options: RequestOptions,
 }
 
-/// v2 `protocolAdapterRegistry.detectedReasoningKeys`: the reasoning dialect
-/// each connection was first observed streaming in, remembered for the
-/// process's life so the NEXT request's replay of unmarked history think
-/// parts uses the current model's own field. Keyed `base#model` (v2
-/// `modelKey`); the first observation wins — the registry never overwrites,
-/// so a later chunk speaking a second dialect cannot re-key the history.
 static DETECTED_REASONING_KEYS: once_cell::sync::Lazy<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = once_cell::sync::Lazy::new(Default::default);
 
-/// The dialect recorded for this connection, if any (v2
-/// `detectedReasoningKeys.get(modelKey)`).
 fn detected_reasoning_key_for(base_url: &str, model: &str) -> Option<String> {
     DETECTED_REASONING_KEYS
         .lock()
@@ -341,9 +252,6 @@ fn detected_reasoning_key_for(base_url: &str, model: &str) -> Option<String> {
         .cloned()
 }
 
-/// v2 `onReasoningKey`: record the first dialect a connection is observed
-/// streaming in. Only an accumulator without a declared key reports one, so
-/// a model with a config-declared field never lands here.
 fn record_detected_reasoning_key(base_url: &str, model: &str, key: &str) {
     DETECTED_REASONING_KEYS
         .lock()
@@ -352,9 +260,6 @@ fn record_detected_reasoning_key(base_url: &str, model: &str, key: &str) {
         .or_insert_with(|| key.to_string());
 }
 
-/// Whether the transport config asked for thinking, in either wire dialect:
-/// an OpenAI-shaped effort (anything but the host-level off tokens) or an
-/// anthropic thinking budget.
 fn thinking_is_on(config: &NativeLlmConfig) -> bool {
     config
         .reasoning_effort
@@ -364,26 +269,13 @@ fn thinking_is_on(config: &NativeLlmConfig) -> bool {
 }
 
 impl NativeHttpLlm {
-    /// Build the transport for one config. The model's own system prompt and
-    /// off-effort are resolved here, so every construction site — the session
-    /// model, a `[secondary_model]` pool alias, the REPL — gets the same
-    /// effective config.
     pub fn new(mut config: NativeLlmConfig, system_prompt: String) -> Self {
-        // A model's own system prompt replaces the session prompt for its
-        // transport; without one the session prompt stands.
         let system_prompt = config.system_prompt.clone().unwrap_or(system_prompt);
-        // The host resolves `reasoning_effort` itself (its thinking state is
-        // not visible here), so a model that encodes "thinking off" as an
-        // effort value only fills the gap when the host sent none.
+
         if config.reasoning_effort.is_none() {
             config.reasoning_effort = config.off_effort.clone();
         }
-        // v2 `resolveThinkingKeep`: preserved thinking defaults to `"all"`
-        // while thinking is on, and is absent when it is off. Only the Kimi
-        // and anthropic wires consume it (a `thinking.keep` object field and
-        // a `clear_thinking_20251015` context-management edit); the generic
-        // OpenAI wire has no encoding for it, so it stays unset there until
-        // the user asks for it explicitly.
+
         if config.thinking_keep.is_none()
             && thinking_is_on(&config)
             && (config.protocol == "anthropic"
@@ -407,63 +299,56 @@ impl NativeHttpLlm {
             stream_agent_id: std::sync::Mutex::new(None),
             turn_watch: std::sync::Mutex::new(None),
             cache_key: None,
+            last_trace_id: std::sync::Mutex::new(None),
+            interrupted_response: std::sync::Mutex::new(None),
             request_options: RequestOptions::default(),
         }
     }
 
-    fn tool_call_ledger(
-        &self,
-    ) -> Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>> {
+    fn tool_call_ledger(&self) -> Option<Arc<kimi_core::tool_call_id::ToolCallIdNormalizer>> {
         self.tool_call_ids
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
-    /// Attach a streaming event sink. Deltas are forwarded to it as
-    /// `{ "type": "llm.delta", "part": { "type": "text" | "think", ... } }`.
     pub fn with_sink(mut self, sink: EventSink) -> Self {
         self.sink = Some(sink);
         self
     }
 
-    /// Attach the OAuth token channel. Required when the config names an
-    /// `auth_provider`; ignored otherwise.
     pub fn with_auth_provider(mut self, auth: AuthTokenProvider) -> Self {
         self.auth = Some(auth);
         self
     }
 
-    /// Attach the session's prompt-cache key (v2 `cacheKey`).
     pub fn with_cache_key(mut self, key: Option<String>) -> Self {
         self.cache_key = key.filter(|value| !value.is_empty());
         self
     }
 
-    /// Attach the optional request-body knobs (v2 `ModelRequestInput`):
-    /// `response_format`, `seed`, sampling and per-protocol `extraParams`.
     pub fn with_request_options(mut self, options: RequestOptions) -> Self {
         self.request_options = options;
         self
     }
 
-    /// The per-request completion cap (v2 `completionBudgetParams` +
-    /// `resolveMaxCompletionCap`, `21406fb4c8`): only an explicitly configured
-    /// output cap becomes a request budget, and the remaining context
-    /// (`window - used`) can only lower it. With no declared cap the field is
-    /// omitted entirely, except for Kimi's OpenAI / Responses traits, whose
-    /// `completionTokensWhenUnset` fills it with `window - used`.
     fn completion_cap(&self, params: &LLMChatParams) -> Option<u32> {
+        if let Some(requested) = params.effective_max_output_tokens() {
+            let requested = requested.max(1);
+            let capped = match (params.max_context_tokens, params.used_context_tokens) {
+                (Some(window), Some(used)) if window > 0 => {
+                    requested.min(window.saturating_sub(used).max(1))
+                }
+                _ => requested,
+            };
+            return Some(capped);
+        }
         let is_kimi = self
             .config
             .provider_type
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
         let Some(requested) = self.config.max_tokens else {
-            // `kimiOpenAITrait` / `kimiResponsesTrait` are the only traits with
-            // `completionTokensWhenUnset`. `kimiAnthropicTrait` has none: the
-            // Anthropic wire fills its required `max_tokens` from the model
-            // ceiling instead (see `default_max_tokens_for_model`).
             let kimi_unset_budget = is_kimi
                 && matches!(
                     self.config.protocol.as_str(),
@@ -482,8 +367,7 @@ impl NativeHttpLlm {
             }
             return Some(window.saturating_sub(used).max(1));
         };
-        // v2 `resolveMaxCompletionCap`: a non-positive cap is the opt-out
-        // spelling and resolves to `undefined`, so nothing goes on the wire.
+
         if requested == 0 {
             return None;
         }
@@ -494,13 +378,6 @@ impl NativeHttpLlm {
         Some(cap.max(1))
     }
 
-    /// v2 `prepareOpenAIRequest`'s cap chain for Chat Completions:
-    /// `resolveMaxCompletionCap` → the trait's `completionTokensWhenUnset` →
-    /// `familyDefaultCap`. The model-family tier is what fills an otherwise
-    /// unset `max_tokens` (DeepSeek: 8192 / 65536 / 131072 by effort, then
-    /// clamped by the remaining context); an explicit `0` is the opt-out
-    /// spelling and stops the chain. Responses and Anthropic have no family
-    /// tier in v2 and keep [`Self::completion_cap`] unchanged.
     fn openai_completion_cap(&self, params: &LLMChatParams) -> Option<u32> {
         if self.config.max_tokens.is_some() {
             return self.completion_cap(params);
@@ -518,18 +395,10 @@ impl NativeHttpLlm {
         })
     }
 
-    /// The wire history for one request. Tool-call ids are normalised per
-    /// protocol first (v2 `normalizeToolCallIdsForProvider`, applied to the
-    /// message list before lowering): the id alphabet providers accept is
-    /// narrower than what a gateway returns, and both halves of a call must be
-    /// rewritten through one map or the pair splits into an unknown call plus
-    /// an orphan result. The ledger normalizer that assigned the ids is a
-    /// different layer and is not consulted here.
     fn wire_messages(&self, params: &LLMChatParams) -> Vec<WireMessage> {
         let policy = match self.config.protocol.as_str() {
             "openai_responses" | "openai-responses" => Some(ToolCallIdPolicy::Responses),
-            // v2's Google requester has no call-id policy; Gemini ids travel
-            // as issued.
+
             "google" | "google-genai" | "gemini" => None,
             _ => Some(ToolCallIdPolicy::Chat),
         };
@@ -541,22 +410,13 @@ impl NativeHttpLlm {
         to_wire(&messages)
     }
 
-    /// Moonshot preserved-thinking keep is active (`[thinking] keep` /
-    /// `KIMI_MODEL_THINKING_KEEP`); the host filters off-values, so any value
-    /// here reaches the wire.
-    fn thinking_keep_active(&self) -> bool {
-        self.config
-            .thinking_keep
-            .as_deref()
-            .is_some_and(|keep| !keep.is_empty())
-    }
-
-    /// Whether anthropic requests take the **beta** Messages API
-    /// (`POST {base}/messages?beta=true`). Enabling keep routes there as well
-    /// — `clear_thinking_20251015` is honored only on the beta API — which is
-    /// the same override the host provider applies in `withThinkingKeep`.
     fn beta_messages_api(&self) -> bool {
-        self.config.beta_api || self.thinking_keep_active()
+        self.config.beta_api
+            || self
+                .config
+                .thinking_keep
+                .as_deref()
+                .is_some_and(|keep| !keep.is_empty())
     }
 
     fn endpoint(&self) -> String {
@@ -571,11 +431,6 @@ impl NativeHttpLlm {
             }
             "openai_responses" | "openai-responses" => format!("{base}/responses"),
             "google" | "google-genai" | "gemini" => {
-                // The GenerateContent API always carries a version segment; the
-                // host resolvers normalize `base_url` for this, but the URL is
-                // actually assembled here, so this must not depend on the
-                // caller having done so. A bare host root otherwise builds a
-                // path that is not an API route at all.
                 let base = google_api_base(base);
                 format!(
                     "{base}/models/{}:streamGenerateContent?alt=sse",
@@ -591,9 +446,6 @@ impl NativeHttpLlm {
         delta: StreamDelta,
         ids: Option<&kimi_core::tool_call_id::ToolCallIdResponseNormalizer>,
     ) {
-        // Every streamed fragment is observable progress for the turn's
-        // watchdog (v2's `partials.length` arm) — including the fragments
-        // withheld below, which still prove the provider stream is alive.
         if let Some(watch) = self
             .turn_watch
             .lock()
@@ -602,11 +454,7 @@ impl NativeHttpLlm {
         {
             watch.note_partial();
         }
-        // A streamed fragment carries the id the finalized call will carry, so
-        // the host addresses one tool-call entity for both. A fragment whose
-        // provider sent no id yet is withheld rather than forwarded with an
-        // empty id: the step mints the id on finalization, and a phantom
-        // entity with no id would never be joined to it.
+
         let delta = match (delta, ids) {
             (
                 StreamDelta::ToolCall {
@@ -632,11 +480,7 @@ impl NativeHttpLlm {
                 "type": "llm.delta",
                 "part": delta.to_part(),
             });
-            // Attribute the fragment to the agent whose turn is in flight (v2
-            // stamps `agentId` at event construction inside each agent's own
-            // loop service). Without it the host's attribution fallback
-            // resolves every delta — a subagent's body text and thinking
-            // included — to the main agent's transcript.
+
             if let Some(agent_id) = self
                 .stream_agent_id
                 .lock()
@@ -659,6 +503,11 @@ impl NativeHttpLlm {
         &self,
         params: LLMChatParams,
     ) -> Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        *self.last_trace_id.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.interrupted_response
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         let wire = self.wire_messages(&params);
         let is_anthropic = self.config.protocol == "anthropic";
         let is_responses = matches!(
@@ -671,10 +520,6 @@ impl NativeHttpLlm {
         );
         let started_at = std::time::Instant::now();
 
-        // v2 #4230 (`thinking-cannot-disable`): Gemini 4 always reasons, and
-        // `off` has no encoding on that family (its levels are LOW/MEDIUM/HIGH
-        // only). Failing before the request is built keeps the user-facing
-        // reason instead of the provider's generic 400.
         if is_google
             && let Some(rejection) = google_genai::thinking_off_rejection(
                 &self.config.model,
@@ -683,18 +528,6 @@ impl NativeHttpLlm {
         {
             return Err(rejection.into());
         }
-
-        // `llm.step.begin` is deliberately *not* emitted here. A step boundary
-        // belongs to the turn loop (`run_turn`), the only layer that knows the
-        // turn and the step ordinal — the typed contract
-        // (`EngineEvent::LlmStepBegin { turn_id, step }`) has required both all
-        // along, and this transport cannot fill them in. One chat call is not
-        // one step either: this method runs once per retry *attempt*, and the
-        // same LLM instance is borrowed by the compaction summarizer, the
-        // title generator and the memory filer. Mirroring each request as a
-        // step boundary handed the host a `turn.step.started` for calls that
-        // are not steps, with no `turn.step.completed` to close them once the
-        // addressed emissions were gated.
 
         let completion_cap = self.completion_cap(&params);
         let mut body = if is_anthropic {
@@ -731,13 +564,6 @@ impl NativeHttpLlm {
                 &self.request_options,
             )
         } else if is_google {
-            // The host expresses "thinking on" as an *effort* for every
-            // non-anthropic protocol (`thinking_budget` stays None), so that —
-            // not the anthropic-only budget — is the signal that the request
-            // must ask Gemini for its reasoning. Without `includeThoughts` the
-            // response carries no `thought` part and the stream emits no think
-            // delta, which is exactly why Gemini showed no thinking in the TUI
-            // while the effort was configured and on.
             let reasoning_on = self
                 .config
                 .reasoning_effort
@@ -786,9 +612,6 @@ impl NativeHttpLlm {
         };
 
         if opencode_adapter::is_opencode_endpoint(&self.config.base_url) {
-            // The protocol decides the placeholder shape: the gate demands the
-            // same pair on every wire, but each wire spells a tool definition
-            // differently.
             opencode_adapter::apply(&mut body, &self.config.protocol);
         }
 
@@ -797,10 +620,7 @@ impl NativeHttpLlm {
             .send_request(&body, token.as_str(), params.cancel.as_ref())
             .await?;
         let mut status = response.status();
-        // A 401/403 on an OAuth-managed transport means the cached token went
-        // stale (expired early, revoked, rotated); force a host-side refresh
-        // and retry once before surfacing the failure. Static-key transports
-        // have nothing to refresh — a bad key never becomes good by retrying.
+
         if !status.is_success() && matches!(status.as_u16(), 401 | 403) && self.auth.is_some() {
             token = self.refresh_credential().await?;
             response = self
@@ -809,32 +629,18 @@ impl NativeHttpLlm {
             status = response.status();
         }
         let t_headers = started_at.elapsed();
-        // The request reached the wire (v2 `requestSentAt`): the mark the
-        // build/server split of the request timing is measured against.
+
         let t_sent = started_at.elapsed();
-        // One resolution for both body readers: the success stream and the
-        // error-body excerpt below must share the same idle cap, or a failing
-        // provider that stalls mid-error-body would still hold the turn.
+
         let body_timeout = resolve_llm_body_timeout_ms()?;
         if !status.is_success() {
-            // The provider may ask for a specific wait; carry it on the typed
-            // error so the retry layer can honour it instead of burning its
-            // attempts at its own pace. Two sources, header first:
-            //   * the standard `Retry-After` header (whole seconds);
-            //   * Google, which does not use that header at all and puts the
-            //     wait in the body as a `RetryInfo` detail (v2
-            //     `parseRetryInfoDelayMs`, google-genai/format.ts:304).
             let header_retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .map(Duration::from_secs);
-            // v2 captures the provider's request id from the same header block
-            // (`human/kimi/trace.ts` reads `x-trace-id` on both the streaming
-            // and the failed path) and keeps it on the typed error. It is the
-            // only identifier the provider's support can search on, so it must
-            // not be dropped just because the call failed.
+
             let trace_id = response
                 .headers()
                 .get("x-trace-id")
@@ -847,6 +653,13 @@ impl NativeHttpLlm {
                     .with_trace_id(trace_id.as_deref()),
             ));
         }
+
+        *self.last_trace_id.lock().unwrap_or_else(|e| e.into_inner()) = response
+            .headers()
+            .get("x-trace-id")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
 
         let mut acc = if is_anthropic {
             Accumulator::Anthropic(anthropic::StreamAccumulator::new())
@@ -861,13 +674,6 @@ impl NativeHttpLlm {
             )
         };
 
-        // One request is one attempt. Its tool-call ids are claimed on the
-        // turn's ledger as its fragments stream out, and every failure path
-        // below hands those claims back through the guard's `Drop`, so the
-        // retry reuses the provider's raw ids instead of minting `__2`
-        // variants of a response the turn never kept (v2 #3734: the requester
-        // opens a response per attempt and the turn rolls the discarded one
-        // back).
         let mut attempt = AttemptLedger::new(
             self.tool_call_ledger()
                 .as_ref()
@@ -882,35 +688,25 @@ impl NativeHttpLlm {
             .to_string();
 
         let mut n_events: u32 = 0;
-        // Frames that arrived but were not JSON, and in-band provider errors.
-        // Both used to be dropped without a trace: a gateway answering 200 with
-        // a catch-all (HTML/plain) body produced zero events, the accumulator
-        // finished on EOF with an empty response, and the step layer mapped that
-        // to a normal `Complete`. From the outside it looked like "the model
-        // returned nothing", with no error anywhere.
+
         let mut n_malformed: u32 = 0;
         let mut first_malformed: Option<String> = None;
         let mut in_band_error: Option<String> = None;
         let mut t_first_event: Option<std::time::Duration> = None;
-        // Thinking-loop guard: a degenerate thinking stream is a decoding
-        // attractor the model cannot notice from inside, so the repetition is
-        // caught here and the rest of the block is dropped from the display.
-        // The accumulator keeps its own copy — an Anthropic thinking block
-        // must round-trip with its signature intact.
+
         let mut thinking_guard = crate::llm::thinking_guard::ThinkingGuard::from_settings();
         let mut stream = response.bytes_stream().eventsource();
-        // v2 `LLM_BODY_TIMEOUT_ENV`: undici's body timeout is the idle gap
-        // between body chunks after the headers, not a whole-exchange cap —
-        // so it wraps each read. Unset takes the undici default (300 s);
-        // `0` is the explicit escape hatch that disables it. Google shares
-        // the same default: v2 gives it no explicit dispatcher, so its fetch
-        // runs on the same undici global defaults.
+
         while let Some(event) = tokio::select! {
-            // Mid-stream cancellation (generate.ts:154-202): abort the read
-            // instead of draining the rest of the response. Already-emitted
-            // deltas stay in the transcript, mirroring v2's behavior of
-            // keeping consumed content after an abort.
+
+
+
+
             _ = cancelled_or_pending(params.cancel.as_ref()) => {
+                *self
+                    .interrupted_response
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(acc.finish());
                 return Err(CANCELLED_MESSAGE.into());
             }
             event = async {
@@ -939,9 +735,7 @@ impl NativeHttpLlm {
             }
             let value: serde_json::Value = match serde_json::from_str(&event.data) {
                 Ok(v) => v,
-                // Tolerate non-JSON keep-alive payloads, but count them: an
-                // endpoint that is not actually speaking SSE must not look like
-                // an empty completion.
+
                 Err(_) => {
                     n_malformed += 1;
                     if first_malformed.is_none() {
@@ -979,23 +773,12 @@ impl NativeHttpLlm {
             return Err(format!("llm provider stream error: {message}").into());
         }
 
-        // The stream is done (v2 `streamEndedAt`): the mark the stream
-        // duration is measured to.
         let t_ended = started_at.elapsed();
 
-        // Failures the accumulator recorded itself (truncated Responses
-        // function-call arguments) must also fail the request: finishing
-        // here would run tools with fabricated empty arguments or complete
-        // the turn with an empty answer.
         if let Some(message) = acc.take_error() {
             return Err(format!("llm provider stream error: {message}").into());
         }
 
-        // Hyper returns a connection to the pool only after its body is read
-        // to EOF. The loop above breaks on the terminal marker and would
-        // otherwise drop the stream mid-body — closing the connection and
-        // forcing the next turn to pay a fresh TCP+TLS handshake. Drain the
-        // remainder off-thread, bounded, so the pool keeps the connection.
         tokio::spawn(async move {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 while let Some(Ok(_)) = stream.next().await {}
@@ -1014,27 +797,16 @@ impl NativeHttpLlm {
             );
         }
 
-        // v2 #4485 `detectedReasoningKeys`: the dialect this connection was
-        // observed streaming in is remembered (first-seen wins) and replayed
-        // as the reasoning key of unmarked history think parts on the next
-        // request — before this, only the config-declared key was consulted.
         let observed_reasoning_key = acc.detected_reasoning_key();
         let mut response = acc.finish();
         if let Some(key) = observed_reasoning_key {
             record_detected_reasoning_key(&self.config.base_url, &self.config.model, key);
         }
-        // The calls that enter history carry the ids their fragments streamed
-        // under, so the host joins one tool-call entity for the whole call
-        // (v2 `remapFinalizedCalls`). An id the provider left empty is skipped:
-        // the step mints it, and claiming "" here would only take the slot.
+
         if let Some(ids) = attempt.ids() {
             kimi_core::tool_call_id::remap_response_tool_calls(&mut response, ids);
         }
 
-        // A stream that produced no usable events is a transport failure, not an
-        // empty answer. Returning `Ok` here is what turned a misconfigured
-        // endpoint into "the model said nothing", with no error anywhere for the
-        // retry layer or the user to act on.
         if n_events == 0 {
             return Err(
                 empty_stream_error(&content_type, n_malformed, first_malformed.as_deref()).into(),
@@ -1050,11 +822,6 @@ impl NativeHttpLlm {
             .into());
         }
 
-        // Report the finished step (content + tool calls + usage) so the
-        // host can record the assistant message without owning the call.
-        // v2 `buildModelRequestTiming` (upstream #3938): the marks taken
-        // above become the structured timing; every mark shares the
-        // `started_at` origin, so the start is 0.
         let timing = crate::llm::LlmTiming::from_marks(
             0,
             Some(t_sent.as_millis().min(i64::MAX as u128) as i64),
@@ -1082,13 +849,11 @@ impl NativeHttpLlm {
             },
         }));
 
-        // The request succeeded: the ids it claimed are the turn's.
         attempt.commit();
         response.timing = timing;
         Ok(response)
     }
 
-    /// Send one request with the protocol's auth headers carrying `token`.
     async fn send_request(
         &self,
         body: &serde_json::Value,
@@ -1111,10 +876,7 @@ impl NativeHttpLlm {
             req = req
                 .header("x-api-key", token)
                 .header("anthropic-version", "2023-06-01");
-            // v2 `executeAnthropicRequest`: `betas` travels as a header on the
-            // standard Messages API and in the body on the beta API (which is
-            // also where preserved thinking routes, see `endpoint()`). The
-            // default list carries the interleaved-thinking beta.
+
             if !self.beta_messages_api() {
                 let betas = anthropic::anthropic_betas(
                     self.config.provider_type.as_deref(),
@@ -1132,17 +894,9 @@ impl NativeHttpLlm {
         for (k, v) in &self.config.custom_headers {
             req = req.header(k.as_str(), v.as_str());
         }
-        // v2 aborts preflight sends through the same signal
-        // (generate.ts:107-109): a cancel landing before the response
-        // headers arrives must not pay for the request.
+
         let send = req.send();
-        // v2 #4092 (`llm-requester/timeout.ts`): a cap on the wait for the
-        // response headers — `send()` resolves as they arrive, so wrapping it
-        // ports the undici `headersTimeout`. Unset takes the undici default
-        // (300 s) on every wire: v2 arms an explicit dispatcher only for the
-        // openai / openai-responses / anthropic clients, but the google wire
-        // runs on the same undici fetch defaults, so leaving it uncapped here
-        // would be strictly worse than the reference.
+
         let headers_cap = resolve_llm_headers_timeout_ms()?;
         let send = async move {
             let result = match headers_cap {
@@ -1168,8 +922,6 @@ impl NativeHttpLlm {
         }
     }
 
-    /// The credential for this request: the cached OAuth token (fetched once,
-    /// then reused until a 401/403 forces a refresh) or the static key.
     async fn credential(&self) -> Result<String, String> {
         if let Some(env_name) = self.config.api_key_env.as_deref() {
             if !self.config.api_key.trim().is_empty() || self.config.auth_provider.is_some() {
@@ -1189,15 +941,11 @@ impl NativeHttpLlm {
                     self.config.auth_provider
                 )
             })?;
-            // Fast path: a cached token needs neither the gate nor a round-trip.
+
             if let Some(token) = self.cached_token_value() {
                 return Ok(token);
             }
-            // Single-flight the cold fetch. Without this gate, N concurrent
-            // first-requests would each call `host/auth_token` and the host's
-            // OAuth manager could refresh N times for one logical login. The
-            // winner populates the cache; the rest re-check under the gate and
-            // reuse it.
+
             let _gate = self.fetch_gate.lock().await;
             if let Some(token) = self.cached_token_value() {
                 return Ok(token);
@@ -1207,11 +955,8 @@ impl NativeHttpLlm {
         Ok(self.config.api_key.clone())
     }
 
-    /// Force-refresh the OAuth token through the host after a 401/403.
     async fn refresh_credential(&self) -> Result<String, String> {
         match &self.auth {
-            // Serialize forced refreshes too, so concurrent 401s share one
-            // host round-trip instead of stampeding the OAuth manager.
             Some(fetch) => {
                 let _gate = self.fetch_gate.lock().await;
                 self.store_token(fetch(true).await?)
@@ -1220,7 +965,6 @@ impl NativeHttpLlm {
         }
     }
 
-    /// The currently cached token, if any.
     fn cached_token_value(&self) -> Option<String> {
         self.cached_token
             .lock()
@@ -1234,10 +978,6 @@ impl NativeHttpLlm {
     }
 }
 
-/// Google's GenerateContent routes live under a version segment (`/v1beta`).
-/// Append it when the configured base URL carries none, so a host-root-only
-/// `base_url` — the documented contract for the `google-genai` provider —
-/// still resolves to a real API route.
 pub fn google_api_base(base: &str) -> String {
     if url_has_api_version(base) {
         return base.to_string();
@@ -1245,35 +985,14 @@ pub fn google_api_base(base: &str) -> String {
     format!("{base}/v1beta")
 }
 
-/// Whether a URL already carries an API version segment (`v1`, `v1beta`, …).
-///
-/// The native streaming transport receives a full endpoint URL rather than a
-/// base, so it cannot append a version segment — but it can refuse to issue a
-/// request that has none, instead of letting a catch-all gateway answer 200 and
-/// the empty result read as "the model said nothing".
 pub fn url_has_api_version(url: &str) -> bool {
     url.split('/').any(is_api_version_segment)
 }
 
-/// The model id as the GenerateContent path expects it: only the final segment.
-///
-/// Callers may hand over a `provider/model` alias (e.g.
-/// `zhongzhuan/gemini-3.8-flash-high`) when the alias is not declared under
-/// `[models.*]`. The model path segment must be the bare model id — a
-/// Gemini-compatible relay answers the prefixed form with 404
-/// (`protocol_endpoint_not_found`), which reaches the user as an empty
-/// response because nothing in the stream decodes.
-///
-/// Only applied to Google: other wires legitimately use `provider/model`
-/// (OpenRouter-style aliases), and they carry it in a body field rather than
-/// in the URL path.
 pub(crate) fn google_model_id(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
-/// Whether one path segment is an API version marker: `v` + digits + optional
-/// alpha suffix (`v1`, `v1beta`, `v2alpha`). `vertex` is not one — the digits
-/// must come immediately after the `v`.
 fn is_api_version_segment(segment: &str) -> bool {
     let Some(rest) = segment.strip_prefix(['v', 'V']) else {
         return false;
@@ -1282,71 +1001,24 @@ fn is_api_version_segment(segment: &str) -> bool {
     digits > 0 && rest[digits..].chars().all(|c| c.is_ascii_alphabetic())
 }
 
-/// Cap on how much of an error body is read. Only a brief excerpt is
-/// rendered, so there is no reason to buffer an unbounded response first.
 const ERROR_BODY_MAX_BYTES: usize = 16 * 1024;
 
-/// Build the machine-readable transport-error prefix. reqwest 0.12's
-/// `Display` hides the actual cause (timeout / refused / DNS ...) behind
-/// `.source()`, so classify it here while the `reqwest::Error` is in hand —
-/// the retry layer matches this prefix instead of grepping free text.
-/// Stable prefix for cancellation failures. `is_retryable_error` treats it
-/// as deterministic (the caller asked to stop), mirroring v2 where an
-/// `AbortError` is never classified as a retryable provider error.
 const CANCELLED_MESSAGE: &str = "llm cancelled: request aborted";
 
-/// Whether a failure is the caller's own cancellation rather than a provider
-/// fault. v2's `AbortError` carries the same meaning through a typed `name`, so
-/// the retry layer and the telemetry payload both need to recognise it.
 pub fn is_cancelled_error(error: &str) -> bool {
     error.starts_with(CANCELLED_MESSAGE)
 }
 
-/// Prefix for a response that is not an SSE stream at all. Re-exported from the
-/// native stream module so both transports classify it identically.
-/// The HTTP statuses the retry layer treats as transient.
-///
-/// **Single source of truth for the retry policy.** It lives here rather than
-/// inside one transport's `is_retryable_error` because both transports answer
-/// the same question — the native HTTP path and the host-proxy path — and when
-/// the set was written out twice they drifted: the host-proxy arm was missing
-/// 408/409/425, so a request the policy says to retry failed immediately, while
-/// its keyword fallback retried a 400 whose body merely mentioned
-/// "connection" (see `HostLlmProxy::is_retryable_error`).
-///
-/// The set mirrors v2 `RETRYABLE_STATUS_CODES`
-/// (`agent-core-v2/src/human/llm/requester/retry.ts`) and
-/// `isRetryableGenerateError` (`kosong/src/errors.ts`): the explicit list
-/// `[408, 409, 429, 500, 502, 503, 504, 529]` — **not** the whole 5xx range,
-/// so 501/505/506/… fail fast instead of burning the retry budget. 425 is the
-/// fork's recorded addition for retry-later transports.
-///
-/// What a transport does with a *status-less* error stays its own business:
-/// the native path matches its stamped `llm transport error ` prefix, the host
-/// proxy matches the raw strings a JS host produces. Only the policy is shared.
 pub fn is_retryable_status_code(code: u16) -> bool {
     matches!(code, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
 }
 
 const NOT_AN_SSE_ENDPOINT_PREFIX: &str = crate::native::NOT_AN_SSE_ENDPOINT_PREFIX;
 
-/// The HTTP status the transport stamped into an error string, when the failure
-/// is status-coded.
-///
-/// Status failures are rendered as `llm http status {code}: {brief}` (see the
-/// response check in this module), so the classification layers read the code
-
-/// Keeps a diagnosis readable: the first frame of a non-SSE body is the useful
-/// part, and a catch-all gateway can answer with a megabyte of HTML.
-///
-/// Delegates to the native-stream implementation so the two transports cannot
-/// drift apart.
 fn truncate_for_diagnosis(text: &str) -> String {
     crate::native::truncate_for_diagnosis(text)
 }
 
-/// Explains a stream that produced no events. Delegates to the shared
-/// implementation so both transports word the diagnosis the same way.
 fn empty_stream_error(
     content_type: &str,
     n_malformed: u32,
@@ -1355,8 +1027,6 @@ fn empty_stream_error(
     crate::native::empty_stream_error(content_type, n_malformed, first_malformed)
 }
 
-/// Resolve immediately when no cancel handle is wired (test stubs) so the
-/// select arm stays inert.
 async fn cancelled_or_pending(cancel: Option<&tokio_util::sync::CancellationToken>) {
     match cancel {
         Some(cancel) => cancel.cancelled().await,
@@ -1379,19 +1049,6 @@ fn transport_error_message(e: &reqwest::Error) -> String {
     format!("llm transport error {kind}")
 }
 
-/// Read the error body once and return both the excerpt that goes into the
-/// error message and any wait the provider embedded in it.
-///
-/// The wait has to come off the *untruncated* buffer: Google's `RetryInfo`
-/// detail can sit past the excerpt cut, and a wait that is silently dropped
-/// means the retry layer backs off on its own schedule against a provider that
-/// just told it to wait longer.
-///
-/// Bounded twice: bytes kept ([`ERROR_BODY_MAX_BYTES`]) and, when a body cap
-/// is armed, each read — a provider that sends headers and then stalls must
-/// not hold the failure path open. A read failure is not the end of the body:
-/// it is recorded as `[body unreadable: …]` so the detail never claims the
-/// provider said less than it did.
 async fn read_error_body(
     response: reqwest::Response,
     body_timeout: Option<Duration>,
@@ -1428,15 +1085,6 @@ async fn read_error_body(
     (brief, retry_after)
 }
 
-/// The wait Google reports for a throttled or overloaded request.
-///
-/// v2 `parseRetryInfoDelayMs` (google-genai/format.ts:324-348). Google does not
-/// send a `Retry-After` header; the wait rides in the body as an entry of
-/// `error.details[]` typed `google.rpc.RetryInfo`, whose `retryDelay` is a
-/// protobuf duration string (`"7s"`, fractional seconds allowed).
-///
-/// `None` when the body is not JSON, carries no `RetryInfo` entry, or states a
-/// delay that cannot be read — the caller then falls back to plain backoff.
 fn parse_google_retry_info_delay(body: &str) -> Option<Duration> {
     let json_start = body.find('{')?;
     let parsed: serde_json::Value = serde_json::from_str(&body[json_start..]).ok()?;
@@ -1456,11 +1104,6 @@ fn parse_google_retry_info_delay(body: &str) -> Option<Duration> {
     None
 }
 
-/// Parse a protobuf duration string (`"7s"`, `"1.5s"`) into a [`Duration`].
-///
-/// v2 rounds to whole milliseconds (`Math.round(seconds * 1000)`); this keeps
-/// millisecond precision instead of rounding, so a provider that asks for
-/// 1.5s gets 1.5s rather than a truncation it did not agree to.
 fn parse_protobuf_duration(text: &str) -> Option<Duration> {
     let seconds: f64 = text.trim().strip_suffix('s')?.parse().ok()?;
     if !seconds.is_finite() || seconds < 0.0 {
@@ -1469,23 +1112,10 @@ fn parse_protobuf_duration(text: &str) -> Option<Duration> {
     Some(Duration::from_secs_f64(seconds))
 }
 
-/// Quota/arrears detection mirroring v2's quota signals (kosong
-/// `providers/kimi-errors.ts` + `providers/openai-common.ts`): the
-/// structured Kimi code `exceeded_current_quota_error`, the OpenAI
-/// `insufficient_quota` code (set as both `error.type` and `error.code`),
-/// and the message fallback for gateways that flatten the body to text —
-/// every pattern anchored to billing wording, deliberately no bare
-/// /quota/ or /balance/ (which would also match transient throttle
-/// messages like "token quota per minute"). A hit means the request can
-/// never succeed without human action, so the retry loop must stand down
-/// even though the wire status looks transient.
 fn is_quota_exhaustion_error(error: &str) -> bool {
     const QUOTA_MARKERS: &[&str] = &[
         "exceeded_current_quota_error",
         "insufficient_quota",
-        // v2's regex is /exceeded your current (?:token )?quota/ — the
-        // token-bearing wording is the one Moonshot's own docs quote, so
-        // both spellings are markers.
         "exceeded your current quota",
         "exceeded your current token quota",
         "check your account balance",
@@ -1499,10 +1129,6 @@ fn is_quota_exhaustion_error(error: &str) -> bool {
     QUOTA_MARKERS.iter().any(|m| lower.contains(m))
 }
 
-/// Rolls an attempt's tool-call-id claims back unless the attempt commits.
-/// `chat_impl` has several failure exits; the guard makes "the request failed,
-/// release what it claimed" the default instead of a rule every exit has to
-/// remember (v2 #3734).
 struct AttemptLedger {
     ids: Option<kimi_core::tool_call_id::ToolCallIdResponseNormalizer>,
     committed: bool,
@@ -1556,6 +1182,13 @@ impl LLM for NativeHttpLlm {
         *self.turn_watch.lock().unwrap_or_else(|e| e.into_inner()) = watch;
     }
 
+    fn take_interrupted_response(&self) -> Option<LLMChatResponse> {
+        self.interrupted_response
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
     fn model_name(&self) -> &str {
         &self.config.model
     }
@@ -1580,6 +1213,48 @@ impl LLM for NativeHttpLlm {
         self.config.reasoning_effort.as_deref()
     }
 
+    fn request_parameters(&self) -> Option<kimi_core::types::LlmRequestParameters> {
+        Some(kimi_core::types::LlmRequestParameters {
+            temperature: self.request_options.temperature,
+            top_p: self.request_options.top_p,
+            beta_api: Some(self.beta_messages_api()),
+            thinking_keep: self.config.thinking_keep.clone(),
+        })
+    }
+
+    fn effective_max_tokens(&self, params: &LLMChatParams) -> Option<u32> {
+        if self.config.protocol == "anthropic" {
+            let is_kimi = self
+                .config
+                .provider_type
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("kimi"));
+            let max_tokens = self.config.max_tokens.unwrap_or_else(|| {
+                crate::llm::anthropic::default_max_tokens_for_model(&self.config.model)
+            });
+            return Some(crate::llm::anthropic::effective_max_tokens(
+                &self.config.model,
+                max_tokens,
+                self.completion_cap(params),
+                is_kimi,
+            ));
+        }
+        if matches!(
+            self.config.protocol.as_str(),
+            "openai_responses" | "openai-responses" | "google" | "google-genai" | "gemini"
+        ) {
+            return self.completion_cap(params);
+        }
+        self.openai_completion_cap(params)
+    }
+
+    fn last_trace_id(&self) -> Option<String> {
+        self.last_trace_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn media_target(&self) -> Option<crate::llm::media_resolver::MediaTarget> {
         let capabilities = self.config.capabilities.as_deref().unwrap_or_default();
         let declares = |name: &str| capabilities.iter().any(|c| c == name);
@@ -1592,18 +1267,13 @@ impl LLM for NativeHttpLlm {
                 .clone()
                 .unwrap_or_else(|| self.config.protocol.clone()),
             provider_type: self.config.provider_type.clone().unwrap_or_default(),
-            // An undeclared capability set accepts everything: the host only
-            // sends a set when it means to narrow the model.
+
             image_in: capabilities.is_empty() || declares("image_in"),
             video_in: capabilities.is_empty() || declares("video_in"),
             audio_in: capabilities.is_empty() || declares("audio_in"),
-            // v2 gates the upload on the provider being OAuth-managed
-            // (`modelSource === 'oauth-catalog'`); `auth_provider` is the
-            // engine's marker for the same set.
+
             uploads_media: self.config.auth_provider.is_some(),
-            // v2 `standard.ts:45`: only the google provider declares
-            // `media.inlineVideo`; every other provider can take a video
-            // exclusively through an upload.
+
             inline_video: matches!(
                 self.config.protocol.as_str(),
                 "google" | "google-genai" | "gemini"
@@ -1617,57 +1287,30 @@ impl LLM for NativeHttpLlm {
     }
 
     fn is_retryable_error(&self, error: &str) -> bool {
-        // Status-coded errors are classified by code, not by body. Scanning
-        // the body for keywords would retry a 400 whose text happens to
-        // contain "connection", or a 401 that mentions a session timeout —
-        // requests that can never succeed no matter how often they repeat.
         if is_cancelled_error(error) {
             return false;
         }
-        // A body that is not SSE at all is a configuration error, not a
-        // transient one: no number of retries will make it parseable.
+
         if error.starts_with(NOT_AN_SSE_ENDPOINT_PREFIX) {
             return false;
         }
         if error.starts_with("llm http status ") {
-            // The prefix is present, so this is a status-coded failure: the
-            // code decides, and the keyword list below is never consulted for
-            // it. An unparseable code classifies as non-retryable.
             let code = kimi_core::error::llm_http_status(error).unwrap_or(0);
-            // The code set is [`is_retryable_status_code`], shared with the
-            // host-proxy transport so the two cannot drift. The quota
-            // exemption mirrors v2 `APIProviderQuotaExhaustedError`
-            // (kimi-errors.ts / openai-common.ts): a 429 that is really
-            // "your account is out of quota / balance" is deterministic —
-            // retrying burns attempts for nothing.
+
             if code == 429 && is_quota_exhaustion_error(error) {
                 return false;
             }
             return is_retryable_status_code(code);
         }
-        // 402 "Payment Required" (DeepSeek arrears, some Kimi plans) is
-        // never in the retryable set, so no explicit exemption is needed.
-        // Transport-level failures are classified at the error site too:
-        // reqwest 0.12's Display only renders "error sending request for
-        // url (...)" — the underlying cause (dns timeout, connection
-        // refused/reset, ...) sits in `.source()` and keyword-matching the
-        // Display string would classify every transport failure as
-        // non-retryable. The transport step stamps a stable kind instead.
+
         if let Some(rest) = error.strip_prefix("llm transport error ") {
             return !rest.starts_with("invalid_request");
         }
-        // A config error is deterministic — no retry succeeds with it. The
-        // keyword list below would otherwise catch the "timeout" inside the
-        // `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS` name.
+
         if error.starts_with("config.invalid:") {
             return false;
         }
-        // Fallback keyword list for errors produced by older code paths
-        // (e.g. SSE decode failures, which carry their own prefix).
-        //
-        // An empty-but-well-formed stream is included deliberately: relays do
-        // intermittently answer 200 with an empty body, and the retry layer is
-        // the only thing that turns that into a usable turn.
+
         const RETRYABLE: &[&str] = &[
             "overloaded",
             "timed out",
@@ -1688,11 +1331,6 @@ impl LLM for NativeHttpLlm {
         &self,
         params: LLMChatParams,
     ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>> {
-        // The error is boxed as-is rather than flattened into an `io::Error`:
-        // a status-coded failure is a [`kimi_core::error::LlmError`], and the retry
-        // layer downcasts it to read the provider's `retryAfterMs` / status
-        // instead of re-parsing the rendered message (v2 reads the fields).
-        // Wrapping it would throw that type away.
         Box::pin(async move { self.chat_impl(params).await })
     }
 }
@@ -1706,8 +1344,6 @@ mod tests {
 
     #[test]
     fn google_base_url_gets_a_version_segment() {
-        // Host root only (the documented contract for `google-genai`): the
-        // version segment is appended here, so the assembled URL is an API route.
         assert_eq!(
             google_api_base("https://generativelanguage.googleapis.com"),
             "https://generativelanguage.googleapis.com/v1beta"
@@ -1740,9 +1376,6 @@ mod tests {
 
     #[test]
     fn google_model_id_strips_a_provider_prefix() {
-        // A `provider/model` alias must not reach the URL path: the relay
-        // answers `/models/zhongzhuan/gemini-...` with 404
-        // (`protocol_endpoint_not_found`) and the turn comes back empty.
         assert_eq!(
             google_model_id("zhongzhuan/gemini-3.8-flash-high"),
             "gemini-3.8-flash-high"
@@ -1753,14 +1386,12 @@ mod tests {
 
     #[test]
     fn a_non_version_segment_is_not_mistaken_for_one() {
-        // `vertex` starts with `v` but carries no digits directly after it.
         assert_eq!(
             google_api_base("https://x.example.com/vertex"),
             "https://x.example.com/vertex/v1beta"
         );
     }
 
-    /// v2 `parseRetryInfoDelayMs` (google-genai/format.ts:324-348).
     #[test]
     fn google_retry_info_delay_is_read_from_the_error_details() {
         let body = r#"{"error":{"code":429,"message":"Resource exhausted","details":[
@@ -1771,15 +1402,12 @@ mod tests {
             Some(Duration::from_secs(7))
         );
 
-        // Fractional seconds survive — the reason the wait is typed rather than
-        // re-parsed from a whole-second suffix.
         let fractional = r#"{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"1.5s"}]}}"#;
         assert_eq!(
             parse_google_retry_info_delay(fractional),
             Some(Duration::from_millis(1500))
         );
 
-        // The type URL is matched by suffix, so a different host prefix works.
         let prefixed = r#"{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"3s"}]}}"#;
         assert_eq!(
             parse_google_retry_info_delay(prefixed),
@@ -1789,24 +1417,23 @@ mod tests {
 
     #[test]
     fn google_retry_info_absent_or_unreadable_yields_nothing() {
-        // Not JSON at all.
         assert_eq!(
             parse_google_retry_info_delay("<html>502 Bad Gateway</html>"),
             None
         );
-        // JSON without the detail.
+
         assert_eq!(
             parse_google_retry_info_delay(r#"{"error":{"code":500,"message":"boom"}}"#),
             None
         );
-        // A detail of another type must not be mistaken for RetryInfo.
+
         assert_eq!(
             parse_google_retry_info_delay(
                 r#"{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.Help"}]}}"#
             ),
             None
         );
-        // A delay that is not a protobuf duration, and one that is negative.
+
         assert_eq!(
             parse_google_retry_info_delay(
                 r#"{"error":{"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"soon"}]}}"#
@@ -1829,15 +1456,12 @@ mod tests {
             Some(Duration::from_millis(1500))
         );
         assert_eq!(parse_protobuf_duration("0s"), Some(Duration::ZERO));
-        // Anything that is not `<number>s` is not a duration.
+
         assert_eq!(parse_protobuf_duration("7"), None);
         assert_eq!(parse_protobuf_duration("s"), None);
         assert_eq!(parse_protobuf_duration("infinity"), None);
     }
 
-    /// A streamed tool-call fragment goes out under the id its finalized call
-    /// enters history with, and an id the restored history already holds is
-    /// disambiguated in both (v2 `remapStreamedId` + `remapFinalizedCalls`).
     #[tokio::test]
     async fn streamed_tool_call_fragments_share_the_finalized_id() {
         let (addr, server) = spawn_fixed_200_server(
@@ -1861,8 +1485,6 @@ mod tests {
             sink.lock().unwrap().push(event);
         }));
 
-        // The restored history already carries `call_1`: the provider replaying
-        // it must not create a second call with the same id.
         let ledger = Arc::new(kimi_core::tool_call_id::ToolCallIdNormalizer::new());
         ledger.seed_from(&[kimi_core::types::LLMMessage {
             role: "assistant".into(),
@@ -1876,6 +1498,7 @@ mod tests {
                 args_parse_error: None,
             }],
             tool_call_id: None,
+            tools: Vec::new(),
             prompt_id: None,
             origin: None,
         }]);
@@ -1914,9 +1537,6 @@ mod tests {
         );
     }
 
-    /// A request that fails after streaming releases the ids it claimed, so the
-    /// retry reuses the provider's raw ids instead of minting `__2` variants of
-    /// a response nothing kept (v2 #3734).
     #[tokio::test]
     async fn failed_request_releases_the_tool_call_ids_it_streamed() {
         let (addr, server) = spawn_fixed_200_server(
@@ -1950,8 +1570,6 @@ mod tests {
         );
     }
 
-    /// The guard behind it: an attempt that commits keeps its claims, one that
-    /// is dropped without committing releases them.
     #[test]
     fn attempt_ledger_commits_or_releases() {
         let ledger = Arc::new(kimi_core::tool_call_id::ToolCallIdNormalizer::new());
@@ -1980,17 +1598,12 @@ mod tests {
             "a dropped attempt releases its ids"
         );
 
-        // A replayed committed id is still disambiguated.
         assert_eq!(
             ledger.begin_response().remap_streamed_id("call_1", None),
             "call_1__2"
         );
     }
 
-    /// B7 回归：流式 delta 必须携带归属 agent 的 `agent_id`（v2 在每个代理
-    /// 自己的 loopService 里结构性打标；这里由 run_turn 经
-    /// `set_stream_agent_id` 按回合安装）。没有它，SDK 的归属回退会把
-    /// 子代理的正文/思考流整体归到主代理的 transcript。
     #[test]
     fn streamed_deltas_carry_the_installed_agent_id() {
         let llm = NativeHttpLlm::new(config("anthropic", "http://127.0.0.1:9"), String::new());
@@ -2000,11 +1613,9 @@ mod tests {
             sink_seen.lock().unwrap().push(event);
         }));
 
-        // 未安装（回合尚未开始）：不带 agent_id，宿主按缺省归 main。
         llm.emit_delta(StreamDelta::Text("leak".into()), None);
         assert!(seen.lock().unwrap()[0].get("agent_id").is_none());
 
-        // 回合安装了 agent_id：每个 delta 都带上。
         llm.set_stream_agent_id("subagent-1");
         llm.emit_delta(StreamDelta::Text("body".into()), None);
         llm.emit_delta(StreamDelta::Think("reasoning".into()), None);
@@ -2047,10 +1658,6 @@ mod tests {
         }
     }
 
-    /// v2 `resolveThinkingKeep` defaults preserved thinking to `"all"` while
-    /// thinking is on. Only the wires that encode it take that default — the
-    /// Kimi `thinking` object and anthropic's `clear_thinking_20251015` — so a
-    /// generic OpenAI-compatible endpoint never receives an unknown field.
     #[test]
     fn thinking_keep_defaults_to_all_where_the_wire_consumes_it() {
         let build = |provider_type: Option<&str>, protocol: &str, effort: Option<&str>, budget| {
@@ -2105,9 +1712,6 @@ mod tests {
         );
     }
 
-    /// One-shot server that captures the first request body and answers with a
-    /// one-delta OpenAI SSE stream, so a test can assert what the transport
-    /// actually put on the wire.
     async fn spawn_capturing_server() -> (
         std::net::SocketAddr,
         tokio::task::JoinHandle<()>,
@@ -2176,6 +1780,8 @@ mod tests {
                 tools: Arc::from(Vec::new()),
                 used_context_tokens: Some(10_000),
                 max_context_tokens: Some(20_000),
+                max_output_tokens: None,
+                max_output_size: None,
                 ..Default::default()
             })
             .await;
@@ -2183,7 +1789,7 @@ mod tests {
         let body = body.await.unwrap();
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["prompt_cache_key"], "sess-1");
-        // hard cap 64k, remaining window 10k — the smaller value wins.
+
         assert_eq!(json["max_tokens"], 10_000);
         server.abort();
     }
@@ -2197,14 +1803,15 @@ mod tests {
         cfg.reasoning_effort = Some("high".into());
         cfg.max_tokens = Some(64_000);
         let llm = NativeHttpLlm::new(cfg, String::new()).with_cache_key(Some("sess-2".to_string()));
-        // The fixed SSE body is OpenAI-shaped, so the anthropic decoder
-        // rejects it — this test only inspects the captured request.
+
         let _ = llm
             .chat(LLMChatParams {
                 messages: Arc::from(vec![kimi_core::types::LLMMessage::user("hi")]),
                 tools: Arc::from(Vec::new()),
                 used_context_tokens: Some(10_000),
                 max_context_tokens: Some(50_000),
+                max_output_tokens: None,
+                max_output_size: None,
                 ..Default::default()
             })
             .await;
@@ -2218,9 +1825,6 @@ mod tests {
         server.abort();
     }
 
-    /// The detected-dialect store is connection-scoped (v2 `modelKey` =
-    /// `base#model`) and first-seen wins. Unique model names keep the
-    /// process-global map from leaking between tests.
     #[test]
     fn detected_reasoning_keys_are_recorded_once_per_connection() {
         let base = "http://detected-keys.test/v1";
@@ -2234,17 +1838,6 @@ mod tests {
         assert_eq!(detected_reasoning_key_for(base, "m-other"), None);
     }
 
-    /// v2 `resolveLlmHeadersTimeoutMs`, plus the engine's undici-default
-    /// fallback: unset and blank take 300 s (what v2 inherits from the global
-    /// undici Agent when it leaves the dispatcher undefined), a positive
-    /// integer within the undici range is the cap, and anything else is a
-    /// `config.invalid` failure.
-    ///
-    /// These legs are pure, so the process-global
-    /// `KIMI_CODE_LLM_HEADERS_TIMEOUT_MS` is never written here: every other
-    /// test in this module calls `chat`, which resolves that variable inside
-    /// `send_request`, and a write window flaked those readers (observed as
-    /// `chat_fails_cleanly_on_unreachable_endpoint` reading `"abc"`).
     #[test]
     fn headers_timeout_env_parses_like_v2() {
         assert_eq!(
@@ -2275,9 +1868,6 @@ mod tests {
         }
     }
 
-    /// v2 `resolveLlmBodyTimeoutMs`, plus the engine's undici-default
-    /// fallback: unset/blank take 300 s, `0` means "no cap" explicitly, a
-    /// positive integer is the cap, and anything else is a config error.
     #[test]
     fn body_timeout_env_parses_like_v2() {
         assert_eq!(
@@ -2317,10 +1907,6 @@ mod tests {
         }
     }
 
-    /// The env is the source of the cap, so an armed value must reach the
-    /// resolver. Only a benign value (`45000`) is ever written: a concurrent
-    /// `chat` that reads it mid-window is unaffected, and the poison values
-    /// are covered pure by `headers_timeout_env_parses_like_v2`.
     #[test]
     fn headers_timeout_reads_the_env_var() {
         struct EnvGuard(Option<std::ffi::OsString>);
@@ -2335,8 +1921,7 @@ mod tests {
             }
         }
         let _guard = EnvGuard(std::env::var_os(LLM_HEADERS_TIMEOUT_ENV));
-        // Serialize with any other test that arms this name (crate-wide
-        // facility); the value itself is harmless to concurrent readers.
+
         let _env_lock = crate::env::ENV_TEST_LOCK.blocking_lock();
         unsafe { std::env::set_var(LLM_HEADERS_TIMEOUT_ENV, "45000") };
         assert_eq!(
@@ -2347,14 +1932,6 @@ mod tests {
         );
     }
 
-    /// v2 #4092: the cap fires on a gateway that never answers, while an
-    /// ordinary exchange is unaffected — and a bad value fails the request
-    /// as a deterministic config error, never a retryable one.
-    ///
-    /// The value is scoped to this test's thread via
-    /// [`headers_timeout_override`] instead of the process env; the default
-    /// `#[tokio::test]` runtime is current-thread, so every `chat` poll that
-    /// resolves the cap runs on this thread.
     #[tokio::test]
     async fn headers_timeout_cap_and_bad_value_gate_the_wait() {
         let chat_params = || LLMChatParams {
@@ -2363,7 +1940,6 @@ mod tests {
             ..Default::default()
         };
 
-        // Armed and generous: an ordinary exchange is unaffected.
         let (addr, server, body) = spawn_capturing_server().await;
         {
             let _cap = headers_timeout_override::Scoped::set(Ok(Some(
@@ -2379,8 +1955,6 @@ mod tests {
         let _ = body.await;
         server.abort();
 
-        // A silent gateway: the 2s cap fires instead of the 600s request
-        // budget, and the failure classifies as transient.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let hang_addr = listener.local_addr().unwrap();
         let hang = tokio::spawn(async move {
@@ -2417,10 +1991,6 @@ mod tests {
             );
         }
 
-        // A bad value fails before any connection attempt and is never
-        // retryable — the env name carries "timeout", so the keyword list
-        // alone would get this wrong. The error string comes from the
-        // product parser, so this also pins the classification handoff.
         let _bad_value =
             headers_timeout_override::Scoped::set(parse_llm_headers_timeout_ms(Some("abc")));
         let llm = NativeHttpLlm::new(
@@ -2443,11 +2013,6 @@ mod tests {
         hang.abort();
     }
 
-    /// v2 #4485 end to end: a stream speaking the `reasoning` dialect
-    /// records it on the connection, and the NEXT request — built by a
-    /// fresh transport, the way every turn rebuilds one — replays unmarked
-    /// history thinking under that dialect instead of dropping it into the
-    /// assistant text.
     #[tokio::test]
     async fn a_detected_dialect_replays_unmarked_history_on_the_next_request() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2505,8 +2070,6 @@ mod tests {
         let mut cfg = config("openai", &base);
         cfg.model = model.into();
 
-        // Turn 1: the model streams its reasoning in the `reasoning`
-        // dialect; the transport records it on the connection.
         let llm = NativeHttpLlm::new(cfg.clone(), String::new());
         let first = llm
             .chat(LLMChatParams {
@@ -2522,8 +2085,6 @@ mod tests {
         );
         let _ = rx.recv().await;
 
-        // Turn 2 (a fresh transport, as built per turn): an unmarked
-        // history think part replays under the detected dialect.
         let llm = NativeHttpLlm::new(cfg, String::new());
         let history = kimi_core::types::LLMMessage {
             role: "assistant".into(),
@@ -2555,19 +2116,36 @@ mod tests {
         server.abort();
     }
 
-    /// Upstream #4091 (`21406fb4c8`): the completion budget is `undefined`
-    /// unless it was explicitly configured. Only the Kimi OpenAI / Responses
-    /// traits fill an unset budget with `window - used`
-    /// (`completionTokensWhenUnset`); the Anthropic trait has no such hook.
+    #[test]
+    fn a_per_request_output_cap_overrides_the_config() {
+        let llm = NativeHttpLlm::new(
+            config("openai", "https://api.example.com/v1"),
+            String::new(),
+        );
+        let params = |used: Option<u32>, window: Option<u32>| LLMChatParams {
+            used_context_tokens: used,
+            max_context_tokens: window,
+            max_output_tokens: Some(4096),
+            max_output_size: None,
+            ..Default::default()
+        };
+        assert_eq!(llm.completion_cap(&params(None, None)), Some(4096));
+        assert_eq!(
+            llm.completion_cap(&params(Some(900), Some(1000))),
+            Some(100)
+        );
+    }
+
     #[test]
     fn completion_cap_is_absent_unless_explicitly_configured() {
         let params = |used: Option<u32>, window: Option<u32>| LLMChatParams {
             used_context_tokens: used,
             max_context_tokens: window,
+            max_output_tokens: None,
+            max_output_size: None,
             ..Default::default()
         };
 
-        // No declared cap: no budget at all — the window is never a fallback.
         let llm = NativeHttpLlm::new(
             config("openai", "https://api.example.com/v1"),
             String::new(),
@@ -2582,8 +2160,6 @@ mod tests {
             None
         );
 
-        // Declared output cap wins over the window, and the remaining context
-        // can only lower it.
         let mut cfg = config("openai", "https://api.example.com/v1");
         cfg.max_tokens = Some(64_000);
         let llm = NativeHttpLlm::new(cfg, String::new());
@@ -2600,8 +2176,6 @@ mod tests {
             Some(1)
         );
 
-        // A non-positive explicit cap is upstream's opt-out spelling:
-        // `resolveMaxCompletionCap` returns `undefined`, so no field is sent.
         let mut opted_out = config("openai", "https://api.example.com/v1");
         opted_out.max_tokens = Some(0);
         let llm = NativeHttpLlm::new(opted_out, String::new());
@@ -2610,7 +2184,6 @@ mod tests {
             None
         );
 
-        // Kimi's OpenAI traits are the one unset-budget source.
         let mut kimi = config("openai", "https://api.example.com/v1");
         kimi.provider_type = Some("kimi".into());
         let kimi = NativeHttpLlm::new(kimi, String::new());
@@ -2621,8 +2194,6 @@ mod tests {
         assert_eq!(kimi.completion_cap(&params(None, Some(100_000))), None);
         assert_eq!(kimi.completion_cap(&params(None, None)), None);
 
-        // `kimiAnthropicTrait` has no `completionTokensWhenUnset`: the
-        // Anthropic wire keeps its required model ceiling instead.
         let mut kimi_anthropic = config("anthropic", "https://api.anthropic.com/v1");
         kimi_anthropic.model = "k3".into();
         kimi_anthropic.provider_type = Some("kimi".into());
@@ -2632,23 +2203,19 @@ mod tests {
             None
         );
 
-        // Anthropic's `max_tokens` is a required request field filled from the
-        // model ceiling by the builder, not a completion budget.
         let mut claude = config("anthropic", "https://api.anthropic.com/v1");
         claude.model = "claude-sonnet-4-5".into();
         let claude = NativeHttpLlm::new(claude, String::new());
         assert_eq!(claude.completion_cap(&params(None, None)), None);
     }
 
-    /// B8: v2's Chat Completions cap chain ends in `familyDefaultCap`, so an
-    /// unconfigured `max_tokens` takes the family tier (DeepSeek 8192 / 65536 /
-    /// 131072 by effort) bounded by the remaining window. Responses and
-    /// Anthropic have no such tier in v2 and stay unset.
     #[test]
     fn an_unset_openai_budget_falls_back_to_the_model_family_tier() {
         let params = |used: Option<u32>, window: Option<u32>| LLMChatParams {
             used_context_tokens: used,
             max_context_tokens: window,
+            max_output_tokens: None,
+            max_output_size: None,
             ..Default::default()
         };
         let llm = |model: &str, effort: Option<&str>, max_tokens: Option<u32>| {
@@ -2672,8 +2239,7 @@ mod tests {
             llm("deepseek-chat", Some("max"), None).openai_completion_cap(&params(None, None)),
             Some(131_072)
         );
-        // The remaining window can only lower the tier, and a fully consumed
-        // window yields no cap at all.
+
         assert_eq!(
             deepseek.openai_completion_cap(&params(Some(10_000), Some(20_000))),
             Some(10_000)
@@ -2683,8 +2249,6 @@ mod tests {
             None
         );
 
-        // An explicit budget wins over the tier, and `0` is the opt-out
-        // spelling that suppresses it.
         assert_eq!(
             llm("deepseek-chat", Some("high"), Some(4_000))
                 .openai_completion_cap(&params(None, None)),
@@ -2695,16 +2259,12 @@ mod tests {
             None
         );
 
-        // No family, no tier.
         assert_eq!(
             llm("gpt-5", Some("high"), None).openai_completion_cap(&params(None, None)),
             None
         );
     }
 
-    /// B16: the wire history normalises both halves of a tool call through one
-    /// map, keyed by the protocol's policy. The Responses wire keeps the part
-    /// before `|`; Google ids travel as issued.
     #[test]
     fn wire_history_normalises_tool_call_ids_per_protocol() {
         let call = |id: &str| LLMMessage {
@@ -2754,9 +2314,6 @@ mod tests {
         assert_eq!(wire[2].tool_call_id.as_deref(), Some("rs_1|call_abc/1"));
     }
 
-    /// v2 `standard.ts:45`: only the google provider declares
-    /// `media.inlineVideo`; every other provider can take a video solely
-    /// through an upload, so the resolver must not inline it.
     #[test]
     fn only_the_google_provider_inlines_video() {
         for protocol in ["google", "google-genai", "gemini"] {
@@ -2781,9 +2338,6 @@ mod tests {
         }
     }
 
-    /// Upstream #4091 on the wire: an unconfigured budget sends no field for
-    /// OpenAI Chat Completions, Responses, or Google; Anthropic still carries
-    /// its required `max_tokens`; Kimi's OpenAI trait sends `window - used`.
     #[tokio::test]
     async fn unconfigured_completion_budget_stays_off_the_wire() {
         for (protocol, field) in [
@@ -2802,6 +2356,8 @@ mod tests {
                     tools: Arc::from(Vec::new()),
                     used_context_tokens: Some(90_000),
                     max_context_tokens: Some(100_000),
+                    max_output_tokens: None,
+                    max_output_size: None,
                     ..Default::default()
                 })
                 .await;
@@ -2819,8 +2375,6 @@ mod tests {
             server.abort();
         }
 
-        // Anthropic requires `max_tokens`; without a budget it is the model
-        // ceiling (`resolveDefaultMaxTokens`).
         let (addr, server, body) = spawn_capturing_server().await;
         let mut cfg = config("anthropic", &format!("http://{addr}/v1"));
         cfg.model = "claude-sonnet-4-5".into();
@@ -2831,6 +2385,8 @@ mod tests {
                 tools: Arc::from(Vec::new()),
                 used_context_tokens: Some(90_000),
                 max_context_tokens: Some(100_000),
+                max_output_tokens: None,
+                max_output_size: None,
                 ..Default::default()
             })
             .await;
@@ -2839,8 +2395,6 @@ mod tests {
         assert_eq!(json["max_tokens"], 64_000, "{json}");
         server.abort();
 
-        // The Kimi OpenAI trait fills the unset budget with the remaining
-        // context window (v2 `kimiUnsetCompletionTokens`).
         let (addr, server, body) = spawn_capturing_server().await;
         let mut cfg = config("openai", &format!("http://{addr}/v1"));
         cfg.provider_type = Some("kimi".into());
@@ -2851,6 +2405,8 @@ mod tests {
                 tools: Arc::from(Vec::new()),
                 used_context_tokens: Some(90_000),
                 max_context_tokens: Some(100_000),
+                max_output_tokens: None,
+                max_output_size: None,
                 ..Default::default()
             })
             .await;
@@ -2897,12 +2453,6 @@ mod tests {
         );
     }
 
-    /// The retryable status set is v2's explicit list, not the whole 5xx
-    /// range: 501/505/506/507/508/510/511 and the 52x family fail fast
-    /// instead of burning the retry budget (v2 `isRetryableGenerateError`,
-    /// kosong/src/errors.ts, and `RETRYABLE_STATUS_CODES`,
-    /// human/llm/requester/retry.ts). 425 stays as the fork's recorded
-    /// retry-later addition.
     #[test]
     fn retryable_status_set_matches_v2_explicit_list() {
         let llm = NativeHttpLlm::new(
@@ -2928,9 +2478,6 @@ mod tests {
         }
     }
 
-    /// Both transports classify the same status-code policy. Pinned so that a
-    /// future edit making one arm stop delegating to [`is_retryable_status_code`]
-    /// fails here instead of silently changing one transport's retry budget.
     #[test]
     fn both_transports_agree_on_every_status() {
         let native = NativeHttpLlm::new(
@@ -2950,10 +2497,6 @@ mod tests {
 
     #[test]
     fn quota_exhaustion_is_not_retryable() {
-        // Mirrors the v2 quota-exemption cases (kimi-errors.ts:7-22,
-        // openai-common.ts:90): a 429 carrying quota/balance wording is a
-        // deterministic failure — retrying burns attempts without any
-        // chance of success.
         let llm = NativeHttpLlm::new(
             config("openai", "https://api.example.com/v1"),
             String::new(),
@@ -2965,8 +2508,6 @@ mod tests {
             r#"{"error":{"message":"Please recharge your account to continue"}}"#,
             r#"{"error":{"message":"Your account is in arrears. Settle the balance to resume."}}"#,
             "Check your account balance before retrying",
-            // v2's regex is /exceeded your current (?:token )?quota/ — the
-            // token-bearing wording is the one Moonshot's docs quote.
             "You exceeded your current token quota: 1000000 tokens",
         ];
         for body in quota_bodies {
@@ -2975,12 +2516,11 @@ mod tests {
                 "quota body must be non-retryable: {body}"
             );
         }
-        // A rate-limit 429 without quota wording stays retryable.
+
         assert!(llm.is_retryable_error(
             "llm http status 429 Too Many Requests: rate limit exceeded, slow down"
         ));
-        // The exemption also covers the keyword-fallback path (SSE decode
-        // failures that quote quota wording).
+
         assert!(!llm.is_retryable_error(
             "llm sse decode error: exceeded_current_quota_error while decoding"
         ));
@@ -2988,9 +2528,6 @@ mod tests {
 
     #[test]
     fn transport_errors_are_classified_by_stamped_kind() {
-        // reqwest 0.12's Display only renders "error sending request for
-        // url (...)" — the retryable-ness must come from the stamped kind,
-        // not from keywords that never appear in that string.
         let llm = NativeHttpLlm::new(
             config("anthropic", "https://api.example.com/v1"),
             String::new(),
@@ -3016,9 +2553,7 @@ mod tests {
             config("openai", "https://api.example.com/v1"),
             String::new(),
         );
-        // A 400 whose body mentions connections, and a 401 that mentions a
-        // session timeout, describe requests that can never succeed — no
-        // amount of retrying changes that.
+
         assert!(
             !llm.is_retryable_error("llm http status 400 Bad Request: unknown field 'connection'")
         );
@@ -3045,14 +2580,32 @@ mod tests {
     }
 
     #[test]
+    fn thinking_keep_selects_the_beta_messages_endpoint_like_v2() {
+        let mut cfg = config("anthropic", "https://api.example.com/v1");
+        cfg.thinking_keep = Some("all".into());
+        let llm = NativeHttpLlm::new(cfg, "sys".into());
+        assert_eq!(
+            llm.endpoint(),
+            "https://api.example.com/v1/messages?beta=true"
+        );
+
+        let mut cfg = config("anthropic", "https://api.example.com/v1");
+        cfg.thinking_keep = Some("all".into());
+        cfg.beta_api = true;
+        let llm = NativeHttpLlm::new(cfg, "sys".into());
+        assert_eq!(
+            llm.endpoint(),
+            "https://api.example.com/v1/messages?beta=true"
+        );
+    }
+
+    #[test]
     fn off_effort_fills_a_missing_reasoning_effort() {
         let mut cfg = config("openai", "https://api.example.com/v1");
         cfg.off_effort = Some("none".into());
         let llm = NativeHttpLlm::new(cfg, String::new());
         assert_eq!(llm.config.reasoning_effort.as_deref(), Some("none"));
 
-        // An effort the host resolved itself wins: the off-effort only fills
-        // the gap, it never overrides a chosen effort.
         let mut declared = config("openai", "https://api.example.com/v1");
         declared.off_effort = Some("none".into());
         declared.reasoning_effort = Some("high".into());
@@ -3062,8 +2615,6 @@ mod tests {
 
     #[tokio::test]
     async fn chat_fails_cleanly_on_unreachable_endpoint() {
-        // Port 1 on loopback is essentially never listening — the connect
-        // is refused immediately without reaching any real server.
         let mut cfg = config("openai", "http://127.0.0.1:1/v1");
         cfg.custom_headers.insert("x-test".into(), "1".into());
         let llm = NativeHttpLlm::new(cfg, String::new());
@@ -3083,10 +2634,6 @@ mod tests {
         );
     }
 
-    /// A cancel firing while the provider is still streaming must abort the
-    /// read with the stable cancellation error (v2 AbortSignal,
-    /// generate.ts:154-202) — and that error must never be retried, the way
-    /// v2's `AbortError` short-circuits `isRetryableGenerateError`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn chat_cancels_mid_stream_and_never_retries() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3096,15 +2643,14 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 4096];
             let _ = sock.read(&mut buf).await;
-            // One streamed delta, then hold the connection open: the model
-            // never finishes, so only the cancel handle can end the call.
-            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n";
+
+            let body = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"why\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n";
             let head = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
             );
             let _ = sock.write_all(head.as_bytes()).await;
             let _ = sock.flush().await;
-            // Park the socket so the stream stays open until the test ends.
+
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         });
 
@@ -3129,7 +2675,6 @@ mod tests {
                 .await
         });
 
-        // Let the first delta arrive, then cancel mid-stream.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         token.cancel();
 
@@ -3144,14 +2689,19 @@ mod tests {
             !llm.is_retryable_error(&msg),
             "cancellation must never be classified as retryable"
         );
+        let partial = llm
+            .take_interrupted_response()
+            .expect("the cancelled attempt exposes its accumulated response");
+        assert_eq!(partial.content, "hel");
+        assert!(matches!(
+            partial.thinking.as_slice(),
+            [kimi_core::types::ContentBlock::Think { think, .. }] if think == "why"
+        ));
+        assert!(llm.take_interrupted_response().is_none());
 
         server.abort();
     }
 
-    /// One-shot local HTTP server: the first request draws a 401, every later
-    /// one a 200 with a one-delta SSE body. The body used to be empty, which
-    /// made this test the only place asserting that an empty stream is `Ok` —
-    /// the behaviour that hid "the model returned nothing".
     async fn spawn_401_then_ok_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3162,10 +2712,7 @@ mod tests {
                 requests += 1;
                 let mut buf = [0u8; 4096];
                 let _ = sock.read(&mut buf).await;
-                // `connection: close` is critical: without it HTTP/1.1
-                // defaults to keep-alive and the eventsource stream hangs
-                // forever waiting for the server to push more events or close
-                // the TCP connection.
+
                 let response = if requests == 1 {
                     "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
                         .to_string()
@@ -3181,7 +2728,6 @@ mod tests {
         (addr, handle)
     }
 
-    /// A local server that always answers 200 with a fixed body.
     async fn spawn_fixed_200_server(
         content_type: &'static str,
         body: &'static str,
@@ -3222,13 +2768,6 @@ mod tests {
         .map_err(|e| e.to_string())
     }
 
-    /// A failed call keeps the provider's own request id.
-    ///
-    /// The id is the one string a user can quote to the provider's support, and
-    /// it arrives on the same response headers as `retry-after` — which this
-    /// path already read. Nothing observed the capture, though: renaming
-    /// `x-trace-id` in the header lookup left every test in this module green,
-    /// so in production `request_id()` could have been permanently `None`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_call_keeps_the_provider_trace_id() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3239,9 +2778,7 @@ mod tests {
                 let mut buf = [0u8; 4096];
                 let _ = sock.read(&mut buf).await;
                 let body = "{\"error\":\"boom\"}";
-                // `x-trace-id` is what the provider sends so a caller can cite
-                // the failure; the transport must not lose it just because the
-                // call failed.
+
                 let response = format!(
                     "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\nx-trace-id: trace-abc-123\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
@@ -3278,8 +2815,7 @@ mod tests {
             Some("trace-abc-123"),
             "the provider's request id must survive the failure"
         );
-        // And it is in the rendered text, which is what a log and a bug report
-        // actually show.
+
         assert!(
             typed.to_string().contains("[trace trace-abc-123]"),
             "{typed}"
@@ -3288,12 +2824,45 @@ mod tests {
         server.abort();
     }
 
-    /// Google does not send a `Retry-After` header; the wait rides in the body
-    /// as a `google.rpc.RetryInfo` detail, which the transport used to drop
-    /// entirely. It must now reach the retry layer as a typed field — the whole
-    /// point of carrying an [`kimi_core::error::LlmError`] instead of a bare string,
-    /// since only the field keeps the sub-second precision the rendered
-    /// `(retry-after Ns)` suffix rounds away.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_successful_call_records_the_provider_trace_id_per_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut requests = 0u32;
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                requests += 1;
+                let body =
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+                let trace = if requests == 1 {
+                    "x-trace-id: trace-ok\r\n"
+                } else {
+                    ""
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n{trace}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let llm = NativeHttpLlm::new(
+            config("openai", &format!("http://{addr}/v1")),
+            String::new(),
+        );
+        chat_once(&llm).await.expect("first call succeeds");
+        assert_eq!(llm.last_trace_id().as_deref(), Some("trace-ok"));
+        chat_once(&llm).await.expect("second call succeeds");
+        assert_eq!(llm.last_trace_id(), None);
+
+        server.abort();
+    }
+
     #[tokio::test]
     async fn google_retry_info_reaches_the_retry_layer_as_a_typed_wait() {
         let body = r#"{"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"1.5s"}]}}"#;
@@ -3331,7 +2900,7 @@ mod tests {
             .expect("the transport must hand the retry layer a typed error, not a bare string");
         assert_eq!(typed.status_code(), Some(429));
         assert_eq!(typed.retry_after(), Some(Duration::from_millis(1500)));
-        // The rendered text is unchanged, so every string consumer still works.
+
         assert!(
             typed.to_string().starts_with("llm http status 429"),
             "{typed}"
@@ -3340,7 +2909,6 @@ mod tests {
         server.abort();
     }
 
-    /// A `Retry-After` header wins over the body, and is whole seconds.
     #[tokio::test]
     async fn retry_after_header_is_honoured_over_the_body() {
         let body = r#"{"error":{"code":429,"message":"slow down"}}"#;
@@ -3379,8 +2947,6 @@ mod tests {
         server.abort();
     }
 
-    /// An empty 200 body must be an error the retry layer can act on, not an
-    /// `Ok` empty response that the step layer reports as a finished turn.
     #[tokio::test]
     async fn empty_sse_body_is_reported_instead_of_returning_an_empty_answer() {
         let (addr, server) = spawn_fixed_200_server("text/event-stream", "").await;
@@ -3402,8 +2968,6 @@ mod tests {
         server.abort();
     }
 
-    /// A catch-all gateway answers 200 with anything. That must be diagnosed as
-    /// a wrong endpoint, and must not be retried (retries cannot fix it).
     #[tokio::test]
     async fn non_sse_body_is_reported_as_a_misconfigured_endpoint() {
         let (addr, server) =
@@ -3430,8 +2994,6 @@ mod tests {
         server.abort();
     }
 
-    /// Gateways report mid-stream failures in-band. The engine path used to
-    /// ignore these and finish with whatever partial content had arrived.
     #[tokio::test]
     async fn in_band_error_frame_is_surfaced() {
         let (addr, server) = spawn_fixed_200_server(
@@ -3454,7 +3016,6 @@ mod tests {
         server.abort();
     }
 
-    /// The happy path still works, so the new guards are not over-eager.
     #[tokio::test]
     async fn a_normal_sse_stream_still_decodes() {
         let (addr, server) = spawn_fixed_200_server(
@@ -3542,7 +3103,6 @@ mod tests {
         }
 
         fn set(&self, value: Option<&str>) {
-            // This test owns a unique variable, never a provider/global name.
             unsafe {
                 match value {
                     Some(value) => std::env::set_var(&self.name, value),
@@ -3606,9 +3166,6 @@ mod tests {
 
     #[tokio::test]
     async fn oauth_cached_token_is_reused_across_requests() {
-        // Test the caching logic directly via `credential()` without going
-        // through the network at all — the network path is already covered by
-        // `oauth_token_refreshes_once_on_401`.
         let mut cfg = config("openai", "http://127.0.0.1:1/v1");
         cfg.api_key = String::new();
         cfg.auth_provider = Some("kimi".into());
@@ -3620,12 +3177,10 @@ mod tests {
                 Box::pin(async move { Ok(format!("token-{n}")) })
             }));
 
-        // First call: cache miss, fetches token-1.
         let t1 = llm.credential().await.unwrap();
         assert_eq!(t1, "token-1");
         assert_eq!(fetches.load(Ordering::SeqCst), 1, "first call must fetch");
 
-        // Second call: cache hit, must not invoke the provider again.
         let t2 = llm.credential().await.unwrap();
         assert_eq!(t2, "token-1", "cached token must be returned unchanged");
         assert_eq!(
@@ -3667,8 +3222,6 @@ mod tests {
             NativeHttpLlm::new(cfg, String::new()).with_auth_provider(Arc::new(move |_force| {
                 let n = fetch_count.fetch_add(1, Ordering::SeqCst) + 1;
                 Box::pin(async move {
-                    // Yield so concurrent callers pile up on the gate while the
-                    // winner is still fetching.
                     tokio::task::yield_now().await;
                     Ok(format!("token-{n}"))
                 })
@@ -3695,9 +3248,6 @@ mod tests {
         );
     }
 
-    /// A degenerate thinking loop must stop reaching the host, while the
-    /// answer that follows it still does. This drives the real SSE loop
-    /// against a local server, so it covers the wiring and not just the guard.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_thinking_loop_is_dropped_from_the_stream() {
         const LOOP_DELTAS: usize = 60;

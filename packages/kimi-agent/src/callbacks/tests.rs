@@ -1675,6 +1675,8 @@ fn sample_ask_question_request() -> AskQuestionRequest {
         question_id: "question_1".into(),
         turn_id: "turn-1".into(),
         tool_call_id: "call_1".into(),
+        agent_id: None,
+        session_id: None,
         background: false,
         timeout_ms: None,
         questions: vec![AskQuestionItem {
@@ -2455,6 +2457,50 @@ async fn list_tools_persists_initial_and_runtime_registry_origins() {
     assert_eq!(state.changes.len(), 1);
 }
 
+#[tokio::test]
+async fn tool_select_persistence_rides_the_event_sink_instead_of_the_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(crate::session::sqlite_store::SqliteSessionStore::in_memory().unwrap());
+    store.create_session("tool-select-bus", None).unwrap();
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(RecordingCallbacks {
+        events: events.clone(),
+    });
+    let toolset = NativeToolset::new(tmp.path().to_str().unwrap(), None)
+        .unwrap()
+        .with_session_id("tool-select-bus")
+        .with_session_store(store.clone())
+        .with_callbacks(callbacks);
+    let initial = vec![crate::tools::tool_select_ops::ToolSelectTool {
+        name: "mcp__s__alpha".to_string(),
+        description: "d".to_string(),
+        parameters: serde_json::json!({}),
+        source: crate::tools::tool_select_ops::ToolSelectSource::Builtin,
+        disclosure: None,
+        origin: crate::tools::tool_select_ops::ToolSelectOrigin::Initial,
+    }];
+    toolset
+        .reconcile_tool_select(&initial, &initial)
+        .await
+        .unwrap();
+
+    let emitted = events.lock().unwrap();
+    let event = emitted
+        .iter()
+        .find(|event| event["type"] == "tool_select.initialized")
+        .expect("the durable tool-select event must reach the event sink");
+    assert_eq!(event["agentId"], "main");
+    assert_eq!(event["tools"][0]["name"], "mcp__s__alpha");
+    assert!(
+        store
+            .get_wire_events("tool-select-bus", 0, 10)
+            .unwrap()
+            .iter()
+            .all(|record| record.event_type != "tool_select.initialized"),
+        "with callbacks wired the toolset must not write the store directly"
+    );
+}
+
 /// The model-facing seam must re-advertise a loaded deferred tool with its
 /// real schema. Merely delivering the `<tools_added>` text leaves the model
 /// without a definition (the audit's gap: "activates, but only text arrives").
@@ -2842,6 +2888,41 @@ async fn a_deny_verdict_keeps_its_reason_on_the_returned_decision() {
             .is_empty(),
         "a deny must not consult the host"
     );
+}
+
+#[tokio::test]
+async fn a_native_write_advances_the_hello_world_run() {
+    let (_dir, callbacks, _, _, _) = gate_setup(PermissionDecision::allow());
+    let registry = crate::features::helloWorld::helloWorldOps::hello_world_mode_registry();
+    registry.exit("main");
+    crate::features::helloWorld::agent::helloWorldService::HelloWorldService::enter(
+        callbacks.inner.as_ref(),
+        "main",
+        crate::features::helloWorld::agent::helloWorld::HelloWorldModeTrigger::Manual,
+        None,
+    );
+    let response = callbacks
+        .execute_tool(ToolExecuteRequest {
+            turn_id: "1".into(),
+            agent_id: "main".into(),
+            tool_call_id: "call-requirements".into(),
+            tool_name: "Write".into(),
+            arguments: serde_json::json!({
+                "path": "specs/demo/requirements.md",
+                "content": "# Requirements",
+            }),
+        })
+        .await
+        .unwrap();
+    assert!(!response.is_error, "{}", response.content);
+    let run = registry.run("main").unwrap();
+    assert_eq!(run.stage, "design");
+    assert!(run.items[0].done);
+    assert_eq!(
+        run.items[0].evidence.as_deref(),
+        Some("specs/demo/requirements.md")
+    );
+    registry.exit("main");
 }
 
 /// A host whose goal lifecycle is host-owned (the native host's `createGoal`

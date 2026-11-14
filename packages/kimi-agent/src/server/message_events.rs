@@ -1,23 +1,3 @@
-//! Assistant/user message identity for the Web event vocabulary.
-//!
-//! The engine's turn loop speaks in steps and deltas (`llm.delta`,
-//! `llm.step.end`); the Web client speaks in messages (`event.message.created`
-//! / `event.assistant.delta` / `event.message.updated`). This decorator is
-//! the translation seam, applied per turn on the server path:
-//!
-//! - the user prompt becomes one `event.message.created` at turn start;
-//! - a step's first content delta creates the step's assistant message
-//!   (`event.message.created`) and every further delta rides
-//!   `event.assistant.delta` — or `event.thinking.delta` for a reasoning
-//!   chunk, the distinct event name v2's wire uses — with a running
-//!   `content_index`;
-//! - `llm.step.end` finalizes the message (`event.message.updated`) with the
-//!   text block plus one `tool_use` block per requested tool call, then the
-//!   next step starts a fresh message.
-//!
-//! Message ids are deterministic (`msg-u<turn>` / `msg-a<turn>-<step>`) so a
-//! client can key them without a registry round-trip.
-
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -32,21 +12,16 @@ use crate::rpc::types::{
 use crate::server::hub::EventHub;
 use crate::turn_loop::types::{GoalContext, LLMMessage};
 
-/// The assistant message of the current step, from its first content delta.
 struct AssistantMessage {
     id: String,
-    /// How many deltas were already announced — `content_index` on the fork's
-    /// own wire, letting a client splice chunks into its content array.
+
     content_index: usize,
 }
 
 struct MessageState {
     step: u32,
     current: Option<AssistantMessage>,
-    /// Whether the turn's user prompt has been announced. The prompt identity
-    /// must land at the contract-ordered point (after the busy/status flips),
-    /// and the turn driver calls `announce_prompt` exactly once per turn —
-    /// whichever path calls first wins and the other is a no-op.
+
     prompt_announced: bool,
 }
 
@@ -56,27 +31,16 @@ pub struct MessageCallbacks {
     pub hub: Arc<EventHub>,
     pub turn_number: u32,
     pub prompt: String,
-    /// The prompt's media blocks, announced as v1 content parts alongside
-    /// the text so a live client sees the attachments on the user message
-    /// (and the v3 translator can name their ids).
+
     pub blocks: Vec<crate::rpc::types::ContentBlock>,
-    /// The turn's prompt origin (v2 `PromptOrigin`), announced with the
-    /// prompt so the v3 live translator can project what the history fold
-    /// projects — a `skill_activation` variant's activations (v2 #3832).
+
     pub origin: Option<Value>,
     state: Mutex<MessageState>,
-    /// Notified on every `llm.step.begin` with the running step ordinal, so a
-    /// shared registry can answer "where is streaming now" (the history
-    /// route's `in_flight`) without owning a full translator.
+
     step_tracker: Option<Box<dyn Fn(u32) + Send + Sync>>,
 }
 
 impl MessageCallbacks {
-    /// Build the decorator. Constructing it does **not** announce the prompt:
-    /// the turn-boundary contract pins `event.message.created` after the
-    /// `work_changed(busy)` / status / phase events, and this decorator is
-    /// built before those fire. Call [`Self::announce_prompt`] at the point
-    /// the turn actually starts.
     pub fn new(
         inner: Arc<dyn HostCallbacks>,
         session_id: &str,
@@ -87,13 +51,6 @@ impl MessageCallbacks {
         Self::with_step_tracker(inner, session_id, hub, turn_number, prompt, &[], None, None)
     }
 
-    /// [`Self::new`] plus a step-boundary observer: called with the step
-    /// ordinal (1-based) at each `llm.step.begin`.
-    ///
-    /// Constructing this does **not** announce the prompt: the turn-boundary
-    /// contract pins `event.message.created` after the `work_changed(busy)` /
-    /// status / phase events, and this decorator is built before those fire.
-    /// Call [`Self::announce_prompt`] at the point the turn actually starts.
     #[allow(clippy::too_many_arguments)]
     pub fn with_step_tracker(
         inner: Arc<dyn HostCallbacks>,
@@ -122,9 +79,6 @@ impl MessageCallbacks {
         }
     }
 
-    /// Announce the user prompt as this turn's first message (v2 folded the
-    /// prompt into the transcript before the first step ran). Idempotent: the
-    /// turn driver calls it once per turn, at the step the contract orders it.
     pub fn announce_prompt(&self) {
         {
             let mut state = self
@@ -145,9 +99,7 @@ impl MessageCallbacks {
             "content": content,
             "created_at": chrono::Utc::now().to_rfc3339(),
         });
-        // The turn's prompt origin rides the announcement: the v3 live
-        // translator projects what the history fold projects off it (a
-        // `skill_activation` variant's activations, v2 #3832).
+
         if let Some(origin) = &self.origin {
             message["origin"] = origin.clone();
         }
@@ -159,16 +111,11 @@ impl MessageCallbacks {
             })));
     }
 
-    /// A content delta arrived: create the step's assistant message on first
-    /// sight, then announce the chunk on the event name its kind owns.
     fn on_delta(&self, part: &Value) {
         let Some(part_kind) = part.get("type").and_then(|v| v.as_str()) else {
             return;
         };
-        // v2 suppresses a hidden thinking part on its way to the event stream
-        // (`agent/loop/loopService.ts:1564-1581`): it stays in the assembled
-        // message for replay but is never dispatched. Announcing it here would
-        // open a Thinking frame the user should not see.
+
         if crate::events::is_hidden_delta_part(part) {
             return;
         }
@@ -179,14 +126,7 @@ impl MessageCallbacks {
         }) else {
             return;
         };
-        // The kind rides the event name, the way v2 keeps `assistant.delta`
-        // and `thinking.delta` distinct (events-zod.ts) rather than flagging
-        // one stream — a consumer that must open a Thinking frame instead of
-        // a Text one reads the name, not a boolean. `turn_id` travels too, so
-        // the event is self-describing: a projection that must place the text
-        // inside a turn cannot rely on having seen an earlier lifecycle
-        // event, and the transcript projector has no cursor when the server
-        // path never emits a typed `TurnStarted`.
+
         let event_name = if part_kind == "think" {
             "event.thinking.delta"
         } else {
@@ -232,8 +172,6 @@ impl MessageCallbacks {
             })));
     }
 
-    /// The step finished: finalize the assistant message with its text plus
-    /// one `tool_use` block per requested tool call.
     fn on_step_end(&self, event: &Value) {
         let mut state = self
             .state
@@ -395,10 +333,6 @@ impl HostCallbacks for MessageCallbacks {
     }
 }
 
-/// One media block as a v1 content part (`protocol/message.ts`
-/// `messageContentSchema`): a store reference is `session_media`, a URL
-/// reference keeps its provider id when it has one, inline bytes stay
-/// base64. Text and think blocks are not media and map to nothing.
 fn media_content_part(block: &crate::rpc::types::ContentBlock) -> Option<Value> {
     use crate::rpc::types::{ContentBlock, MediaKind};
     let (part_type, source) = match block {
@@ -437,7 +371,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A no-op inner: the decorator never needs it for the message fold.
     fn inner() -> Arc<dyn HostCallbacks> {
         struct Drop;
         impl HostCallbacks for Drop {
@@ -466,8 +399,6 @@ mod tests {
         Arc::new(Drop)
     }
 
-    /// A bound event drain: the hub's subscriber queue would otherwise hang
-    /// the suite on a regression that publishes one event too few.
     async fn next_event(sub: &mut crate::server::hub::WsSubscription) -> Value {
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
             .await
@@ -476,12 +407,6 @@ mod tests {
         serde_json::to_value(&event.event).unwrap()
     }
 
-    /// The prompt's media blocks ride the announcement as v1 content parts,
-    /// so a live client sees the attachments on the user message and the v3
-    /// translator can name their ids (ROADMAP §7.7 — live `attachment_ids`).
-    /// v2 #3832: the turn's prompt origin rides the announcement, so the v3
-    /// live translator projects the same activations the history fold
-    /// projects off the persisted origin.
     #[tokio::test]
     async fn the_prompt_announcement_carries_the_turn_origin() {
         let hub = Arc::new(EventHub::new());
@@ -563,9 +488,6 @@ mod tests {
         let mut sub = hub.attach();
         let callbacks = MessageCallbacks::new(inner(), "sess-msg", hub.clone(), 4, "draw a cat");
 
-        // The prompt identity is announced by the turn driver, not at
-        // construction: the turn-boundary contract orders it after the
-        // busy/status flips.
         callbacks.announce_prompt();
         let user = next_event(&mut sub).await;
         assert_eq!(user["type"], "event.message.created");
@@ -573,10 +495,8 @@ mod tests {
         assert_eq!(user["message"]["role"], "user");
         assert_eq!(user["message"]["content"][0]["text"], "draw a cat");
 
-        // Idempotent: a second call must not duplicate the announcement.
         callbacks.announce_prompt();
 
-        // Step 1: the first delta creates the message, both deltas stream.
         callbacks.emit_event(json!({ "type": "llm.step.begin", "model": "m" }));
         callbacks.emit_event(json!({
             "type": "llm.delta",
@@ -603,7 +523,6 @@ mod tests {
         assert_eq!(delta["content_index"], 1);
         assert_eq!(delta["delta"], "llo");
 
-        // Step end finalizes the message with text + tool_use blocks.
         callbacks.emit_event(json!({
             "type": "llm.step.end",
             "content": "hello",
@@ -621,7 +540,6 @@ mod tests {
         assert_eq!(updated["content"][1]["tool_call_id"], "c1");
         assert_eq!(updated["content"][1]["input"]["path"], "a");
 
-        // Step 2 starts a fresh message.
         callbacks.emit_event(json!({ "type": "llm.step.begin", "model": "m" }));
         callbacks.emit_event(json!({
             "type": "llm.delta",
@@ -640,7 +558,6 @@ mod tests {
         callbacks.announce_prompt();
         let _user = next_event(&mut sub).await;
 
-        // A step that ends without ever streaming produces no message events.
         callbacks.emit_event(json!({ "type": "llm.step.begin", "model": "m" }));
         callbacks.emit_event(json!({ "type": "llm.step.end", "content": "", "tool_calls": [] }));
 
@@ -653,14 +570,10 @@ mod tests {
         let delta = next_event(&mut sub).await;
         assert_eq!(delta["type"], "event.thinking.delta");
         assert_eq!(delta["delta"], "reasoning...");
-        // The kind rides the event name — v2 keeps `thinking.delta` distinct
-        // from `assistant.delta` — and the turn rides the payload, so a
-        // consumer can place the chunk without an earlier lifecycle event.
+
         assert_eq!(delta["turn_id"], 1, "the delta must name its turn");
     }
 
-    /// A text part rides `event.assistant.delta`, the answer stream v2 keeps
-    /// separate from the reasoning one.
     #[tokio::test]
     async fn text_deltas_ride_the_assistant_event() {
         let hub = Arc::new(EventHub::new());

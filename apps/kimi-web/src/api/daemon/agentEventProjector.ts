@@ -1422,6 +1422,20 @@ export function createAgentProjector(): AgentProjector {
         break;
       }
 
+      case 'task.output': {
+        const taskId = typeof p?.taskId === 'string' ? p.taskId : undefined;
+        const chunk = typeof p?.chunk === 'string' ? p.chunk : undefined;
+        if (taskId === undefined || chunk === undefined) break;
+        out.push({
+          type: 'taskProgress',
+          sessionId,
+          taskId,
+          outputChunk: chunk,
+          stream: p?.stream === 'stderr' ? 'stderr' : 'stdout',
+        });
+        break;
+      }
+
       // -----------------------------------------------------------------------
       case 'compaction.completed': {
         // Compaction replaced a batch of old messages with a summary on the
@@ -1591,6 +1605,7 @@ const KNOWN_AGENT_CORE_TYPES = new Set([
   'subagent.failed',
   'task.started',
   'task.terminated',
+  'task.output',
   'background.task.started',
   'background.task.terminated',
   'cron.fired',

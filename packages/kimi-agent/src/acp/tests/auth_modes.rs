@@ -86,6 +86,7 @@ async fn test_acp_authenticate_succeeds_with_engine() {
             session_id: None,
             secondary_model: None,
             image_read_byte_budget: None,
+            llm_request_byte_budget: None,
             image_max_edge_px: None,
             model_capabilities: None,
             skill_dirs: Vec::new(),

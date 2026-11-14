@@ -1,17 +1,8 @@
-//! Optional request-body knobs shared by the protocol writers (v2
-//! `human/llm/response-format.ts` + `requester/bases/*/requester.ts`).
-//!
-//! These are capabilities of the request layer, not of the engine's turn
-//! config: the transport can be handed a `RequestOptions` value and each
-//! writer maps the parts its protocol understands. An empty value is inert and
-//! leaves the wire body byte-identical to a call without options.
-
 use serde_json::{Map, Value};
 
 use super::wire::WireMessage;
 use kimi_core::types::ContentBlock;
 
-/// v2 `ResponseFormat`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseFormat {
     JsonObject,
@@ -24,7 +15,6 @@ pub enum ResponseFormat {
 }
 
 impl ResponseFormat {
-    /// v2 `responseFormatToOpenAI` / v2 `responseFormatToResponsesText`.
     pub fn to_openai_value(&self) -> Value {
         match self {
             ResponseFormat::JsonObject => serde_json::json!({ "type": "json_object" }),
@@ -51,8 +41,6 @@ impl ResponseFormat {
         }
     }
 
-    /// v2 `responseFormatToResponsesText`: the Responses body flattens the
-    /// schema onto `text.format` instead of nesting it under `json_schema`.
     pub fn to_responses_text_value(&self) -> Value {
         match self {
             ResponseFormat::JsonObject => serde_json::json!({ "type": "json_object" }),
@@ -77,7 +65,6 @@ impl ResponseFormat {
         }
     }
 
-    /// v2 `applyAnthropicResponseFormat`: Anthropic has no `json_object` mode.
     pub fn to_anthropic_output_config(&self) -> Result<Value, String> {
         match self {
             ResponseFormat::JsonObject => {
@@ -96,7 +83,6 @@ fn insert_optional(map: &mut Map<String, Value>, key: &str, value: Option<Value>
     }
 }
 
-/// v2 `ExtraParams`, split per protocol.
 #[derive(Debug, Clone, Default)]
 pub struct ExtraParams {
     pub openai: Map<String, Value>,
@@ -104,19 +90,16 @@ pub struct ExtraParams {
     pub anthropic: Map<String, Value>,
 }
 
-/// The optional request-body knobs a caller may attach to a request.
 #[derive(Debug, Clone, Default)]
 pub struct RequestOptions {
     pub response_format: Option<ResponseFormat>,
-    /// Explicit determinism seed; takes precedence over the derived one.
+
     pub seed: Option<i64>,
-    /// Derive a stable seed from model + first user text when no explicit
-    /// seed is given (v2 `determinism.seed ?? deriveDeterminismSeed(...)`).
+
     pub derive_seed: bool,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
-    /// Protocol-specific raw parameters merged last; they may override any
-    /// field the writer produced.
+
     pub extra_params: ExtraParams,
 }
 
@@ -132,7 +115,6 @@ impl RequestOptions {
             && self.extra_params.anthropic.is_empty()
     }
 
-    /// The seed to send, if determinism was requested.
     pub fn seed_for(&self, model: &str, messages: &[WireMessage]) -> Option<i64> {
         if let Some(seed) = self.seed {
             return Some(seed);
@@ -141,22 +123,17 @@ impl RequestOptions {
             .then(|| derive_determinism_seed(model, messages))
     }
 
-    /// Sampling fields that belong in the OpenAI-family bodies.
     pub fn openai_sampling(&self) -> Map<String, Value> {
         sampling_map(self.temperature, self.top_p)
     }
 }
 
 impl From<&crate::rpc::types::NativeLlmConfig> for RequestOptions {
-    /// Project the transport config's optional request knobs onto the writer
-    /// options. Every field is absent by default, so a config that declares
-    /// none yields [`RequestOptions::is_inert`].
     fn from(config: &crate::rpc::types::NativeLlmConfig) -> Self {
         Self {
             response_format: config.response_format.as_ref().map(ResponseFormat::from),
             seed: config.determinism.as_ref().and_then(|value| value.seed),
-            // v2: `determinism` present without an explicit seed still derives
-            // one, so presence — not a set seed — arms derivation.
+
             derive_seed: config.determinism.is_some(),
             temperature: config.sampling.as_ref().and_then(|value| value.temperature),
             top_p: config.sampling.as_ref().and_then(|value| value.top_p),
@@ -206,15 +183,12 @@ fn sampling_map(temperature: Option<f64>, top_p: Option<f64>) -> Map<String, Val
     map
 }
 
-/// v2 `stripIgnoredSamplingParams`: remove the fields the family rejects while
-/// reasoning is on.
 pub fn strip_ignored_sampling(kwargs: &mut Map<String, Value>, ignored: &[&str]) {
     for key in ignored {
         kwargs.remove(*key);
     }
 }
 
-/// v2 `deriveDeterminismSeed`: FNV-1a (32-bit) over `model\0<first user text>`.
 pub fn derive_determinism_seed(model: &str, messages: &[WireMessage]) -> i64 {
     let source = format!("{model}\u{0}{}", first_user_text(messages));
     let mut hash: u32 = 2_166_136_261;
@@ -225,9 +199,6 @@ pub fn derive_determinism_seed(model: &str, messages: &[WireMessage]) -> i64 {
     i64::from(hash)
 }
 
-/// v2 `firstUserText`: the first non-empty user text turn. v2's messages are
-/// part lists, so text parts are concatenated; a text-only `WireMessage` keeps
-/// its text in `content` and lands on the same string.
 fn first_user_text(messages: &[WireMessage]) -> String {
     for message in messages {
         if message.role != "user" {
@@ -376,7 +347,7 @@ mod tests {
         );
         assert_eq!(options.temperature, Some(0.2));
         assert_eq!(options.top_p, Some(0.9));
-        // Presence of `determinism` without a seed still arms derivation.
+
         assert_eq!(options.seed, None);
         assert!(options.derive_seed);
         assert_eq!(

@@ -1,8 +1,3 @@
-//! Per-session prompt queue: one active prompt per session, submitted prompts
-//! that arrive while a turn runs wait behind it, and `steer` moves queued
-//! prompts into the running turn. Mirrors the kap-server prompt-queue state
-//! machine (`running` / `queued` / `blocked`) that the REST contract exposes.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -15,18 +10,13 @@ use crate::server::hub::EventHub;
 use crate::session::sqlite_store::SqliteSessionStore;
 use crate::session::wake::{WakePayload, WakeReplayHandler, WakeReplayStatus};
 
-/// The model input handed back to the turn loop when a prompt is admitted or
-/// promoted.
 pub struct RunInput {
     pub prompt_id: String,
     pub prompt: String,
     pub blocks: Vec<ContentBlock>,
-    /// The request's `metadata` as `[metadata]` (v2 `clientMetadata`), `None`
-    /// when the client sent none. Persisted as the turn's origin payload.
+
     pub origin: Option<Value>,
-    /// Whether this run settles a client-visible prompt. A task-notification
-    /// wake (v2 `loop.notify`) has no prompt behind it, so the driver must
-    /// not publish `prompt.completed` for it.
+
     pub prompt_events: bool,
 }
 
@@ -40,25 +30,21 @@ enum PromptAdvance {
 struct State {
     active: HashMap<String, Entry>,
     queued: HashMap<String, Vec<Entry>>,
-    /// Rich wakes interrupted by user input, replayed after the prompt FIFO
-    /// drains. Ordinary task notifications keep their existing semantics.
+
     deferred_wakes: HashMap<String, Vec<WakePayload>>,
     wake_replay_handlers: HashMap<(String, String), WakeReplayHandler>,
     wake_replay_inflight: HashSet<(String, String)>,
     wake_replay_errors: HashMap<(String, String), String>,
 }
 
-/// One active prompt plus a FIFO of queued prompts, keyed by session.
 #[derive(Default)]
 pub struct PromptQueue {
     state: Mutex<State>,
 }
 
-/// What [`PromptQueue::cancel`] found.
 pub enum CancelOutcome {
-    /// The prompt was active: the caller cancels its turn through the engine.
     Active,
-    /// The prompt was queued and has been removed; it will never run.
+
     Queued,
 }
 
@@ -67,19 +53,13 @@ struct Entry {
     prompt: String,
     blocks: Vec<ContentBlock>,
     origin: Option<Value>,
-    /// See [`RunInput::prompt_events`].
+
     prompt_events: bool,
-    /// The turn number the live `event.message.created` id names
-    /// (`msg-u{turn}`), stamped by the driver when the turn starts. `None`
-    /// until then: a queued prompt has no turn yet.
+
     turn_number: Option<u32>,
-    /// The abort route settled this prompt: the turn driver must not publish
-    /// a second terminal event (`prompt.completed`) on top of the
-    /// `prompt.aborted` the route already published — v2's `cancelWaiter`
-    /// settles the item exactly once (loopService.ts:735-750).
+
     cancelled: bool,
-    /// Present only for caller-rendered rich wakes. The payload survives an
-    /// automatic user-prompt interruption so it can be replayed verbatim.
+
     wake: Option<WakePayload>,
 }
 
@@ -88,9 +68,6 @@ impl PromptQueue {
         Self::default()
     }
 
-    /// Register a submitted prompt and stamp its wire `status`. Returns the
-    /// wire item, and the run input when this prompt becomes active (the caller
-    /// must start a turn); `None` means it was queued behind the active one.
     pub fn admit(
         &self,
         session_id: &str,
@@ -145,28 +122,15 @@ impl PromptQueue {
         }
     }
 
-    /// Admit a synthetic task-notification turn (v2 `loop.notify`
-    /// `turnScoped: false`): the model sees a background task's completion as
-    /// input even though no user prompt is pending. The entry carries no
-    /// prompt events, and its origin is the task origin the transcript folds.
-    ///
-    /// Returns the run when this wake became the session's active turn;
-    /// `None` means it queued behind an active prompt and the running driver
-    /// promotes it through [`PromptQueue::advance`].
     pub fn admit_wake(&self, session_id: &str, text: String, origin: Value) -> Option<RunInput> {
         self.admit_wake_entry(session_id, text, Vec::new(), Some(origin), None)
             .1
     }
 
-    /// Admit a caller-rendered rich wake. Unlike an ordinary task notification,
-    /// this entry participates in user-prompt interruption and replay.
     pub fn admit_rich_wake(&self, session_id: &str, payload: WakePayload) -> Option<RunInput> {
         self.admit_rich_wake_with_id(session_id, payload).1
     }
 
-    /// Variant that also returns the wake id for explicit cancellation through
-    /// [`PromptQueue::cancel`]. Explicit cancellation discards; only automatic
-    /// user-prompt interruption requeues the payload.
     pub fn admit_rich_wake_with_id(
         &self,
         session_id: &str,
@@ -267,9 +231,6 @@ impl PromptQueue {
         }
     }
 
-    /// The expected server turn number of an active wake interrupted by a user
-    /// prompt. The caller passes it to `ServerEngine::cancel_turn_at`, which
-    /// refuses to cancel a newer turn if the wake ended in the meantime.
     pub fn interrupted_wake_turn(&self, session_id: &str) -> Option<u32> {
         let state = self.lock();
         let active = state.active.get(session_id)?;
@@ -278,9 +239,6 @@ impl PromptQueue {
             .flatten()
     }
 
-    /// Whether the active rich wake was interrupted before its driver started
-    /// the turn. The run loop skips execution and immediately promotes the
-    /// queued user prompt in this case.
     pub fn active_is_interrupted_wake(&self, session_id: &str) -> bool {
         self.lock()
             .active
@@ -288,9 +246,6 @@ impl PromptQueue {
             .is_some_and(|entry| entry.wake.is_some() && entry.cancelled)
     }
 
-    /// Discard a producer's whole wake channel, including deferred replays.
-    /// Returns whether anything was found and the active turn that now needs
-    /// cancellation, if it had already started.
     pub fn drop_rich_wakes(&self, session_id: &str, variant: &str) -> (bool, Option<u32>) {
         let mut state = self.lock();
         let mut found = false;
@@ -331,7 +286,6 @@ impl PromptQueue {
         (found, active_turn)
     }
 
-    /// `(active, queued)` wire items for the list route.
     pub fn snapshot(&self, session_id: &str) -> (Option<Value>, Vec<Value>) {
         let state = self.lock();
         let active = state.active.get(session_id).map(|entry| entry.item.clone());
@@ -343,7 +297,6 @@ impl PromptQueue {
         (active, queued)
     }
 
-    /// The active prompt's wire item, when one is running.
     pub fn active_item(&self, session_id: &str) -> Option<Value> {
         self.lock()
             .active
@@ -351,9 +304,6 @@ impl PromptQueue {
             .map(|entry| entry.item.clone())
     }
 
-    /// The active prompt's id when it is a client-visible (tracked) prompt —
-    /// v2 `LoopSnapshot.activePromptId` is `undefined` for an untracked
-    /// notification turn, so a wake's id must not surface here.
     pub fn active_tracked_prompt_id(&self, session_id: &str) -> Option<String> {
         let state = self.lock();
         state
@@ -364,8 +314,6 @@ impl PromptQueue {
             .filter(|id| !id.is_empty())
     }
 
-    /// The queued tracked prompt ids, in FIFO order — v2 `LoopSnapshot.queue`
-    /// filtered to entries carrying a `promptId`.
     pub fn queued_tracked_prompt_ids(&self, session_id: &str) -> Vec<String> {
         let state = self.lock();
         state
@@ -382,8 +330,6 @@ impl PromptQueue {
             .unwrap_or_default()
     }
 
-    /// Queued task-notification / rich-wake entries — v2
-    /// `LoopSnapshot.notificationCount` (the machine's notification queue).
     pub fn queued_notification_count(&self, session_id: &str) -> usize {
         self.lock()
             .queued
@@ -392,9 +338,6 @@ impl PromptQueue {
             .unwrap_or(0)
     }
 
-    /// Replace the replay owner for one session + variant. Deferred payloads
-    /// use the handler on their next advance; unregistered variants retain the
-    /// original direct replay.
     pub fn set_wake_replay_handler(
         &self,
         session_id: &str,
@@ -406,7 +349,6 @@ impl PromptQueue {
             .insert((session_id.to_string(), variant.to_string()), handler);
     }
 
-    /// Inspect one channel's deferred/in-flight replay and last handler error.
     pub fn wake_replay_status(&self, session_id: &str, variant: &str) -> Option<WakeReplayStatus> {
         let state = self.lock();
         let key = (session_id.to_string(), variant.to_string());
@@ -423,9 +365,6 @@ impl PromptQueue {
         })
     }
 
-    /// Select the next runnable turn, or a delegated replay when its variant
-    /// has a handler. The queue lock is released before `advance_after_turn`
-    /// invokes that handler.
     fn advance(&self, session_id: &str) -> PromptAdvance {
         let mut state = self.lock();
         let queued = match state.queued.get_mut(session_id) {
@@ -464,10 +403,6 @@ impl PromptQueue {
         PromptAdvance::Run(run)
     }
 
-    /// Advance after a completed turn, awaiting any delegated replay. Handler
-    /// success transfers ownership of re-enqueue to the handler. On failure the
-    /// original payload is restored and the error remains queryable; returning
-    /// `None` stops the current driver instead of spinning on the failure.
     async fn advance_after_turn(&self, session_id: &str) -> Option<RunInput> {
         loop {
             let (payload, handler) = match self.advance(session_id) {
@@ -502,11 +437,6 @@ impl PromptQueue {
         }
     }
 
-    /// Settle a prompt by id (v2 `cancelWaiter`, loopService.ts:735-750): a
-    /// queued prompt is removed from the queue so the driver never promotes
-    /// it, and the active prompt is flagged so the driver publishes no second
-    /// terminal event on top of the `prompt.aborted` the route published.
-    /// `None` means no active or queued prompt carries the id.
     pub fn cancel(&self, session_id: &str, prompt_id: &str) -> Option<CancelOutcome> {
         Self::cancel_locked(&mut self.lock(), session_id, prompt_id)
     }
@@ -533,18 +463,12 @@ impl PromptQueue {
         None
     }
 
-    /// Record the turn number the driver is about to run for the active
-    /// prompt, so the live message id (`msg-u{turn}`) can be resolved back to
-    /// it. Called by `run_prompt_loop` once per turn.
     pub fn stamp_active_turn(&self, session_id: &str, turn_number: u32) {
         if let Some(entry) = self.lock().active.get_mut(session_id) {
             entry.turn_number = Some(turn_number);
         }
     }
 
-    /// The turn number stamped for the active prompt, when the driver has
-    /// started it — the `turnId` a `turn.steer` payload carries so the fold
-    /// can pair the steer with its turn (v2 `turnSteerSchema`).
     pub fn active_turn_number(&self, session_id: &str) -> Option<u32> {
         self.lock()
             .active
@@ -552,19 +476,6 @@ impl PromptQueue {
             .and_then(|entry| entry.turn_number)
     }
 
-    /// Settle a prompt by the *user message id* a client holds, returning the
-    /// resolved prompt id alongside the outcome. Two schemes name the same
-    /// message and neither is the prompt id:
-    ///
-    /// - `msg-u{turn}` — the live `event.message.created` id
-    ///   (`message_events.rs`), resolved through the active prompt's stamped
-    ///   turn. This is what the web UI's abort button sends (ROADMAP §7.6:
-    ///   the raw prompt-id lookup missed it and the route answered 404).
-    /// - `msg-{prompt_id}` — the prompt item's own `user_message_id`.
-    ///
-    /// A turn scheme that names a turn the active prompt is not running falls
-    /// through to the prompt-id scheme, so a client-chosen prompt id that
-    /// happens to start with `u` still resolves.
     pub fn cancel_by_user_message_id(
         &self,
         session_id: &str,
@@ -586,7 +497,6 @@ impl PromptQueue {
         Some((prompt_id.to_string(), outcome))
     }
 
-    /// Whether the abort route settled the active prompt.
     pub fn active_is_cancelled(&self, session_id: &str) -> bool {
         self.lock()
             .active
@@ -594,29 +504,16 @@ impl PromptQueue {
             .is_some_and(|entry| entry.cancelled)
     }
 
-    /// Overwrite the active prompt's status (used to surface `blocked`).
     pub fn set_active_status(&self, session_id: &str, status: &str) {
         if let Some(entry) = self.lock().active.get_mut(session_id) {
             entry.item["status"] = json!(status);
         }
     }
 
-    /// Drop the active slot once a session has no more prompts to run.
     pub fn clear_active(&self, session_id: &str) {
         self.lock().active.remove(session_id);
     }
 
-    /// Retire the active prompt and promote anything admitted in the gap.
-    ///
-    /// `advance` decides under one lock whether the queue is idle, but the
-    /// driver then releases the lock before calling this on the `Idle` arm. A
-    /// prompt admitted in that window sees the old active entry, is queued
-    /// behind it, and would be orphaned by a plain `clear_active` — the exact
-    /// race a cancel makes easy to hit, because the engine's turn goes idle
-    /// before the driver finishes its bookkeeping. Doing the remove and the
-    /// promote under one lock closes it: a prompt either queues before this
-    /// call (and is promoted here) or arrives after it (and starts its own
-    /// driver).
     pub fn finish_active(&self, session_id: &str) -> Option<RunInput> {
         let mut state = self.lock();
         state.active.remove(session_id);
@@ -631,8 +528,6 @@ impl PromptQueue {
         Some(run)
     }
 
-    /// Remove queued prompts by id, returning them for steering. Ids that are
-    /// not queued are absent from the result.
     pub fn take_queued(
         &self,
         session_id: &str,
@@ -654,12 +549,10 @@ impl PromptQueue {
         taken
     }
 
-    /// Prompts waiting behind the active one (v2 `LoopSnapshot.queue.length`).
     pub fn queued_count(&self, session_id: &str) -> usize {
         self.lock().queued.get(session_id).map_or(0, Vec::len)
     }
 
-    /// Whether a prompt id is active or queued.
     pub fn contains(&self, session_id: &str, prompt_id: &str) -> bool {
         let state = self.lock();
         state
@@ -672,7 +565,6 @@ impl PromptQueue {
                 .is_some_and(|queue| queue.iter().any(|entry| item_id(&entry.item) == prompt_id))
     }
 
-    /// Whether the active prompt has this id.
     pub fn active_is(&self, session_id: &str, prompt_id: &str) -> bool {
         self.lock()
             .active
@@ -692,16 +584,10 @@ fn item_id(item: &Value) -> String {
         .to_string()
 }
 
-/// Publish one prompt-lifecycle event on the session's lane.
 pub fn publish_prompt_event(hub: &EventHub, session_id: &str, event: Value) {
     hub.bus_for(session_id).publish(&EngineEvent::Custom(event));
 }
 
-/// Drive a session's prompts to completion: run the admitted prompt, then
-/// promote and run each queued one in turn until the queue drains. Emits
-/// `prompt.completed` per prompt (reason `completed`, `failed` when the turn
-/// errored, or `blocked` when the prompt gate rejected it; the latter two
-/// surface the row as `blocked`).
 pub async fn run_prompt_loop(
     engine: Option<Arc<ServerEngine>>,
     store: Arc<SqliteSessionStore>,
@@ -716,9 +602,6 @@ pub async fn run_prompt_loop(
     };
     let mut run = run;
     loop {
-        // A user prompt can interrupt an admitted wake before this driver gets
-        // its first poll. Such a wake never starts an engine turn; its payload
-        // is already deferred and replayed after the user queue drains.
         if queue.active_is_interrupted_wake(&session_id) {
             match queue.advance_after_turn(&session_id).await {
                 Some(next) => {
@@ -734,9 +617,7 @@ pub async fn run_prompt_loop(
                 },
             }
         }
-        // v2 `publishPromptStarted` (`loopService.ts:747-755`): the prompt's
-        // turn is about to launch. A client that queued it moves the entry from
-        // `queued` to `running` on this event; a cancelled trigger never starts.
+
         if run.prompt_events && !queue.active_is_cancelled(&session_id) {
             publish_prompt_event(
                 &hub,
@@ -749,9 +630,7 @@ pub async fn run_prompt_loop(
         }
         let history = store.load_session_history(&session_id).unwrap_or_default();
         let turn_number = store.next_turn_number(&session_id).unwrap_or(1);
-        // The live `event.message.created` id names this turn (`msg-u{turn}`);
-        // stamping it lets the abort route resolve that id back to the prompt
-        // (ROADMAP §7.6).
+
         queue.stamp_active_turn(&session_id, turn_number);
         let outcome = engine
             .run_turn_with_media(
@@ -763,24 +642,12 @@ pub async fn run_prompt_loop(
                 run.origin.clone(),
             )
             .await;
-        // The prompt gate can reject the prompt without an error transport-wise
-        // (v2 `settleGateRejectedPrompt`): the row settles as `blocked`, and
-        // the reason below is `blocked` rather than `completed`.
+
         let gate_blocked = outcome.as_ref().is_ok_and(|report| report.gate_blocked);
         if outcome.is_err() || gate_blocked {
             queue.set_active_status(&session_id, "blocked");
         }
-        // A prompt the abort route already settled has its terminal event
-        // (`prompt.aborted`); publishing `prompt.completed` as well would
-        // settle it twice — v2's `cancelWaiter` settles exactly once.
-        // `agentId` is deliberately the literal `main`, not a carried-over id:
-        // the prompt queue drives the session's main turn only — a queued
-        // prompt, a steer, and an abort all target that one turn. This is a
-        // different thing from the subagent identity plumbing, where an event's
-        // owner is threaded explicitly through
-        // `RunTurnInput.agent_id` → `ToolExecuteRequest.agent_id` and a
-        // task-local read would silently degrade to `main` across the
-        // scheduler's `tokio::spawn`. Do not "fix" this into a lookup.
+
         if run.prompt_events && !queue.active_is_cancelled(&session_id) {
             publish_prompt_event(
                 &hub,
@@ -801,13 +668,7 @@ pub async fn run_prompt_loop(
                 }),
             );
         }
-        // v2 `launchContinuationTurn`: a cleanly completed turn of an active
-        // goal owes the model another prompt — without it a goal never
-        // progresses past one response, because no host loop re-prompts on
-        // this entry point. The continuation runs before the queue advances,
-        // so a queued user prompt cannot interleave with the goal's own
-        // turns; a cancel stops the chain, the way v2 pauses the goal on an
-        // interrupted turn.
+
         let mut outcome = outcome;
         while !queue.active_is_cancelled(&session_id)
             && outcome.as_ref().is_ok_and(turn_owes_goal_continuation)
@@ -843,8 +704,6 @@ pub async fn run_prompt_loop(
     }
 }
 
-/// Drain one session's queued task notifications into the wake turn's prompt
-/// and origin, or `None` when nothing is queued.
 pub fn take_task_wake_prompt(
     runner: &crate::storage::TaskRunner,
     session_id: &str,
@@ -861,9 +720,6 @@ pub fn take_task_wake_prompt(
     Some((text, origin))
 }
 
-/// Whether a turn ended cleanly enough to owe a goal continuation. v2
-/// continues on a completed turn (a max-tokens finish included); a
-/// cancelled, filtered, or step-capped turn settles the goal instead.
 pub(crate) fn turn_completed(report: &TurnReport) -> bool {
     matches!(
         report.stop_reason.as_str(),
@@ -871,15 +727,10 @@ pub(crate) fn turn_completed(report: &TurnReport) -> bool {
     )
 }
 
-/// A turn after which the goal may owe another turn: a clean completion, or
-/// the per-turn step budget running out (v2 `isMaxStepsTurnFailure`, which
-/// continues with the step-cap prompt instead of pausing).
 pub(crate) fn turn_owes_goal_continuation(report: &TurnReport) -> bool {
     turn_completed(report) || turn_step_capped(report)
 }
 
-/// Whether the turn stopped because it ran out of steps inside its goal
-/// (v2 `isMaxStepsTurnFailure`).
 pub(crate) fn turn_step_capped(report: &TurnReport) -> bool {
     report.stop_reason == "MaxSteps"
 }
@@ -922,10 +773,6 @@ mod tests {
         assert_eq!(queued[0]["prompt_id"], "p2");
     }
 
-    /// v2 `loop.notify` on the server: a task-notification wake is a queued
-    /// turn with no prompt behind it. It runs when the session is idle and
-    /// queues behind an active prompt otherwise, and the driver is told not to
-    /// settle a client prompt for it.
     #[test]
     fn a_task_wake_runs_when_idle_and_queues_behind_a_prompt() {
         let queue = PromptQueue::new();
@@ -960,11 +807,6 @@ mod tests {
         assert_eq!(queue.snapshot("s1").0.unwrap()["kind"], "notification");
     }
 
-    /// ROADMAP §7.6: the web UI's abort button sends the live
-    /// `event.message.created` id (`msg-u{turn}`, `message_events.rs`), which
-    /// names the turn's user message — not the prompt. The raw prompt-id
-    /// lookup misses it and the route answered 404; resolving the message id
-    /// to the prompt whose turn it names is what keeps the button working.
     #[test]
     fn abort_resolves_the_live_user_message_id_to_the_active_prompt() {
         let queue = PromptQueue::new();
@@ -985,9 +827,6 @@ mod tests {
         assert!(queue.active_is_cancelled("s1"));
     }
 
-    /// The prompt item's own `user_message_id` (`msg-{prompt_id}`) is the
-    /// other scheme a client can hold; it resolves active and queued prompts
-    /// alike. An id that names neither is still a miss.
     #[test]
     fn abort_resolves_the_prompt_items_own_user_message_id() {
         let queue = PromptQueue::new();
@@ -1021,9 +860,6 @@ mod tests {
 
     #[test]
     fn client_metadata_rides_the_item_and_the_run() {
-        // #3764: the route wraps the request's `metadata` as a one-element
-        // `clientMetadata` array inside the origin; the item echoes it for the
-        // REST response and the run carries the origin to persistence.
         let queue = PromptQueue::new();
         let mut base = item("p1");
         base["metadata"] = json!({ "surface": "web", "threadId": "abc" });
@@ -1038,7 +874,6 @@ mod tests {
         assert_eq!(origin["kind"], "user");
         assert_eq!(origin["clientMetadata"][0]["surface"], "web");
 
-        // A queued prompt keeps its origin until it is promoted.
         let mut queued_base = item("p2");
         queued_base["metadata"] = json!({ "surface": "web" });
         let origin2 = json!({ "kind": "user", "clientMetadata": [{ "surface": "web" }] });
@@ -1067,20 +902,12 @@ mod tests {
         assert!(queue.snapshot("s1").0.is_none());
     }
 
-    /// The `Idle` arm of `advance_after_turn` releases the queue lock before
-    /// the driver retires the active entry. A prompt admitted in that window
-    /// queues behind the old entry; `finish_active` must promote it rather
-    /// than dropping the slot and orphaning the prompt (the cancel path makes
-    /// the engine idle before the driver's bookkeeping, so this is reachable
-    /// in a single test turn).
     #[test]
     fn finishing_the_active_prompt_promotes_one_admitted_in_the_gap() {
         let queue = PromptQueue::new();
         queue.admit("s1", item("p1"), "p1".into(), Vec::new(), None);
         assert!(advance(&queue, "s1").is_none(), "p1 is the only prompt");
 
-        // The driver has seen `Idle`; the next admission still sees `p1`
-        // active and is queued rather than starting its own driver.
         let (_queued, run) = queue.admit("s1", item("p2"), "p2".into(), Vec::new(), None);
         assert!(run.is_none());
 
@@ -1114,9 +941,6 @@ mod tests {
         assert_eq!(queue.active_item("s1").unwrap()["status"], "blocked");
     }
 
-    /// v2's `cancelWaiter` (loopService.ts:735-750): a queued prompt is
-    /// removed so the driver never promotes it — an aborted prompt must not
-    /// run after the abort.
     #[test]
     fn cancel_removes_a_queued_prompt_so_it_never_runs() {
         let queue = PromptQueue::new();
@@ -1128,16 +952,13 @@ mod tests {
             Some(CancelOutcome::Queued)
         ));
         assert!(!queue.contains("s1", "p2"));
-        // The active prompt is untouched and still runs.
+
         assert!(queue.active_is("s1", "p1"));
         assert!(!queue.active_is_cancelled("s1"));
-        // Promotion skips the removed entry entirely.
+
         assert!(advance(&queue, "s1").is_none());
     }
 
-    /// The active prompt is flagged, not removed: its turn is still running
-    /// and must be cancelled through the engine, and the driver must publish
-    /// no second terminal event on top of the route's `prompt.aborted`.
     #[test]
     fn cancel_flags_the_active_prompt() {
         let queue = PromptQueue::new();
@@ -1149,7 +970,7 @@ mod tests {
         ));
         assert!(queue.active_is_cancelled("s1"));
         assert_eq!(queue.active_item("s1").unwrap()["status"], "aborted");
-        // Still present: the driver settles it after the turn returns.
+
         assert!(queue.contains("s1", "p1"));
     }
 

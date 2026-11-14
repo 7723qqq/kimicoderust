@@ -17,6 +17,8 @@ mod goal_cancel;
 #[cfg(test)]
 mod goal_judge;
 #[cfg(test)]
+mod human_turn;
+#[cfg(test)]
 mod injection_telemetry_tools;
 #[cfg(test)]
 mod notify_user_nudge;

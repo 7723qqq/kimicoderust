@@ -1,7 +1,3 @@
-//! Standard JSON response envelope format and protocol error codes.
-//!
-//! Mirrors kap-server's `okEnvelope`, `errEnvelope`, and `ErrorCode` taxonomy.
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -11,10 +7,9 @@ pub mod error_codes {
     pub const VALIDATION_FAILED: u32 = 40001;
     pub const REQUEST_MALFORMED: u32 = 40002;
     pub const PROVIDER_OAUTH_MANAGED: u32 = 40003;
-    /// v2 `CATALOG_IMPORT_INVALID`: a models.dev entry cannot be imported.
+
     pub const CATALOG_IMPORT_INVALID: u32 = 40004;
-    /// v2 `REGISTRY_IMPORT_INVALID`: a custom registry cannot be fetched,
-    /// parsed, or lists no importable providers.
+
     pub const REGISTRY_IMPORT_INVALID: u32 = 40005;
     pub const AUTH_TOKEN_UNAUTHORIZED: u32 = 40112;
 
@@ -28,8 +23,7 @@ pub mod error_codes {
     pub const MCP_SERVER_NOT_FOUND: u32 = 40408;
     pub const FS_PATH_NOT_FOUND: u32 = 40409;
     pub const WORKSPACE_NOT_FOUND: u32 = 40410;
-    /// v2 `CATALOG_ENTRY_NOT_FOUND`: no models.dev directory entry with the
-    /// requested catalog id.
+
     pub const CATALOG_ENTRY_NOT_FOUND: u32 = 40417;
     pub const PROVIDER_NOT_FOUND: u32 = 40412;
     pub const MODEL_NOT_FOUND: u32 = 40413;
@@ -37,18 +31,15 @@ pub mod error_codes {
 
     pub const SESSION_BUSY: u32 = 40901;
     pub const APPROVAL_ALREADY_RESOLVED: u32 = 40902;
-    /// v2 `session.occupied` (upstream #4246): a live foreign process holds
-    /// the session's occupancy lock.
+
     pub const SESSION_OCCUPIED: u32 = 40903;
-    /// v2 `session.stale`: the journal was written by another client since
-    /// this one last saw it; reload before continuing.
+
     pub const SESSION_STALE: u32 = 40932;
     pub const PROMPT_ID_CONFLICT: u32 = 40927;
     pub const QUESTION_DISMISSED: u32 = 40909;
     pub const PROVIDER_ALREADY_EXISTS: u32 = 40921;
     pub const REMOTE_CONTROL_ALREADY_RUNNING: u32 = 40928;
-    /// Outbound queue overflow on a v3 websocket connection: the client is
-    /// not reading fast enough and is closed (upstream `WS_SLOW_CONSUMER`).
+
     pub const WS_SLOW_CONSUMER: u32 = 42903;
 
     pub const INTERNAL_ERROR: u32 = 50001;
@@ -62,7 +53,6 @@ pub struct Envelope<T> {
     pub request_id: String,
 }
 
-/// Construct a success envelope `{ code: 0, msg: "success", data, request_id }`.
 pub fn ok_envelope(data: &Value, request_id: &str) -> Value {
     json!({
         "code": error_codes::SUCCESS,
@@ -72,7 +62,6 @@ pub fn ok_envelope(data: &Value, request_id: &str) -> Value {
     })
 }
 
-/// Construct an error envelope `{ code, msg, data: null, request_id }`.
 pub fn err_envelope(code: u32, msg: &str, request_id: &str) -> Value {
     json!({
         "code": code,
@@ -82,16 +71,6 @@ pub fn err_envelope(code: u32, msg: &str, request_id: &str) -> Value {
     })
 }
 
-/// Wrap one dispatcher response into the kap-server envelope the Web client's
-/// REST transport unwraps:
-///
-/// - non-JSON bodies (static assets, media, downloads) stay untouched;
-/// - a body that is already an envelope (debug routes, 401 challenges) is
-///   left as-is;
-/// - 2xx bodies become `code: 0` with the original body as `data`;
-/// - error bodies keep an explicit non-zero `code` when they carry one,
-///   otherwise the status maps onto the closest kap-server code, and the
-///   message comes from `error` / `msg` / `message`.
 pub fn envelope_response(
     request_id: &str,
     response: crate::server::router::HttpResponse,
@@ -142,7 +121,7 @@ pub fn envelope_response(
             .unwrap_or_else(|| code_for_status(status));
         err_envelope(code, msg, request_id)
     };
-    // The original headers (auth challenge, cache policy, …) survive.
+
     let mut wrapped_response = crate::server::router::HttpResponse::json(status, &wrapped);
     wrapped_response.headers = headers;
     wrapped_response
@@ -156,7 +135,6 @@ fn is_envelope(value: &Value) -> bool {
     })
 }
 
-/// The closest kap-server code for a status the dispatcher did not annotate.
 fn code_for_status(status: u16) -> u32 {
     match status {
         400 | 405 | 422 => error_codes::VALIDATION_FAILED,
@@ -194,7 +172,6 @@ mod tests {
         assert_eq!(body["msg"], "Not Found");
         assert!(body["data"].is_null());
 
-        // An explicit code wins over the status mapping.
         let coded = HttpResponse::json(
             404,
             &json!({ "code": error_codes::PROVIDER_NOT_FOUND, "msg": "provider gone" }),
@@ -217,8 +194,7 @@ mod tests {
             wrapped.header("www-authenticate"),
             Some("Bearer realm=\"kimi-code\"")
         );
-        // A code+msg+data body is already an envelope and stays byte-level
-        // unchanged apart from nothing — the extra keys survive.
+
         let body: Value = serde_json::from_slice(&wrapped.body).unwrap();
         assert_eq!(body["code"], 40101);
         assert!(body.get("request_id").is_none() || body["request_id"] == "req_7");
@@ -226,12 +202,10 @@ mod tests {
 
     #[test]
     fn envelope_response_leaves_raw_and_enveloped_bodies_alone() {
-        // Non-JSON (static asset / download) passes through byte-for-byte.
         let raw = HttpResponse::bytes(200, "text/html", b"<html>".to_vec());
         let wrapped = envelope_response("req_4", raw);
         assert_eq!(wrapped.body, b"<html>");
 
-        // An existing envelope (debug routes) is not wrapped twice.
         let enveloped = HttpResponse::json(200, &ok_envelope(&json!({ "ok": true }), "req_5"));
         let wrapped = envelope_response("req_6", enveloped);
         let body: Value = serde_json::from_slice(&wrapped.body).unwrap();
@@ -250,7 +224,6 @@ mod tests {
         assert_eq!(env["data"]["count"], 42);
         assert_eq!(env["request_id"], "req_123");
 
-        // Envelope struct deserialization round-trip
         let typed: Envelope<serde_json::Value> = serde_json::from_value(env).unwrap();
         assert_eq!(typed.code, 0);
         assert_eq!(typed.msg, "success");
@@ -279,7 +252,6 @@ mod tests {
 
     #[test]
     fn test_error_codes_taxonomy_and_envelope_edge_cases() {
-        // Assert exact error codes mapped according to kap-server taxonomy
         assert_eq!(error_codes::SUCCESS, 0);
         assert_eq!(error_codes::VALIDATION_FAILED, 40001);
         assert_eq!(error_codes::REQUEST_MALFORMED, 40002);
@@ -300,14 +272,12 @@ mod tests {
         assert_eq!(error_codes::QUESTION_DISMISSED, 40909);
         assert_eq!(error_codes::INTERNAL_ERROR, 50001);
 
-        // Edge cases: null data in ok_envelope, empty request_id
         let env_null = ok_envelope(&Value::Null, "");
         assert_eq!(env_null["code"], 0);
         assert_eq!(env_null["msg"], "success");
         assert!(env_null["data"].is_null());
         assert_eq!(env_null["request_id"], "");
 
-        // err_envelope with internal error and empty message
         let env_internal = err_envelope(error_codes::INTERNAL_ERROR, "", "req_empty");
         assert_eq!(env_internal["code"], 50001);
         assert_eq!(env_internal["msg"], "");

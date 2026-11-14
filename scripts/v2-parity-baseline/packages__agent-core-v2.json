@@ -1,0 +1,2531 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/agent-core-v2. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/agent-core-v2",
+  "redEntries": [
+    {
+      "tsPath": "_base/asyncEventQueue.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/contribution/registry.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/cascadeEngine.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/collection.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/dependencyGraph.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/descriptors.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/errors.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/fiber.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/graph.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/instantiation.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/instantiationService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/lifecycle.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/scope.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/scopeUnits.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/service.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/serviceCollection.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/test.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/testInstantiationService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/di/util/linkedList.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/errors/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/errors/unexpectedError.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/event.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/execEnv/bufferedReadable.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/execEnv/decodeText.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/execEnv/loginShellPath.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/execEnv/shellPathBridge.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/execEnv/shellProvision.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/lifecycle/keyedResource.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/lifecycle/lifecycleMachine.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/log/fileLog.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/log/formatter.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/log/log.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/log/logConfig.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/log/logService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/abort.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/canonical-args.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/fetchLike.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/guards.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/hero-slug.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/proxy.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/proxyEnv.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/timer.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "_base/utils/typeEquality.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/utils/types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/utils/undici-npm.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/agentIdentity/agentIdentity.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/agentIdentity/agentIdentityService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/agentIdentity/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/agentProfileCatalog.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/agentProfileContribution.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/agentProfileRegistry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/agentProfileRegistryService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/behaviorContract.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/builtinAgentProfileLoaderService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/contribution.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/profile-shared.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/agentProfileCatalog/promptPrefix.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/auth/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/csdn/fetchCsdnArticle.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/csdn/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/engine-http.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/engine-undici.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/http3.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/juejin/fetchJuejinArticle.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/juejin/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/linuxdo/fetchLinuxDoArticle.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/linuxdo/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/zhihu/fetchZhihuArticle.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/webSearch/engines/zhihu/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/auth/webSearch/webSearch.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/bashParser/bashParser.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/bashParser/bashParserService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/bootstrap/bootstrap.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/bootstrap/bootstrapService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/bootstrap/home.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/capability/capability.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/capability/capabilityEvents.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/capability/capabilityService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/capability/entries/context.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/capability/entries/kimiCu.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/capability/entries/kimiWebbridge.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/capability/entries/windowsCuProcesses.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/capability/host.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/capability/types.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/config/config.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/config/configEvents.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/config/configOverlayContributions.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/config/configPure.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/config/configSectionContributions.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/config/configService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/config/deprecations.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/config/sectionDiff.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/config/toml.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/config/tomlWriteback.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/edit/editService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/edit/fileEdit.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/edit/fileEditService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/edit/textModel.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/environment/environment.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/environment/environmentService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/environmentDeclaration/environmentDeclaration.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/environmentDeclaration/environmentDeclarationService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/event/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/event/event.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/event/event2.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/event/eventBus.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/event/eventBusService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/event/eventService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/event/fiberEventResolver.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/feature/featureManager.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/feature/featureManagerService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/feature/featureServiceContribution.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/file/fileService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/file/fileServiceImpl.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/flag/flag.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/flag/flagRegistry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/flag/flagRegistryService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/flag/flagService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/gateway/gateway.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/gateway/gatewayService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/git/git.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/git/gitParsers.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/git/gitService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/git/workTree.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/hostFolderBrowser/hostFolderBrowser.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/hostFolderBrowser/hostFolderBrowserService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/kosongConfig/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/kosongConfig/hostRequestHeadersAdapter.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/kosongConfig/oauthTokenAdapter.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/llmProtocol/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/llmProtocol/message.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpConfig/configLoader.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpConfig/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpConfig/configStore.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpConfig/oauthService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpConfig/oauthStore.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpManagement/mcpManagement.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpManagement/mcpManagementService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpRegistry/mcpRegistry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/mcpRegistry/mcpRegistryService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/memory/memoryStore.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/plugin/availability.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/plugin/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/plugin/nodeFallback.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/region/regionService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/scopes.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionExport/errors.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionExport/file-source.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionExport/manifest.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionExport/sessionExport.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionExport/sessionExportService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionExport/wire-scan.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionExport/zip.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionIndex/sessionIndex.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/sessionIndex/sessionIndexDirtyJournal.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionIndex/sessionIndexMirrorService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionIndex/sessionIndexModel.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionIndex/sessionIndexProjector.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionIndex/sessionIndexService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionIndex/sessionIndexSource.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionLegacy/sessionLegacy.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionLegacy/sessionLegacyService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionLegacy/sessionProtocol.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/sessionManager/sessionLookup.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/sessionManager/sessionManager.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/sessionManager/sessionManagerService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/state/appState.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/state/appStateService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/task/task.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/task/taskService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/telemetry/cloudAppender.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/telemetry/cloudTransport.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/telemetry/consoleAppender.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/telemetry/context.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/telemetry/events.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/telemetry/telemetry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/telemetry/telemetryService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/watch/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/web/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/web/providers/local-fetch-url.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/web/providers/moonshot-fetch-url.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/web/tools/fetch-url-types.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/web/web.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/web/webService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workflow/tools/workflow.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workflow/workflowRuntime.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/workflow/workflowService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workflow/workflowTypes.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspace/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspace/fileWorkspacePersistence.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspace/workspace.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspace/workspaceAlias.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspace/workspaceEvents.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/workspace/workspacePersistence.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspace/workspaceProtocol.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspace/workspaceService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspaceAliases/workspaceAliases.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspaceAliases/workspaceAliasesService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspaceLifecycle/workspaceLifecycle.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspaceLifecycle/workspaceLifecycleService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspaceSessions/workspaceSessions.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/workspaceSessions/workspaceSessionsService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contract.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/debugCascade.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/debugCascadeService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/debugGraph.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/debugGraphService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/debugLedger.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/debugLedgerService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "debug/scopeTree.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/environment.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/environmentDefaults.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/environmentProvider.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/environmentRegistry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/environmentWorkspaceView.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/fakeEnvironment.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/localEnvironment.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/programPath.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "environment/shareBinRg.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "events.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/astron/flag.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/attachment/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/btw/btwFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/btw/btwService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/codeRuntime/codeRuntimeFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/codeRuntime/codeShimSource.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/codeRuntime/memoryGuard.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/codeRuntime/runCodeTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/cron/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/cron/cronFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/cron/cronService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/cron/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/cron/tools/cron-create/cronCreateTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/cron/tools/cron-delete/cronDeleteTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/dateChange/dateChangeFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/dateChange/dateChangeService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/debugEvents/debugEvents.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/debugEvents/debugEventsFeature.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/debugEvents/debugEventsService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/externalHooks/externalHooksFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/feature.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/featureAssembly.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/featureAssemblyService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/featureRegistry.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/fileHistory/fileHistory.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/fileHistory/fileHistoryFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/fileHistory/fileHistoryOps.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/fileHistory/fileHistoryRetention.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/fileHistory/fileHistoryService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/gitMemory/cache.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/gitMemory/gitMemoryEntries.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/gitMemory/gitMemoryIndexLoader.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/gitMemory/gitMemoryService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/gitMemory/gitReader.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/goal/errors.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/goal/goalFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/goal/goalService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/goal/tools/update-goal/updateGoalTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/helloWorld/agent/helloWorld.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/helloWorld/agent/helloWorldService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/helloWorld/agent/injection/helloWorldInjection.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/helloWorld/helloWorldFeature.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/helloWorld/helloWorldOps.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/lsp/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/lsp/lspConnection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/lsp/lspFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/lsp/lspService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/notify/flag.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/notify/notifyFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/notify/notifyUserAvailability.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/notify/notifyUserNudgeService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/notify/sessionNotify.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/operationLog/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/operationLog/flag.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/operationLog/operationFeature.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/operationLog/operationLog.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/operationLog/operationLogStore.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/operationLog/operationService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/operationLog/operationSnapshotStore.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/operationLog/repositoryViewService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/plan/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/plan/exitPlanModeReview.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/plan/parsePlanToTodos.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/plan/plan.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/plan/planFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/plan/planOps.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/plan/planService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/plan/planToTodoConverter.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/plan/tools/exit-plan-mode/exitPlanModeTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/promptOptimizer/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/promptOptimizer/errors.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/promptOptimizer/flag.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/promptOptimizer/optimizerProfile.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/promptOptimizer/promptOptimizer.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/promptOptimizer/promptOptimizerFeature.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/promptOptimizer/promptOptimizerService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/reminder/reminderFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/reminder/reminderService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/reminder/systemReminder.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/sessionInit/sessionInit.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/sessionInit/sessionInitFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/sessionInit/sessionInitService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/sessionQuery/sessionQueryFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/catalog/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/catalog/inMemorySkillDiscovery.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/catalog/skillDiscovery.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/catalog/skillSource.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/session/skillCatalog.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/session/skillCatalogData.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/session/skillCatalogService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/skillFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/skillService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/workspace/workspaceSkillCatalog.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/skill/workspace/workspaceSkillCatalogService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/snapshot/snapshotFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/snapshot/snapshotListTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/snapshot/snapshotService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/spec/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/spec/injection/specModeInjection.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/spec/spec.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/spec/specFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/spec/specOps.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/spec/tools/exit-spec-mode/exitSpecModeTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/swarm/swarmFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/swarm/swarmOps.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/todo/todoFeature.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/todo/todoService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/todo/tools/todo-list/todo-list.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tokenCounting/tokenCountingFeature.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/tower/tools/complete/complete.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/complete/completeTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/delivery.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/init/initTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/plan/plan.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/rebase/rebaseTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/review/review.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/review/reviewTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/spawn/spawnTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tools/teardown/teardownTool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/tower.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/towerFeature.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "features/tower/towerOps.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/tower/towerService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "features/usage/usageFeature.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "hooks.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/agent/context-usage.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/agent/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/agent/events.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/agent/historySchema.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/agent/machine.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/agent/origin.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/agent/slices.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/agent/turn.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/credentials/credentials.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/credentials/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/credentials/kimi-oauth.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/eventStore/actor.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/eventStore/events.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/eventStore/eventStore.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/eventStore/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/eventStore/journal.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/eventStore/slice.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/interaction/facade.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/interaction/interaction.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/interaction/machine.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/llm/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm/protocol/rewrite.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm/provider-catalog.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm/requester/undici-npm.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/llm/syntax-errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/log/log.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/persist/open.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/persist/v2/convert.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/persist/v2/fold.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/persist/v2/migrate.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/plugin.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/session/events.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/session/machine.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/session/slices.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/session/stores.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/store/backend/backend.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/store/backend/memory.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/store/backend/node.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/store/branch.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/store/internal/codec.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/store/internal/context.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/store/store.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/store/tree.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/store/types.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/todo/todoItem.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/tool-select/plugin.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/tool-select/resolver.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/tool-select/state.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/tool-select/tool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/tool/executor.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/tool/machine.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/tool/tool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/tool/wait-for.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/utils/abort.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/utils/watch.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/xstate2.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "human/xstateInspection.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/contract/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/contract/message.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/contract/request-trace.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/model/credential-recovery.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/model/host-request-headers.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/model/model-oauth.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/model/model-service.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/protocol/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/protocol/protocol-base.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/protocol/protocol.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/protocol/protocolAdapterRegistry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/provider/provider-definition.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/provider/provider-service.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/provider/provider.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/record-diff.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "mcpCore/client-http.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/client-remote.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/client-shared.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/client-sse.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/client-stdio.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/config-schema.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/configView.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/oauth/coordinator.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/oauth/provider.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcpCore/types.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/backends/host/hostClockService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/backends/host/hostEnvironmentService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/backends/host/hostFsService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/backends/host/hostProcessService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/backends/host/hostServices.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/backends/host/hostTimersService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/backends/remote/remoteFileSystem.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "os/backends/remote/remoteProcess.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "os/backends/remote/rpcDomainError.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "os/interface/hostEnvironment.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/interface/hostFileSystem.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/interface/hostFsErrors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/interface/hostProcess.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "os/interface/hostTimers.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "persistence/backends/memory/inMemoryStorageService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "persistence/backends/memory/sessionLockService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "persistence/backends/minidb/miniDbQueryStore.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "persistence/backends/node-fs/appendLogStore.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/backends/node-fs/atomicDocumentStore.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/backends/node-fs/blobStoreService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/backends/node-fs/fileStorageService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/backends/node-fs/projectLocalConfigService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/backends/node-fs/sessionLockService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/interface/appendLogStore.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/interface/blobStore.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "persistence/interface/queryStore.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "program/program.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "program/programDependencies.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "program/programWorkdirs.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/askpass.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/client/connectGuidance.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/client/connection.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/client/execBridge.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/client/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/client/launchers.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/client/remoteEnvironmentProvider.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/client/remoteSession.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/client/sshAskpass.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/declaration/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/declaration/remoteEnvironmentDeclaration.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/processLifecycle.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "remote/protocol/channel.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/protocol/codec.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/protocol/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/protocol/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/protocol/messages.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/protocol/methods.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/server/entry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/server/environment.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/server/fsHandler.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/server/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/server/processManager.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "remote/server/stdioHost.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/agentLifecycle/agentLifecycle.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/agentLifecycle/agentLifecycleService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/agentLifecycle/createAwaitingClose.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/agentLifecycle/forked.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/agentLifecycle/getOrRestoreAgent.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/agentLifecycle/mainAgent.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/agentLifecycle/managedAgent.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/agentLifecycle/profile/gitContext.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/agentLifecycle/profile/profiles.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/agentLifecycle/subagentMetadata.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/errors.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/mcp/ephemeralMcpServers.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/mcp/mergedConnectionView.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/mcp/sessionMcpHandle.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/process/processRunner.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/process/processRunnerService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionActivity/sessionActivity.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionActivity/sessionActivityService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionActivity/sessionOutcomeMirror.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionActivity/sessionOutcomeMirrorService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionActivity/sessionRunGate.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionActivity/sessionRunGateService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionAgentProfileCatalog/agentProfileCatalogSeed.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionAgentProfileCatalog/sessionAgentProfileCatalog.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionAgentProfileCatalog/sessionAgentProfileCatalogService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionContext/sessionContext.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionInstructions/instructionsProvider.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionLog/sessionLogService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionMetadata/promptMetadata.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionMetadata/sessionMetadata.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionMetadata/sessionMetadataService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionMetadata/sessionMetaEvents.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionTitle/agentTitlePromptSource.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionTitle/agentTitlePromptSourceService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionTitle/sessionTitle.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionTitle/sessionTitleService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/sessionToolPolicy/sessionToolPolicy.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionToolPolicy/sessionToolPolicyService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionToolPolicyGate/sessionToolPolicyGate.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/sessionToolPolicyGate/sessionToolPolicyGateService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/state/sessionState.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/state/sessionStateService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/backend/acpBackend.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/backend/backendCompat.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/backend/claudeCodeBackend.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/backend/codexBackend.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/backend/codexWire.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/backend/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/subagent/backend/flag.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/subagent/backend/subagentBackend.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/backend/subagentBackendService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/subagent/subagentModelsValidation.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/subagentModelsValidationService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session/subagent/subagentScopeCacheService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/subagent/subagentService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/tokenCounting/sessionTokenCounting.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/tokenCounting/sessionTokenCountingService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/tokenCounting/tokenCountingAgentModel.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/usage/sessionUsage.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/usage/sessionUsageService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/usage/usageAgentModel.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/workdir/workdir.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/workspaceContext/agentWorkspaceContextService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/workspaceContext/workspaceContext.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/workspaceContext/workspaceContextService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/workspaceContext/workspacePaths.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/workspaceContext/workspaceRoots.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session/workspaceInfo/workspaceInfo.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "state/agentEffect.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "state/agentModel.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "state/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "state/eventDispatcher.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "state/eventDispatcherService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "state/state.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "state/stateContribution.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/human.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/journal.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/record.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/repair.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/tree/fork.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/tree/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/tree/tree.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/wire.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wire/wireService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/sandbox/sandbox.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/sandbox/sandboxPolicyService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/sessionLifecycle/coldSessionArchive.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/sessionLifecycle/internal/addressing.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/sessionLifecycle/internal/forkTurnSlice.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/sessionLifecycle/sessionLifecycle.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/sessionLifecycle/sessionLifecycleEvents.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/sessionLifecycle/sessionLifecycleService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/state/workspaceState.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/state/workspaceStateService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/explicitAgentProfileLoader.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/explicitAgentProfileLoaderService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/extraAgentProfileLoader.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/extraAgentProfileLoaderService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/internal/agentFile.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/internal/agentFileDiscovery.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/internal/agentProfileFromFile.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/internal/agentProfileLoader.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/internal/agentRoots.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/internal/paths.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/internal/systemFile.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/internal/types.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/pluginAgentProfileLoader.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/pluginAgentProfileLoaderService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/userAgentProfileLoader.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/userAgentProfileLoaderService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/workspaceAgentProfileLoader.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceAgentProfileLoader/workspaceAgentProfileLoaderService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceContext/workspaceContext.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceDirs/workspaceDirs.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceDirs/workspaceDirsService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceFs/fs.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceFs/fsService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceFs/internal/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceFs/internal/fdSuggest.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceFs/internal/fsProcess.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceFs/internal/fsSearch.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceFs/internal/rgLocator.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceFs/internal/runRg.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceGit/workspaceGit.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceGit/workspaceGitService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceInstance/workspaceInstance.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceInstance/workspaceInstanceManager.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceInstance/workspaceInstanceManagerService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceInstructions/workspaceInstructions.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceInstructions/workspaceInstructionsService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceMcp/workspaceMcp.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceMcp/workspaceMcpService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceMcpConfig/workspaceMcpConfig.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceMcpConfig/workspaceMcpConfigService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "workspace/workspaceTrust/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceTrust/trustDisclosure.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceTrust/trustDisclosureService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceTrust/trustRecord.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceTrust/workspaceTrust.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceTrust/workspaceTrustService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "workspace/workspaceTrust/workspaceTrustStore.ts",
+      "verdict": "partial"
+    }
+  ]
+}

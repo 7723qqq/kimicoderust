@@ -97,8 +97,22 @@ fn glob_description() -> String {
 }
 
 fn bash_description() -> String {
-    let (shell_name, _) = crate::prompt::environment::detect_shell(None);
+    let shell_name = crate::prompt::environment::detect_shell(None)
+        .map(|(name, _)| name)
+        .unwrap_or_else(|_| "sh".to_string());
     BASH_DESCRIPTION.replace("${SHELL_NAME}", &shell_name)
+}
+
+pub fn bash_description_without_background(description: &str) -> String {
+    description
+        .replace(
+            "Set `timeout` for possibly long-running commands. A foreground command that hits its timeout is moved to the background instead of being killed, and you are notified when it completes. The user can also move a running foreground command to the background at any time.",
+            "Set `timeout` for possibly long-running commands. A command that hits its timeout is killed.",
+        )
+        .replace(
+            "For long-running builds, tests, watchers, or servers that the conversation should not wait on, set `run_in_background=true` with a short `description`; the call returns a task ID. Set `disable_timeout=true` only when the task should run without a timeout. You are notified automatically when the task completes, so return control to the user instead of waiting on it. Use `TaskOutput` only for a non-blocking snapshot, and `TaskStop` only to cancel.",
+            "Background execution is disabled for this agent. Do not set `run_in_background=true`.",
+        )
 }
 
 pub fn core_tool_defs() -> Vec<ToolInfo> {
@@ -477,7 +491,7 @@ fn build_core_tool_defs() -> Vec<ToolInfo> {
     defs
 }
 
-const NOTIFY_USER_DESCRIPTION: &str = r#"Show the end user a short progress update without ending your turn. Main-agent and subagent updates appear together in the TUI's Updates panel, with source labels added automatically. The panel keeps every update in order until the main agent starts a new turn. It remains visible when work ends, and the user can page through the complete messages.
+const NOTIFY_USER_DESCRIPTION: &str = r#"Show the end user a progress update without ending your turn. Main-agent and subagent updates are shown to the user as they arrive, with source labels added automatically. The title is shown on its own wherever space is tight, and the user can open the full message from it. Updates stay visible after the work ends.
 
 **When to use:**
 1. Early in a multi-step task, describe your approach so the user can follow your work.
@@ -486,7 +500,8 @@ const NOTIFY_USER_DESCRIPTION: &str = r#"Show the end user a short progress upda
 4. When blocked, explain the blocker and your next step.
 
 **How to use:**
-- Write one or two sentences of light Markdown in the end user's language. Avoid repeating unchanged status or narrating individual tool calls.
+- Write the `title` without Markdown or a trailing period.
+- Write the `message` the way you would update a colleague in chat: open with two to four sentences of evidence and reasoning, then give details as bullet points, short paragraphs, or key-value lines with file paths and error excerpts. Avoid tables and wide code blocks; updates can be shown in a narrow column. Keep it self-contained, and avoid repeating unchanged status or narrating individual tool calls.
 - When working as a subagent, describe only your own subtask. Its completion does not mean the whole task is complete.
 - Do not add an agent name or source prefix; the UI supplies it.
 - Batch the update with your next tool calls when possible.
@@ -504,9 +519,15 @@ pub fn notify_user_tool_def() -> ToolInfo {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
             "properties": {
+                "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "A one-line headline the user can take in at a glance: the conclusion or current phase, in the user's language, under ~60 characters, plain text."
+                },
                 "message": {
                     "type": "string",
-                    "description": "Short progress update in light Markdown to show the user."
+                    "minLength": 1,
+                    "description": "The details behind the title, without repeating it: a short paragraph followed by a few bullet points of light Markdown, in the user's language, under ~1000 characters."
                 }
             },
             "required": ["message"],
@@ -613,8 +634,17 @@ pub fn all_native_tool_defs() -> Vec<ToolInfo> {
     }
     defs.push(notify_user_tool_def());
     defs.push(memory_tool_def());
+    if crate::tools::memory_repo::git_memory_enabled() {
+        defs.push(crate::tools::git_memory::repo_map_tool_def());
+    }
     defs.push(session_query_tool_def());
-    defs
+    defs.into_iter()
+        .map(|mut definition| {
+            definition.input_schema =
+                crate::tool::input_schema::to_input_json_schema(definition.input_schema);
+            definition
+        })
+        .collect()
 }
 
 pub const MEMORY_TOOL_NAME: &str = "Memory";
@@ -626,6 +656,14 @@ pub fn memory_tool_def() -> ToolInfo {
         name: MEMORY_TOOL_NAME.into(),
         description: MEMORY_DESCRIPTION.into(),
         input_schema: crate::tools::memory_action::memory_input_schema(),
+    }
+}
+
+pub fn memory_graph_tool_def() -> ToolInfo {
+    ToolInfo {
+        name: crate::tools::memory_graph_tool::MEMORY_GRAPH_TOOL_NAME.into(),
+        description: crate::tools::memory_graph_tool::memory_graph_description(),
+        input_schema: crate::tools::memory_graph_tool::memory_graph_input_schema(),
     }
 }
 
@@ -681,7 +719,9 @@ mod tests {
         assert!(!read.contains("absolute value cannot exceed"));
 
         let bash = get("Bash");
-        let (shell_name, _) = crate::prompt::environment::detect_shell(None);
+        let shell_name = crate::prompt::environment::detect_shell(None)
+            .map(|(name, _)| name)
+            .unwrap_or_else(|_| "sh".to_string());
         assert!(bash.contains(&format!("Execute a `{shell_name}` command")));
         assert!(!bash.contains("${SHELL_NAME}"));
         assert!(bash.contains("moved to the background instead of being killed"));
@@ -856,5 +896,10 @@ mod tests {
         assert_eq!(nu.input_schema["required"], json!(["message"]));
         assert_eq!(nu.input_schema["additionalProperties"], false);
         assert_eq!(nu.input_schema["properties"]["message"]["type"], "string");
+        assert_eq!(
+            nu.input_schema["properties"]["title"]["description"],
+            "A one-line headline the user can take in at a glance: the conclusion or current phase, in the user's language, under ~60 characters, plain text."
+        );
+        assert!(nu.description.contains("The title is shown on its own"));
     }
 }

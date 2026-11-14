@@ -740,7 +740,8 @@ pub(crate) async fn build_engine_pipeline(
         // Treat the stub and the `"sys"` sentinel the same way `ServerEngine::
         // session_spec` already does, and build the real prompt from the
         // workspace the caller passed.
-        system_prompt: build_session_system_prompt(params),
+        system_prompt: build_session_system_prompt(params)
+            .map_err(|error| napi::Error::from_reason(error.coded_message()))?,
         model_name: params.model_name.clone(),
         providers: params
             .providers
@@ -772,7 +773,10 @@ pub(crate) async fn build_engine_pipeline(
         // engine's own view of the mode was unobservable. Report both.
         policy_snapshot: params.policy_snapshot_json.as_deref().and_then(|json| {
             match serde_json::from_str::<crate::permission::PolicySnapshot>(json) {
-                Ok(snapshot) => {
+                Ok(mut snapshot) => {
+                    if print_mode {
+                        snapshot.non_interactive = true;
+                    }
                     tracing::debug!(mode = ?snapshot.mode, "native policy snapshot accepted");
                     Some(snapshot)
                 }
@@ -847,6 +851,7 @@ pub(crate) async fn build_engine_pipeline(
         image_read_byte_budget: params
             .image_read_byte_budget
             .and_then(|value| u64::try_from(value).ok()),
+        llm_request_byte_budget: params.request_byte_budget.and_then(|value| u64::try_from(value).ok()),
         image_max_edge_px: params
             .image_max_edge_px
             .and_then(|value| u32::try_from(value).ok()),
@@ -930,7 +935,7 @@ pub(crate) async fn build_engine_pipeline(
             event_bus: None,
             // Background-task lifecycle reaches the TUI through the same host
             // callbacks the turn events use: the pipeline owns its own runner,
-            // so without this sink its `event.task.*` go nowhere.
+            // so without this sink its `task.*` go nowhere.
             task_event_sink: Some({
                 let callbacks = host_callbacks.clone();
                 Arc::new(move |_session, event| callbacks.emit_event(event))
@@ -1045,6 +1050,7 @@ async fn run_turn_rust_impl(
             tool_call_id: m.tool_call_id.clone(),
             prompt_id: None,
             origin: None,
+            tools: Vec::new(),
         })
         .collect();
 
@@ -1076,6 +1082,7 @@ async fn run_turn_rust_impl(
     });
 
     let input = RunTurnInput {
+        llm_request_byte_budget: pipeline.llm_request_byte_budget,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         max_attempts: params.max_attempts,
         turn_id: turn_id.clone(),

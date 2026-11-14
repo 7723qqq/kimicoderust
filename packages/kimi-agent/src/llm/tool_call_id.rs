@@ -1,29 +1,16 @@
-//! Request-side tool-call-id normalisation (v2
-//! `human/llm/requester/bases/tool-call-id.ts`).
-//!
-//! Providers accept a narrower id alphabet than the one a turn can be handed
-//! (gateway prefixes, `|`-joined ids). The request builder rewrites *both*
-//! sides of a tool call — the assistant's `tool_calls[].id` and the tool
-//! message's `tool_call_id` — through one map so the pair stays matched. A
-//! collision after sanitising is resolved with a `_2`, `_3`, … suffix, and an
-//! id that sanitises to nothing becomes `tool_call`.
-
 use std::collections::{HashMap, HashSet};
 
 use kimi_core::types::LLMMessage;
 
-/// The id alphabet the providers accept; anything else becomes `_`.
 const TOOL_CALL_ID_SAFE_CHARS: fn(char) -> bool =
     |c| c.is_ascii_alphanumeric() || c == '_' || c == '-';
 
 const EMPTY_TOOL_CALL_ID: &str = "tool_call";
 
-/// The per-protocol sanitation rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCallIdPolicy {
-    /// Chat Completions and Anthropic: sanitise the id verbatim.
     Chat,
-    /// OpenAI Responses: ids are `<prefix>|<call_id>`; keep the prefix part.
+
     Responses,
 }
 
@@ -32,8 +19,6 @@ impl ToolCallIdPolicy {
         match self {
             ToolCallIdPolicy::Chat => sanitize_tool_call_id(id, max_length),
             ToolCallIdPolicy::Responses => {
-                // v2 `sanitizeOpenAIResponsesCallId` — `split('|', 1)` keeps
-                // the part *before* the first separator.
                 let call_id = id.split('|').next().unwrap_or(id);
                 sanitize_tool_call_id(call_id, max_length)
             }
@@ -122,10 +107,6 @@ fn build_tool_call_id_map(
     mapped
 }
 
-/// Rewrite every tool-call id in `messages` through one map (v2
-/// `normalizeToolCallIdsForProvider`). Returns the raw→wire map so a streamed
-/// response can be translated back. `max_length` mirrors the v2 policies'
-/// 64-character ceiling.
 pub fn normalize_tool_call_ids(
     messages: &mut [LLMMessage],
     policy: ToolCallIdPolicy,

@@ -1,0 +1,95 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/oauth. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/oauth",
+  "redEntries": [
+    {
+      "tsPath": "custom-registry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "google-oauth.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "identity.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "managed-feedback-upload.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "managed-kimi-code.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "managed-tools.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "managed-usage.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "model-alias-merge.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "oauth-manager.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "oauth-token-transaction.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "oauth.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "open-platform-defs.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "open-platform.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "provider-credential.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "refreshProviderModels.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "region-resolver.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "region.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "storage.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "token-state.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "toolkit.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "types.ts",
+      "verdict": "partial"
+    }
+  ]
+}

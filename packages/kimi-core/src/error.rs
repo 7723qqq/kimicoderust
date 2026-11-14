@@ -1,4 +1,3 @@
-
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -113,10 +112,7 @@ mod tests {
     #[test]
     fn renders_a_string_the_classifiers_still_read() {
         let err = LlmError::http(413, "request too large", None);
-        assert_eq!(
-            llm_http_status(&err.to_string()),
-            Some(413)
-        );
+        assert_eq!(llm_http_status(&err.to_string()), Some(413));
     }
 
     #[test]
@@ -129,10 +125,7 @@ mod tests {
         );
         // The typed channel survives the same suffix the retry layer parses
         // around: a status classifier must still find the code.
-        assert_eq!(
-            llm_http_status(&err.to_string()),
-            Some(500)
-        );
+        assert_eq!(llm_http_status(&err.to_string()), Some(500));
     }
 
     #[test]

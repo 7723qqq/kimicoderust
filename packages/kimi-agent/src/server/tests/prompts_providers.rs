@@ -2,19 +2,8 @@ use super::super::*;
 use super::common::*;
 use std::collections::HashMap;
 
-/// The full server path for an unconsumed steer (v2's semantics; the
-/// session path's session-scoped queue behaves the same): a prompt runs
-/// against a model endpoint that hangs mid-stream, a queued prompt is
-/// steered into the running turn, the turn is aborted before the steer is
-/// drained — the cancel check runs at the step top, ahead of
-/// `drain_steers` — and the next prompt's turn must carry the steered text
-/// exactly once. Before `release_turn_steer_state`, the steer died with the
-/// aborted turn and the text appeared nowhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
-    // A local OpenAI-compatible endpoint: the first request streams one
-    // delta and then holds the connection (only a cancellation ends that
-    // turn); every later request answers a complete turn.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let first_request = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -45,7 +34,6 @@ async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
                     let _ = sock.write_all(head.as_bytes()).await;
                     let _ = sock.flush().await;
                     if hanging {
-                        // Hold the connection open: the turn only ends through cancellation.
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     }
                 });
@@ -89,6 +77,7 @@ async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
             session_id: None,
             secondary_model: None,
             image_read_byte_budget: None,
+            llm_request_byte_budget: None,
             image_max_edge_px: None,
             model_capabilities: None,
             skill_dirs: Vec::new(),
@@ -121,7 +110,6 @@ async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
         }
     }
 
-    // 1. The first prompt runs against the hanging endpoint.
     let first = server
         .handle_request(&post(
             "/api/v1/sessions/sess-steer-cancel/prompts",
@@ -133,19 +121,12 @@ async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
     let first_id = first_item["prompt_id"].as_str().unwrap().to_string();
     assert_eq!(first_item["status"], "running");
     wait_until(10, || engine.is_turn_active("sess-steer-cancel")).await;
-    // `is_turn_active` is set when the turn is admitted, which is *before* its
-    // first step head drains steering. A steer submitted in that window is
-    // ordinary steering — the first head consumes it — so the cancel case this
-    // test pins needs the turn to be inside the model request first. Wait for
-    // the mock to have read that request ("hel" is already streaming); on a
-    // cold start the checkpoint write before the first step head is slow enough
-    // that the steer could otherwise arrive first and be drained.
+
     wait_until(10, || {
         !first_request.load(std::sync::atomic::Ordering::SeqCst)
     })
     .await;
 
-    // 2. A second prompt queues behind it and is steered into the running turn.
     let second = server
         .handle_request(&post(
             "/api/v1/sessions/sess-steer-cancel/prompts",
@@ -164,7 +145,6 @@ async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
         .await;
     assert_eq!(steer.status, 200);
 
-    // 3. Abort the running turn before its next step head drains the steer.
     let abort = server
         .handle_request(&post(
             &format!("/api/v1/sessions/sess-steer-cancel/prompts/{first_id}:abort"),
@@ -179,7 +159,6 @@ async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
         "the undrained steer survives the cancelled turn"
     );
 
-    // 4. The next prompt's turn drains the survivor at its first step head.
     let third = server
         .handle_request(&post(
             "/api/v1/sessions/sess-steer-cancel/prompts",
@@ -188,7 +167,6 @@ async fn a_steer_survives_a_cancel_and_joins_the_next_turn_over_rest() {
         .await;
     assert_eq!(third.status, 200);
 
-    // 5. The steered text is persisted exactly once, inside the new turn.
     let steered_turn = std::sync::Mutex::new(None);
     wait_until(10, || {
         let messages = store.load_session_messages("sess-steer-cancel").unwrap();
@@ -228,7 +206,6 @@ async fn prompt_queue_routes_reflect_state() {
     let server = HttpServer::in_memory().unwrap();
     server.store().create_session("sess-pq", None).unwrap();
 
-    // Idle session: no active prompt and an empty queue.
     let list = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -243,7 +220,6 @@ async fn prompt_queue_routes_reflect_state() {
     assert!(list_body["active"].is_null());
     assert_eq!(list_body["queued"], json!([]));
 
-    // Steering an unknown prompt id is PROMPT_NOT_FOUND, not a fake success.
     let steer = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -255,7 +231,6 @@ async fn prompt_queue_routes_reflect_state() {
         .await;
     assert_eq!(steer.status, 404);
 
-    // Aborting an unknown prompt is PROMPT_NOT_FOUND, not a fake success.
     let abort = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -270,10 +245,6 @@ async fn prompt_queue_routes_reflect_state() {
     assert_eq!(abort_body["code"], 40402);
 }
 
-/// ROADMAP §7.6: the web UI's abort button sends the live
-/// `event.message.created` id (`msg-u{turn}`). Before the message-id
-/// resolution landed, the route answered 404 for exactly the id the
-/// button holds.
 #[tokio::test]
 async fn abort_resolves_the_live_user_message_id_at_the_route() {
     let server = HttpServer::in_memory().unwrap();
@@ -293,7 +264,7 @@ async fn abort_resolves_the_live_user_message_id_at_the_route() {
     );
     assert!(run.is_some(), "the first prompt is active");
     assert_eq!(item["status"], "running");
-    // The driver stamps the turn the live event names.
+
     server.prompt_queue.stamp_active_turn("sess-abort", 2);
 
     let abort = server
@@ -325,7 +296,9 @@ async fn prompt_submission_options_persist_to_session_profile() {
         "profile": "coder",
         "metadata": { "title": "T" },
     });
-    apply_prompt_submission_options(&server, "sess-opt", &body).unwrap();
+    apply_prompt_submission_options(&server, "sess-opt", &body)
+        .await
+        .unwrap();
 
     let config = server
         .store()
@@ -350,12 +323,115 @@ async fn prompt_submission_options_persist_to_session_profile() {
     assert_eq!(metadata["permission_mode"], "yolo");
     assert_eq!(metadata["title"], "T");
 
-    // An unknown permission mode is rejected before any turn runs.
     let bad = json!({
         "content": [{ "type": "text", "text": "x" }],
         "permission_mode": "nope",
     });
-    assert!(apply_prompt_submission_options(&server, "sess-opt", &bad).is_err());
+    assert!(
+        apply_prompt_submission_options(&server, "sess-opt", &bad)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn hello_world_submission_emits_mode_records_and_updates_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = HttpServer::in_memory().unwrap();
+    let sid = "sess-hello-world";
+    server.store().create_session(sid, None).unwrap();
+    crate::features::helloWorld::helloWorldOps::hello_world_mode_registry()
+        .exit(crate::callbacks::MAIN_AGENT_ID);
+    let events = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let collector = events.clone();
+    server.hub.bus_for(sid).subscribe(move |event| {
+        if let crate::events::types::EngineEvent::Custom(value) = event {
+            collector.lock().unwrap().push(value.clone());
+        }
+    });
+    let body = json!({
+        "hello_world_mode": true,
+        "metadata": { "cwd": dir.path().to_string_lossy() },
+    });
+    apply_prompt_submission_options(&server, sid, &body)
+        .await
+        .unwrap();
+    let config = server
+        .store()
+        .get_state("agent_config", sid)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config["hello_world_mode"], true);
+    let run = crate::features::helloWorld::helloWorldOps::hello_world_mode_registry()
+        .run(crate::callbacks::MAIN_AGENT_ID)
+        .unwrap();
+    assert_eq!(run.stage, "requirements");
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "hello_world_mode.enter")
+    );
+
+    apply_prompt_submission_options(&server, sid, &json!({ "hello_world_mode": false }))
+        .await
+        .unwrap();
+    let config = server
+        .store()
+        .get_state("agent_config", sid)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config["hello_world_mode"], false);
+    assert!(
+        !crate::features::helloWorld::helloWorldOps::hello_world_mode_registry()
+            .is_active(crate::callbacks::MAIN_AGENT_ID)
+    );
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "hello_world_mode.exit")
+    );
+
+    for enabled in [true, false] {
+        let response = server
+            .handle_request(&HttpRequest {
+                method: "POST".into(),
+                path: format!("/api/v1/sessions/{sid}:profile"),
+                query: None,
+                headers: HashMap::new(),
+                body: serde_json::to_vec(&json!({
+                    "agent_config": { "hello_world_mode": enabled },
+                }))
+                .unwrap(),
+            })
+            .await;
+        assert_eq!(response.status, 200);
+        let profile: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(profile["agent_config"]["hello_world_mode"], enabled);
+        assert_eq!(
+            crate::features::helloWorld::helloWorldOps::hello_world_mode_registry()
+                .is_active(crate::callbacks::MAIN_AGENT_ID),
+            enabled
+        );
+    }
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "hello_world_mode.enter")
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "hello_world_mode.exit")
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -369,7 +445,9 @@ async fn prompt_plan_mode_activates_workspace_plan_state() {
         "plan_mode": true,
         "metadata": { "cwd": dir.to_string_lossy() },
     });
-    apply_prompt_submission_options(&server, "sess-plan", &body).unwrap();
+    apply_prompt_submission_options(&server, "sess-plan", &body)
+        .await
+        .unwrap();
 
     let state = crate::storage::StateStore::for_workspace(&dir).unwrap();
     assert_eq!(
@@ -408,7 +486,6 @@ async fn test_http_provider_crud_writes_config() {
         }
     }
 
-    // 1. Create writes the provider + aliases and seeds the unset default.
     let create_body = json!({
         "id": "kimi-code",
         "type": "openai",
@@ -430,7 +507,6 @@ async fn test_http_provider_crud_writes_config() {
     assert_eq!(created["status"], "connected");
     assert_eq!(created["default_model"], "kimi-code/k3");
 
-    // 2. A duplicate id is a PROVIDER_ALREADY_EXISTS conflict.
     let res = server
         .handle_request(&request("POST", "/api/v1/providers", Some(&create_body)))
         .await;
@@ -438,7 +514,6 @@ async fn test_http_provider_crud_writes_config() {
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(body["code"], 40921);
 
-    // 3. The single-provider read reveals the stored key.
     let res = server
         .handle_request(&request("GET", "/api/v1/providers/kimi-code", None))
         .await;
@@ -446,7 +521,6 @@ async fn test_http_provider_crud_writes_config() {
     let fetched: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(fetched["api_key"], "sk-test");
 
-    // 4. The write is format-preserving and the read side sees it.
     let text = std::fs::read_to_string(&config_path).unwrap();
     assert!(text.contains("[providers.kimi-code]"), "{text}");
     assert!(text.contains("[models.\"kimi-code/k3\"]"), "{text}");
@@ -464,7 +538,6 @@ async fn test_http_provider_crud_writes_config() {
             .any(|item| item["model"] == "kimi-code/k3")
     );
 
-    // 5. Replace with a rename migrates default_model, drops stale aliases.
     let res = server
         .handle_request(&request(
             "PUT",
@@ -492,7 +565,6 @@ async fn test_http_provider_crud_writes_config() {
     );
     assert!(!text.contains("kimi-code/fast"), "{text}");
 
-    // 6. OAuth-managed providers refuse writes; delete cleans aliases.
     let mut text = std::fs::read_to_string(&config_path).unwrap();
     text.push_str(
             "\n[providers.\"managed:kimi-code\"]\ntype = \"kimi\"\noauth = { provider = \"managed:kimi-code\" }\n",
@@ -518,8 +590,7 @@ async fn test_http_provider_crud_writes_config() {
     let deleted: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(deleted["deleted"], true);
     let text = std::fs::read_to_string(&config_path).unwrap();
-    // The provider and its aliases are gone; the (now dangling) default
-    // pointer is the user's setting and stays, matching kap-server.
+
     assert!(!text.contains("[providers.kimi-code-2]"), "{text}");
     assert!(!text.contains("[models.\"kimi-code-2/k3\"]"), "{text}");
     assert!(
@@ -528,7 +599,6 @@ async fn test_http_provider_crud_writes_config() {
     );
     assert!(text.contains("[providers.openai]"), "{text}");
 
-    // 7. Validation failures carry the kap-server validation code.
     let res = server
         .handle_request(&request(
             "POST",
@@ -561,7 +631,6 @@ async fn catalog_routes_fall_back_to_the_builtin_when_the_fetch_fails() {
     assert_eq!(items.len(), 4, "the built-in snapshot ends the chain");
     assert!(items.iter().any(|item| item["id"] == "moonshot"));
 
-    // The per-id route serves the same entry the list advertises.
     let res = server
         .handle_request(&catalog_request(
             "GET",
@@ -575,7 +644,6 @@ async fn catalog_routes_fall_back_to_the_builtin_when_the_fetch_fails() {
     assert_eq!(item["wire_type"], "anthropic");
     assert_eq!(item["base_url"], "https://api.anthropic.com");
 
-    // An unknown id is a 404, not a fabricated entry.
     let res = server
         .handle_request(&catalog_request(
             "GET",
@@ -634,7 +702,7 @@ async fn import_registry_writes_providers_with_their_source() {
     let providers = imported["providers"].as_array().unwrap();
     assert_eq!(providers.len(), 2, "the invalid entry is skipped");
     assert_eq!(imported["credential_env"]["acme"], "ACME_API_KEY");
-    // The Bearer key reached the registry.
+
     let requests = upstream.requests();
     assert!(
         requests
@@ -650,12 +718,9 @@ async fn import_registry_writes_providers_with_their_source() {
     assert!(text.contains("apiKey = \"sk-reg\""), "{text}");
     assert!(text.contains("[models.\"acme/big\"]"), "{text}");
     assert!(text.contains("[models.\"beta/sonnet\"]"), "{text}");
-    // The unset default is seeded from the first entry's first model.
+
     assert!(text.contains("default_model = \"acme/big\""), "{text}");
 
-    // A re-import of the same URL with one provider gone removes the
-    // vanished provider and its aliases; the URL is the identity, so the
-    // stored key is reused when the request omits it.
     upstream.set_response(
         "200 OK",
         &json!({
@@ -681,9 +746,7 @@ async fn import_registry_writes_providers_with_their_source() {
     assert!(!text.contains("[providers.beta]"), "{text}");
     assert!(!text.contains("beta/sonnet"), "{text}");
     assert!(text.contains("[providers.acme]"), "{text}");
-    // v2's remove-then-apply clears a default that pointed into the
-    // re-imported provider, and its `hadDefault` reads the pre-apply
-    // value, so it is not reseeded — the port mirrors that.
+
     assert!(!text.contains("default_model"), "{text}");
 }
 
@@ -697,7 +760,6 @@ async fn import_registry_rejects_the_unimportable() {
         .with_config_write_path(config_path.clone());
     let upstream = RegistryServer::spawn("200 OK", "{}").await;
 
-    // A missing url is a validation failure.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -709,7 +771,6 @@ async fn import_registry_rejects_the_unimportable() {
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(body["code"], 40001);
 
-    // An empty registry has no importable providers.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -727,7 +788,6 @@ async fn import_registry_rejects_the_unimportable() {
             .contains("no importable providers")
     );
 
-    // An upstream failure carries the status in the reason.
     upstream.set_response("401 Unauthorized", r#"{"message":"bad key"}"#);
     let res = server
         .handle_request(&catalog_request(
@@ -744,7 +804,6 @@ async fn import_registry_rejects_the_unimportable() {
     assert!(msg.contains("401"), "{msg}");
     assert!(msg.contains("bad key"), "{msg}");
 
-    // An OAuth-managed provider refuses the import.
     upstream.set_response(
         "200 OK",
         &json!({
@@ -775,8 +834,6 @@ async fn import_registry_rejects_the_unimportable() {
 
 #[tokio::test]
 async fn import_catalog_falls_back_to_the_builtin_when_the_fetch_fails() {
-    // The offline path a blocked-network user takes: the upstream fetch
-    // fails, so the import resolves against the built-in snapshot.
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, "default_model = \"\"\n").unwrap();
@@ -877,15 +934,12 @@ async fn import_catalog_writes_the_provider_and_its_aliases() {
     );
     assert!(text.contains("[models.\"acme/big\"]"), "{text}");
     assert!(text.contains("[models.\"acme/small\"]"), "{text}");
-    // The unset default is seeded from the first imported model.
+
     assert!(text.contains("default_model = \"acme/big\""), "{text}");
-    // The always-thinking rename and the capped input size ride along.
+
     assert!(text.contains("always_thinking"), "{text}");
     assert!(text.contains("max_input_size = 64000"), "{text}");
 
-    // A re-import under a new id rewrites that entry; the old provider's
-    // aliases survive (v2 filters by the target id) and the credential
-    // carries over when the request supplies none.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -899,7 +953,7 @@ async fn import_catalog_writes_the_provider_and_its_aliases() {
     assert!(text.contains("[models.\"acme-2/big\"]"), "{text}");
     assert!(text.contains("[models.\"acme/big\"]"), "{text}");
     assert!(text.contains("api_key = \"sk-acme\""), "{text}");
-    // The seeded default is not rewritten by the re-import.
+
     assert!(text.contains("default_model = \"acme/big\""), "{text}");
 }
 
@@ -930,7 +984,6 @@ async fn import_catalog_rejects_the_unimportable() {
         },
     )));
 
-    // An unknown catalog entry is CATALOG_ENTRY_NOT_FOUND.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -942,7 +995,6 @@ async fn import_catalog_rejects_the_unimportable() {
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(body["code"], 40417);
 
-    // A missing catalog_id is a validation failure.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -954,7 +1006,6 @@ async fn import_catalog_rejects_the_unimportable() {
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(body["code"], 40001);
 
-    // Every unimportable-entry branch carries CATALOG_IMPORT_INVALID.
     for catalog_id in ["gateway", "bedrock", "empty"] {
         let res = server
             .handle_request(&catalog_request(
@@ -968,7 +1019,6 @@ async fn import_catalog_rejects_the_unimportable() {
         assert_eq!(body["code"], 40004, "{catalog_id}");
     }
 
-    // An entry that needs an endpoint is a validation failure.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -986,7 +1036,6 @@ async fn import_catalog_rejects_the_unimportable() {
             .contains("requires a base_url")
     );
 
-    // A proprietary-SDK entry is a validation failure.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -998,7 +1047,6 @@ async fn import_catalog_rejects_the_unimportable() {
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(body["code"], 40004);
 
-    // An entry with no importable models is a validation failure.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -1016,7 +1064,6 @@ async fn import_catalog_rejects_the_unimportable() {
             .contains("no importable models")
     );
 
-    // An unusable target id is a validation failure.
     let res = server
         .handle_request(&catalog_request(
             "POST",
@@ -1028,7 +1075,6 @@ async fn import_catalog_rejects_the_unimportable() {
     let body: Value = serde_json::from_slice(&res.body).unwrap();
     assert_eq!(body["code"], 40004);
 
-    // An OAuth-managed provider refuses the import.
     let mut text = std::fs::read_to_string(&config_path).unwrap();
     text.push_str("\n[providers.acme]\ntype = \"openai\"\noauth = { provider = \"acme\" }\n");
     std::fs::write(&config_path, text).unwrap();
@@ -1084,8 +1130,7 @@ async fn provider_create_publishes_config_changed_on_the_global_lane() {
         panic!("expected ConfigChanged, got {:?}", ev.event);
     };
     assert_eq!(changed_fields, &vec!["providers".to_string()]);
-    // The payload carries the post-write config, so the client can fold
-    // it instead of re-fetching.
+
     assert_eq!(config["providers"]["kimi-code"]["type"], "openai");
     assert_eq!(config["default_model"], "kimi-code/k3");
 
@@ -1113,11 +1158,6 @@ async fn model_catalog_changed_publishes_on_the_global_lane() {
     assert!(value["failed"].as_array().unwrap().is_empty());
 }
 
-/// The v3 `config.warning` entity's producer: a `config.toml` with a
-/// malformed `[models]` entry reaches the global lane as
-/// `event.config.warning`, the event the global translator turns into the
-/// entity. The warning is captured at config load, which happens before
-/// the server exists, so this exercises the staging seam too.
 #[tokio::test]
 async fn a_malformed_model_entry_reaches_the_global_lane_as_a_config_warning() {
     let dir = tempfile::tempdir().unwrap();
@@ -1139,9 +1179,7 @@ max_context_size = 1000
     let server = HttpServer::in_memory().unwrap();
     let mut sub = server.hub().attach();
     let server = server.with_config(config);
-    // The seeded config is what `config()` reads back, so the warning list
-    // and the config view come from one load rather than two that could
-    // differ.
+
     assert_eq!(server.config().await.config_warnings.len(), 1);
 
     let ev = sub.recv().await.unwrap();
@@ -1150,7 +1188,7 @@ max_context_size = 1000
     let crate::events::EngineEvent::Custom(value) = &ev.event else {
         panic!("expected Custom event, got {:?}", ev.event);
     };
-    // The shape the global translator reads: `warnings[].message`.
+
     let warnings = value["warnings"].as_array().unwrap();
     assert_eq!(warnings.len(), 1, "{value}");
     assert!(
@@ -1164,19 +1202,12 @@ max_context_size = 1000
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A config that loaded cleanly must not publish an empty warning entity
-/// *at startup*: a fresh daemon has no stale advisory to clear, and the
-/// entity would sit in the global lane's replay ring saying nothing.
-/// (The reload path is the opposite — see the test below.)
 #[tokio::test]
 async fn a_clean_config_publishes_no_config_warning_at_startup() {
     let server = HttpServer::in_memory()
         .unwrap()
         .with_config(Default::default());
 
-    // Nothing is on the global lane, so the subscription's replay is empty
-    // and `recv` only returns on a publish. Any event would prove the
-    // publish happened; a timeout proves none did.
     let mut sub = server.hub().attach();
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), sub.recv())
@@ -1190,7 +1221,6 @@ async fn a_clean_config_publishes_no_config_warning_at_startup() {
 async fn test_http_provider_refresh_discovers_managed_models() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // A mock `GET /models` whose payload the test can swap between calls.
     let payload = Arc::new(std::sync::Mutex::new(json!({
         "data": [
             { "id": "k3", "limit": { "context": 200000 }, "display_name": "K3", "reasoning": { "type": "both" } },
@@ -1220,7 +1250,6 @@ async fn test_http_provider_refresh_discovers_managed_models() {
         }
     });
 
-    // Cached OAuth credential the refresh authenticates with.
     let credentials =
         std::env::temp_dir().join(format!("kimi-refresh-creds-{}", fastrand::u64(..)));
     std::fs::create_dir_all(&credentials).unwrap();
@@ -1269,7 +1298,6 @@ async fn test_http_provider_refresh_discovers_managed_models() {
         }
     }
 
-    // 1. A targeted refresh discovers both models and writes the aliases.
     let res = server
         .handle_request(&request("/api/v1/providers/managed%3Akimi-code:refresh"))
         .await;
@@ -1284,7 +1312,6 @@ async fn test_http_provider_refresh_discovers_managed_models() {
     assert!(text.contains("[models.\"kimi-code/k3-fast\"]"), "{text}");
     assert!(text.contains("provider = \"managed:kimi-code\""), "{text}");
 
-    // 2. The same payload again is a no-op.
     let res = server
         .handle_request(&request("/api/v1/providers/managed%3Akimi-code:refresh"))
         .await;
@@ -1292,7 +1319,6 @@ async fn test_http_provider_refresh_discovers_managed_models() {
     assert_eq!(result["unchanged"], json!(["managed:kimi-code"]));
     assert!(result["changed"].as_array().unwrap().is_empty());
 
-    // 3. A model the endpoint stops listing is reported and removed.
     *payload
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = json!({

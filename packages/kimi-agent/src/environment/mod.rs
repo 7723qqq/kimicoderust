@@ -31,6 +31,24 @@ pub mod agent;
 pub mod agents_md;
 pub mod binding;
 pub mod declaration;
+#[path = "environment.rs"]
+pub mod environment;
+#[path = "environmentDefaults.rs"]
+pub mod environment_defaults;
+#[path = "environmentWorkspaceView.rs"]
+pub mod environment_workspace_view;
+#[path = "environmentProvider.rs"]
+pub mod environment_provider;
+#[path = "environmentRegistry.rs"]
+pub mod environment_registry;
+#[path = "fakeEnvironment.rs"]
+pub mod fake_environment;
+#[path = "localEnvironment.rs"]
+pub mod local_environment;
+#[path = "programPath.rs"]
+pub mod program_path;
+#[path = "shareBinRg.rs"]
+pub mod share_bin_rg;
 pub mod workdir;
 pub mod workspace;
 

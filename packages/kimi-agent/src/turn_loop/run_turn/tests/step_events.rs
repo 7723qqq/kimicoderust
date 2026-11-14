@@ -1,10 +1,5 @@
 use super::super::{is_unknown_tool_refusal, provider_finish_reason, step_event_id};
 
-/// v2 `ProviderFinishReason` (`human/llm/finish-reason.ts:1-6`) is the
-/// normalized enum the protocol's step event carries next to the provider's own
-/// spelling. Every provider vocabulary in the reference must land on the same
-/// value: Anthropic says `end_turn`, OpenAI says `stop`, Google says `STOP`,
-/// and a gateway may invent another.
 #[test]
 fn provider_finish_reason_normalizes_known_vocabularies() {
     assert_eq!(provider_finish_reason(Some("stop")), Some("completed"));
@@ -50,9 +45,6 @@ fn provider_finish_reason_normalizes_known_vocabularies() {
     assert_eq!(provider_finish_reason(None), None);
 }
 
-/// v2 stamps one `stepId` on both `turn.step.started` and
-/// `turn.step.completed` (loopService.ts:1393-1424). The derived id must be
-/// stable across the boundaries of the same step and distinct across steps.
 #[test]
 fn step_event_id_is_stable_per_step_and_distinct_across_steps() {
     assert_eq!(
@@ -64,10 +56,6 @@ fn step_event_id_is_stable_per_step_and_distinct_across_steps() {
     assert_ne!(step_event_id("turn-a", 1), step_event_id("turn-b", 1));
 }
 
-/// v2 `isCannedUnknownToolResult` (`loopService.ts:1818-1834`) is narrow on
-/// purpose: only an error whose whole content is exactly `unknown tool: <name>`
-/// is deferred and retried. A tool that reported *about* an unknown tool is a
-/// normal result and must not be re-run.
 #[test]
 fn unknown_tool_refusal_matches_only_the_canned_shape() {
     assert!(is_unknown_tool_refusal(

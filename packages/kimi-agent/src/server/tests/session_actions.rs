@@ -6,7 +6,6 @@ async fn test_http_session_action_dual_syntax_and_controls() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
     let server = HttpServer::new(store.clone());
 
-    // Create base session
     store
         .create_session("sess-dual", Some("Dual Syntax Test"))
         .unwrap();
@@ -32,7 +31,6 @@ async fn test_http_session_action_dual_syntax_and_controls() {
         )
         .unwrap();
 
-    // 1. :status and /status
     let res_status_colon = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -44,8 +42,7 @@ async fn test_http_session_action_dual_syntax_and_controls() {
         .await;
     assert_eq!(res_status_colon.status, 200);
     let status_val: Value = serde_json::from_slice(&res_status_colon.body).unwrap();
-    // v2 `sessionStatusResponseSchema`: a bare status object keyed by field
-    // name, with no `sessionId`.
+
     assert!(status_val["busy"].is_boolean());
     assert!(status_val["permission"].is_string());
 
@@ -60,7 +57,6 @@ async fn test_http_session_action_dual_syntax_and_controls() {
         .await;
     assert_eq!(res_status_slash.status, 200);
 
-    // 2. :messages and /messages
     let res_msgs_colon = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -85,7 +81,6 @@ async fn test_http_session_action_dual_syntax_and_controls() {
         .await;
     assert_eq!(res_msgs_slash.status, 200);
 
-    // 3. :goal and /goal
     let res_goal_colon = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -97,7 +92,7 @@ async fn test_http_session_action_dual_syntax_and_controls() {
         .await;
     assert_eq!(res_goal_colon.status, 200);
     let goal_val: Value = serde_json::from_slice(&res_goal_colon.body).unwrap();
-    // v2 answers the bare `goalSnapshotSchema`.
+
     assert_eq!(goal_val["objective"], "verify dual syntax");
 
     let res_goal_slash = server
@@ -111,7 +106,6 @@ async fn test_http_session_action_dual_syntax_and_controls() {
         .await;
     assert_eq!(res_goal_slash.status, 200);
 
-    // 4. :abort and /abort
     let res_abort_colon = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -123,7 +117,6 @@ async fn test_http_session_action_dual_syntax_and_controls() {
         .await;
     assert_eq!(res_abort_colon.status, 200);
 
-    // 5. :export and /export
     let res_export_colon = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -135,7 +128,6 @@ async fn test_http_session_action_dual_syntax_and_controls() {
         .await;
     assert_eq!(res_export_colon.status, 200);
 
-    // 6. :fork
     let res_fork_colon = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -151,7 +143,6 @@ async fn test_http_session_action_dual_syntax_and_controls() {
     let forked_history = store.load_session_history(new_sid).unwrap();
     assert_eq!(forked_history.len(), 4);
 
-    // 7. :compact
     let res_compact_colon = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -161,15 +152,11 @@ async fn test_http_session_action_dual_syntax_and_controls() {
             body: Vec::new(),
         })
         .await;
-    // 7. :compact — a summary is mandatory now, so a server with no
-    // engine refuses before touching history. Both syntaxes must carry
-    // the same refusal (the dedicated 503 contract is covered by
-    // test_http_compact_without_summarizer_preserves_history).
+
     assert_eq!(res_compact_colon.status, 503);
     let compact_val: Value = serde_json::from_slice(&res_compact_colon.body).unwrap();
     assert_eq!(compact_val["error"], "no engine configured for this server");
 
-    // 8. :undo
     let res_undo_colon = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -207,7 +194,6 @@ async fn test_http_skills_endpoints() {
     let ws = store.create_workspace(&ws_root, Some("Skill WS")).unwrap();
     let ws_id = ws.id;
 
-    // 1. GET /api/v1/workspaces/:id/skills
     let res_ws = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -227,7 +213,6 @@ async fn test_http_skills_endpoints() {
             .any(|s| s["name"] == "check-kimi-code-docs")
     );
 
-    // 2. Non-existent workspace -> 404
     let res_ws_none = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -239,7 +224,6 @@ async fn test_http_skills_endpoints() {
         .await;
     assert_eq!(res_ws_none.status, 404);
 
-    // 3. GET /api/v1/sessions/:id/skills (both :skills and /skills)
     store
         .create_session_with_workspace("sess-skill", Some("Skill Session"), Some(&ws_id))
         .unwrap();
@@ -270,7 +254,6 @@ async fn test_http_skills_endpoints() {
         .await;
     assert_eq!(res_sess_slash.status, 200);
 
-    // 4. Non-existent session -> 404
     let res_sess_none = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -282,7 +265,6 @@ async fn test_http_skills_endpoints() {
         .await;
     assert_eq!(res_sess_none.status, 404);
 
-    // 5. POST activate skill -> 200
     let res_act = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -309,11 +291,12 @@ async fn test_http_interaction_questions_and_approvals() {
 
     let inter_mgr = server.interaction_manager();
 
-    // 1. Questions: Register and resolve
     let q_req = crate::rpc::types::AskQuestionRequest {
         question_id: "q_test_http".into(),
         turn_id: "turn-1".into(),
         tool_call_id: "call_q".into(),
+        agent_id: None,
+        session_id: None,
         background: false,
         timeout_ms: None,
         questions: vec![crate::rpc::types::AskQuestionItem {
@@ -335,7 +318,6 @@ async fn test_http_interaction_questions_and_approvals() {
 
     let rx_q = inter_mgr.register_question("sess-inter", q_req);
 
-    // GET questions (both /questions and :questions)
     let res_q_list_slash = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -360,7 +342,6 @@ async fn test_http_interaction_questions_and_approvals() {
         .await;
     assert_eq!(res_q_list_colon.status, 200);
 
-    // POST resolve question
     let res_q_resolve = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -380,11 +361,12 @@ async fn test_http_interaction_questions_and_approvals() {
     let resp_q = rx_q.await.unwrap();
     assert_eq!(resp_q.answers.get("Select mode?").unwrap(), "Safe");
 
-    // 2. Questions: Dismiss
     let q_dismiss_req = crate::rpc::types::AskQuestionRequest {
         question_id: "q_dismiss_http".into(),
         turn_id: "turn-2".into(),
         tool_call_id: "call_d".into(),
+        agent_id: None,
+        session_id: None,
         background: false,
         timeout_ms: None,
         questions: vec![],
@@ -404,7 +386,6 @@ async fn test_http_interaction_questions_and_approvals() {
     let resp_d = rx_d.await.unwrap();
     assert!(resp_d.note.is_some());
 
-    // 3. Approvals: Register and allow
     let appr_req = crate::rpc::types::PermissionCheckRequest {
         tool_name: "Bash".into(),
         session_approval_rule: None,
@@ -444,7 +425,6 @@ async fn test_http_interaction_questions_and_approvals() {
     let decision_a = rx_a.await.unwrap();
     assert!(decision_a.is_allow());
 
-    // 4. Approvals: Reject / Deny
     let appr_req_deny = crate::rpc::types::PermissionCheckRequest {
         tool_name: "Write".into(),
         session_approval_rule: None,
@@ -478,9 +458,6 @@ async fn test_http_interaction_questions_and_approvals() {
     );
 }
 
-/// An approval resolution must be explicit. A missing or unparsable body
-/// must never resolve to "approved" — that would let any client able to
-/// reach the route grant a dangerous tool call with an empty POST.
 #[tokio::test]
 async fn test_approval_resolve_is_fail_closed() {
     let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
@@ -499,7 +476,6 @@ async fn test_approval_resolve_is_fail_closed() {
         reason: None,
     };
 
-    // Empty body must not approve.
     let (aid, mut rx) = inter_mgr.register_approval("sess-fc", appr_req.clone(), "dangerous");
     let res = server
         .handle_request(&HttpRequest {
@@ -516,7 +492,6 @@ async fn test_approval_resolve_is_fail_closed() {
         "no decision must reach the waiter on a rejected body"
     );
 
-    // Malformed JSON must not approve.
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -528,7 +503,6 @@ async fn test_approval_resolve_is_fail_closed() {
         .await;
     assert_eq!(res.status, 400, "malformed body must be rejected");
 
-    // A well-formed body without `decision` must not approve either.
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -544,7 +518,6 @@ async fn test_approval_resolve_is_fail_closed() {
         "missing decision must not resolve the approval"
     );
 
-    // An explicit decision still works.
     let res = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -557,11 +530,12 @@ async fn test_approval_resolve_is_fail_closed() {
     assert_eq!(res.status, 200);
     assert!(rx.try_recv().unwrap().is_allow());
 
-    // Unparsable question resolution is rejected the same way.
     let q_req = crate::rpc::types::AskQuestionRequest {
         question_id: "q_fc".into(),
         turn_id: "turn-1".into(),
         tool_call_id: "call_q_fc".into(),
+        agent_id: None,
+        session_id: None,
         background: false,
         timeout_ms: None,
         questions: vec![crate::rpc::types::AskQuestionItem {
@@ -587,10 +561,6 @@ async fn test_approval_resolve_is_fail_closed() {
     assert_eq!(res.status, 400, "malformed question body must be rejected");
 }
 
-/// The `DELETE /sessions/{id}` path must clean the session's on-disk state
-/// too. The rows cascade in SQLite, but the undo snapshots and logs live in a
-/// directory no cascade reaches: leaving it behind while answering `deleted`
-/// is exactly the orphan this guards against.
 #[tokio::test]
 async fn deleting_a_session_removes_its_state_directory() {
     let dir = tempfile::tempdir().unwrap();
@@ -625,4 +595,48 @@ async fn deleting_a_session_removes_its_state_directory() {
     assert!(store.get_session("sess-orphan").unwrap().is_none());
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn events_undo_appends_a_context_undo_instead_of_deleting_rows() {
+    let store = Arc::new(SqliteSessionStore::in_memory().unwrap());
+    let server = HttpServer::new(store.clone());
+    let sid = "sess-events-undo";
+    store.create_session(sid, None).unwrap();
+    for (index, (id, content)) in [("evt-user", "hi"), ("evt-assistant", "hello")]
+        .into_iter()
+        .enumerate()
+    {
+        store
+            .append_wire_event(&crate::native::event_store::RawWireEvent {
+                id: id.into(),
+                session_id: sid.into(),
+                event_type: "message.user".into(),
+                payload: json!({ "content": content }),
+                is_checkpoint: index == 0,
+                is_compaction: false,
+                created_at: index as i64 + 1,
+            })
+            .unwrap();
+    }
+    let before = store.get_wire_events(sid, 0, 100).unwrap().len();
+
+    let res = server
+        .handle_request(&HttpRequest {
+            method: "POST".into(),
+            path: format!("/api/v1/sessions/{sid}:events:undo"),
+            query: None,
+            headers: HashMap::new(),
+            body: Vec::new(),
+        })
+        .await;
+    assert_eq!(res.status, 200);
+
+    let records = store.get_wire_events(sid, 0, 100).unwrap();
+    assert_eq!(records.len(), before + 1, "the legacy delete must be gone");
+    let undo = records.last().unwrap();
+    assert_eq!(undo.event_type, "context.undo");
+    assert_eq!(undo.payload["type"], "context.undo");
+    assert_eq!(undo.payload["agentId"], "main");
+    assert_eq!(undo.payload["count"], 1);
 }

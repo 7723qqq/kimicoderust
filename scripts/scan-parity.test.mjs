@@ -146,7 +146,7 @@ describe('shell order against the real tree', () => {
   );
 
   it('extracts the documented order from both files as they exist', () => {
-    expect(rustShellOrder(rust)).toEqual(['pwsh', 'powershell', 'bash', 'cmd']);
+    expect(rustShellOrder(rust)).toEqual(['pwsh', 'powershell', 'bash']);
     expect(tsShellOrder(ts)).toEqual(['pwsh', 'powershell', 'bash']);
   });
 

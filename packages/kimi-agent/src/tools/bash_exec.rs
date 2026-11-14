@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::features::operationLog::operationService;
+
 fn shell_git_terminal_prompt() -> std::ffi::OsString {
     std::env::var_os("GIT_TERMINAL_PROMPT").unwrap_or_else(|| "0".into())
 }
@@ -9,6 +11,7 @@ impl NativeToolset {
         &self,
         args: &Value,
         on_update: Option<OutputUpdate<'_>>,
+        tool_call_id: Option<&str>,
     ) -> Option<ExecutableToolResult> {
         let Some(command) = args.get("command") else {
             return Some(err_result(arg_error_text(
@@ -35,6 +38,12 @@ impl NativeToolset {
             .get("run_in_background")
             .and_then(|value| value.as_bool())
             == Some(true);
+        if starts_in_background && operationService::operation_log_enabled() {
+            return Some(err_result(
+                "Background execution is not available for this agent because TaskOutput and TaskStop are not enabled."
+                    .to_string(),
+            ));
+        }
 
         if let Some(refusal) =
             crate::tools::shell_results::validate_run_request(command, false, None)
@@ -85,39 +94,42 @@ impl NativeToolset {
                 let bg_timeout = self.background_bash_timeout(args);
                 let progress_runner = runner.clone();
                 let progress_task_id = task_id.clone();
-                let agent_env = agent_env.clone();
 
-                let bg_fut = async move {
-                    let mut cmd = tokio::process::Command::new(&shell_cmd);
-                    for arg in &shell_args {
-                        cmd.arg(arg);
-                    }
-                    cmd.arg(&cmd_str)
-                        .current_dir(&work_dir)
-                        .envs(&agent_env)
-                        .env("NO_COLOR", "1")
-                        .env("TERM", "dumb")
-                        .env("GIT_TERMINAL_PROMPT", shell_git_terminal_prompt())
-                        .env("SHELL", &shell_cmd)
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .kill_on_drop(true);
+                let mut cmd = tokio::process::Command::new(&shell_cmd);
+                for arg in &shell_args {
+                    cmd.arg(arg);
+                }
+                cmd.arg(&cmd_str)
+                    .current_dir(&work_dir)
+                    .envs(&agent_env)
+                    .env("NO_COLOR", "1")
+                    .env("TERM", "dumb")
+                    .env("GIT_TERMINAL_PROMPT", shell_git_terminal_prompt())
+                    .env("SHELL", &shell_cmd)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
 
-                    #[cfg(unix)]
-                    cmd.process_group(0);
-                    #[cfg(windows)]
-                    cmd.creation_flags(0x08000000);
-                    let mut child = match cmd.spawn() {
-                        Ok(child) => child,
-                        Err(e) => {
-                            return LocalizedText::with_params(
+                #[cfg(unix)]
+                cmd.process_group(0);
+                #[cfg(windows)]
+                cmd.creation_flags(0x08000000);
+                let mut child = match cmd.spawn() {
+                    Ok(child) => child,
+                    Err(e) => {
+                        return Some(err_result(
+                            LocalizedText::with_params(
                                 "engine.tools.bash.commandFailed",
                                 i18n_params!["e" => e],
                             )
-                            .render();
-                        }
-                    };
+                            .render(),
+                        ));
+                    }
+                };
+                let pid = child.id();
+
+                let bg_fut = async move {
                     let mut stdout_pipe = child.stdout.take();
                     let mut stderr_pipe = child.stderr.take();
 
@@ -181,34 +193,39 @@ impl NativeToolset {
                         }
                     };
 
-                    let (out, err) = match bg_timeout {
+                    let (out, err, exit_code) = match bg_timeout {
                         Some(limit) => match tokio::time::timeout(limit, async {
-                            let _ = child.wait().await;
+                            let exit_code =
+                                child.wait().await.ok().and_then(|status| status.code());
                             let _ = tokio::time::timeout(Duration::from_millis(250), drained).await;
-                            (out_sink.take(), err_sink.take())
+                            (out_sink.take(), err_sink.take(), exit_code)
                         })
                         .await
                         {
                             Ok(result) => result,
                             Err(_) => {
                                 crate::native::bash::kill_process_tree_async(&mut child).await;
-                                return format!(
-                                    "Background command timed out after {}s and was stopped.",
-                                    limit.as_secs()
+                                return (
+                                    format!(
+                                        "Background command timed out after {}s and was stopped.",
+                                        limit.as_secs()
+                                    ),
+                                    None,
                                 );
                             }
                         },
                         None => {
-                            let _ = child.wait().await;
+                            let exit_code =
+                                child.wait().await.ok().and_then(|status| status.code());
                             let _ = tokio::time::timeout(Duration::from_millis(250), drained).await;
-                            (out_sink.take(), err_sink.take())
+                            (out_sink.take(), err_sink.take(), exit_code)
                         }
                     };
 
                     let tripped = limit_tripped.load(std::sync::atomic::Ordering::Relaxed);
                     if tripped {
                         crate::native::bash::kill_process_tree_async(&mut child).await;
-                        return output_limit_reason();
+                        return (output_limit_reason(), None);
                     }
                     let mut s = String::from_utf8_lossy(&out).into_owned();
                     let err_text = String::from_utf8_lossy(&err);
@@ -218,12 +235,14 @@ impl NativeToolset {
                         }
                         s.push_str(err_text.trim_end());
                     }
-                    s
+                    (s, exit_code)
+                };
+                let bg_fut = async move {
+                    let (output, exit_code) = bg_fut.await;
+                    crate::storage::TaskOutcome::Process { output, exit_code }
                 };
 
-                let bg_fut = async move { crate::storage::TaskOutcome::Completed(bg_fut.await) };
-
-                if let Err(e) = runner.spawn_task_with_meta(
+                if let Err(e) = runner.spawn_process_task(
                     crate::storage::TaskSpawnMeta {
                         session_id: self.session_id.as_deref(),
                         kind: "bash",
@@ -231,6 +250,9 @@ impl NativeToolset {
                         agent_id: None,
                         timeout_ms: bg_timeout.map(|d| d.as_millis() as u64),
                     },
+                    command,
+                    pid,
+                    tool_call_id,
                     task_id.clone(),
                     desc.clone(),
                     bg_fut,
@@ -305,15 +327,39 @@ impl NativeToolset {
         let mut stdout_pipe = child.stdout.take();
         let mut stderr_pipe = child.stderr.take();
 
+        let output_accumulator = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tool::output_accumulator::ToolOutputAccumulator::new(),
+        ));
+        let output_decoders =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+                String,
+                encoding_rs::Decoder,
+            >::new()));
         let throttle = ProgressThrottle::new();
-        let emit = |kind: &str, chunk: &[u8]| {
-            if throttle.admit(kind)
-                && let Some(cb) = on_update
-            {
-                cb(&crate::tools::ToolUpdate::text(
-                    kind,
-                    &String::from_utf8_lossy(chunk),
-                ));
+        let emit = {
+            let accumulator = output_accumulator.clone();
+            let decoders = output_decoders.clone();
+            move |kind: &str, chunk: &[u8]| {
+                let mut decoded =
+                    String::with_capacity(chunk.len().saturating_mul(3).saturating_add(4));
+                decoders
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .entry(kind.to_string())
+                    .or_insert_with(|| encoding_rs::UTF_8.new_decoder())
+                    .decode_to_string(chunk, &mut decoded, false);
+                accumulator
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .write(&decoded);
+                if throttle.admit(kind)
+                    && let Some(cb) = on_update
+                {
+                    cb(&crate::tools::ToolUpdate::text(
+                        kind,
+                        &String::from_utf8_lossy(chunk),
+                    ));
+                }
             }
         };
 
@@ -363,6 +409,7 @@ impl NativeToolset {
             }
             Err(_) => {
                 if self.bash_auto_background
+                    && !operationService::operation_log_enabled()
                     && let Some(runner) = &self.task_runner
                 {
                     let task_id = crate::storage::generate_task_id("bash");
@@ -375,29 +422,46 @@ impl NativeToolset {
                     let bg_timeout = self.background_bash_timeout(args);
 
                     let detached_pid = child.id();
+                    let seed = promoted_output_seed(
+                        &stdout_bytes,
+                        &stderr_bytes,
+                        discarded.load(std::sync::atomic::Ordering::Relaxed),
+                    );
                     let bg_fut = async move {
                         match bg_timeout {
                             Some(limit) => match tokio::time::timeout(limit, child.wait()).await {
-                                Ok(_) => "Background command execution finished".to_string(),
+                                Ok(status) => (
+                                    "Background command execution finished".to_string(),
+                                    status.ok().and_then(|status| status.code()),
+                                ),
                                 Err(_) => {
                                     crate::native::bash::kill_process_tree_async(&mut child).await;
-                                    format!(
-                                        "Background command timed out after {}s and was stopped.",
-                                        limit.as_secs()
+                                    (
+                                        format!(
+                                            "Background command timed out after {}s and was stopped.",
+                                            limit.as_secs()
+                                        ),
+                                        None,
                                     )
                                 }
                             },
                             None => {
-                                let _ = child.wait().await;
-                                "Background command execution finished".to_string()
+                                let exit_code =
+                                    child.wait().await.ok().and_then(|status| status.code());
+                                (
+                                    "Background command execution finished".to_string(),
+                                    exit_code,
+                                )
                             }
                         }
                     };
 
-                    let bg_fut =
-                        async move { crate::storage::TaskOutcome::Completed(bg_fut.await) };
+                    let bg_fut = async move {
+                        let (output, exit_code) = bg_fut.await;
+                        crate::storage::TaskOutcome::Process { output, exit_code }
+                    };
 
-                    if let Err(e) = runner.spawn_task_with_meta(
+                    if let Err(e) = runner.spawn_promoted_process_task(
                         crate::storage::TaskSpawnMeta {
                             session_id: self.session_id.as_deref(),
                             kind: "bash",
@@ -405,8 +469,12 @@ impl NativeToolset {
                             agent_id: None,
                             timeout_ms: bg_timeout.map(|d| d.as_millis() as u64),
                         },
+                        command,
+                        detached_pid,
+                        tool_call_id,
                         task_id.clone(),
                         desc,
+                        seed,
                         bg_fut,
                     ) {
                         if let Some(pid) = detached_pid {
@@ -436,22 +504,12 @@ impl NativeToolset {
             }
         };
 
-        let mut text = String::from_utf8_lossy(&stdout_bytes).into_owned();
-        let stderr = String::from_utf8_lossy(&stderr_bytes);
-        if !stderr.trim().is_empty() {
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(stderr.trim_end());
-        }
-
         let discarded_bytes = discarded.load(std::sync::atomic::Ordering::Relaxed);
+        let mut notices = String::new();
         if discarded_bytes > 0 {
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(
-                &LocalizedText::with_params(
+            push_stream_notice(
+                &mut notices,
+                LocalizedText::with_params(
                     "engine.tools.bash.outputTruncated",
                     i18n_params![
                         "mib" => MAX_TASK_OUTPUT_BYTES / (1024 * 1024),
@@ -462,28 +520,117 @@ impl NativeToolset {
             );
         }
         for error in read_errors.iter().flatten() {
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(
-                &LocalizedText::with_params(
+            push_stream_notice(
+                &mut notices,
+                LocalizedText::with_params(
                     "engine.tools.bash.outputReadFailed",
                     i18n_params!["e" => error],
                 )
                 .render(),
             );
         }
-        if exit_status.success() {
-            let out = if text.trim().is_empty() {
-                "Command executed successfully.".to_string()
-            } else {
-                text
-            };
-            Some(ok_result(out))
-        } else {
-            Some(err_result(failed_command_output(text, &exit_status)))
+
+        for decoder in output_decoders
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values_mut()
+        {
+            let mut tail = String::with_capacity(4);
+            decoder.decode_to_string(&[], &mut tail, true);
+            output_accumulator
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .write(&tail);
         }
+        let mut builder = output_accumulator
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let empty_output = builder.n_chars() == 0;
+        let accumulated = if exit_status.success() {
+            builder.ok("Command executed successfully.", None)
+        } else {
+            if builder.n_chars() == 0
+                && let Some(code) = exit_status.code()
+            {
+                builder.write(&format!("Process exited with code {code}"));
+            }
+            builder.error(
+                &format!("{notices}{}", command_failure_suffix(&exit_status)),
+                None,
+            )
+        };
+        let total_chars = builder.total_chars();
+        drop(builder);
+
+        let mut content = if empty_output && exit_status.success() && !notices.is_empty() {
+            String::new()
+        } else {
+            accumulated.content
+        };
+        if exit_status.success() && !notices.is_empty() {
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(&notices);
+        }
+        let mut spill = accumulated.spill;
+        if total_chars > crate::tool::tool_contract::DEFAULT_TOOL_RESULT_MAX_CHARS {
+            spill.get_or_insert_with(Default::default).total_chars = Some(total_chars);
+        }
+        Some(ExecutableToolResult {
+            spill,
+            parts: Vec::new(),
+            delivery: None,
+            stop_turn: false,
+            content,
+            is_error: accumulated.is_error,
+            note: None,
+            display: None,
+        })
     }
+}
+
+/// Stitch a command's two captured streams into one text block: stdout
+/// verbatim, then stderr when it has non-whitespace content, separated by a
+/// newline when stdout did not end with one.
+fn merge_stream_text(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(stdout).into_owned();
+    let stderr = String::from_utf8_lossy(stderr);
+    if !stderr.trim().is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(stderr.trim_end());
+    }
+    text
+}
+
+/// The output a foreground command already produced when its timeout promoted
+/// it to a task.
+///
+/// v2 registers the foreground process and its output sink at spawn
+/// (`bashTool.ts:231-252`), so a task detached on timeout keeps everything
+/// printed before the detach. This engine runs the foreground command inline
+/// and only starts a task at promotion, so the text has to be carried over
+/// explicitly; otherwise `TaskOutput` would start at the promotion point.
+fn promoted_output_seed(stdout: &[u8], stderr: &[u8], discarded_bytes: u64) -> String {
+    let mut seed = merge_stream_text(stdout, stderr);
+    if discarded_bytes > 0 {
+        if !seed.is_empty() && !seed.ends_with('\n') {
+            seed.push('\n');
+        }
+        seed.push_str(
+            &LocalizedText::with_params(
+                "engine.tools.bash.outputTruncated",
+                i18n_params![
+                    "mib" => MAX_TASK_OUTPUT_BYTES / (1024 * 1024),
+                    "bytes" => discarded_bytes
+                ],
+            )
+            .render(),
+        );
+    }
+    seed
 }
 
 pub(super) fn failed_command_output(text: String, status: &std::process::ExitStatus) -> String {
@@ -495,19 +642,30 @@ pub(super) fn failed_command_output(text: String, status: &std::process::ExitSta
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    match status.code() {
-        Some(code) => {
-            if out.is_empty() {
-                out.push_str(&format!("Process exited with code {code}"));
-                out.push('\n');
-            }
-            out.push_str(&format!("Command failed with exit code: {code}."));
-        }
-        None => out.push_str(&signal_termination_line(status).unwrap_or_else(|| {
-            LocalizedText::new("engine.tools.bash.terminatedBySignalUnknown").render()
-        })),
+    if out.is_empty()
+        && let Some(code) = status.code()
+    {
+        out.push_str(&format!("Process exited with code {code}"));
+        out.push('\n');
     }
+    out.push_str(&command_failure_suffix(status));
     out
+}
+
+fn command_failure_suffix(status: &std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("Command failed with exit code: {code}."),
+        None => signal_termination_line(status).unwrap_or_else(|| {
+            LocalizedText::new("engine.tools.bash.terminatedBySignalUnknown").render()
+        }),
+    }
+}
+
+fn push_stream_notice(notices: &mut String, message: String) {
+    if !notices.is_empty() && !notices.ends_with('\n') {
+        notices.push('\n');
+    }
+    notices.push_str(&message);
 }
 
 fn signal_termination_line(status: &std::process::ExitStatus) -> Option<String> {

@@ -10,8 +10,8 @@ description:
   en: >
       VitePress docs site: bilingual user documentation and the Normify specification page.
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.287Z"
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-11T19:20:38.902Z"
 fingerprint: cb996f2e23fee271179a965c312a112beeb224718220b0e83b476f113577b617
 source:
   - path: "docs/.vitepress/config.ts"

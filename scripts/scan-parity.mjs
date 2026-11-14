@@ -388,15 +388,28 @@ function shellName(raw) {
   return file.toLowerCase().replace(/\.exe$/, '').replace(/^git[-_]/, '');
 }
 
-/** The rungs of `resolve_shell`'s Windows branch, in source order. */
+/**
+ * The rungs of the engine's Windows resolution, in source order:
+ * `resolve_shell`'s `cfg(windows)` block, then the `resolve_windows_shell`
+ * helper it delegates to (the rungs live there after the shell refactor), then
+ * the helpers those rungs call. `locate_windows_git_bash` is the Git Bash rung.
+ */
 export function rustShellOrder(text) {
-  const fn = text.match(/pub fn resolve_shell\([\s\S]*?\n\}/)?.[0] ?? '';
-  const win = fn.slice(fn.indexOf('#[cfg(windows)]'));
+  const fns = [...text.matchAll(/(?:pub )?fn (?:resolve_shell|resolve_windows_shell)\([\s\S]*?\n\}/g)].map(
+    (m) => m[0],
+  );
   /** @type {string[]} */
   const order = [];
-  for (const m of win.matchAll(/\bwhich\("([^"]+)"\)|(\bgit_bash\(\))|program:\s*"([^"]+)"/g)) {
-    const name = shellName(m[1] ?? (m[2] ? 'bash' : m[3]));
-    if (SHELL_NAMES.has(name) && !order.includes(name)) order.push(name);
+  for (const fn of fns) {
+    const at = fn.indexOf('#[cfg(windows)]');
+    const win = at === -1 ? fn : fn.slice(at);
+    const rungs = win.matchAll(
+      /\bwhich\([^)]*"([^"]+)"\)|(\bgit_bash\(\))|(\blocate_windows_git_bash\()|program:\s*"([^"]+)"/g,
+    );
+    for (const m of rungs) {
+      const name = shellName(m[1] ?? (m[2] || m[3] ? 'bash' : m[4]));
+      if (SHELL_NAMES.has(name) && !order.includes(name)) order.push(name);
+    }
   }
   return order;
 }

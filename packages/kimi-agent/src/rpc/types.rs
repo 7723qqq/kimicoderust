@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+pub use kimi_core::types::BoxFuture;
 pub use kimi_core::types::{
     AntigravityLimits, ContentBlock, GoalContext, GoalStatus, MediaKind, NativeDeterminism,
     NativeExtraParams, NativeJsonSchema, NativeLlmConfig, NativeResponseFormat, NativeSampling,
     TelemetryContext, TokenUsage, ToolDelivery, ToolInfo,
 };
-pub use kimi_core::types::BoxFuture;
 
 // ── JSON-RPC 2.0 base types ────────────────────────────────────────────────
 
@@ -329,6 +329,10 @@ pub struct AskQuestionRequest {
     /// Tool call the question answers; lets the UI associate it with the
     /// tool card.
     pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// `true` = background question: the host registers a background task
     /// and returns its task_id immediately instead of waiting for a human.
     #[serde(default)]
@@ -533,7 +537,6 @@ pub struct WebServiceConfig {
     pub custom_headers: std::collections::HashMap<String, String>,
 }
 
-
 // ── RunTurn request/response types ─────────────────────────────────────────
 
 /// Input for a run_turn RPC call.
@@ -649,6 +652,11 @@ pub struct RunTurnParams {
     /// image reads. `None` keeps the 256KB default.
     #[serde(default)]
     pub image_read_byte_budget: Option<u64>,
+    /// Host-resolved `[llm_requester].request_byte_budget` (v2
+    /// `resolveLlmRequestByteBudget`): whole-request UTF-8 byte budget.
+    /// `None` keeps the 32 MiB default.
+    #[serde(default)]
+    pub request_byte_budget: Option<u64>,
     /// Host-resolved `[image].max_edge_px` for model-initiated image reads.
     /// `None` keeps the 2000px default.
     #[serde(default)]
@@ -958,6 +966,11 @@ pub struct LlmChatRequest {
     /// single-provider path, where nothing can lose a race.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Per-request output cap the host must apply (v2 `maxOutputSize`).
+    /// Omitted when the caller set none, so a host that predates the field
+    /// keeps its own model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 /// A message in the LLM chat request.
@@ -1121,4 +1134,3 @@ impl JsonRpcError {
 
 #[cfg(test)]
 mod tests;
-

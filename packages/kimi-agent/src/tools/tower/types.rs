@@ -101,6 +101,7 @@ pub enum TowerMissionKind {
     #[default]
     Build,
     Survey,
+    Artifact,
 }
 
 impl TowerMissionKind {
@@ -108,6 +109,7 @@ impl TowerMissionKind {
         match self {
             Self::Build => "build",
             Self::Survey => "survey",
+            Self::Artifact => "artifact",
         }
     }
 }
@@ -149,6 +151,10 @@ pub struct TowerMission {
     pub notes: Vec<String>,
     #[serde(default)]
     pub blockers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_artifacts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +261,7 @@ pub struct TowerReviewResult {
     pub review: TowerReviewInfo,
     pub notifications: Vec<TowerInboxSent>,
     pub notification_errors: Vec<String>,
+    pub activity_log_errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,6 +442,8 @@ pub struct TowerReviewInput {
     #[serde(default)]
     pub checks: Option<Vec<String>>,
     pub decision: String,
+    #[serde(default)]
+    pub acceptance_tip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

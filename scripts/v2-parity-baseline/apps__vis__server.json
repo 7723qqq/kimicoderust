@@ -1,0 +1,103 @@
+{
+  "note": "Initial unverified v2 parity baseline for apps/vis/server. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "apps/vis/server",
+  "redEntries": [
+    {
+      "tsPath": "lib/agent-record-types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/agent-tree.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/blob-resolver.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/context-projector.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/cron-store.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/import-store.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/log-reader.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/reveal.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/session-store.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/task-store.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/web-asset.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/wire-reader.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "lib/zip-import.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/blobs.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/context.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/cron.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/imports.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/logs.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/session-detail.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/sessions.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/subagents.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/tasks.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/wire.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "start.ts",
+      "verdict": "partial"
+    }
+  ]
+}

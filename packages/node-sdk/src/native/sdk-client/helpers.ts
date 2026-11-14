@@ -1183,6 +1183,9 @@ export interface EngineTaskWireEntry {
   endedAt?: number;
   stopReason?: string;
   output?: string;
+  kind?: string;
+  questionCount?: number;
+  toolCallId?: string;
 }
 
 /**

@@ -1,4 +1,3 @@
-
 use super::codes::ErrorDomain;
 
 pub mod core {

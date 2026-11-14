@@ -1,14 +1,3 @@
-//! Model-family profiles used by the request builders (v2
-//! `human/llm/modelFamily.ts`).
-//!
-//! A family is matched by model-name segments rather than by provider type:
-//! the last segment is the model itself (`deepseek-chat`, `deepseek-reasoner`),
-//! while a gateway in front of it shows up as an earlier segment
-//! (`deepseek/deepseek-chat`). Gateways are matched only when they are not the
-//! first segment — a host route named `deepseek/...` is the gateway, not a
-//! model.
-
-/// The output-token tiers a family declares for an unset completion cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FamilyMaxOutputDefaults {
     pub non_thinking: u32,
@@ -16,19 +5,13 @@ pub struct FamilyMaxOutputDefaults {
     pub thinking_max_effort: u32,
 }
 
-/// The replay/sampling quirks of a family's thinking history.
 #[derive(Debug, Clone, Copy)]
 pub struct FamilyThinkingHistory {
-    /// Replay hidden reasoning only when tools are in play (DeepSeek rejects
-    /// the request otherwise).
     pub full_echo_with_tools: bool,
-    /// Sampling fields the provider rejects while reasoning is on.
+
     pub ignored_while_thinking: &'static [&'static str],
 }
 
-/// A model-family profile. Only the fields the request builders consume are
-/// modelled; the adapter-side ones (image pricing, adaptation prefixes) stay
-/// with the host.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelFamilyProfile {
     pub id: &'static str,
@@ -40,8 +23,7 @@ pub struct ModelFamilyProfile {
 #[derive(Debug, Clone, Copy)]
 pub struct ModelFamilyPrefix {
     pub value: &'static str,
-    /// Match a prefix that is glued to the rest of the segment
-    /// (`xopdeepseek-chat`), not only one followed by `-` or `.`.
+
     pub glued: bool,
 }
 
@@ -120,8 +102,6 @@ fn segment_matches_family(
     gateway_segment_matches(segment, prefix.value)
 }
 
-/// Resolve the family profile for `name` (v2 `resolveModelFamily`). The longest
-/// matching prefix wins.
 pub fn resolve_model_family(name: &str) -> Option<&'static ModelFamilyProfile> {
     let segments = model_name_segments(name);
     if segments.is_empty() {
@@ -143,14 +123,10 @@ pub fn resolve_model_family(name: &str) -> Option<&'static ModelFamilyProfile> {
     resolved
 }
 
-/// The family's unset-completion-cap tiers (v2 `maxOutputDefaultsForModel`).
 pub fn max_output_defaults_for_model(name: &str) -> Option<&'static FamilyMaxOutputDefaults> {
     resolve_model_family(name).and_then(|family| family.max_output_defaults.as_ref())
 }
 
-/// Whether hidden reasoning must be echoed back (v2
-/// `fullReasoningEchoRequired`): only DeepSeek, and only while tools are in
-/// play.
 pub fn full_reasoning_echo_required(name: &str, has_tools: bool) -> bool {
     if !has_tools {
         return false;
@@ -160,19 +136,12 @@ pub fn full_reasoning_echo_required(name: &str, has_tools: bool) -> bool {
         .is_some_and(|history| history.full_echo_with_tools)
 }
 
-/// Sampling fields the family rejects while reasoning is on (v2
-/// `ignoredSamplingParamsForModel`).
 pub fn ignored_sampling_params_for_model(name: &str) -> &'static [&'static str] {
     resolve_model_family(name)
         .and_then(|family| family.thinking_history)
         .map_or(&[], |history| history.ignored_while_thinking)
 }
 
-/// The family's default completion cap (v2 `familyDefaultCap`).
-///
-/// `remaining` is the model window minus the estimated prompt tokens. When the
-/// caller has no estimate the tier itself is the cap; a fully consumed window
-/// yields no cap at all.
 pub fn family_default_completion_cap(
     model: &str,
     effort: Option<&str>,
@@ -187,9 +156,6 @@ pub fn family_default_completion_cap(
     }
 }
 
-/// v2 `outputTierForEffort`: `off` is the non-thinking tier, `max` the
-/// max-effort tier, and every other level (including an unresolved one) the
-/// thinking tier.
 fn tier_for_effort(defaults: &FamilyMaxOutputDefaults, effort: Option<&str>) -> u32 {
     match effort {
         Some(effort)
@@ -263,7 +229,7 @@ mod tests {
             family_default_completion_cap("deepseek-chat", Some("max"), None),
             Some(131072)
         );
-        // Unresolved effort is the thinking tier.
+
         assert_eq!(
             family_default_completion_cap("deepseek-chat", None, None),
             Some(65536)

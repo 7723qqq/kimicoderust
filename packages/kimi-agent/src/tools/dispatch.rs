@@ -1,20 +1,147 @@
 use super::*;
 
+use crate::features::operationLog::operationService;
+
+fn operation_log_captures_tool(tool_name: &str) -> bool {
+    let name = tool_name.to_ascii_lowercase().replace('_', "");
+    !matches!(
+        name.as_str(),
+        "agent"
+            | "agentswarm"
+            | "websearch"
+            | "knowledge"
+            | "fetchurl"
+            | "askuserquestion"
+            | "waitfor"
+            | "taskwait"
+            | "taskstop"
+            | "taskoutput"
+            | "tasklist"
+            | "selecttools"
+            | "grep"
+            | "read"
+            | "glob"
+            | "lsp"
+            | "towerstatus"
+            | "memorygraph"
+            | "updategoal"
+            | "setgoalbudget"
+            | "repomap"
+            | "todolist"
+            | "getgoal"
+            | "creategoal"
+            | "cronlist"
+            | "exitspecmode"
+            | "crondelete"
+            | "skill"
+            | "croncreate"
+            | "exitplanmode"
+            | "snapshotlist"
+            | "notifyuser"
+            | "sessionquery"
+            | "memory"
+    )
+}
+
 impl NativeToolset {
     pub fn execute(&self, tool_name: &str, args: &Value) -> Option<ExecutableToolResult> {
         let sandbox = self.sandbox();
         match tool_name.to_ascii_lowercase().as_str() {
-            "read" => self
-                .read_media(args)
-                .or_else(|| Self::read(&sandbox, &self.shell_bridge, args)),
+            "read" => self.read_media(args).or_else(|| {
+                let event_log = self.wire_journal_read(args);
+                Self::read(&sandbox, &self.shell_bridge, args, event_log)
+            }),
             "grep" => Self::grep(&sandbox, &self.shell_bridge, args),
             "glob" => Self::glob(&sandbox, &self.shell_bridge, args),
             _ => None,
         }
     }
 
+    fn wire_journal_read(&self, args: &Value) -> bool {
+        let Some(path) = args.get("path").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(store) = self.session_store() else {
+            return false;
+        };
+        let Some(home) = store.path().and_then(|path| path.parent()) else {
+            return false;
+        };
+        crate::session::wire_journal::is_wire_journal_path(home, path)
+    }
+
+    async fn attach_file_memory(
+        &self,
+        args: &Value,
+        result: Option<ExecutableToolResult>,
+    ) -> Option<ExecutableToolResult> {
+        let result = result?;
+        let Some(path) = args.get("path").and_then(Value::as_str) else {
+            return Some(result);
+        };
+        Some(
+            crate::agent::tools::file_memory::with_file_memory(
+                result,
+                path,
+                self.file_memory.as_deref(),
+            )
+            .await,
+        )
+    }
+
+    async fn repo_map_with(&self, args: &Value) -> Option<ExecutableToolResult> {
+        let base = crate::tools::memory_store::memory_base()?;
+        let service = crate::tools::git_memory::GitMemoryService::new(self.root.clone(), base);
+        let path = args.get("path").and_then(Value::as_str).map(str::to_string);
+        let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(3) as usize;
+        let output = tokio::task::spawn_blocking(move || service.repo_map(path.as_deref(), depth))
+            .await
+            .ok()?;
+        Some(if output.is_empty() {
+            err_result(crate::tools::git_memory::REPO_MAP_EMPTY_OUTPUT.to_string())
+        } else {
+            ok_result(output)
+        })
+    }
+
     pub fn handles(&self, tool_name: &str) -> bool {
         is_native_tool_name(tool_name)
+    }
+
+    fn memory_graph_service(
+        &self,
+    ) -> Option<Arc<crate::features::associativeMemory::service::AssociativeMemoryService>> {
+        let mut slot = self
+            .memory_graph
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(service) = slot.as_ref() {
+            return Some(service.clone());
+        }
+        if !crate::tools::memory_action::associative_memory_enabled() {
+            return None;
+        }
+        let home = crate::workflow::kimi_home()?;
+        let service = Arc::new(
+            crate::features::associativeMemory::service::AssociativeMemoryService::new(
+                crate::features::associativeMemory::service::MemoryDeps {
+                    home_dir: home.clone(),
+                    store_dir: home,
+                    cwd: self.root.clone(),
+                    session_id: self.session_id.clone().unwrap_or_default(),
+                    session_cwd: self.root.clone(),
+                    logger: None,
+                    flags: Some(Arc::new(
+                        crate::features::associativeMemory::service::EnvMemoryFlags,
+                    )),
+                    reminders: None,
+                    history: None,
+                    legacy_store: None,
+                },
+            ),
+        );
+        *slot = Some(service.clone());
+        Some(service)
     }
 
     async fn tool_registration(&self, tool_name: &str) -> select_tools::ToolRegistration {
@@ -84,6 +211,56 @@ impl NativeToolset {
         args: &Value,
         on_update: Option<OutputUpdate<'_>>,
     ) -> Option<ExecutableToolResult> {
+        if !operation_log_captures_tool(tool_name)
+            || crate::agent::tools::github::github_legacy::is_github_tool(tool_name)
+        {
+            return self
+                .execute_tool_streaming_inner(tool_call_id, tool_name, args, on_update)
+                .await;
+        }
+        let caller = self.effective_caller_agent_id();
+        let service = self.operation_log_service(&caller);
+        let context = operationService::CaptureContext {
+            description: crate::tools::tool_display::tool_call_description(
+                tool_name,
+                args,
+                self.root.to_str(),
+            )
+            .unwrap_or_else(|| tool_name.to_string()),
+            origin: operationService::CaptureOrigin {
+                session_id: self.session_id.clone().unwrap_or_default(),
+                agent_id: caller,
+                turn_id: Some(self.effective_turn_id() as u64),
+                tool_call_id: tool_call_id.map(str::to_string),
+                tool_name: tool_name.to_string(),
+            },
+            repo_mutation: None,
+        };
+        let mut result = None;
+        let captured = service
+            .capture(&context, || async {
+                result = self
+                    .execute_tool_streaming_inner(tool_call_id, tool_name, args, on_update)
+                    .await;
+                Ok(())
+            })
+            .await;
+        match captured {
+            Ok(()) => result,
+            Err(error) => Some(err_result(format!(
+                "onExecuteTool hook failed for \"{tool_name}\": {}",
+                error.message
+            ))),
+        }
+    }
+
+    async fn execute_tool_streaming_inner(
+        &self,
+        tool_call_id: Option<&str>,
+        tool_name: &str,
+        args: &Value,
+        on_update: Option<OutputUpdate<'_>>,
+    ) -> Option<ExecutableToolResult> {
         let caller = self.effective_caller_agent_id();
         if let Some(denial) =
             crate::subagent::check_btw_tool_denial(Some(caller.as_str()), tool_name)
@@ -91,12 +268,26 @@ impl NativeToolset {
             return Some(denial);
         }
 
+        if matches!(
+            tool_name.to_ascii_lowercase().as_str(),
+            "cronlist" | "cron_list" | "croncreate" | "cron_create" | "crondelete" | "cron_delete"
+        ) && let Some(refusal) =
+            crate::tools::goal_tools::main_agent_only_refusal(caller.as_str())
+        {
+            return Some(refusal);
+        }
+
         let registration = self.tool_registration(tool_name).await;
         let was_loaded = self
             .loaded_tools
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .contains(tool_name);
+            .contains(tool_name)
+            || self
+                .tool_select_pending_loaded
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(tool_name);
 
         if let Some(refusal) = select_tools::missing_refusal(
             self.supports_dynamic_tool_loading(),
@@ -158,8 +349,19 @@ impl NativeToolset {
                 if let Some(result) = self.read_media_on_blocking_pool(args).await {
                     return Some(result);
                 }
-                self.run_readonly_file_tool_on_blocking_pool(args, Self::read)
-                    .await
+                let event_log = self.wire_journal_read(args);
+                let result = match Self::spawn_file_tool_with_event_log(
+                    self.sandbox(),
+                    self.shell_bridge.clone(),
+                    args.clone(),
+                    event_log,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => blocking_pool_failure(false, e.to_string()),
+                };
+                self.attach_file_memory(args, result).await
             }
             "grep" => {
                 self.run_readonly_file_tool_on_blocking_pool(args, Self::grep)
@@ -192,8 +394,29 @@ impl NativeToolset {
                 Some(subagent_tools::execute_define_subagent(mgr, args).await)
             }
             "askuserquestion" | "ask_user_question" => {
-                let callbacks = self.callbacks.as_deref()?;
-                Some(ask_user_question::execute_ask_user_question(callbacks, args).await)
+                let callbacks = self.callbacks.as_ref()?.clone();
+                let background_allowed = self.tools_filter.as_ref().is_none_or(|filter| {
+                    ["TaskList", "TaskOutput", "TaskStop"]
+                        .iter()
+                        .all(|name| filter.allows(name))
+                });
+                let caller = self.effective_caller_agent_id();
+                let llm_trace_id = self.llm_trace_id();
+                Some(
+                    crate::agent::tools::ask_user_question::ask_user_question_tool::execute_ask_user_question(
+                        callbacks,
+                        self.task_runner.as_ref(),
+                        self.session_id.as_deref(),
+                        Some(caller.as_str()),
+                        llm_trace_id.as_deref(),
+                        self.effective_turn_id() as u64,
+                        tool_call_id,
+                        self.non_interactive,
+                        background_allowed,
+                        args,
+                    )
+                    .await,
+                )
             }
             "getgoal" | "get_goal" => {
                 let callbacks = self.callbacks.as_deref()?;
@@ -202,7 +425,8 @@ impl NativeToolset {
             }
             "todolist" | "todo_list" => {
                 let callbacks = self.callbacks.as_deref()?;
-                Some(todo_list::execute_todo_list(callbacks, args).await)
+                let caller = self.effective_caller_agent_id();
+                Some(todo_list::execute_todo_list(callbacks, caller.as_str(), args).await)
             }
             "cronlist" | "cron_list" => {
                 let callbacks = self.callbacks.as_deref()?;
@@ -210,11 +434,13 @@ impl NativeToolset {
             }
             "croncreate" | "cron_create" => {
                 let callbacks = self.callbacks.as_deref()?;
-                Some(cron_tools::execute_cron_create(callbacks, args).await)
+                let caller = self.effective_caller_agent_id();
+                Some(cron_tools::execute_cron_create(callbacks, args, caller.as_str()).await)
             }
             "crondelete" | "cron_delete" => {
                 let callbacks = self.callbacks.as_deref()?;
-                Some(cron_tools::execute_cron_delete(callbacks, args).await)
+                let caller = self.effective_caller_agent_id();
+                Some(cron_tools::execute_cron_delete(callbacks, args, caller.as_str()).await)
             }
             "updategoal" | "update_goal" => {
                 let callbacks = self.callbacks.as_deref()?;
@@ -343,30 +569,57 @@ impl NativeToolset {
                 )
             }
             "notifyuser" | "notify_user" => {
+                if let Some(title) = args.get("title") {
+                    let Some(title) = title.as_str() else {
+                        return Some(err_result("title must be a string.".to_string()));
+                    };
+                    if title.trim().is_empty() {
+                        return Some(err_result("title must not be empty.".to_string()));
+                    }
+                    if title.contains('\n') || title.contains('\r') {
+                        return Some(err_result("title must be a single line.".to_string()));
+                    }
+                }
                 let message = args.get("message").and_then(Value::as_str).unwrap_or("");
                 if message.trim().is_empty() {
-                    Some(ExecutableToolResult {
-                        spill: None,
-                        parts: Vec::new(),
-                        delivery: None,
-                        stop_turn: false,
-                        content: "message must not be empty.".to_string(),
-                        is_error: true,
-                        note: None,
-                        display: None,
-                    })
-                } else {
-                    Some(ExecutableToolResult {
-                        spill: None,
-                        parts: Vec::new(),
-                        delivery: None,
-                        stop_turn: false,
-                        content: "Update shown to the user.".to_string(),
-                        is_error: false,
-                        note: None,
-                        display: None,
-                    })
+                    return Some(err_result("message must not be empty.".to_string()));
                 }
+                let displayed = self.notify_user_enabled;
+                let streak = CURRENT_CONVERSATION_HISTORY
+                    .try_with(|slot| {
+                        crate::injection::notify_user_nudge::notify_streak(
+                            &slot.lock().unwrap_or_else(|error| error.into_inner()),
+                        )
+                    })
+                    .ok();
+                let rounds = streak.as_ref().map_or(0, |streak| streak.rounds);
+                let after_nudge = streak.as_ref().is_some_and(|streak| streak.nudges > 0);
+                if let Some(callbacks) = &self.callbacks {
+                    callbacks.telemetry(serde_json::json!({
+                        "event": "notify_user_sent",
+                        "turn_id": args
+                            .get("turn_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                        "rounds_since_notify": rounds,
+                        "after_nudge": after_nudge,
+                        "title_chars": args
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .map(|title| title.encode_utf16().count())
+                            .unwrap_or(0),
+                        "message_chars": message.encode_utf16().count(),
+                        "displayed": displayed,
+                    }));
+                }
+                Some(ok_result(
+                    if displayed {
+                        "Update shown to the user."
+                    } else {
+                        "Notifications are disabled; the update was not displayed."
+                    }
+                    .to_string(),
+                ))
             }
             "select_tools" | "selecttools" => {
                 if !self.supports_dynamic_tool_loading() {
@@ -483,7 +736,16 @@ impl NativeToolset {
                         .unwrap_or_default()
                 };
 
-                let mut loaded = self.loaded_tools.lock().unwrap_or_else(|e| e.into_inner());
+                let mut loaded = self
+                    .loaded_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let mut pending = self
+                    .tool_select_pending_loaded
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                loaded.extend(pending.iter().cloned());
 
                 let mut tracker = self
                     .selection_failures
@@ -506,7 +768,8 @@ impl NativeToolset {
                     args,
                     &loadable,
                     &registered,
-                    &mut loaded,
+                    &loaded,
+                    &mut pending,
                     self.tools_filter.as_ref(),
                     &mut tracker,
                 ))
@@ -542,6 +805,7 @@ impl NativeToolset {
                 )
                 .await
             }
+            "repomap" | "repo_map" => self.repo_map_with(args).await,
             "knowledge" => Some(knowledge_tool::execute_knowledge(&self.root, args)),
 
             "memory" => {
@@ -550,6 +814,16 @@ impl NativeToolset {
                 }
                 let session_id = self.session_id.as_deref().unwrap_or_default();
                 Some(memory_action::execute(&self.root, args, session_id))
+            }
+
+            "memorygraph" => {
+                if caller != "main" {
+                    return Some(err_result(memory_action::main_agent_only_message()));
+                }
+                let Some(service) = self.memory_graph_service() else {
+                    return Some(err_result(memory_action::unavailable_message()));
+                };
+                Some(memory_graph_tool::execute_memory_graph(&service, args).await)
             }
 
             "sessionquery" | "session_query" => {
@@ -622,8 +896,14 @@ impl NativeToolset {
                 let caller = self.effective_caller_agent_id();
                 let caller = caller.as_str();
                 let session = self.session_id.as_deref().unwrap_or("session-main");
-                let mut result =
-                    tower::execute_tower_init(&self.root, caller, session, &args.to_string()).await;
+                let mut result = tower::execute_tower_init(
+                    &self.root,
+                    caller,
+                    session,
+                    &args.to_string(),
+                    self.callbacks.as_deref(),
+                )
+                .await;
 
                 if caller == "main"
                     && !result.is_error
@@ -723,6 +1003,7 @@ impl NativeToolset {
                         &args.to_string(),
                         self.task_runner.as_deref(),
                         wake_runtime.as_ref(),
+                        self.callbacks.as_deref(),
                     )
                     .await,
                 )
@@ -778,6 +1059,8 @@ impl NativeToolset {
                         &args.to_string(),
                         self.task_runner.as_ref(),
                         wake_runtime.as_ref(),
+                        self.non_interactive,
+                        self.permission_mode,
                     )
                     .await,
                 )
@@ -794,6 +1077,7 @@ impl NativeToolset {
                     tower::execute_tower_status(
                         &self.root,
                         caller,
+                        &args.to_string(),
                         self.task_runner.as_deref(),
                         self.tower_max_running_tasks,
                     )
@@ -801,17 +1085,26 @@ impl NativeToolset {
                 )
             }
             "write" => {
-                self.run_mutating_file_tool_on_blocking_pool(args, Self::write)
-                    .await
+                let result = self
+                    .run_mutating_file_tool_on_blocking_pool(args, Self::write)
+                    .await;
+                self.attach_file_memory(args, result).await
             }
             "edit" => {
-                self.run_mutating_file_tool_on_blocking_pool(args, Self::edit)
-                    .await
+                let result = self
+                    .run_mutating_file_tool_on_blocking_pool(args, Self::edit)
+                    .await;
+                self.attach_file_memory(args, result).await
             }
-            "bash" => self.bash_with(args, on_update).await,
-            "powershell" => self.powershell_with(args, on_update).await,
-            _ if github::is_github_tool(tool_name) => {
-                github::execute_github_tool(tool_name, args, self.github_credentials.as_ref()).await
+            "bash" => self.bash_with(args, on_update, tool_call_id).await,
+            "powershell" => self.powershell_with(args, on_update, tool_call_id).await,
+            _ if crate::agent::tools::github::github_legacy::is_github_tool(tool_name) => {
+                crate::agent::tools::github::github_legacy::execute_github_tool(
+                    tool_name,
+                    args,
+                    self.github_credentials.as_ref(),
+                )
+                .await
             }
             _ => {
                 if let Some(ref mcp) = self.mcp_manager
@@ -833,19 +1126,8 @@ impl NativeToolset {
         tool_name: &str,
         args: &Value,
     ) -> Option<ExecutableToolResult> {
-        match tool_name.to_ascii_lowercase().as_str() {
-            "write" => {
-                self.run_mutating_file_tool_on_blocking_pool(args, Self::write)
-                    .await
-            }
-            "edit" => {
-                self.run_mutating_file_tool_on_blocking_pool(args, Self::edit)
-                    .await
-            }
-            "bash" => self.bash_with(args, None).await,
-            "powershell" => self.powershell_with(args, None).await,
-            _ => None,
-        }
+        self.execute_tool_streaming(None, tool_name, args, None)
+            .await
     }
 
     pub(super) async fn run_readonly_file_tool_on_blocking_pool(
@@ -906,16 +1188,28 @@ impl NativeToolset {
         tokio::task::spawn_blocking(move || tool(&sandbox, &bridge, &args)).await
     }
 
+    async fn spawn_file_tool_with_event_log(
+        sandbox: Sandbox,
+        bridge: Arc<ShellPathBridge>,
+        args: Value,
+        event_log: bool,
+    ) -> Result<Option<ExecutableToolResult>, tokio::task::JoinError> {
+        tokio::task::spawn_blocking(move || Self::read(&sandbox, &bridge, &args, event_log)).await
+    }
+
     pub(super) async fn run_mutating_file_tool_on_blocking_pool(
         &self,
         args: &Value,
         tool: fn(&Sandbox, &ShellPathBridge, &Value) -> Option<ExecutableToolResult>,
     ) -> Option<ExecutableToolResult> {
-        let ctx = self
-            .file_history
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let ctx = if operationService::operation_log_enabled() {
+            None
+        } else {
+            self.file_history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        };
         let turn_id = self.effective_turn_id();
         match Self::spawn_mutating_file_tool(
             self.sandbox(),

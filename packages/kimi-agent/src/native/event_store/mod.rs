@@ -21,22 +21,10 @@ pub struct RawWireEvent {
     pub created_at: i64,
 }
 
-/// The wire protocol version this engine writes (v2 `WIRE_PROTOCOL_VERSION`).
-///
-/// This engine stores rows, not v2's JSONL records, so the version is a per-row
-/// stamp rather than a leading `metadata` record. The discipline is the same:
-/// a log says which protocol wrote it, a newer log is refused rather than
-/// half-read, and a migration chain exists to be filled in the day a record
-/// shape changes.
 pub const WIRE_PROTOCOL_VERSION: &str = "1.5";
 
-/// The minimum reader version a row written by this engine requires (v2
-/// `WIRE_MIN_READER_VERSION`). Kept as a row stamp rather than a leading
-/// JSONL metadata record: this engine's wire is SQLite rows, not a journal.
 pub const WIRE_MIN_READER_VERSION: &str = "1.5";
 
-/// Numeric comparison of dotted versions, a missing segment reading as zero
-/// (v2 `compareWireVersions`).
 pub fn compare_wire_versions(a: &str, b: &str) -> i32 {
     let mut left = a.split('.');
     let mut right = b.split('.');
@@ -53,13 +41,10 @@ pub fn compare_wire_versions(a: &str, b: &str) -> i32 {
     }
 }
 
-/// A segment that is not a number reads as zero, so an unparseable version
-/// compares as older and can never masquerade as one this engine must refuse.
 fn parse_version_segment(segment: &str) -> i32 {
     segment.parse::<i32>().unwrap_or(0)
 }
 
-/// v2 `isNewerWireVersion`: true when the log was written by a newer engine.
 pub fn is_newer_wire_version(read_version: &str) -> bool {
     compare_wire_versions(read_version, WIRE_PROTOCOL_VERSION) > 0
 }
@@ -77,11 +62,7 @@ pub enum MessageRole {
 pub struct Message {
     pub role: MessageRole,
     pub content: String,
-    /// Multimodal content blocks carried through verbatim as wire JSON
-    /// (ordered array of `{type: "text"|"image"|"image_url"|"audio_url"|"video_url"|"think", ...}`).
-    /// Empty array for text-only messages. The event-store crate cannot depend
-    /// on the consumer's `ContentBlock` type, so blocks stay as raw JSON and
-    /// the consumer deserializes them into its own typed enum.
+
     #[serde(default)]
     pub blocks: serde_json::Value,
     pub tool_calls: Option<serde_json::Value>,
@@ -98,27 +79,20 @@ pub enum EventStoreError {
     UndoCompactionBoundary,
     #[error("Undo failed: Checkpoint not found or history exhausted")]
     CheckpointNotFound,
-    /// The log was written by a newer engine. Refusing beats folding it: this
-    /// engine's record shapes are not guaranteed to be a prefix of the newer
-    /// ones, and a silently truncated projection is worse than a visible error.
+
     #[error(
         "This session requires a newer version of Kimi Code. Upgrade Kimi Code to the latest version to read this session."
     )]
     WireProtocolTooNew { found: String, supported: String },
-    /// A row declares a minimum reader version this engine does not meet (v2
-    /// `assertWireReaderVersion`). The public sentence is #4662's simplified
-    /// upgrade guidance; both versions stay on the error for diagnostics.
+
     #[error(
         "This session requires a newer version of Kimi Code. Upgrade Kimi Code to the latest version to read this session."
     )]
     WireReaderTooLow { required: String, supported: String },
-    /// A live foreign process holds the session's occupancy lock (v2
-    /// `session.occupied`, upstream #4246). The message is v2's exact wording.
+
     #[error("{0}")]
     SessionOccupied(String),
-    /// A row cannot be brought to the current record shape: the chain has no
-    /// step for its version (`wire.migration_missing`) or loops
-    /// (`wire.cycle`). Refusing beats reinterpreting old fields as current.
+
     #[error(transparent)]
     WireMigration(#[from] migration::WireMigrationError),
 }
@@ -130,16 +104,8 @@ pub trait EventStore: Send + Sync {
     fn undo_to_last_checkpoint(&self, session_id: &str) -> Result<usize, EventStoreError>;
 }
 
-/// One `wire_events` row a cold projection folds: `(event_type, payload,
-/// is_compaction)` with the payload already parsed.
 pub type WireEventFoldRow = (String, serde_json::Value, bool);
 
-/// Refuse a log from a newer engine before reading any of it (v2
-/// `isNewerWireVersion` at the journal-open seam). Rows written before the
-/// column existed are NULL and mean *this* version — the table has only ever
-/// had one shape, so a NULL cannot be hiding an older record. Every reader
-/// that interprets row payloads — the cold fold and the journal-slice
-/// helpers alike — must pass this gate first.
 pub fn refuse_newer_wire_version(
     conn: &Connection,
     session_id: &str,
@@ -172,20 +138,6 @@ pub fn refuse_newer_wire_version(
     Ok(())
 }
 
-/// Read the rows a cold projection folds, skipping rows whose payload is not
-/// valid JSON. Returns the usable rows and how many were dropped.
-///
-/// A single malformed payload must not decide the whole session: propagating
-/// the `serde_json` error out of `fold_projection` means the session will not
-/// open at all, while the callers that swallow that error show the user an
-/// empty session. Nothing is rewritten here — the log stays as the user left
-/// it, the dropped rows are counted, and the count is reported through
-/// `tracing` so the gap is visible instead of silent.
-///
-/// Every usable row is lifted to the current record shape first, using the
-/// version stamped on that row (v2 `readEntries` → `resolveWireMigrations` →
-/// `migrateWireRecord`). A version the chain cannot reach is an error, not a
-/// best-effort read: old fields read as current ones is silent corruption.
 pub fn read_fold_rows(
     conn: &Connection,
     session_id: &str,
@@ -215,17 +167,13 @@ pub fn read_fold_rows(
                     &mut payload,
                     protocol_version.as_deref(),
                 )?;
-                // Restore the media the write dehydrated (v2 `rehydrateStates`
-                // → `blobService.loadParts`), so the folded projection carries
-                // the same content the model originally saw.
+
                 blobs::rehydrate_blob_refs(&mut payload, conn, cache)?;
                 fold_rows.push((event_type, payload, is_compaction));
             }
             Err(e) => {
                 dropped += 1;
-                // v2 `restore` reports a malformed record at error level with
-                // its index and type, and attaches no code; `seq` is this
-                // log's line number.
+
                 tracing::error!(
                     %session_id,
                     index = seq,
@@ -246,12 +194,10 @@ pub fn read_fold_rows(
     Ok((fold_rows, dropped))
 }
 
-/// Why a wire log needed repair (v2 `AppendLogTruncation.reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireRepairReason {
-    /// A row failed to decode while further rows followed it.
     Corrupted,
-    /// The last row failed to decode — a write that never finished.
+
     Truncated,
 }
 
@@ -265,23 +211,19 @@ impl WireRepairReason {
     }
 }
 
-/// What a repair did, mirroring v2 `repairWireJournal`'s log line and its
-/// `wire_repair` telemetry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireRepairReport {
     pub reason: WireRepairReason,
-    /// 1-based ordinal of the first undecodable row in this session's log
-    /// (v2 `AppendLogTruncation.lineNumber`).
+
     pub line_number: u64,
-    /// Rows removed from the log.
+
     pub dropped_count: usize,
-    /// Whether this repair wrote the one-time `.bak` of the original log.
+
     pub backup_created: bool,
-    /// Where the original log was preserved, when a path was available.
+
     pub backup_path: Option<PathBuf>,
 }
 
-/// One `wire_events` row read verbatim, for backing the log up before a repair.
 struct RawWireRow {
     seq: i64,
     id: String,
@@ -314,8 +256,6 @@ impl RawWireRow {
     }
 }
 
-/// The one-time backup location for a session's wire log, beside the database
-/// (v2 `wireJournalBackupKey` puts `${key}.bak` beside the journal).
 #[must_use]
 pub fn wire_backup_path(db_path: &Path, session_id: &str) -> PathBuf {
     let safe: String = session_id
@@ -333,9 +273,6 @@ pub fn wire_backup_path(db_path: &Path, session_id: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Read every row of one session's log verbatim, oldest first. Unlike
-/// [`read_fold_rows`] this does not stop at the last compaction checkpoint: the
-/// backup must preserve the whole log, not the foldable window.
 fn read_raw_wire_rows(
     conn: &Connection,
     session_id: &str,
@@ -362,7 +299,6 @@ fn read_raw_wire_rows(
         .map_err(EventStoreError::from)
 }
 
-/// Write the original log as JSONL, atomically (tmp → `sync_all` → rename).
 fn write_wire_backup(path: &Path, rows: &[RawWireRow], session_id: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -379,7 +315,7 @@ fn write_wire_backup(path: &Path, rows: &[RawWireRow], session_id: &str) -> std:
         file.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
-    // The rename is only durable once the directory entry is.
+
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         if let Ok(dir) = std::fs::File::open(parent) {
@@ -389,14 +325,6 @@ fn write_wire_backup(path: &Path, rows: &[RawWireRow], session_id: &str) -> std:
     Ok(())
 }
 
-/// Repair a log that contains undecodable rows: preserve the original once as
-/// `<db>.<session>.wire.bak`, then delete the undecodable rows so the next read
-/// does not fail on them again (v2 `repairWireJournal`).
-///
-/// Rows after a corrupt one are kept: v2's reader reports the line through
-/// `onTruncate` and keeps collecting the records that follow, and the rewrite
-/// writes every record it collected. Removing only the undecodable rows is the
-/// table equivalent of that rewrite.
 pub fn repair_wire_journal(
     conn: &Connection,
     session_id: &str,
@@ -423,8 +351,6 @@ pub fn repair_wire_journal(
     let mut backup_created = false;
     let mut backup_target = None;
     if let Some(path) = backup_path {
-        // v2 writes the backup only when one is not already there: the oldest
-        // original is the one worth keeping.
         if !path.exists() {
             write_wire_backup(path, &rows, session_id)
                 .map_err(|error| EventStoreError::Serialization(serde_json::Error::io(error)))?;
@@ -462,9 +388,6 @@ pub fn repair_wire_journal(
     Ok(Some(report))
 }
 
-/// [`read_fold_rows`] plus the repair pass v2's `readEntries` runs when it
-/// found a truncation: read the foldable rows, then preserve and rewrite the
-/// log so the same corruption is not hit again on the next open.
 pub fn read_fold_rows_with_repair(
     conn: &Connection,
     session_id: &str,
@@ -475,11 +398,7 @@ pub fn read_fold_rows_with_repair(
     if dropped == 0 {
         return Ok((fold_rows, dropped, None));
     }
-    // A failed repair must not discard a projection that was already rebuilt
-    // from every row that decoded: the caller's session would then refuse to
-    // open over a write it does not need to perform. The failure is reported at
-    // error level (v2 `repairWireJournal` records `outcome: 'failed'` and the
-    // read still yields its records), and the next open retries the repair.
+
     let report = match repair_wire_journal(conn, session_id, backup_path) {
         Ok(report) => report,
         Err(error) => {
@@ -496,12 +415,6 @@ pub fn read_fold_rows_with_repair(
     Ok((fold_rows, dropped, report))
 }
 
-/// Add one nullable wire column to a database created before it existed.
-///
-/// `duplicate column name` is the only error that means "already migrated";
-/// everything else (read-only database, disk error, missing table) is a
-/// migration that did not run and must surface instead of leaving the store in
-/// a half-upgraded shape.
 fn add_wire_column(conn: &Connection, column: &str) -> Result<(), EventStoreError> {
     match conn.execute(
         &format!("ALTER TABLE wire_events ADD COLUMN {column} TEXT"),
@@ -516,20 +429,10 @@ fn add_wire_column(conn: &Connection, column: &str) -> Result<(), EventStoreErro
 pub struct SqliteEventStore {
     conn: Arc<Mutex<Connection>>,
     blob_cache: blobs::BlobCache,
-    /// Where the database lives, so a repair can leave the original wire log
-    /// beside it (`<db>.<session>.wire.bak`). `None` for the in-memory store,
-    /// which has no durable place to put a backup.
+
     path: Option<PathBuf>,
 }
 
-/// Files this process already opened through [`SqliteEventStore`].
-///
-/// Direct use of this store bypasses the session occupancy lock, which lives in
-/// `session::lock` (this module deliberately does not depend on it — the
-/// dependency would run from the journal into the session layer). Production
-/// callers go through `SqliteSessionStore`, which owns both the connection and
-/// the guard; opening the same journal here a second time is a sign that
-/// something reached below that entry point. Debug builds warn on it.
 #[cfg(debug_assertions)]
 static OPEN_JOURNALS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
@@ -554,11 +457,7 @@ impl SqliteEventStore {
             }
         }
         let conn = Connection::open(&path)?;
-        // A second connection to the same file (another store instance in this
-        // process, or a foreign holder that ignored the occupancy lock) must
-        // wait for a bounded time instead of failing an append immediately with
-        // `SQLITE_BUSY`. The session lock is the real cross-process guard; this
-        // is the bound that keeps a lost race from surfacing as a failed write.
+
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             r#"
@@ -580,15 +479,7 @@ impl SqliteEventStore {
             "#,
         )?;
         conn.execute_batch(blobs::BLOB_TABLE_SQL)?;
-        // Databases written before the column existed: the ALTER is the same
-        // idempotent shape the session store uses for its own columns. NULL
-        // means "no version recorded", which the reader treats as this
-        // version — the table has only ever had one shape, so NULL cannot be
-        // hiding an older record.
-        //
-        // Only "duplicate column" is tolerated. Swallowing every error here
-        // would leave a store whose writes later fail on a missing column, with
-        // the migration failure itself nowhere in the log.
+
         add_wire_column(&conn, "protocol_version")?;
         add_wire_column(&conn, "min_protocol_version")?;
         Ok(Self {
@@ -626,8 +517,6 @@ impl SqliteEventStore {
     }
 }
 
-/// Robustly extract plain text or a multimodal text representation from a JSON
-/// payload field.
 fn extract_content_text(payload: &serde_json::Value, field: &str) -> Option<String> {
     if let Some(val) = payload.get(field) {
         if let Some(s) = val.as_str() {
@@ -663,8 +552,6 @@ fn extract_content_text(payload: &serde_json::Value, field: &str) -> Option<Stri
     None
 }
 
-/// Extract the multimodal content blocks (a wire JSON array) from a payload;
-/// returns an empty array when missing or not an array.
 fn extract_blocks(payload: &serde_json::Value) -> serde_json::Value {
     payload
         .get("blocks")
@@ -673,12 +560,6 @@ fn extract_blocks(payload: &serde_json::Value) -> serde_json::Value {
         .unwrap_or_else(|| serde_json::json!([]))
 }
 
-/// Convert one entry of a compaction payload's `messages` array (an engine
-/// `LLMMessage` as serialized by `serde`) into a folded [`Message`].
-///
-/// Only role-visible fields are carried: the payload may also hold thinking
-/// blocks and tool-call arguments, which are kept verbatim so the resumed
-/// context matches what the model originally received.
 fn compaction_message(value: &serde_json::Value) -> Option<Message> {
     let role = match value.get("role").and_then(|role| role.as_str())? {
         "system" => MessageRole::System,
@@ -710,8 +591,6 @@ fn compaction_message(value: &serde_json::Value) -> Option<Message> {
     })
 }
 
-/// Strip the chain-of-thought draft out of an assistant reply
-/// (`thinking... response`) so the history does not bloat.
 fn strip_think_blocks(text: &str) -> String {
     let mut result = String::new();
     let mut remaining = text;
@@ -728,11 +607,6 @@ fn strip_think_blocks(text: &str) -> String {
     result.trim().to_string()
 }
 
-/// Whether one content part carries nothing the model can use (v2
-/// `isVacuousContentPart`, `contextMemory/vacuousContent.ts`): whitespace-only
-/// text, or an empty `think` with no provider signature. Media parts always
-/// count, and so does a signed think block (the signature is what lets the
-/// provider accept the follow-up).
 fn is_vacuous_part(part: &serde_json::Value) -> bool {
     match part.get("type").and_then(|kind| kind.as_str()) {
         Some("text") => part
@@ -751,10 +625,6 @@ fn is_vacuous_part(part: &serde_json::Value) -> bool {
     }
 }
 
-/// Whether a message carries nothing at all (v2 `project()`'s vacuous branch):
-/// no tool call, blank text, and every content part vacuous. Tool messages are
-/// never vacuous — their emptiness is the tool's answer, and dropping one would
-/// orphan its call.
 fn is_vacuous_message(msg: &Message) -> bool {
     if msg.role == MessageRole::Tool {
         return false;
@@ -775,32 +645,7 @@ fn is_vacuous_message(msg: &Message) -> bool {
         .is_none_or(|parts| parts.iter().all(is_vacuous_part))
 }
 
-/// The strict self-healing pipeline: aligned with TS
-/// `contextProjector/projection.ts` (`summarizeProjectionRepairs`, 9 anomaly
-/// classes in total); 8 of them are implemented here:
-/// 1. drop a leading orphan Tool or lone Assistant (Anthropic/OpenAI require the
-///    first message to be User or System)
-/// 2. drop an orphan `Tool.result` with no matching declaration (prevents the
-///    `tool_call_id does not match any tool_calls` 400)
-/// 3. dedupe duplicated tool-call ids across Assistant messages, and drop an
-///    Assistant left with neither calls nor text (`duplicate_tool_call_dropped`)
-/// 4. dedupe duplicated `Tool.result` rows per call id, letting a real result
-///    replace a synthesized "interrupted" one
-///    (`duplicate_tool_result_dropped`)
-/// 5. merge consecutive same-role Assistant messages (prevents Anthropic's
-///    `roles must alternate` 400)
-/// 6. degrade placeholder images in long history turns (keep the most recent
-///    3, degrade older ones to placeholder text so the window cannot blow up)
-/// 7. drop whitespace-only messages (`whitespace_text_dropped`)
-/// 8. drop messages whose every part is vacuous (`vacuous_message_dropped`)
-///
-/// The remaining class, `tool_result_reordered`, is handled at fold time: the
-/// pending-call queue attaches results in declaration order.
 fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
-    // Step 0: drop messages with nothing in them (v2 `whitespace_text_dropped`
-    // and `vacuous_message_dropped`). A `step.begin` with no text and no tool
-    // call folds into an empty Assistant, and providers reject blank assistant
-    // content; a whitespace-only user or system message is equally useless.
     let messages: Vec<Message> = messages
         .into_iter()
         .filter(|message| !is_vacuous_message(message))
@@ -809,7 +654,6 @@ fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
         return messages;
     }
 
-    // Step A: collect every legal tool_call_id declared by an Assistant message
     let mut declared_tool_call_ids = std::collections::HashSet::new();
     for msg in &messages {
         if msg.role == MessageRole::Assistant
@@ -824,8 +668,6 @@ fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
         }
     }
 
-    // Step B: drop orphan Tool results (a Tool's call_id must exist in
-    // declared_tool_call_ids)
     let filtered_tools: Vec<Message> = messages
         .into_iter()
         .filter(|msg| {
@@ -841,11 +683,6 @@ fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
         })
         .collect();
 
-    // Step B2: dedupe tool ids (v2 `dedupeDuplicateToolCalls`,
-    // `contextProjector/projection.ts:264-302`). A stream retry can record the
-    // same call twice, and providers reject a repeated `tool_use`/`tool_call`
-    // id outright. The first declaration wins; an assistant left with no calls
-    // and no text is dropped.
     let mut seen_call_ids = std::collections::HashSet::new();
     let mut deduped_calls: Vec<Message> = Vec::with_capacity(filtered_tools.len());
     for mut msg in filtered_tools {
@@ -872,9 +709,6 @@ fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
         deduped_calls.push(msg);
     }
 
-    // Step B3: dedupe tool results by call id, keeping the first. A real result
-    // that arrives after a synthesized "interrupted" one replaces it — the
-    // fallback only exists because the tool had not answered yet.
     const INTERRUPTED: &str =
         crate::native::event_store::loop_fold::TOOL_INTERRUPTED_ON_RESUME_OUTPUT;
     let mut result_indexes: std::collections::HashMap<String, usize> =
@@ -897,10 +731,6 @@ fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
     }
     let filtered_tools = deduped_results;
 
-    // Step C: merge consecutive Assistant messages unconditionally (v2
-    // `mergeConsecutiveAssistantMessages`): content and tool calls concatenate.
-    // Anthropic enforces strict alternation, and a stream retry can leave two
-    // assistants in a row.
     let mut merged_assistants: Vec<Message> = Vec::new();
     for msg in filtered_tools {
         if let Some(last) = merged_assistants.last_mut()
@@ -914,8 +744,6 @@ fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
         merged_assistants.push(msg);
     }
 
-    // Step D: merge consecutive user messages (v2 `canMergeUserMessage`:
-    // real user input only, so an injected reminder stays its own message).
     let mut merged_users: Vec<Message> = Vec::new();
     for msg in merged_assistants {
         if let Some(last) = merged_users.last_mut()
@@ -934,11 +762,6 @@ fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
         merged_users.push(msg);
     }
 
-    // Step E: drop everything before the first user message (v2
-    // `dropLeadingNonUserMessages`). The callers supply the system prompt
-    // separately; a leading tool or assistant would make providers reject the
-    // request. A leading System message is kept: it is the legacy summary-only
-    // compaction shape, which carries the only surviving context.
     let mut cleaned_leading = merged_users;
     let leading = cleaned_leading
         .iter()
@@ -949,8 +772,6 @@ fn sanitize_and_repair_projection(messages: Vec<Message>) -> Vec<Message> {
     cleaned_leading
 }
 
-/// Append `incoming` tool calls onto `current`, preserving `None` when both
-/// sides declare none.
 fn merge_tool_calls(current: &mut Option<serde_json::Value>, incoming: Option<serde_json::Value>) {
     let Some(incoming) = incoming else {
         return;
@@ -973,7 +794,6 @@ fn merge_tool_calls(current: &mut Option<serde_json::Value>, incoming: Option<se
     }
 }
 
-/// Concatenate content blocks when merging two messages.
 fn merge_blocks(current: &mut serde_json::Value, incoming: serde_json::Value) {
     let Some(incoming) = incoming.as_array() else {
         return;
@@ -987,9 +807,6 @@ fn merge_blocks(current: &mut serde_json::Value, incoming: serde_json::Value) {
     }
 }
 
-/// Stored wire event types the projection deliberately does not fold: they are
-/// part of the recorded log (turn bookkeeping) but carry nothing the model
-/// context needs, so seeing one is not an unknown record.
 const NON_PROJECTED_EVENT_TYPES: &[&str] = &[
     "turn.started",
     "turn.ended",
@@ -998,18 +815,12 @@ const NON_PROJECTED_EVENT_TYPES: &[&str] = &[
     "prompt.started",
 ];
 
-/// The fold's output plus the diagnostics it produced. v2's `restore` reports
-/// every record it had to skip, and an unknown type is reported as
-/// `wire.unknown_record` (`test/state/eventDispatcher.test.ts:590-641`) rather
-/// than vanishing.
 pub struct WireFoldReport {
     pub messages: Vec<Message>,
-    /// Event types the fold does not know, in first-seen order, deduplicated.
+
     pub unknown_event_types: Vec<String>,
 }
 
-/// Fold the raw wire event sequence into the context message list the model
-/// needs, with strict self-healing and protocol correction.
 pub fn fold_wire_events<'a, I>(events: I) -> Result<Vec<Message>, EventStoreError>
 where
     I: IntoIterator<Item = (&'a str, &'a serde_json::Value, bool)>,
@@ -1017,10 +828,6 @@ where
     Ok(fold_wire_events_with_report(events)?.messages)
 }
 
-/// [`fold_wire_events`] that also returns what it skipped. Unknown types are
-/// logged here (the production callers fold many events and would otherwise
-/// have to reproduce the warning), and returned so a caller or a test can see
-/// exactly which records were dropped.
 pub fn fold_wire_events_with_report<'a, I>(events: I) -> Result<WireFoldReport, EventStoreError>
 where
     I: IntoIterator<Item = (&'a str, &'a serde_json::Value, bool)>,
@@ -1051,17 +858,11 @@ where
         };
 
     for (event_type, payload, is_compaction) in events {
-        // 1. Compaction boundary: reset the fold state machine
         if is_compaction {
             messages.clear();
             pending_tool_calls.clear();
             deferred_messages.clear();
-            // v2's `context.compaction` carries the spliced history
-            // (`contextMemoryService.ts:115-134`): kept verbatim user
-            // messages, the summary (a `user` message) and the continuation
-            // note. Rebuilding that array preserves the order the model saw;
-            // the summary-only fallback below is for logs written before the
-            // payload carried `messages`.
+
             let restored_messages = payload
                 .get("result")
                 .and_then(|result| result.get("messages"))
@@ -1094,7 +895,6 @@ where
             continue;
         }
 
-        // 2. Fold-and-project through the state machine
         match event_type {
             "message.system" => {
                 if let Some(text) = extract_content_text(payload, "content") {
@@ -1116,9 +916,7 @@ where
                         tool_calls: None,
                         tool_call_id: None,
                     };
-                    // Protocol constraint: while a tool call is awaiting a result,
-                    // park the message so the Tool message stays right after its
-                    // Assistant
+
                     if !pending_tool_calls.is_empty() {
                         deferred_messages.push(user_msg);
                     } else {
@@ -1127,8 +925,6 @@ where
                 }
             }
             "message.assistant" => {
-                // If the previous round still has a dangling unresolved tool,
-                // synthesize a repair first
                 if !pending_tool_calls.is_empty() {
                     flush_hanging_tools(
                         &mut messages,
@@ -1155,7 +951,6 @@ where
                 }
 
                 if !text.is_empty() || tool_calls.is_some() {
-                    // Collect the tool call ids this Assistant message started
                     if let Some(ref calls) = tool_calls
                         && let Some(calls_arr) = calls.as_array()
                     {
@@ -1181,15 +976,11 @@ where
                     .and_then(|id| id.as_str())
                     .map(String::from);
                 let mut content = extract_content_text(payload, "output").unwrap_or_default();
-                // v2 `renderToolResultForModel`: an empty output still becomes
-                // a non-empty model-facing message; otherwise `projectStrict`
-                // would reject the history as a request-invalid tool result.
+
                 if content.trim().is_empty() {
                     content = "<system>Tool output is empty.</system>".to_string();
                 }
 
-                // FIFO settlement: with no tool_call_id given, pop the head of
-                // pending_tool_calls to settle against
                 if tool_call_id.is_none() && !pending_tool_calls.is_empty() {
                     tool_call_id = Some(pending_tool_calls.remove(0));
                 } else if let Some(ref id) = tool_call_id
@@ -1206,7 +997,6 @@ where
                     tool_call_id,
                 });
 
-                // Once every unresolved tool has returned, release the deferred queue
                 if pending_tool_calls.is_empty() && !deferred_messages.is_empty() {
                     messages.append(&mut deferred_messages);
                 }
@@ -1291,8 +1081,6 @@ where
         }
     }
 
-    // 3. Loop finished: if a dangling unresolved tool remains at the end (a
-    // crashed process or a cancellation), synthesize a repair automatically
     flush_hanging_tools(
         &mut messages,
         &mut pending_tool_calls,
@@ -1316,14 +1104,7 @@ where
 impl EventStore for SqliteEventStore {
     fn append_event(&self, event: &RawWireEvent) -> Result<u64, EventStoreError> {
         let conn = self.conn.lock();
-        // Dehydrate before the row is written (v2 `appendRecord` →
-        // `RecordDehydrator`): large inline media becomes a `blobref:` URL and
-        // the bytes live once in `wire_blobs`.
-        //
-        // The blob inserts and the event row commit together. Without the
-        // transaction a failed insert (duplicate id, disk full) would leave the
-        // offloaded bytes behind with no reference to them — content without a
-        // reference, which nothing can find or reclaim later.
+
         let tx = conn.unchecked_transaction()?;
         let mut payload = event.payload.clone();
         blobs::offload_data_uris(&mut payload, &tx, &self.blob_cache)?;
@@ -1383,7 +1164,6 @@ impl EventStore for SqliteEventStore {
         let mut conn = self.conn.lock();
         let tx = conn.transaction()?;
 
-        // Find the most recent checkpoint
         let last_checkpoint: Option<(i64, bool)> = tx
             .query_row(
                 "SELECT seq, is_compaction FROM wire_events 
@@ -1397,7 +1177,6 @@ impl EventStore for SqliteEventStore {
         let (target_seq, is_compaction) =
             last_checkpoint.ok_or(EventStoreError::CheckpointNotFound)?;
 
-        // Blocked by protocol: refuse to roll back across a compaction boundary
         if is_compaction {
             return Err(EventStoreError::UndoCompactionBoundary);
         }
@@ -1416,9 +1195,6 @@ impl EventStore for SqliteEventStore {
 mod tests {
     use super::*;
 
-    /// One unparseable `wire_events` payload must not make the session
-    /// unopenable: the fold skips that row, counts it, and still returns the
-    /// messages around it.
     #[test]
     fn test_fold_projection_skips_and_counts_a_corrupt_row() {
         let store = SqliteEventStore::new_in_memory().unwrap();
@@ -1456,13 +1232,9 @@ mod tests {
             .fold_projection(session)
             .expect("one corrupt row must not fail the whole fold");
         let contents: Vec<&str> = projected.iter().map(|m| m.content.as_str()).collect();
-        // The two surviving user messages are consecutive once the corrupt
-        // assistant is gone, and v2 merges consecutive real user input.
+
         assert_eq!(contents, vec!["first\n\nthird"]);
 
-        // The read repairs the log (v2 `repairWireJournal`): the undecodable
-        // row is removed so the next open does not hit it again. An in-memory
-        // store has no durable place for the original, so no backup is written.
         let conn = store.conn.lock();
         let remaining: i64 = conn
             .query_row(
@@ -1474,10 +1246,6 @@ mod tests {
         assert_eq!(remaining, 2, "the corrupt row was dropped");
     }
 
-    /// A large inline media part is written as a `blobref:` URL (v2
-    /// `RecordDehydrator`) and expanded again when the log is read (v2
-    /// `rehydrateStates`). Without the round-trip the model would receive a
-    /// `blobref:` string it cannot use.
     #[test]
     fn test_append_dehydrates_large_media_and_read_rehydrates_it() {
         let store = SqliteEventStore::new_in_memory().unwrap();
@@ -1527,10 +1295,6 @@ mod tests {
         );
     }
 
-    /// v2 `restore` reports the record types it does not know instead of
-    /// dropping them silently (`wire.unknown_record`,
-    /// `test/state/eventDispatcher.test.ts:590-641`). Bookkeeping types the
-    /// projection deliberately ignores are not "unknown".
     #[test]
     fn test_fold_reports_unknown_event_types_and_skips_them() {
         let unknown = serde_json::json!({ "value": 1 });
@@ -1557,7 +1321,6 @@ mod tests {
         let store = SqliteEventStore::new_in_memory().unwrap();
         let session = "test_session_1";
 
-        // User asks a question
         store
             .append_event(&RawWireEvent {
                 id: "evt_1".into(),
@@ -1570,7 +1333,6 @@ mod tests {
             })
             .unwrap();
 
-        // Assistant replies
         store
             .append_event(&RawWireEvent {
                 id: "evt_2".into(),
@@ -1588,7 +1350,6 @@ mod tests {
         assert_eq!(msgs[0].role, MessageRole::User);
         assert_eq!(msgs[1].role, MessageRole::Assistant);
 
-        // Trigger a compaction
         store
             .checkpoint_compress(session, "Prior context summary")
             .unwrap();
@@ -1598,7 +1359,6 @@ mod tests {
         assert_eq!(msgs_after_compaction[0].role, MessageRole::System);
         assert_eq!(msgs_after_compaction[0].content, "Prior context summary");
 
-        // Verify undo is refused across a compaction boundary
         let undo_res = store.undo_to_last_checkpoint(session);
         assert!(matches!(
             undo_res,
@@ -1606,8 +1366,6 @@ mod tests {
         ));
     }
 
-    /// v2's compaction payload carries the spliced history; a replay must
-    /// reproduce it instead of collapsing everything to one system summary.
     #[test]
     fn test_compaction_completed_replays_the_spliced_messages() {
         let store = SqliteEventStore::new_in_memory().unwrap();
@@ -1667,9 +1425,6 @@ mod tests {
         let store = SqliteEventStore::new_in_memory().unwrap();
         let session = "test_session_deferral";
 
-        // 0. A real conversation starts with user input; a history that opens
-        // with an assistant message has that assistant dropped by projection
-        // (v2 `dropLeadingNonUserMessages`).
         store
             .append_event(&RawWireEvent {
                 id: "evt_0".into(),
@@ -1682,7 +1437,6 @@ mod tests {
             })
             .unwrap();
 
-        // 1. The Assistant issues two tool calls
         store
             .append_event(&RawWireEvent {
                 id: "evt_1".into(),
@@ -1701,7 +1455,6 @@ mod tests {
             })
             .unwrap();
 
-        // 2. A user message is interleaved (or a system-injected prompt)
         store
             .append_event(&RawWireEvent {
                 id: "evt_2".into(),
@@ -1714,7 +1467,6 @@ mod tests {
             })
             .unwrap();
 
-        // 3. The first tool result returns
         store
             .append_event(&RawWireEvent {
                 id: "evt_3".into(),
@@ -1727,7 +1479,6 @@ mod tests {
             })
             .unwrap();
 
-        // 4. The second tool result returns
         store
             .append_event(&RawWireEvent {
                 id: "evt_4".into(),
@@ -1742,8 +1493,7 @@ mod tests {
 
         let msgs = store.fold_projection(session).unwrap();
         assert_eq!(msgs.len(), 5);
-        // Verify deferred ordering: each Tool result stays right after its call,
-        // and the interrupted user input lands last
+
         assert_eq!(msgs[0].role, MessageRole::User);
         assert_eq!(msgs[1].role, MessageRole::Assistant);
         assert_eq!(msgs[2].role, MessageRole::Tool);
@@ -1759,7 +1509,6 @@ mod tests {
         let store = SqliteEventStore::new_in_memory().unwrap();
         let session = "test_session_hanging";
 
-        // 0. A user message opens the conversation, as in a real history.
         store
             .append_event(&RawWireEvent {
                 id: "evt_0".into(),
@@ -1772,7 +1521,6 @@ mod tests {
             })
             .unwrap();
 
-        // 1. The Assistant issues a tool call that is unexpectedly left unresolved
         store
             .append_event(&RawWireEvent {
                 id: "evt_1".into(),
@@ -1790,13 +1538,11 @@ mod tests {
             })
             .unwrap();
 
-        // 2. End the turn directly, or start the next one with input
         let msgs = store.fold_projection(session).unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, MessageRole::User);
         assert_eq!(msgs[1].role, MessageRole::Assistant);
-        // The key assertion: a tool call that never got a result must be healed by
-        // synthesizing an isError message
+
         assert_eq!(msgs[2].role, MessageRole::Tool);
         assert_eq!(msgs[2].tool_call_id.as_deref(), Some("call_hang"));
         assert_eq!(
@@ -1810,7 +1556,6 @@ mod tests {
         let store = SqliteEventStore::new_in_memory().unwrap();
         let session = "test_multimodal";
 
-        // 1. System prompt event
         store
             .append_event(&RawWireEvent {
                 id: "evt_sys".into(),
@@ -1823,7 +1568,6 @@ mod tests {
             })
             .unwrap();
 
-        // 2. Multimodal user input (a text plus an image array)
         store.append_event(&RawWireEvent {
             id: "evt_multi".into(),
             session_id: session.into(),
@@ -1839,7 +1583,6 @@ mod tests {
             created_at: 11,
         }).unwrap();
 
-        // 3. The assistant reply carries a `<think>` draft
         store.append_event(&RawWireEvent {
             id: "evt_asst".into(),
             session_id: session.into(),
@@ -1864,7 +1607,7 @@ mod tests {
                 .contains("[Image: data:image/png;base64,mock]")
         );
         assert_eq!(msgs[2].role, MessageRole::Assistant);
-        // Verify the think tag is stripped and only the text survives
+
         assert_eq!(msgs[2].content, "This is a test diagram.");
     }
 
@@ -1909,7 +1652,6 @@ mod tests {
         assert_eq!(msgs[0].blocks, blocks_user);
         assert_eq!(msgs[1].blocks, blocks_asst);
 
-        // A message with no blocks folds to an empty array, not null
         store
             .append_event(&RawWireEvent {
                 id: "evt_plain".into(),
@@ -1943,7 +1685,6 @@ mod tests {
             })
             .unwrap();
 
-        // The Assistant starts tool call call_1
         store
             .append_event(&RawWireEvent {
                 id: "evt_1".into(),
@@ -1961,7 +1702,6 @@ mod tests {
             })
             .unwrap();
 
-        // The tool result comes back with its tool_call_id field missing
         store
             .append_event(&RawWireEvent {
                 id: "evt_2".into(),
@@ -1979,8 +1719,7 @@ mod tests {
         let msgs = store.fold_projection(session).unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[2].role, MessageRole::Tool);
-        // The key assertion: FIFO re-associates it with call_1, so no bogus
-        // dangling-tool error is raised
+
         assert_eq!(msgs[2].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(msgs[2].content, "command success");
     }
@@ -1990,7 +1729,6 @@ mod tests {
         let store = SqliteEventStore::new_in_memory().unwrap();
         let session = "test_repair_rules";
 
-        // 1. Inject an orphan leading Assistant message (e.g. a truncation leftover)
         store
             .append_event(&RawWireEvent {
                 id: "evt_leading_bad".into(),
@@ -2003,7 +1741,6 @@ mod tests {
             })
             .unwrap();
 
-        // 2. A correct User message
         store
             .append_event(&RawWireEvent {
                 id: "evt_user_1".into(),
@@ -2016,7 +1753,6 @@ mod tests {
             })
             .unwrap();
 
-        // 3. Inject an orphan Tool.result that declares no call_id at all
         store.append_event(&RawWireEvent {
             id: "evt_orphan_tool".into(),
             session_id: session.into(),
@@ -2027,7 +1763,6 @@ mod tests {
             created_at: 3,
         }).unwrap();
 
-        // 4. Two consecutive Assistant messages (no tool_calls)
         store
             .append_event(&RawWireEvent {
                 id: "evt_asst_1".into(),
@@ -2053,19 +1788,16 @@ mod tests {
             .unwrap();
 
         let msgs = store.fold_projection(session).unwrap();
-        // 1. The leading orphan Assistant is cleared and the first message lines
-        //    up as User
+
         assert_eq!(msgs[0].role, MessageRole::User);
         assert_eq!(msgs[0].content, "Real first user message");
 
-        // 2. The orphan Tool message with no matching call id is dropped
         assert!(
             !msgs
                 .iter()
                 .any(|m| m.tool_call_id.as_deref() == Some("ghost_call_999"))
         );
 
-        // 3. The consecutive Assistant messages are merged into one
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[1].role, MessageRole::Assistant);
         assert!(msgs[1].content.contains("Part 1 of response."));
@@ -2170,16 +1902,14 @@ mod tests {
 
     #[test]
     fn wire_versions_compare_numerically_not_as_strings() {
-        // "1.10" is newer than "1.5"; a string compare would say otherwise and
-        // would refuse a log the engine can read.
         assert!(compare_wire_versions("1.10", "1.5") > 0);
         assert!(compare_wire_versions("1.5", "1.5") == 0);
         assert!(compare_wire_versions("1.4", "1.5") < 0);
         assert!(compare_wire_versions("2", "1.5") > 0);
-        // A missing segment reads as zero on both sides.
+
         assert!(compare_wire_versions("1", "1.0") == 0);
         assert!(compare_wire_versions("1.5.1", "1.5") > 0);
-        // An unparseable segment cannot masquerade as newer.
+
         assert!(!is_newer_wire_version("next"));
         assert!(!is_newer_wire_version(WIRE_PROTOCOL_VERSION));
         assert!(is_newer_wire_version("1.6"));
@@ -2244,9 +1974,6 @@ mod tests {
         }
     }
 
-    /// v2 #4638: a row can declare the minimum reader version it needs.
-    /// A log written for a newer reader than this engine must be refused
-    /// before folding, with both versions kept in the error for diagnostics.
     #[test]
     fn a_minimum_reader_version_above_this_engine_is_refused() {
         let store = SqliteEventStore::new_in_memory().unwrap();
@@ -2314,15 +2041,10 @@ mod tests {
             )
             .unwrap();
         }
-        // NULL is not "unknown but suspicious" — the table has had one shape,
-        // so it reads as the version this engine writes.
+
         assert_eq!(store.fold_projection(session).unwrap().len(), 1);
     }
 
-    /// v2 `dedupeDuplicateToolCalls` (`contextProjector/projection.ts:264-302`):
-    /// a repeated tool-call id and a repeated result are provider errors
-    /// (`tool_use` ids must be unique), so the projection keeps the first of
-    /// each — and a real result replaces a synthesized "interrupted" one.
     #[test]
     fn test_projection_dedupes_tool_calls_and_results() {
         let call = serde_json::json!({
@@ -2379,10 +2101,6 @@ mod tests {
         );
     }
 
-    /// v2 `project()`'s vacuous branch (`projection.ts:153-162`): a message with
-    /// no tool call and nothing but blank text is dropped, while an image-only
-    /// reply and a signed think block survive — both are real content to the
-    /// provider, and the signature is what lets the follow-up be accepted.
     #[test]
     fn test_projection_drops_vacuous_messages() {
         let message = |role: MessageRole, content: &str, blocks: serde_json::Value| Message {
@@ -2460,8 +2178,6 @@ mod tests {
             .unwrap();
     }
 
-    /// A row stamped with an older protocol version is lifted to the current
-    /// shape before it is folded (v2 `readEntries` → `migrateWireRecord`).
     #[test]
     fn test_read_fold_rows_migrates_a_row_stamped_with_an_older_version() {
         let store = SqliteEventStore::new_in_memory().unwrap();
@@ -2504,8 +2220,6 @@ mod tests {
         );
     }
 
-    /// A version the chain cannot reach is a reported failure, not a
-    /// best-effort read.
     #[test]
     fn test_read_fold_rows_reports_a_missing_migration() {
         let store = SqliteEventStore::new_in_memory().unwrap();
@@ -2532,9 +2246,6 @@ mod tests {
         );
     }
 
-    /// The projection read repairs what it can: the original log is preserved
-    /// once beside the database, the undecodable row is gone, and the rows
-    /// around it still fold (v2 `repairWireJournal`).
     #[test]
     fn test_fold_projection_repairs_a_corrupt_row_and_leaves_a_backup() {
         let dir = temporary_dir();
@@ -2586,8 +2297,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The backup is written once: the first original is the one worth keeping,
-    /// and a later repair reports its own reason without overwriting it.
     #[test]
     fn test_repair_keeps_the_first_backup_and_reports_the_reason() {
         let dir = temporary_dir();
@@ -2642,10 +2351,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// A rejected append must not leave its offloaded media behind. The blob
-    /// insert and the event row commit together, so a row that fails to insert
-    /// (here: a duplicate id) rolls the bytes back with it — otherwise the
-    /// bytes would be content with no reference, which nothing can reclaim.
     #[test]
     fn test_a_failed_append_leaves_no_orphan_blob() {
         let store = SqliteEventStore::new_in_memory().unwrap();
@@ -2674,8 +2379,6 @@ mod tests {
         };
         assert_eq!(blobs_after_first, 1);
 
-        // Same id, different (large) media: the insert violates the UNIQUE id
-        // and the whole append must roll back, blobs included.
         let data_uri = format!(
             "data:image/png;base64,{}",
             "B".repeat(blobs::BLOB_OFFLOAD_THRESHOLD)
@@ -2710,10 +2413,6 @@ mod tests {
         assert_eq!(rows, 1);
     }
 
-    /// A repair that cannot write its backup (or delete the rows) must not hide
-    /// the projection that was already built: the caller still gets every row
-    /// that decoded, the failure is reported at error level, and the next open
-    /// retries the repair.
     #[test]
     fn test_a_failed_repair_still_returns_the_projection() {
         let dir = temporary_dir();
@@ -2731,8 +2430,6 @@ mod tests {
             .unwrap();
         }
 
-        // A regular file where the backup wants a directory: creating the
-        // backup fails before any row is deleted.
         let blocker = dir.join("blocker");
         std::fs::write(&blocker, b"x").unwrap();
         let unwritable = blocker.join("nested").join("session.wire.bak");
@@ -2747,8 +2444,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "message.user");
 
-        // The original is untouched: the corrupt row is still there for the
-        // next open to retry.
         let remaining: i64 = {
             let conn = store.conn.lock();
             conn.query_row(

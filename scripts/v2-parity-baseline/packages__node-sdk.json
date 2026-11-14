@@ -1,0 +1,207 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/node-sdk. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/node-sdk",
+  "redEntries": [
+    {
+      "tsPath": "auth.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "catalog-defaults.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "catalog.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config-rpc.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config/env-model.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config/model.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config/resolve.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config/schema.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config/secondary-model.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config/toml.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "context.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "errors-codes.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "events.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "exec-server.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "flag.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "image.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "interaction.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "kimi-code-model-provider.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "kimi-harness.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "logging/formatter.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "logging/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "logging/logger.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "logging/resolve-config.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "logging/sinks.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "logging/types.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mcp.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "model-provider.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "oauth-error.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "permission.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "proxy.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "replay.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "rpc.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "runtime.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "sdk-rpc-client-v2.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "session.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "ssh-askpass.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "task.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "telemetry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "tool.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "types.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "utils/fs.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "v2/config-mapper.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "v2/event-mapper.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "v2/global-mcp.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "v2/import-context.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "v2/resume-replay.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "v2/session-mapper.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "v2/session-wiring.ts",
+      "verdict": "partial"
+    }
+  ]
+}

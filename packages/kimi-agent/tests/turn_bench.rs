@@ -56,17 +56,17 @@ impl LLM for BenchLlm {
         &self,
         params: LLMChatParams,
     ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>> {
-        // Both the main loop and compaction prepend a system message, but the
-        // main loop's is this fake LLM's own `system_prompt()` ("bench").
-        // Compaction's is the fixed summarizer instruction. Match that text so
-        // the summarizer gets a real summary (avoiding EmptySummary after 200
+        // Both the main loop and compaction prepend a system message, and
+        // compaction's is now the same profile prompt. The v2 instruction
+        // rides as the request's last message; match that text so the
+        // summarizer gets a real summary (avoiding EmptySummary after 200
         // accumulated steps) while the main loop still never finishes on its
         // own and runs the full step budget.
-        let is_summarizer = params.messages.first().is_some_and(|message| {
-            message.role == "system"
+        let is_summarizer = params.messages.last().is_some_and(|message| {
+            message.role == "user"
                 && message
                     .content
-                    .starts_with("You are a conversation summarizer.")
+                    .starts_with("You are about to run out of context.")
         });
         if is_summarizer {
             return Box::pin(async {
@@ -192,6 +192,7 @@ async fn run_turn_sync(
         media: None,
         media_dropped: None,
         media_recovery: None,
+        llm_request_byte_budget: u64::MAX,
         toolset: None,
         previous_turn_aborted: false,
     };

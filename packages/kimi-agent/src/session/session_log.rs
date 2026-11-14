@@ -1,28 +1,16 @@
-//! Per-session diagnostic log.
-//!
-//! v2 scopes a `FileLogWriter` to every session
-//! (`agent-core-v2/src/session/sessionLog/sessionLogService.ts`): the sink is
-//! `<sessionDir>/logs/kimi-code.log`, its level comes from the logging config,
-//! and the file is size-capped and rotated (`_base/log/fileLog.ts`). This
-//! module ports that sink, including the config resolution from
-//! `_base/log/logConfig.ts` so an operator picks the level and the rotation the
-//! same way on both runtimes.
-
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// v2 `DEFAULT_SESSION_MAX_BYTES`.
 pub const DEFAULT_SESSION_MAX_BYTES: u64 = 5 * 1024 * 1024;
-/// v2 `DEFAULT_SESSION_FILES`.
+
 pub const DEFAULT_SESSION_FILES: usize = 3;
-/// v2 `DEFAULT_LOG_LEVEL`.
+
 pub const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Info;
-/// v2 `MSG_MAX_CHARS`: the message is clipped before it reaches the line.
+
 const MESSAGE_MAX_CHARS: usize = 200;
 
-/// v2 `LogLevel`, ordered so `allowed` is a comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
     Off,
@@ -33,8 +21,6 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    /// v2 `parseLevel`: case-insensitive, trimmed; unknown values fall back to
-    /// the default rather than failing the engine.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "off" => Some(Self::Off),
@@ -46,8 +32,6 @@ impl LogLevel {
         }
     }
 
-    /// The fixed-width label v2's formatter prints (`WARN ` / `INFO ` keep the
-    /// message column aligned).
     fn label(self) -> &'static str {
         match self {
             Self::Error => "ERROR",
@@ -59,7 +43,6 @@ impl LogLevel {
     }
 }
 
-/// v2 `LoggingConfig`'s session half.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionLogConfig {
     pub level: LogLevel,
@@ -78,9 +61,6 @@ impl Default for SessionLogConfig {
 }
 
 impl SessionLogConfig {
-    /// v2 `resolveLoggingConfig`: `KIMI_LOG_LEVEL`,
-    /// `KIMI_LOG_SESSION_MAX_BYTES`, `KIMI_LOG_SESSION_FILES`, each falling back
-    /// to its default when unset or unparsable.
     pub fn from_env() -> Self {
         let mut config = Self::default();
         if let Some(level) = std::env::var("KIMI_LOG_LEVEL")
@@ -106,16 +86,10 @@ fn positive_int_env(name: &str) -> Option<u64> {
         .filter(|value| *value > 0)
 }
 
-/// v2 `resolveSessionLogPath`.
 pub fn resolve_session_log_path(session_dir: &Path) -> PathBuf {
     session_dir.join("logs").join("kimi-code.log")
 }
 
-/// One session's log sink: level-filtered, size-capped, rotating.
-///
-/// `log` is synchronous and serialized by a mutex: a turn writes a handful of
-/// lifecycle lines, so an async queue (v2's `RotatingFileWriter`) would buy
-/// nothing here.
 pub struct SessionLog {
     path: PathBuf,
     config: SessionLogConfig,
@@ -131,7 +105,6 @@ impl SessionLog {
         }
     }
 
-    /// The active file. Rotated siblings are `<path>.1` … `<path>.N`.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -144,8 +117,6 @@ impl SessionLog {
         self.config.level != LogLevel::Off && level <= self.config.level
     }
 
-    /// Write one line, rotating first when it would push the active file past
-    /// its cap (v2 `appendLines`' exact-overflow branch).
     pub fn log(&self, level: LogLevel, message: &str, context: &[(&str, &str)]) {
         if !self.enabled(level) {
             return;
@@ -193,8 +164,6 @@ impl SessionLog {
     }
 }
 
-/// v2 `formatEntry`: `{ISO time} {LABEL} {message}  k=v …`, message clipped to
-/// `MSG_MAX_CHARS`, values quoted when they would otherwise break the line.
 fn format_line(level: LogLevel, message: &str, context: &[(&str, &str)]) -> String {
     let time = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let message = truncate_chars(message, MESSAGE_MAX_CHARS);

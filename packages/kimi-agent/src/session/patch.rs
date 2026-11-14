@@ -1,9 +1,3 @@
-//! RFC 6902 JSON Patch & Diff Engine.
-//!
-//! Provides standard RFC 6902 operations (`add`, `remove`, `replace`, `move`, `copy`, `test`),
-//! JSON Pointer RFC 6901 resolution, bidirectional diff computation, and inverse patch generation
-//! for fine-grained state undo/redo workflows.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -25,17 +19,14 @@ pub enum PatchError {
     },
 }
 
-/// Escapes a token for RFC 6901 JSON Pointer (`~` -> `~0`, `/` -> `~1`).
 pub fn escape_pointer_token(token: &str) -> String {
     token.replace('~', "~0").replace('/', "~1")
 }
 
-/// Unescapes an RFC 6901 JSON Pointer token (`~1` -> `/`, `~0` -> `~`).
 pub fn unescape_pointer_token(token: &str) -> String {
     token.replace("~1", "/").replace("~0", "~")
 }
 
-/// Parses an RFC 6901 JSON pointer string into decoded path segments.
 pub fn parse_pointer(pointer: &str) -> Result<Vec<String>, PatchError> {
     if pointer.is_empty() {
         return Ok(Vec::new());
@@ -49,7 +40,6 @@ pub fn parse_pointer(pointer: &str) -> Result<Vec<String>, PatchError> {
         .collect())
 }
 
-/// Single RFC 6902 Patch Operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum PatchOp {
@@ -74,7 +64,6 @@ impl PatchOp {
     }
 }
 
-/// Ordered set of RFC 6902 patch operations.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JsonPatchSet {
     pub ops: Vec<PatchOp>,
@@ -94,7 +83,6 @@ impl JsonPatchSet {
     }
 }
 
-/// Navigates through a JSON value by segments and retrieves a reference.
 fn get_by_segments<'a>(mut val: &'a Value, segments: &[String]) -> Option<&'a Value> {
     for seg in segments {
         match val {
@@ -111,13 +99,11 @@ fn get_by_segments<'a>(mut val: &'a Value, segments: &[String]) -> Option<&'a Va
     Some(val)
 }
 
-/// Retrieves a value by JSON Pointer.
 pub fn get_value_at<'a>(root: &'a Value, pointer: &str) -> Result<&'a Value, PatchError> {
     let segments = parse_pointer(pointer)?;
     get_by_segments(root, &segments).ok_or_else(|| PatchError::NotFound(pointer.to_string()))
 }
 
-/// Applies a single patch operation to `target` in place, optionally generating an inverse operation.
 pub fn apply_op(target: &mut Value, op: &PatchOp) -> Result<Option<PatchOp>, PatchError> {
     match op {
         PatchOp::Test { path, value } => {
@@ -298,7 +284,6 @@ pub fn apply_op(target: &mut Value, op: &PatchOp) -> Result<Option<PatchOp>, Pat
     }
 }
 
-/// Applies a sequence of patch operations to `target` and returns the Inverse PatchSet.
 pub fn apply_patch(target: &mut Value, patch: &JsonPatchSet) -> Result<JsonPatchSet, PatchError> {
     let mut inverse_ops = Vec::new();
     for op in &patch.ops {
@@ -306,12 +291,11 @@ pub fn apply_patch(target: &mut Value, patch: &JsonPatchSet) -> Result<JsonPatch
             inverse_ops.push(inv);
         }
     }
-    // Invert the order of inverse operations so applying them reverts in LIFO sequence.
+
     inverse_ops.reverse();
     Ok(JsonPatchSet::new(inverse_ops))
 }
 
-/// Computes an RFC 6902 PatchSet transforming `old` into `new`.
 pub fn diff_values(old: &Value, new: &Value) -> JsonPatchSet {
     let mut ops = Vec::new();
     diff_recursive(old, new, String::new(), &mut ops);
@@ -325,14 +309,13 @@ fn diff_recursive(old: &Value, new: &Value, current_path: String, ops: &mut Vec<
 
     match (old, new) {
         (Value::Object(old_map), Value::Object(new_map)) => {
-            // Check for deletions
             for k in old_map.keys() {
                 if !new_map.contains_key(k) {
                     let path = format!("{}/{}", current_path, escape_pointer_token(k));
                     ops.push(PatchOp::Remove { path });
                 }
             }
-            // Check for additions and mutations
+
             for (k, new_val) in new_map {
                 let path = format!("{}/{}", current_path, escape_pointer_token(k));
                 match old_map.get(k) {
@@ -349,7 +332,6 @@ fn diff_recursive(old: &Value, new: &Value, current_path: String, ops: &mut Vec<
             }
         }
         (Value::Array(old_arr), Value::Array(new_arr)) => {
-            // For arrays, if elements differ:
             let min_len = old_arr.len().min(new_arr.len());
             for i in 0..min_len {
                 let path = format!("{}/{}", current_path, i);
@@ -365,14 +347,12 @@ fn diff_recursive(old: &Value, new: &Value, current_path: String, ops: &mut Vec<
                 }
             } else if old_arr.len() > new_arr.len() {
                 for _ in min_len..old_arr.len() {
-                    // Always remove at min_len as the tail shrinks
                     let path = format!("{}/{}", current_path, min_len);
                     ops.push(PatchOp::Remove { path });
                 }
             }
         }
         _ => {
-            // Value replacement
             ops.push(PatchOp::Replace {
                 path: current_path,
                 value: new_val_clone(new),
@@ -439,10 +419,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// RFC 6902 `move` is remove-then-add, so moving a value **forward** inside
-    /// the same array shifts the destination index by one. The inverse the
-    /// engine reports must account for that, or undoing a move corrupts the
-    /// document.
     #[test]
     fn move_inverse_round_trips_within_one_array() {
         for (from, path) in [("/0", "/2"), ("/3", "/1"), ("/1", "/1")] {
@@ -492,14 +468,12 @@ mod tests {
         assert_eq!(unescape_pointer_token("~01"), "~1");
         assert_eq!(unescape_pointer_token("~10"), "/0");
 
-        // Valid pointer parsing
         assert_eq!(parse_pointer("").unwrap(), Vec::<String>::new());
         assert_eq!(parse_pointer("/a/b/c").unwrap(), vec!["a", "b", "c"]);
         let parsed = parse_pointer("/foo/bar~1baz/0").unwrap();
         assert_eq!(parsed, vec!["foo", "bar/baz", "0"]);
         assert_eq!(parse_pointer("///").unwrap(), vec!["", "", ""]);
 
-        // Invalid pointer syntax (must begin with '/')
         assert_eq!(
             parse_pointer("foo/bar"),
             Err(PatchError::InvalidPointer("foo/bar".to_string()))
@@ -521,10 +495,8 @@ mod tests {
             }
         });
 
-        // Root lookup
         assert_eq!(get_value_at(&doc, "").unwrap(), &doc);
 
-        // Nested and array lookup
         assert_eq!(get_value_at(&doc, "/title").unwrap(), &json!("Kimi"));
         assert_eq!(get_value_at(&doc, "/items/1").unwrap(), &json!(20));
         assert_eq!(
@@ -533,7 +505,6 @@ mod tests {
         );
         assert_eq!(get_value_at(&doc, "/nested/c~0d").unwrap(), &json!("tilde"));
 
-        // Error cases
         assert_eq!(
             get_value_at(&doc, "/missing"),
             Err(PatchError::NotFound("/missing".to_string()))
@@ -555,7 +526,6 @@ mod tests {
             "items": [1, 2]
         });
 
-        // 1. Add to object generates exact Remove inverse
         let patch_add_obj = JsonPatchSet::new(vec![PatchOp::Add {
             path: "/author".into(),
             value: json!("Moonshot"),
@@ -569,7 +539,6 @@ mod tests {
             }]
         );
 
-        // 2. Add to array with '-' pushes element and generates exact Remove index inverse
         let patch_push = JsonPatchSet::new(vec![PatchOp::Add {
             path: "/items/-".into(),
             value: json!(3),
@@ -583,7 +552,6 @@ mod tests {
             }]
         );
 
-        // 3. Add to array at index 0 inserts at head and shifts
         let patch_insert = JsonPatchSet::new(vec![PatchOp::Add {
             path: "/items/0".into(),
             value: json!(0),
@@ -597,7 +565,6 @@ mod tests {
             }]
         );
 
-        // 4. Overwrite existing property with Add generates Replace inverse
         let patch_overwrite = JsonPatchSet::new(vec![PatchOp::Add {
             path: "/title".into(),
             value: json!("New"),
@@ -612,7 +579,6 @@ mod tests {
             }]
         );
 
-        // 5. Add at root replaces document entirely
         let old_snapshot = doc.clone();
         let patch_root = JsonPatchSet::new(vec![PatchOp::Add {
             path: "".into(),
@@ -628,11 +594,9 @@ mod tests {
             }]
         );
 
-        // Revert root restore
         apply_patch(&mut doc, &inv_root).unwrap();
         assert_eq!(doc["title"], json!("New"));
 
-        // Error cases
         let mut err_doc = json!({ "items": [1, 2], "scalar": 42 });
         assert_eq!(
             apply_patch(
@@ -677,7 +641,6 @@ mod tests {
             "items": [10, 20, 30]
         });
 
-        // 1. Remove object property generates exact Add inverse with removed value
         let patch_rm = JsonPatchSet::new(vec![PatchOp::Remove {
             path: "/title".into(),
         }]);
@@ -691,7 +654,6 @@ mod tests {
             }]
         );
 
-        // 2. Remove array element by index shifts and generates exact Add inverse
         let patch_rm_arr = JsonPatchSet::new(vec![PatchOp::Remove {
             path: "/items/1".into(),
         }]);
@@ -705,13 +667,11 @@ mod tests {
             }]
         );
 
-        // Reverting in LIFO restores full doc state
         apply_patch(&mut doc, &inv_rm_arr).unwrap();
         assert_eq!(doc["items"], json!([10, 20, 30]));
         apply_patch(&mut doc, &inv_rm).unwrap();
         assert_eq!(doc["title"], json!("Old"));
 
-        // Error cases
         assert_eq!(
             apply_patch(
                 &mut doc,
@@ -757,7 +717,6 @@ mod tests {
             "items": [10, 20]
         });
 
-        // 1. Replace object property
         let patch_rep = JsonPatchSet::new(vec![PatchOp::Replace {
             path: "/title".into(),
             value: json!("New"),
@@ -772,7 +731,6 @@ mod tests {
             }]
         );
 
-        // 2. Replace array element
         let patch_rep_arr = JsonPatchSet::new(vec![PatchOp::Replace {
             path: "/items/1".into(),
             value: json!(99),
@@ -787,7 +745,6 @@ mod tests {
             }]
         );
 
-        // 3. Replace root
         let old_root = doc.clone();
         let patch_rep_root = JsonPatchSet::new(vec![PatchOp::Replace {
             path: "".into(),
@@ -803,7 +760,6 @@ mod tests {
             }]
         );
 
-        // Error cases
         let mut doc_err = json!({ "key": 1, "items": [2] });
         assert_eq!(
             apply_patch(
@@ -834,7 +790,6 @@ mod tests {
             "arr": [10, 20]
         });
 
-        // 1. Move within object: moves "first" to "second"
         let patch_move = JsonPatchSet::new(vec![PatchOp::Move {
             from: "/first".into(),
             path: "/second".into(),
@@ -850,12 +805,10 @@ mod tests {
             }]
         );
 
-        // Revert move
         apply_patch(&mut doc, &inv_move).unwrap();
         assert_eq!(doc["first"], json!("value1"));
         assert!(doc.get("second").is_none());
 
-        // 2. Copy within object: copies "first" to "copied"
         let patch_copy = JsonPatchSet::new(vec![PatchOp::Copy {
             from: "/first".into(),
             path: "/copied".into(),
@@ -870,7 +823,6 @@ mod tests {
             }]
         );
 
-        // Error: move / copy from non-existent path
         assert_eq!(
             apply_patch(
                 &mut doc,
@@ -895,13 +847,11 @@ mod tests {
 
     #[test]
     fn test_diff_and_inverse_roundtrip() {
-        // Test identical values diff is empty
         let same = json!({ "a": 1, "b": [2, 3] });
         let empty_diff = diff_values(&same, &same);
         assert!(empty_diff.is_empty());
         assert_eq!(empty_diff.len(), 0);
 
-        // Test array shrinking diff produces exact remove ops
         let arr_old = json!({ "list": [1, 2, 3, 4] });
         let arr_new = json!({ "list": [1, 2] });
         let shrink_diff = diff_values(&arr_old, &arr_new);
@@ -922,7 +872,6 @@ mod tests {
         apply_patch(&mut shrink_target, &inv_shrink).unwrap();
         assert_eq!(shrink_target, arr_old);
 
-        // Comprehensive diff roundtrip
         let old = json!({
             "name": "Kimi",
             "active": true,
@@ -942,10 +891,8 @@ mod tests {
         let mut target = old.clone();
         let inv = apply_patch(&mut target, &diff).unwrap();
 
-        // Target matches new exactly
         assert_eq!(target, new);
 
-        // Applying inverse restores old exactly
         apply_patch(&mut target, &inv).unwrap();
         assert_eq!(target, old);
     }
@@ -954,7 +901,6 @@ mod tests {
     fn test_test_op_success_and_failure() {
         let mut doc = json!({ "count": 42, "user": { "name": "Kimi" } });
 
-        // Passing test: returns empty inverse and preserves document unchanged
         let pass = JsonPatchSet::new(vec![
             PatchOp::Test {
                 path: "/count".into(),
@@ -970,7 +916,6 @@ mod tests {
         assert_eq!(doc["count"], json!(42));
         assert_eq!(doc["user"]["name"], json!("Kimi"));
 
-        // Failing test: returns exact TestFailed error with path, expected, and actual
         let fail = JsonPatchSet::new(vec![PatchOp::Test {
             path: "/count".into(),
             value: json!(99),
@@ -985,7 +930,6 @@ mod tests {
             }
         );
 
-        // Test on non-existent path returns NotFound
         let fail_missing = JsonPatchSet::new(vec![PatchOp::Test {
             path: "/nonexistent".into(),
             value: json!(1),

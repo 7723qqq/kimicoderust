@@ -3,12 +3,6 @@ use super::common::*;
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
-/// Step 1 issues `[Agent, Bash(broken payload)]`; step 2 stops.
-///
-/// The pair is the shape that exposes the defect: the swarm gate removes the
-/// `Agent` call from the batch, and the `Bash` call's refusal was recorded
-/// against position 0. If the refusal vector is indexed positionally, the
-/// surviving `Bash` reads `None` and runs with arguments that never parsed.
 struct AgentAndBrokenBash {
     step: AtomicUsize,
 }
@@ -78,14 +72,6 @@ impl LLM for AgentAndBrokenBash {
     }
 }
 
-/// v2 `preflightToolCall`'s refusal is recorded per call, and the swarm gate
-/// removes a call from the batch — so the refusals must follow the *calls*, not
-/// the positions they occupied before the removal.
-///
-/// With positional indexing the surviving `Bash` reads the removed `Agent`
-/// call's slot (`None`) and is dispatched to the host with `{}` arguments,
-/// which is exactly the fabrication the parse-failure preflight exists to
-/// prevent.
 #[tokio::test]
 async fn a_removed_call_must_not_shift_the_refusals_of_the_surviving_calls() {
     let server = Arc::new(RpcServer::new());
@@ -127,6 +113,7 @@ async fn a_removed_call_must_not_shift_the_refusals_of_the_surviving_calls() {
         step: AtomicUsize::new(0),
     };
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-preflight-order".into(),
@@ -177,7 +164,6 @@ async fn a_removed_call_must_not_shift_the_refusals_of_the_surviving_calls() {
     );
 }
 
-/// Step 1 issues one `Write` whose `path` is a number; step 2 stops.
 struct NumberPathWrite {
     step: AtomicUsize,
 }
@@ -235,13 +221,6 @@ impl LLM for NumberPathWrite {
     }
 }
 
-/// v2 `validateExecutableToolArgs`: a call that decodes but does not satisfy the
-/// tool's declared schema is refused before execution, with the failure as the
-/// model-visible result.
-///
-/// The turn-start snapshot supplies the definition here because the stub host
-/// answers `list_tools` with an empty table — the same shape a host without that
-/// seam produces, which must not silently disable the gate.
 #[tokio::test]
 async fn a_schema_violating_call_is_refused_before_the_tool_runs() {
     let server = Arc::new(RpcServer::new());
@@ -279,6 +258,7 @@ async fn a_schema_violating_call_is_refused_before_the_tool_runs() {
         step: AtomicUsize::new(0),
     };
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-schema-preflight".into(),

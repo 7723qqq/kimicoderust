@@ -18,10 +18,6 @@ struct StepDraft {
     frames: Vec<Value>,
 }
 
-/// A steered follow-up buffered while grouping: it carries the queued prompt's
-/// id (#3906) and lands as a user frame in the current turn's step — v2's
-/// `pendingSteers` (groupTurns.ts:177), where the steer opens no turn of its
-/// own.
 #[derive(Clone)]
 struct ColdSteer {
     text: String,
@@ -33,10 +29,7 @@ struct TurnDraft {
     turn_id: String,
     ordinal: usize,
     prompt: Option<String>,
-    /// The turn's origin as the protocol declares it. A turn opened by an
-    /// injection carries no prompt and reports `other`, matching v2's
-    /// `mapTurnOrigin` default branch — an injected reminder is not a user
-    /// prompt and must not render as one.
+
     origin: Value,
     steps: Vec<StepDraft>,
 }
@@ -84,10 +77,6 @@ impl TurnDraft {
     }
 }
 
-/// Land buffered steers in the last turn's last step — v2's
-/// `flushSteeredLeftovers` (groupTurns.ts:177): create the step when the turn
-/// has none, and a `user`-origin placeholder turn when history holds none yet.
-/// Runs before a new turn opens and at end of history.
 fn flush_steered_leftovers(
     turns: &mut Vec<TurnDraft>,
     next_ordinal: &mut usize,
@@ -135,9 +124,6 @@ pub fn build_items(history: &[LLMMessage]) -> Vec<Value> {
         match message.role.as_str() {
             "system" => continue,
             "user" => {
-                // A steered follow-up carries the queued prompt's id (#3906):
-                // it opens no turn — buffer it (v2 groupTurns.ts:252) and land
-                // it as a user frame at a flush point below.
                 if let Some(prompt_id) = message.prompt_id.as_deref() {
                     pending.push(ColdSteer {
                         text: message.content.clone(),
@@ -145,13 +131,7 @@ pub fn build_items(history: &[LLMMessage]) -> Vec<Value> {
                     });
                     continue;
                 }
-                // A reminder the engine injected is not something the user
-                // typed: v2 marks it `origin.kind === 'injection'` at append
-                // time and its projector maps that to `other`, leaving the
-                // turn without a prompt so no client renders a bubble. The
-                // fork's messages carry no origin, so the `wrapSystemReminder`
-                // envelope distinguishes them (the same classification the
-                // turn loop already uses to keep them out of compaction).
+
                 let is_injection = crate::injection::is_system_reminder(&message.content);
                 let (prompt, origin) = if is_injection {
                     (None, json!({ "kind": "other" }))
@@ -182,9 +162,7 @@ pub fn build_items(history: &[LLMMessage]) -> Vec<Value> {
                     frame_count += 1;
                     format!("{step_id}.f{frame_count}")
                 };
-                // Flush point (a): every assistant message opens a new step,
-                // and buffered steers land at its head before the response
-                // that answered them (v2 groupTurns.ts:349).
+
                 for steer in pending.drain(..) {
                     frames.push(json!({
                         "kind": "text",
@@ -232,51 +210,41 @@ pub fn build_items(history: &[LLMMessage]) -> Vec<Value> {
         }
     }
 
-    // Flush point (c): history ending on a steer still lands it — in the last
-    // turn's last step, or a `user`-origin placeholder turn when none exists
-    // (v2 groupTurns.ts:199).
     flush_steered_leftovers(&mut turns, &mut next_ordinal, &mut pending);
 
     turns.iter().map(TurnDraft::to_value).collect()
 }
 
-/// The cold baseline's turn items on the live wire id axis (upstream
-/// `foldFacts.ts`'s realign pass). `build_items` numbers turns positionally
-/// from 0, but the journal's `turn.prompt` records carry the engine's own
-/// turn ids — the numbering axis the WS live projection already keys off.
-/// Each history turn is matched to its record (in order, by prompt text; the
-/// fork's history carries no `triggerPromptId`), then re-keyed to
-/// `t<wireId>` with `ordinal = wireId`, and the nested step/frame id prefixes
-/// are renamed with it (upstream `renameTurnStep`) — so the REST cold
-/// baseline and the WS live projection agree on every id of the same turn.
 pub fn cold_items(
     store: &SqliteSessionStore,
     session_id: &str,
     history: &[LLMMessage],
 ) -> Vec<Value> {
     let mut items = build_items(history);
-    let Ok(records) = store.turn_prompt_wire_events(session_id) else {
-        return items;
-    };
-    // The journal's numbering axis: (wire turn id, prompt text) in seq order.
-    let axis: Vec<(i64, String)> = records
-        .iter()
-        .filter_map(|record| {
-            let wire_id = record.payload.get("turnId")?.as_i64()?;
-            let text = record
-                .payload
-                .get("input")
-                .and_then(Value::as_array)
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .filter_map(|part| part.get("text").and_then(Value::as_str))
-                        .collect::<String>()
+    let axis = crate::session::wire_journal::turn_prompt_axis(store, session_id)
+        .or_else(|| {
+            let records = store.turn_prompt_wire_events(session_id).ok()?;
+            let axis: Vec<(i64, String)> = records
+                .iter()
+                .filter_map(|record| {
+                    let wire_id = record.payload.get("turnId")?.as_i64()?;
+                    let text = record
+                        .payload
+                        .get("input")
+                        .and_then(Value::as_array)
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                                .collect::<String>()
+                        })
+                        .unwrap_or_default();
+                    Some((wire_id, text))
                 })
-                .unwrap_or_default();
-            Some((wire_id, text))
+                .collect();
+            (!axis.is_empty()).then_some(axis)
         })
-        .collect();
+        .unwrap_or_default();
     if axis.is_empty() {
         return items;
     }
@@ -284,10 +252,6 @@ pub fn cold_items(
     items
 }
 
-/// Re-key each turn to its journal record's wire id (upstream's claim
-/// chain): turns are matched in order by prompt text, each record claimed at
-/// most once. A turn that matches nothing keeps its positional id and pins
-/// that ordinal against renumbering collisions (upstream `keptOrdinals`).
 fn realign_wire_turn_ids(items: &mut [Value], axis: &[(i64, String)]) {
     let mut claimed = vec![false; axis.len()];
     let mut matched: Vec<Option<i64>> = Vec::with_capacity(items.len());
@@ -332,9 +296,6 @@ fn realign_wire_turn_ids(items: &mut [Value], axis: &[(i64, String)]) {
     }
 }
 
-/// Rename a re-keyed turn's nested ids (upstream `renameTurnStep`): step ids
-/// move from `{from}.{n}` to `{to}.{n}`, and frame ids follow their step's
-/// prefix.
 fn rename_nested_ids(turn: &mut Value, from: &str, to: &str) {
     let Some(steps) = turn.get_mut("steps").and_then(Value::as_array_mut) else {
         return;
@@ -366,19 +327,31 @@ fn rename_nested_ids(turn: &mut Value, from: &str, to: &str) {
     }
 }
 
-/// The cold baseline's prompt entities: fold the persisted prompt-lifecycle
-/// journal (`prompt.submitted` / `completed` / `aborted` / `steered`) through
-/// a fresh projector — the same fold the live path runs — so a reconnecting
-/// client sees settled prompts instead of an empty array. `turn.steer` is not
-/// a fold arm: the steer's user frame rides `build_items` above.
-/// `active_wire_turn_id` is the engine's live wire turn number, threaded to
-/// the projector's wedged finalization (upstream #4280): the replay's tail
-/// turn is only wedged when it is not that live one.
 pub fn cold_prompts(
     store: &SqliteSessionStore,
     session_id: &str,
     active_wire_turn_id: Option<i64>,
 ) -> Value {
+    let records = crate::session::wire_journal::restorable_session_records(store, session_id);
+    if !records.is_empty() {
+        let mut projector = project::TranscriptProjector::new();
+        for record in records {
+            let Some(kind) = record.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            if !matches!(
+                kind,
+                "prompt.submitted" | "prompt.completed" | "prompt.aborted" | "prompt.steered"
+            ) {
+                continue;
+            }
+            let at = record.get("time").and_then(Value::as_i64);
+            projector.apply_event_at(&EngineEvent::from_json(record), at);
+        }
+        projector.mark_wedged_turns(active_wire_turn_id);
+        let prompts = projector.snapshot().prompts;
+        return serde_json::to_value(&prompts).unwrap_or(Value::Array(Vec::new()));
+    }
     let Ok(records) = store.prompt_wire_events(session_id) else {
         return Value::Array(Vec::new());
     };
@@ -394,18 +367,40 @@ pub fn cold_prompts(
     serde_json::to_value(&prompts).unwrap_or(Value::Array(Vec::new()))
 }
 
-/// The cold baseline's task entities: fold the persisted task journal through
-/// a fresh projector — the same fold the live path runs — so a reopened
-/// session restores its task list (upstream #3970). The cold snapshot settles
-/// members whose spawning turn is no longer running to `lost` (every loop is
-/// dead after a restart); live members keep their recorded state.
-/// `active_wire_turn_id` threads to the same wedged finalization as
-/// [`cold_prompts`].
 pub fn cold_tasks(
     store: &SqliteSessionStore,
     session_id: &str,
     active_wire_turn_id: Option<i64>,
 ) -> Value {
+    if let Some(records) = crate::session::wire_journal::all_agent_records(store, session_id) {
+        let mut projector = project::TranscriptProjector::new();
+        for record in records {
+            let Some(kind) = record.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            if !matches!(
+                kind,
+                "subagent.spawned"
+                    | "subagent.completed"
+                    | "subagent.failed"
+                    | "task.started"
+                    | "task.terminated"
+                    | "task.output"
+                    | "event.task.created"
+                    | "event.task.completed"
+                    | "event.task.progress"
+                    | "turn.started"
+                    | "turn.ended"
+            ) {
+                continue;
+            }
+            let at = record.get("time").and_then(Value::as_i64);
+            projector.apply_event_at(&EngineEvent::from_json(cold_fold_payload(record)), at);
+        }
+        projector.mark_wedged_turns(active_wire_turn_id);
+        let tasks = projector.cold_snapshot_tasks();
+        return serde_json::to_value(&tasks).unwrap_or(Value::Array(Vec::new()));
+    }
     let Ok(records) = store.task_wire_events(session_id) else {
         return Value::Array(Vec::new());
     };
@@ -421,20 +416,8 @@ pub fn cold_tasks(
     serde_json::to_value(&tasks).unwrap_or(Value::Array(Vec::new()))
 }
 
-/// The agent id a journal turn belongs to: a turn in the wire journal is the
-/// main agent's, the same id the live `EngineEvent` turn events carry.
 const MAIN_AGENT_ID: &str = "main";
 
-/// The journal's own turn-event shape, normalized into the typed event the
-/// projector folds.
-///
-/// The turn events on the wire come from `TurnEvent` (`turnId`, no
-/// `agent_id`), not from the `EngineEvent` the live projector receives, so
-/// feeding them to `from_json` verbatim left them `Custom` — the fold then never
-/// saw a turn, `spawning_turns` stayed empty, and every member looked like it
-/// had outlived its spawning turn. The main agent's id is the one the live
-/// `EngineEvent::TurnStarted` / `TurnEnded` carry, and a journal turn can only
-/// be the main agent's.
 fn cold_fold_payload(payload: Value) -> Value {
     let mut value = payload;
     let Some(kind) = value.get("type").and_then(Value::as_str) else {
@@ -445,12 +428,6 @@ fn cold_fold_payload(payload: Value) -> Value {
     }
     if let Some(object) = value.as_object_mut() {
         if let Some(turn_id) = object.remove("turnId") {
-            // The journal's `turnId` is a number (v2 `turnId: z.number()`),
-            // while the typed turn events carry `turn_id: String` — the
-            // native `turn-<n>` / `subturn-<n>` form. Normalize rather than
-            // move it verbatim: a number that does not fit the field leaves
-            // the payload as `Custom`, the fold never sees a turn, and every
-            // subagent member then looks like it outlived its spawning turn.
             let normalized = match turn_id {
                 Value::String(text) => Value::String(text),
                 other => Value::String(other.to_string()),
@@ -669,16 +646,12 @@ mod tests {
         }
     }
 
-    /// A steered follow-up: the queued prompt's id rides the persisted
-    /// message (#3906) instead of opening a turn of its own.
     fn steer(text: &str, prompt_id: &str) -> LLMMessage {
         let mut message = LLMMessage::new("user", text);
         message.prompt_id = Some(prompt_id.to_string());
         message
     }
 
-    /// Flush point (a): the steer lands at the head of the step that answers
-    /// it — v2's `pendingNotificationFrames` drain (groupTurns.ts:349).
     #[test]
     fn a_steered_follow_up_opens_no_turn_and_lands_at_the_step_head() {
         let history = vec![
@@ -699,13 +672,10 @@ mod tests {
         assert_eq!(frames[0]["origin"]["kind"], "user");
         assert_eq!(frames[1]["role"], "assistant");
         assert_eq!(frames[1]["text"], "on it");
-        // The turn keeps its own prompt: the steer never rewrites it.
+
         assert_eq!(items[0]["prompt"], "first");
     }
 
-    /// Flush point (b): a new user turn flushes the steers left behind into
-    /// the previous turn's last step — v2 `startTurn` →
-    /// `flushSteeredLeftovers` (groupTurns.ts:177).
     #[test]
     fn a_new_turn_flushes_the_steers_left_behind() {
         let history = vec![
@@ -729,9 +699,6 @@ mod tests {
         assert_eq!(items[1]["prompt"], "second");
     }
 
-    /// Flush point (b) with no turn to flush into: v2 opens a `user`-origin
-    /// placeholder (`turn ?? startTurn({kind:'user'})`, groupTurns.ts:199) so
-    /// the steer still renders inside a turn.
     #[test]
     fn a_steer_before_any_turn_opens_a_user_placeholder() {
         let history = vec![steer("early", "prompt-5"), user("hello")];
@@ -752,7 +719,6 @@ mod tests {
         assert_eq!(items[1]["prompt"], "hello");
     }
 
-    /// Flush point (c): history ending on a steer still lands it.
     #[test]
     fn a_steer_at_the_end_of_history_lands_in_the_last_step() {
         let history = vec![
@@ -771,8 +737,6 @@ mod tests {
         assert_eq!(last["promptIds"][0], "prompt-6");
     }
 
-    /// A steer with no turn at all still renders: the placeholder the flush
-    /// opens carries a `user` origin, matching `startTurn({kind:'user'})`.
     #[test]
     fn history_of_only_a_steer_opens_a_user_turn() {
         let items = build_items(&[steer("just a steer", "prompt-7")]);
@@ -783,9 +747,6 @@ mod tests {
         assert_eq!(frames[0]["text"], "just a steer");
     }
 
-    /// `cold_prompts` folds the persisted prompt-lifecycle journal through
-    /// the live fold: submitted → aborted stays aborted, and unrelated event
-    /// types (including `turn.steer`) never reach the fold.
     #[test]
     fn cold_prompts_folds_the_persisted_lifecycle_journal() {
         use crate::native::event_store::RawWireEvent;
@@ -844,15 +805,10 @@ mod tests {
         assert_eq!(prompts[0]["finishedAt"], "2026-09-22T00:00:03Z");
         assert_eq!(prompts[0]["createdAt"], "2026-09-22T00:00:00Z");
 
-        // A session with no journal yields an empty array, not null.
         store.create_session("sess-cold-empty", None).unwrap();
         assert_eq!(cold_prompts(&store, "sess-cold-empty", None), json!([]));
     }
 
-    /// `cold_tasks` restores the task list from the persisted journal
-    /// (#3970): the spawn→register→complete chain folds into one adopted
-    /// task, and an unfinished member whose spawning turn ended settles to
-    /// `lost`.
     #[test]
     fn cold_tasks_restores_tasks_and_settles_lost_members() {
         use crate::native::event_store::RawWireEvent;
@@ -879,12 +835,9 @@ mod tests {
         };
         append(
             "turn.started",
-            // The journal's own shape (`TurnEvent::Started`: `turnId`, no
-            // `agent_id`), not the live `EngineEvent` shape — the fold has to
-            // read what the writer actually persists.
             json!({ "type": "turn.started", "turnId": 1, "origin": Value::Null }),
         );
-        // Tower-worker shape: spawn first (agent-keyed), registration after.
+
         append(
             "subagent.spawned",
             json!({ "type": "subagent.spawned", "subagent_id": "agent-7", "run_in_background": true }),
@@ -911,14 +864,13 @@ mod tests {
                 "usage": { "input_tokens": 7, "output_tokens": 2, "total_tokens": 9 }
             }),
         );
-        // A second member whose spawning turn ended with no completion.
+
         append(
             "subagent.spawned",
             json!({ "type": "subagent.spawned", "subagent_id": "agent-8" }),
         );
         append(
             "turn.ended",
-            // Same journal shape as above: `turnId`, no `agent_id`.
             json!({ "type": "turn.ended", "turnId": 1, "reason": "completed" }),
         );
 
@@ -931,15 +883,9 @@ mod tests {
         assert_eq!(adopted["agentId"], "agent-7");
         assert_eq!(adopted["usage"]["inputOther"], 7);
 
-        // The turn was read at all: without the normalization this member would
-        // have no recorded spawning turn, and the fold would have had to guess
-        // it was lost. `agent-8` really did lose contact with a turn that ended.
         let lost = tasks.iter().find(|t| t["taskId"] == "agent-8").unwrap();
         assert_eq!(lost["state"], "lost");
 
-        // A member whose spawning turn is the LIVE active one keeps its
-        // recorded state: the route threads `active_wire_turn_id` through
-        // (upstream #4280's tail exception), so turn 2 is not wedged here.
         store
             .create_session("sess-cold-running", Some("Running"))
             .unwrap();
@@ -973,9 +919,7 @@ mod tests {
             running[0]["state"], "running",
             "a member of a still-running turn is not lost"
         );
-        // With nothing live (`None`, the restart case) the same unclosed turn
-        // is wedged instead — its loop is provably dead — and the member
-        // settles to `lost` (upstream #4280).
+
         let wedged = cold_tasks(&store, "sess-cold-running", None);
         let wedged = wedged.as_array().expect("tasks serialize to an array");
         assert_eq!(
@@ -983,18 +927,12 @@ mod tests {
             "a member of a wedged (dead, unclosed) turn settles to lost"
         );
 
-        // A session with no journal yields an empty array.
         store.create_session("sess-cold-tasks-empty", None).unwrap();
         assert_eq!(cold_tasks(&store, "sess-cold-tasks-empty", None), json!([]));
     }
 
     #[test]
     fn injected_reminders_are_not_user_prompts() {
-        // v2 appends reminders with `origin.kind === 'injection'` and its
-        // projector maps that to `other`, leaving the turn without a prompt —
-        // so no client renders a bubble for text the user never typed. The
-        // fork's messages carry no origin, so the `<system-reminder>` envelope
-        // is what distinguishes them here.
         let history = vec![
             user("hello"),
             assistant("hi", Vec::new()),
@@ -1015,8 +953,7 @@ mod tests {
             items[1].get("prompt").is_none(),
             "an injected reminder must not carry a prompt"
         );
-        // The turn itself still exists: the reminder accompanies a real turn
-        // rather than replacing it, matching v2's per-turn injection.
+
         assert_eq!(items[1]["steps"].as_array().unwrap().len(), 1);
     }
 
@@ -1239,5 +1176,147 @@ mod tests {
         let (cold, live) = dual_path_fixture(&[(4, true), (8, false)]);
         assert_eq!(live.last().unwrap()["state"], "running");
         assert_eq!(wire_axis(&cold), wire_axis(&live));
+    }
+
+    #[test]
+    fn cold_prompts_reads_prompt_records_from_the_journal() {
+        use crate::events::EngineEvent;
+        use crate::session::sqlite_store::SqliteSessionStore;
+        use crate::session::wire_journal::WireJournal;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(SqliteSessionStore::open(dir.path().join("sessions.db")).unwrap());
+        let workspace = store
+            .create_workspace("/work/prompt-journal", None)
+            .unwrap();
+        store
+            .create_session_with_workspace("sess-prompt-journal", None, Some(&workspace.id))
+            .unwrap();
+        let journal = WireJournal::new(dir.path(), store.clone());
+        journal.append(
+            "sess-prompt-journal",
+            &EngineEvent::Custom(json!({
+                "type": "prompt.submitted",
+                "promptId": "p-1",
+                "userMessageId": "m-1",
+                "status": "running",
+                "content": [{ "type": "text", "text": "hi" }],
+                "createdAt": "2026-01-01T00:00:00Z",
+            })),
+            1000,
+        );
+
+        let prompts = cold_prompts(&store, "sess-prompt-journal", None);
+        let prompts = prompts.as_array().unwrap();
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0]["promptId"], "p-1");
+    }
+
+    #[test]
+    fn cold_tasks_reads_task_records_from_the_journal() {
+        use crate::events::EngineEvent;
+        use crate::session::sqlite_store::SqliteSessionStore;
+        use crate::session::wire_journal::WireJournal;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(SqliteSessionStore::open(dir.path().join("sessions.db")).unwrap());
+        let workspace = store.create_workspace("/work/task-journal", None).unwrap();
+        store
+            .create_session_with_workspace("sess-task-journal", None, Some(&workspace.id))
+            .unwrap();
+        let journal = WireJournal::new(dir.path(), store.clone());
+        for (time, event) in [
+            (
+                1_000,
+                json!({
+                    "type": "task.started",
+                    "info": {
+                        "taskId": "task-1",
+                        "kind": "process",
+                        "status": "running",
+                        "description": "job",
+                        "startedAt": 1_000,
+                        "endedAt": null,
+                    },
+                }),
+            ),
+            (
+                1_001,
+                json!({
+                    "type": "task.output",
+                    "taskId": "task-1",
+                    "chunk": "hello\n",
+                    "outputSizeBytes": 6,
+                }),
+            ),
+            (
+                1_002,
+                json!({
+                    "type": "task.terminated",
+                    "info": {
+                        "taskId": "task-1",
+                        "kind": "process",
+                        "status": "completed",
+                        "description": "job",
+                        "startedAt": 1_000,
+                        "endedAt": 1_002,
+                    },
+                    "outputTail": "hello\n",
+                }),
+            ),
+        ] {
+            journal.append("sess-task-journal", &EngineEvent::Custom(event), time);
+        }
+
+        let tasks = cold_tasks(&store, "sess-task-journal", None);
+        let tasks = tasks.as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "{tasks:?}");
+        assert_eq!(tasks[0]["taskId"], "task-1");
+        assert_eq!(tasks[0]["kind"], "shell");
+        assert_eq!(tasks[0]["state"], "completed");
+        assert_eq!(tasks[0]["description"], "job");
+        assert_eq!(tasks[0]["outputTail"], "hello\n");
+    }
+
+    #[test]
+    fn cold_items_takes_the_turn_axis_from_the_journal_before_sqlite() {
+        use crate::events::EngineEvent;
+        use crate::session::sqlite_store::SqliteSessionStore;
+        use crate::session::wire_journal::WireJournal;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(SqliteSessionStore::open(dir.path().join("sessions.db")).unwrap());
+        let workspace = store.create_workspace("/work/journal-axis", None).unwrap();
+        store
+            .create_session_with_workspace("sess-journal-axis", None, Some(&workspace.id))
+            .unwrap();
+        let journal = WireJournal::new(dir.path(), store.clone());
+        for (turn_id, prompt) in [(3i64, "first"), (7i64, "second")] {
+            journal.append(
+                "sess-journal-axis",
+                &EngineEvent::Custom(json!({
+                    "type": "turn.prompt",
+                    "turnId": turn_id,
+                    "input": [{ "type": "text", "text": prompt }],
+                    "origin": { "kind": "user" },
+                })),
+                turn_id * 10,
+            );
+        }
+
+        let history = store.load_session_history("sess-journal-axis").unwrap();
+        assert_eq!(history.len(), 2, "{history:?}");
+        assert_eq!(
+            store.latest_wire_event_seq("sess-journal-axis").unwrap(),
+            0,
+            "the cold path must not need sqlite wire rows"
+        );
+        let items = cold_items(&store, "sess-journal-axis", &history);
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0]["turnId"], "t3");
+        assert_eq!(items[1]["turnId"], "t7");
     }
 }

@@ -1,23 +1,3 @@
-//! Agent activity phase tracking — a Rust port of the legacy kap-server
-//! activity state machine (the type upstream now calls
-//! `LegacyActivitySnapshot`) projected through `toLegacyPhase` into the
-//! `agent.status.updated` `phase` payload.
-//!
-//! One [`ActivityTracker`] folds every lifecycle signal a session produces —
-//! turn boundaries, LLM step boundaries, streaming deltas, tool executions,
-//! retry backoffs, pending interactions — into seven legacy phases (`idle` /
-//! `running` / `tool_call` / `retrying` / `awaiting_approval` /
-//! `interrupted` / `ended`) plus a fork-only `streaming` (upstream dropped it
-//! in #3646; the fork kept the finer granularity) and publishes each
-//! transition as a phase-only status event. Unlike the status snapshot (see
-//! [`crate::server::engine::ServerEngine::publish_status_updated`]) phase
-//! events carry only the phase, and they are never deduped: the wire marks
-//! `agent.status.updated` volatile precisely because these are live signals.
-//!
-//! Field spellings follow `toLegacyPhase` verbatim: snake_case `kind` values
-//! (`tool_call`, `awaiting_approval`, …) with camelCase payload fields
-//! (`turnId`, `stepId`, `failedAttempt`, `delayMs`, …).
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,11 +16,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// The phase's series identity: everything but the timestamps (`since`/`at`).
-/// Two phases with the same series are the same ongoing activity (`since` just
-/// moved) and must not republish; a genuinely new activity differs in kind,
-/// stream, turn, step or identity. Compared field-by-field — serializing the
-/// phase to JSON here would allocate several times per streamed token.
 fn same_series(a: &AgentPhase, b: &AgentPhase) -> bool {
     match (a, b) {
         (AgentPhase::Idle, AgentPhase::Idle) => true,
@@ -176,7 +151,6 @@ fn same_series(a: &AgentPhase, b: &AgentPhase) -> bool {
     }
 }
 
-/// What the model is streaming right now (v2 `turn.stream`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamKind {
@@ -186,8 +160,6 @@ pub enum StreamKind {
 }
 
 impl StreamKind {
-    /// Map one `llm.delta` content-part type onto the stream it belongs to.
-    /// `None` parts (images, attachments) do not move the phase.
     fn from_part_kind(part_kind: &str) -> Option<Self> {
         match part_kind {
             "text" => Some(Self::Assistant),
@@ -198,7 +170,6 @@ impl StreamKind {
     }
 }
 
-/// Why a turn stopped before completing (v2 `interrupted.reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterruptReason {
@@ -207,7 +178,6 @@ pub enum InterruptReason {
     Error,
 }
 
-/// The blocking interaction (v2 `turn.pendingApprovals` entry).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRef {
@@ -215,9 +185,6 @@ pub struct ApprovalRef {
     pub tool_call_id: String,
 }
 
-/// The v2 `AgentPhase` wire shape (kap-server `legacyStatus.ts`): snake_case
-/// `kind` values, camelCase payload fields. This serde version cannot
-/// `rename_all` a variant's fields, so the camelCase spellings are explicit.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentPhase {
@@ -298,8 +265,6 @@ pub enum AgentPhase {
     },
 }
 
-/// The phase's turn id, `None` while idle: the `activeTurnId` of v2's
-/// `loop.snapshot()` (`loopService.ts:519-553`).
 pub fn phase_turn_id(phase: &AgentPhase) -> Option<u64> {
     match phase {
         AgentPhase::Idle => None,
@@ -313,7 +278,6 @@ pub fn phase_turn_id(phase: &AgentPhase) -> Option<u64> {
     }
 }
 
-/// The instant the phase began, when it carries one.
 pub fn phase_since(phase: &AgentPhase) -> Option<u64> {
     match phase {
         AgentPhase::Idle => None,
@@ -326,21 +290,15 @@ pub fn phase_since(phase: &AgentPhase) -> Option<u64> {
     }
 }
 
-/// Whether the loop is waiting on a client answer (an approval or a question).
 pub fn phase_has_pending_requests(phase: &AgentPhase) -> bool {
     matches!(phase, AgentPhase::AwaitingApproval { .. })
 }
 
-/// One session's phase fold. Cheap to hold behind an [`Arc`]; every method
-/// publishes the transition it applies, so callers stay oblivious of the
-/// wire.
 pub struct ActivityTracker {
     session_id: String,
     hub: Arc<EventHub>,
     state: Mutex<AgentPhase>,
-    /// Tool rounds this turn has entered — the `step` v2's activity machine
-    /// carried. The engine has no per-step event at the fold points, so the
-    /// count advances on each tool execution instead.
+
     step: AtomicU32,
     turn_id: AtomicU32,
     turn_started_at: Mutex<Option<Instant>>,
@@ -358,7 +316,6 @@ impl ActivityTracker {
         }
     }
 
-    /// The phase right now, for status snapshots that want to carry it.
     pub fn snapshot(&self) -> AgentPhase {
         self.state
             .lock()
@@ -366,18 +323,10 @@ impl ActivityTracker {
             .clone()
     }
 
-    /// The turn's step counter (each tool round advances it — see `step`).
-    /// The phase carries the same number while it is live; this accessor is
-    /// for snapshots that need it even when the phase has already moved to
-    /// `ended`/`interrupted`.
     pub fn turn_step(&self) -> u32 {
         self.step.load(Ordering::Relaxed)
     }
 
-    /// When the current (or latest) turn started, in epoch millis — v2
-    /// `LoopSnapshot.turn.since` is the active turn's `startedAt`, not the
-    /// current phase's start. Derived from the monotonic `Instant` so the
-    /// wall-clock duration and this stamp cannot disagree.
     pub fn turn_started_ms(&self) -> Option<u64> {
         let started = (*self
             .turn_started_at
@@ -386,11 +335,6 @@ impl ActivityTracker {
         Some(now_ms().saturating_sub(started.elapsed().as_millis() as u64))
     }
 
-    /// Transition and publish. Phases in the same *series* — the same kind
-    /// with the same identity, only the timestamp advancing (an assistant
-    /// delta flood, a repeated step boundary) — are silent, mirroring the
-    /// v2 activity machine that updates `since` in place instead of
-    /// re-emitting.
     fn transition(&self, next: AgentPhase) {
         {
             let mut state = self
@@ -419,19 +363,12 @@ impl ActivityTracker {
             })));
     }
 
-    /// Publish one engine → host lifecycle record (`turn.prompt` /
-    /// `turn.started` / `turn.cancel` / `turn.ended`) on the session lane.
-    /// Without this the records only ever reached a host that the standalone
-    /// server does not have, so `turn.started` / `turn.ended` had no emitter
-    /// on the WebSocket at all. The hub's persister is what makes the
-    /// durable ones durable.
     pub fn publish_turn_event(&self, payload: serde_json::Value) {
         self.hub
             .bus_for(&self.session_id)
             .publish(&EngineEvent::Custom(payload));
     }
 
-    /// A turn started: `running` at step 0, the wall clock for `ended`.
     pub fn turn_started(&self, turn_number: u32) {
         self.turn_id.store(turn_number, Ordering::Relaxed);
         self.step.store(0, Ordering::Relaxed);
@@ -447,9 +384,6 @@ impl ActivityTracker {
         });
     }
 
-    /// One `llm.delta`: the model is streaming. The part kind selects the
-    /// `stream` (text → assistant, think → thinking, tool_call → tool_call);
-    /// non-content parts never move the phase.
     pub fn llm_delta(&self, part: &Value) {
         let Some(part_kind) = part.get("type").and_then(|v| v.as_str()) else {
             return;
@@ -466,8 +400,6 @@ impl ActivityTracker {
         });
     }
 
-    /// An LLM step boundary: back to `running` (the previous step's phase —
-    /// streaming or tool_call — is over). Also folds `llm.step.end`.
     pub fn step_begin(&self) {
         self.transition(AgentPhase::Running {
             turn_id: u64::from(self.turn_id.load(Ordering::Relaxed)),
@@ -477,8 +409,6 @@ impl ActivityTracker {
         });
     }
 
-    /// A tool execution started: `tool_call` with the call's identity, one
-    /// step advanced (each tool round is a step at the fold points).
     pub fn tool_started(&self, tool_call_id: &str, name: &str) {
         let step = self.step.fetch_add(1, Ordering::Relaxed) + 1;
         self.transition(AgentPhase::ToolCall {
@@ -491,7 +421,6 @@ impl ActivityTracker {
         });
     }
 
-    /// A retryable LLM error entered backoff (v2 `TurnStepRetrying`).
     pub fn retrying(
         &self,
         failed_attempt: u32,
@@ -513,7 +442,6 @@ impl ActivityTracker {
         });
     }
 
-    /// An approval or question started blocking the turn.
     pub fn awaiting(&self, approval_id: &str, tool_call_id: &str) {
         self.transition(AgentPhase::AwaitingApproval {
             turn_id: u64::from(self.turn_id.load(Ordering::Relaxed)),
@@ -526,9 +454,6 @@ impl ActivityTracker {
         });
     }
 
-    /// The blocking interaction resolved: the turn resumes (`running`).
-    /// Silently ignored when nothing was pending — a resolved interaction
-    /// after a turn ended must not resurrect a running phase.
     pub fn interaction_resolved(&self) {
         let matches = matches!(
             *self
@@ -547,8 +472,6 @@ impl ActivityTracker {
         }
     }
 
-    /// The turn ended cleanly (v2 `lastTurn` fold: `ended` with the reason
-    /// and the wall-clock duration).
     pub fn turn_ended(&self, reason: &str) {
         let duration_ms = self
             .turn_started_at
@@ -563,7 +486,6 @@ impl ActivityTracker {
         });
     }
 
-    /// The turn stopped before completing (abort, step budget, error).
     pub fn interrupted(&self, reason: InterruptReason, message: Option<String>) {
         self.transition(AgentPhase::Interrupted {
             turn_id: u64::from(self.turn_id.load(Ordering::Relaxed)),
@@ -575,26 +497,18 @@ impl ActivityTracker {
     }
 }
 
-/// One interaction lifecycle signal for the activity tracker.
 #[derive(Debug, Clone)]
 pub enum ActivitySignal {
-    /// An approval / question started blocking the session.
     Pending {
         approval_id: String,
         tool_call_id: String,
     },
-    /// The blocking interaction resolved (answered, dismissed, or approved).
+
     Resolved,
 }
 
-/// The notifier signature interaction blocks fire through (engine-installed;
-/// see [`ActivityRegistry`]).
 pub type ActivityNotifier = Arc<dyn Fn(&str, ActivitySignal) + Send + Sync>;
 
-/// Per-session trackers, shared by the engine (turn boundaries, callback
-/// decoration) and the interaction manager (approval/question blocks).
-/// Both sides hold an [`Arc<ActivityRegistry>`]; the registry only points at
-/// the hub, so there is no ownership cycle.
 pub struct ActivityRegistry {
     hub: Arc<EventHub>,
     sessions: Mutex<HashMap<String, std::sync::Arc<ActivityTracker>>>,
@@ -608,7 +522,6 @@ impl ActivityRegistry {
         }
     }
 
-    /// The session's tracker, created on first use.
     pub fn tracker(
         self: &std::sync::Arc<Self>,
         session_id: &str,
@@ -638,14 +551,6 @@ use crate::rpc::types::{
 };
 use crate::turn_loop::types::{GoalContext, LLMMessage};
 
-/// A [`HostCallbacks`] decorator that folds the turn's lifecycle signals
-/// into the session's [`ActivityTracker`] while forwarding everything
-/// untouched:
-///
-/// - `llm.delta` events → `streaming` (the part kind selects the stream);
-/// - `llm.step.begin` events → `running` (the previous step's phase ended);
-/// - `execute_tool` → `tool_call` (the execution the model asked for);
-/// - `TurnStepRetrying` telemetry → `retrying`.
 pub struct ActivityCallbacks {
     pub inner: Arc<dyn HostCallbacks>,
     pub tracker: Arc<ActivityTracker>,
@@ -760,8 +665,6 @@ impl HostCallbacks for ActivityCallbacks {
     }
 
     fn turn_event(&self, event: crate::turn_events::TurnEvent) {
-        // Structurally infallible (every field is already JSON), but a
-        // failure must not strand the record silently.
         if let Ok(payload) = serde_json::to_value(&event) {
             self.tracker.publish_turn_event(payload);
         }
@@ -794,8 +697,6 @@ impl HostCallbacks for ActivityCallbacks {
 mod tests {
     use super::*;
 
-    /// A bound event drain: the hub's subscriber queue would otherwise hang
-    /// the suite on a regression that publishes one event too few.
     async fn next_event(sub: &mut crate::server::hub::WsSubscription) -> Value {
         let event = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
             .await
@@ -804,7 +705,6 @@ mod tests {
         serde_json::to_value(&event.event).unwrap()
     }
 
-    /// A host stand-in that only records the lifecycle records it receives.
     #[derive(Default)]
     struct RecordingCallbacks {
         turn_events: std::sync::Mutex<Vec<crate::turn_events::TurnEvent>>,
@@ -842,9 +742,6 @@ mod tests {
 
     #[tokio::test]
     async fn turn_lifecycle_records_reach_the_wire() {
-        // The daemon has no host to forward `host/turn_event` to, so the
-        // callbacks layer is what puts the records on the session lane —
-        // otherwise `turn.started` / `turn.ended` have no emitter at all.
         let hub = Arc::new(EventHub::new());
         let tracker = Arc::new(ActivityTracker::new("sess-turn".into(), hub.clone()));
         let mut sub = hub.attach();
@@ -879,7 +776,6 @@ mod tests {
         assert_eq!(ended["type"], "turn.ended");
         assert_eq!(ended["reason"], "completed");
 
-        // The host-facing seam still gets them.
         assert_eq!(
             inner
                 .turn_events
@@ -944,10 +840,10 @@ mod tests {
         let mut sub = hub.attach();
 
         tracker.llm_delta(&serde_json::json!({ "type": "text", "text": "a" }));
-        // No turn started: a delta still moves idle → streaming once…
+
         let first = next_event(&mut sub).await;
         assert_eq!(first["phase"]["kind"], "streaming");
-        // …and every further assistant delta keeps the same phase.
+
         tracker.llm_delta(&serde_json::json!({ "type": "text", "text": "b" }));
         tracker.llm_delta(&serde_json::json!({ "type": "text", "text": "c" }));
         let quiet = tokio::time::timeout(std::time::Duration::from_millis(50), sub.recv()).await;
@@ -960,13 +856,11 @@ mod tests {
         let tracker = ActivityTracker::new("sess-still".into(), hub.clone());
         let mut sub = hub.attach();
 
-        // Image / unknown parts never select a stream.
         tracker.llm_delta(&serde_json::json!({ "type": "image", "mediaType": "image/png" }));
         tracker.interaction_resolved();
         let quiet = tokio::time::timeout(std::time::Duration::from_millis(50), sub.recv()).await;
         assert!(quiet.is_err(), "the tracker must stay idle");
 
-        // An interrupted turn reports the reason and the message.
         tracker.interrupted(
             InterruptReason::MaxSteps,
             Some("max_steps budget exhausted".into()),

@@ -1,26 +1,10 @@
-//! Detached file/app launching for the `fs:open`, `fs:reveal` and `fs:open-in`
-//! routes.
-//!
-//! Port of the retired `kap-server/src/lib/fileLaunch.ts` (MIT): resolve the
-//! user's editor from the environment, otherwise fall back to the platform
-//! opener (`open` / `cmd start` / `xdg-open`), and spawn it detached so the
-//! server does not wait on the child.
-//!
-//! The previous Rust handlers discarded the resolved path and returned
-//! `{"opened": true}` without launching anything — a fake success the web UI
-//! surfaced as "file opened" while nothing happened. This module does the
-//! actual launch and reports the error when it fails.
-
 use std::path::Path;
 use std::process::Command;
 
-/// One app the `fs:open-in` route can target (v2 `OpenInAppId`).
 pub const OPEN_IN_APP_IDS: [&str; 5] = ["finder", "cursor", "vscode", "iterm", "terminal"];
 
-/// Editor env vars v2 honored, in precedence order.
 const EDITOR_ENV_VARS: [&str; 3] = ["KIMI_CODE_EDITOR", "VISUAL", "EDITOR"];
 
-/// Editors that accept a `path:line` target.
 fn supports_line_target(editor: &str) -> bool {
     let lower = editor.to_ascii_lowercase();
     lower.contains("code")
@@ -30,7 +14,6 @@ fn supports_line_target(editor: &str) -> bool {
         || lower.contains("subl")
 }
 
-/// Split a command line into executable and arguments, respecting quotes.
 fn split_command_line(cmd: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -60,7 +43,6 @@ fn split_command_line(cmd: &str) -> Vec<String> {
     tokens
 }
 
-/// Resolve the editor command from the environment, if one is set.
 fn resolve_editor_command() -> Option<String> {
     for key in EDITOR_ENV_VARS {
         if let Ok(value) = std::env::var(key) {
@@ -93,17 +75,13 @@ fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Explorer's select-item argument (v2 `explorerSelectArg`): `/select,<path>`
-/// with backslashes, passed verbatim because explorer parses it itself.
 fn explorer_select_arg(path: &Path) -> String {
     format!("/select,{}", path.display())
 }
 
-/// Launch a detached child. Returns the OS error string on failure.
 fn launch_detached(program: &str, args: &[String]) -> Result<(), String> {
     #[cfg(test)]
     {
-        // Avoid popping up actual GUI editor/file manager windows during test runs.
         let _ = (program, args);
         Ok(())
     }
@@ -122,8 +100,6 @@ fn launch_detached(program: &str, args: &[String]) -> Result<(), String> {
     }
 }
 
-/// `fs:open`: open the file in the user's editor, or the platform default.
-/// `line` is appended as `path:line` for editors that understand it.
 pub fn open_file(absolute: &Path, line: Option<u64>) -> Result<(), String> {
     if let Some(editor) = resolve_editor_command() {
         let mut tokens = split_command_line(&editor);
@@ -149,7 +125,6 @@ pub fn open_file(absolute: &Path, line: Option<u64>) -> Result<(), String> {
     }
 }
 
-/// `fs:reveal`: select the file in the platform file manager.
 pub fn reveal_file(absolute: &Path) -> Result<(), String> {
     let path = absolute.display().to_string();
     if cfg!(target_os = "macos") {
@@ -167,8 +142,6 @@ pub fn reveal_file(absolute: &Path) -> Result<(), String> {
     }
 }
 
-/// Whether an `fs:open-in` app id is usable on this machine (v2
-/// `getAvailableOpenInApps`).
 pub fn is_open_in_app_available(app_id: &str) -> bool {
     match app_id {
         "finder" | "terminal" => cfg!(target_os = "macos"),
@@ -186,7 +159,6 @@ pub fn is_open_in_app_available(app_id: &str) -> bool {
     }
 }
 
-/// `fs:open-in`: open the path in a specific app.
 pub fn open_in_app(app_id: &str, absolute: &Path, line: Option<u64>) -> Result<(), String> {
     let path = absolute.display().to_string();
     match app_id {
@@ -230,9 +202,6 @@ mod tests {
 
     #[test]
     fn open_missing_file_reports_launch_or_ok() {
-        // Launching a platform opener with a nonexistent path either fails
-        // (no opener installed) or succeeds in spawning. Both are acceptable;
-        // the bug being guarded is returning success without spawning anything.
         let _ = open_file(Path::new("/definitely/not/here.txt"), None);
     }
 

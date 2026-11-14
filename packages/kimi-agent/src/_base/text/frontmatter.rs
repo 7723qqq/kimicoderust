@@ -5,14 +5,14 @@ use serde_json::Value;
 
 const FENCE: &str = "---";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct FrontmatterError {
     message: String,
-    pub cause: Option<String>,
+    pub cause: Option<Box<dyn Error + Send + Sync>>,
 }
 
 impl FrontmatterError {
-    pub fn new(message: impl Into<String>, cause: Option<String>) -> Self {
+    pub fn new(message: impl Into<String>, cause: Option<Box<dyn Error + Send + Sync>>) -> Self {
         Self {
             message: message.into(),
             cause,
@@ -65,8 +65,12 @@ pub fn parse_frontmatter(text: &str) -> Result<Frontmatter, FrontmatterError> {
             body,
         });
     }
-    let parsed: Value = serde_yaml::from_str(&yaml_text)
-        .map_err(|error| FrontmatterError::new(error.to_string(), Some(error.to_string())))?;
+    let parsed: Value = serde_yaml::from_str(&yaml_text).map_err(|error| {
+        FrontmatterError::new(
+            error.to_string(),
+            Some(Box::new(error) as Box<dyn Error + Send + Sync>),
+        )
+    })?;
     if parsed.is_null() {
         return Ok(Frontmatter {
             data: Value::Object(serde_json::Map::new()),

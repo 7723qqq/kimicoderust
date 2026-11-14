@@ -722,6 +722,7 @@ impl McpManager {
             name = name
         );
         let input_schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
             "type": "object",
             "properties": {},
             "additionalProperties": false
@@ -748,6 +749,16 @@ impl McpManager {
                 ToolDisclosure::Inline
             },
         });
+    }
+
+    pub async fn authenticate_tool_description(&self, qualified: &str) -> Option<String> {
+        let servers = self.servers.read().await;
+        servers.iter().find_map(|(name, state)| {
+            (state.status == "needs-auth"
+                && crate::native::tool_naming::qualify_mcp_tool_name(name, "authenticate")
+                    == qualified)
+                .then(|| format!("Authenticating {name}"))
+        })
     }
 
     pub async fn mark_needs_auth(
@@ -1810,7 +1821,7 @@ impl McpManager {
                 state.status = "needs-auth".into();
                 state.retry_at_ms = None;
                 state.retry_streak = 0;
-            } else if error.is_permanent() {
+            } else if is_permanent_failure(&recipe, error) {
                 state.status = "failed".into();
                 state.retry_at_ms = None;
                 state.retry_streak = 0;
@@ -2171,6 +2182,40 @@ fn next_failure_state(
 
 fn needs_auth_hint(name: &str) -> String {
     LocalizedText::with_params("engine.mcp.needsAuthHint", i18n_params!["name" => name]).render()
+}
+
+/// v2 `hasStaticMcpCredentials`: a remote server carrying its own bearer token or
+/// headers authenticates by static credentials, so an auth rejection is
+/// `auth-static` rather than `auth-oauth`.
+fn has_static_credentials(recipe: &McpServerRecipe) -> bool {
+    match recipe {
+        McpServerRecipe::Sse {
+            headers,
+            bearer_token_env_var,
+            ..
+        }
+        | McpServerRecipe::Http {
+            headers,
+            bearer_token_env_var,
+            ..
+        } => bearer_token_env_var.is_some() || !headers.is_empty(),
+        _ => false,
+    }
+}
+
+/// v2 `ConnectionManager.failureTarget`: `config` / `protocol` / `auth-static`
+/// fail outright, an `auth-oauth` rejection without an OAuth service is retried
+/// (or failed when the retry policy is off), everything else follows the error's
+/// own permanence. The `needsAuth` arm is handled by [`should_mark_needs_auth`]
+/// before this is consulted.
+fn is_permanent_failure(recipe: &McpServerRecipe, error: &McpError) -> bool {
+    if matches!(error, McpError::Config(_) | McpError::Protocol(_)) {
+        return true;
+    }
+    if error.is_auth_rejection() {
+        return has_static_credentials(recipe);
+    }
+    error.is_permanent()
 }
 
 fn should_mark_needs_auth(

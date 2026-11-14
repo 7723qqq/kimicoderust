@@ -1475,7 +1475,12 @@ async fn needs_auth_registers_the_synthetic_authenticate_tool_with_its_disclosur
         );
         assert_eq!(
             definitions[0].input_schema,
-            json!({"type":"object","properties":{},"additionalProperties":false})
+            json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            })
         );
         assert_eq!(
             definitions[0].description,
@@ -2046,6 +2051,63 @@ fn test_should_mark_needs_auth_matrix() {
     assert!(!should_mark_needs_auth(&with_bearer, true, true, true));
 }
 
+#[test]
+fn test_startup_failure_classification_follows_v2() {
+    let http = McpServerRecipe::Http {
+        url: "http://example.test/mcp".into(),
+        headers: HashMap::new(),
+        bearer_token_env_var: None,
+    };
+    let with_headers = McpServerRecipe::Http {
+        url: "http://example.test/mcp".into(),
+        headers: HashMap::from([("X-Api-Key".to_string(), "k".to_string())]),
+        bearer_token_env_var: None,
+    };
+    let with_bearer = McpServerRecipe::Http {
+        url: "http://example.test/mcp".into(),
+        headers: HashMap::new(),
+        bearer_token_env_var: Some("KIMI_MCP_TOKEN".into()),
+    };
+    let stdio = McpServerRecipe::Stdio {
+        command: "mcp-server".into(),
+        args: Vec::new(),
+        env: HashMap::new(),
+        cwd: None,
+    };
+    let unauthorized = McpError::http_status(401, "unauthorized");
+    let forbidden = McpError::http_status(403, "forbidden");
+
+    // `config` and `protocol` are permanent regardless of the recipe.
+    assert!(is_permanent_failure(
+        &http,
+        &McpError::Config("no such command".into())
+    ));
+    assert!(is_permanent_failure(
+        &http,
+        &McpError::Protocol("malformed discovery".into())
+    ));
+
+    // An auth rejection without static credentials is `auth-oauth`: retried
+    // (or failed by the retry policy), never an immediate permanent failure.
+    assert!(!is_permanent_failure(&http, &unauthorized));
+    assert!(!is_permanent_failure(&http, &forbidden));
+    assert!(!is_permanent_failure(&stdio, &unauthorized));
+
+    // Static credentials make the rejection `auth-static`, which is permanent.
+    assert!(is_permanent_failure(&with_headers, &unauthorized));
+    assert!(is_permanent_failure(&with_bearer, &unauthorized));
+
+    // A protocol-level JSON-RPC refusal stays permanent; transport errors do not.
+    assert!(is_permanent_failure(
+        &http,
+        &McpError::json_rpc(Some(-32601), "no method")
+    ));
+    assert!(!is_permanent_failure(
+        &http,
+        &McpError::transport("connection reset")
+    ));
+}
+
 #[tokio::test]
 async fn test_static_headers_401_is_failed_not_needs_auth() {
     let (url, _seen, _shutdown) =
@@ -2603,5 +2665,157 @@ async fn shutdown_is_idempotent() {
     assert_eq!(
         manager.dispose.lock().await.state(),
         crate::primitives::teardown::LedgerState::Disposed
+    );
+}
+
+fn overlay_engine() -> crate::server::engine::ServerEngine {
+    crate::server::engine::ServerEngine::new(
+        crate::pipeline::PipelineSpec {
+            system_prompt: "sys".into(),
+            model_name: "test-model".into(),
+            providers: Vec::new(),
+            native_llm: None,
+            workspace_root: None,
+            native_tools: false,
+            extra_roots: Vec::new(),
+            rust_self_contained: false,
+            shell_path: None,
+            policy_snapshot: None,
+            github_token: None,
+            github_base_url: None,
+            subagent_timeout_ms: None,
+            agent_tool_veto: None,
+            tools_veto: None,
+            todo_tool_veto: None,
+            tower_worktree_root: None,
+            tower_enabled: false,
+            notify_user_enabled: true,
+            tool_select: false,
+            sandbox_mode: None,
+            sandbox_policy: None,
+            caller_agent_id: None,
+            session_id: None,
+            secondary_model: None,
+            image_read_byte_budget: None,
+            llm_request_byte_budget: None,
+            image_max_edge_px: None,
+            model_capabilities: None,
+            skill_dirs: Vec::new(),
+            plugin_skill_dirs: Vec::new(),
+            merge_all_available_skills: true,
+            background: crate::storage::BackgroundLimits::default(),
+        },
+        Arc::new(crate::server::hub::EventHub::new()),
+        Arc::new(crate::session::sqlite_store::SqliteSessionStore::in_memory().unwrap()),
+    )
+}
+
+fn stdio_disabled() -> (McpServerRecipe, McpServerOptions) {
+    (
+        McpServerRecipe::Stdio {
+            command: "unused".into(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+        },
+        McpServerOptions {
+            enabled: false,
+            ..McpServerOptions::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn merged_view_keeps_unshadowed_baseline_entries_and_filters_status() {
+    let engine = overlay_engine().with_mcp_manager(Arc::new(McpManager::new()));
+    let base = engine.mcp_manager().unwrap();
+    for name in ["shared", "base-only"] {
+        let (recipe, options) = stdio_disabled();
+        base.configure(name, recipe, options).await.unwrap();
+    }
+    let overlay = Arc::new(McpManager::new());
+    overlay
+        .configure(
+            "shared",
+            McpServerRecipe::Http {
+                url: "https://example.com/mcp".into(),
+                headers: HashMap::new(),
+                bearer_token_env_var: None,
+            },
+            McpServerOptions {
+                enabled: false,
+                ..McpServerOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (recipe, options) = stdio_disabled();
+    overlay.configure("eph", recipe, options).await.unwrap();
+    engine.set_session_mcp_manager("sess", overlay.clone());
+    let manager = engine.mcp_manager_for("sess").unwrap();
+
+    let mut entries = manager.server_entries().await;
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+    assert_eq!(names, vec!["base-only", "eph", "shared"]);
+    assert_eq!(entries[2].transport, "http");
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_by_status = seen.clone();
+    let subscription = manager.on_status_change(Box::new(move |entry: McpServerEntry| {
+        seen_by_status.lock().unwrap().push(entry.name);
+    }));
+    for name in ["shared", "base-only"] {
+        let (recipe, options) = stdio_disabled();
+        base.configure(name, recipe, options).await.unwrap();
+    }
+    overlay
+        .configure(
+            "shared",
+            McpServerRecipe::Http {
+                url: "https://example.com/mcp".into(),
+                headers: HashMap::new(),
+                bearer_token_env_var: None,
+            },
+            McpServerOptions {
+                enabled: false,
+                ..McpServerOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(seen.lock().unwrap().clone(), vec!["base-only", "shared"]);
+
+    assert!(manager.unsubscribe_status(subscription));
+    let (recipe, options) = stdio_disabled();
+    base.configure("base-only", recipe, options).await.unwrap();
+    assert_eq!(seen.lock().unwrap().clone(), vec!["base-only", "shared"]);
+}
+
+#[tokio::test]
+async fn merged_view_routes_reconnect_by_owner_and_waits_for_both_initial_loads() {
+    let engine = overlay_engine().with_mcp_manager(Arc::new(McpManager::new()));
+    let base = engine.mcp_manager().unwrap();
+    base.configure("base-only", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .unwrap();
+    let overlay = Arc::new(McpManager::new());
+    overlay
+        .configure("shared", McpServerRecipe::Mock, McpServerOptions::default())
+        .await
+        .unwrap();
+    engine.set_session_mcp_manager("sess", overlay.clone());
+    let manager = engine.mcp_manager_for("sess").unwrap();
+
+    manager.reconnect("base-only").await.unwrap();
+    assert!(manager.reconnect("unknown").await.is_err());
+
+    base.ready_tx.send_replace(false);
+    let started = std::time::Instant::now();
+    manager.wait_for_initial_load().await;
+    assert!(
+        started.elapsed() >= std::time::Duration::from_secs(4),
+        "baseline readiness must not be skipped: {:?}",
+        started.elapsed()
     );
 }

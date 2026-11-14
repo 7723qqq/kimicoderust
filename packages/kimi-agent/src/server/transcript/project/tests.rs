@@ -85,9 +85,7 @@ fn folds_a_full_turn_into_transcript_ops() {
         turn_id: "turn-0".into(),
         reason: "completed".into(),
     });
-    // The turn closes and its still-running step settles with it: the
-    // client stamps a thinking block's `durationMs` only once the step
-    // it belongs to has stopped running.
+
     assert_eq!(ops.len(), 2);
     assert!(matches!(ops[0], TranscriptOperation::TurnUpsert { .. }));
     assert!(matches!(ops[1], TranscriptOperation::StepUpsert { .. }));
@@ -132,7 +130,6 @@ fn step_end_tool_delta_and_task_progress_ops() {
         args: json!({}),
     });
 
-    // A streamed tool-argument delta lands in the frame's inputText.
     let ops = projector.apply_event(&EngineEvent::ToolCallDelta {
         agent_id: "main".into(),
         turn_id: "turn-0".into(),
@@ -148,7 +145,6 @@ fn step_end_tool_delta_and_task_progress_ops() {
         other => panic!("expected tool frame upsert, got {other:?}"),
     }
 
-    // The step end carries usage.
     let ops = projector.apply_event(&EngineEvent::LlmStepEnd {
         agent_id: "main".into(),
         turn_id: "t0".into(),
@@ -173,7 +169,7 @@ fn step_end_tool_delta_and_task_progress_ops() {
             assert_eq!(usage.output, 20);
             assert_eq!(usage.input_cache_read, 5);
             assert_eq!(step.state, StepState::Completed);
-            // Upstream #3938: the timing rides the event into the step.
+
             let timing = step.timing.as_ref().expect("timing recorded");
             assert_eq!(timing.llm_first_token_latency_ms, Some(110));
             assert_eq!(timing.llm_stream_duration_ms, Some(100));
@@ -183,16 +179,21 @@ fn step_end_tool_delta_and_task_progress_ops() {
         other => panic!("expected step upsert, got {other:?}"),
     }
 
-    // A background-task progress chunk appends to the task's output tail.
     projector.apply_event(&EngineEvent::Custom(json!({
-        "type": "event.task.created",
-        "task": { "id": "task_1", "kind": "bash", "status": "running", "description": "bg" }
+        "type": "task.started",
+        "info": {
+            "taskId": "task_1",
+            "kind": "process",
+            "status": "running",
+            "description": "bg",
+            "startedAt": 1_000
+        }
     })));
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
-        "type": "event.task.progress",
-        "task_id": "task_1",
-        "output_chunk": "line1\n",
-        "stream": "stdout"
+        "type": "task.output",
+        "taskId": "task_1",
+        "chunk": "line1\n",
+        "outputSizeBytes": 6
     })));
     match &ops[0] {
         TranscriptOperation::Append {
@@ -206,8 +207,16 @@ fn step_end_tool_delta_and_task_progress_ops() {
         }
         other => panic!("expected task append, got {other:?}"),
     }
+    let tasks = projector.snapshot().tasks;
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].kind, TaskKind::Shell);
+    assert_eq!(tasks[0].state, TaskState::Running);
+    assert_eq!(tasks[0].description.as_deref(), Some("bg"));
+    assert_eq!(
+        tasks[0].started_at.as_deref(),
+        Some("1970-01-01T00:00:01+00:00")
+    );
 
-    // `hook.result` becomes a marker.
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
         "type": "hook.result",
         "hook": "PreToolUse"
@@ -222,7 +231,6 @@ fn step_end_tool_delta_and_task_progress_ops() {
 fn interaction_and_prompt_ops() {
     let mut projector = TranscriptProjector::new();
 
-    // A user message becomes a prompt; an assistant message does not.
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
         "type": "event.message.created",
         "message": {
@@ -239,7 +247,6 @@ fn interaction_and_prompt_ops() {
     })));
     assert!(ops.is_empty(), "assistant messages are not prompts");
 
-    // Question requested -> pending; answered -> answered.
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
         "type": "event.question.requested",
         "question_id": "q1",
@@ -264,7 +271,6 @@ fn interaction_and_prompt_ops() {
         other => panic!("expected interaction upsert, got {other:?}"),
     }
 
-    // Approval requested -> resolved(allow) -> approved.
     projector.apply_event(&EngineEvent::Custom(json!({
         "type": "event.approval.requested",
         "approval_id": "a1",
@@ -287,10 +293,6 @@ fn interaction_and_prompt_ops() {
     assert_eq!(snapshot.prompts.len(), 1);
 }
 
-/// v2 `displayPaths` reaching the protocol surface (ROADMAP #17 ②): a
-/// stored media reference folds into an attachment that names its file,
-/// so a client can resolve the saved path through the daemon's file API
-/// instead of receiving an identity-less URL or nothing at all.
 #[test]
 fn a_stored_media_reference_folds_into_a_file_sourced_attachment() {
     let mut projector = TranscriptProjector::new();
@@ -318,7 +320,6 @@ fn a_stored_media_reference_folds_into_a_file_sourced_attachment() {
         .collect();
     assert_eq!(attachments.len(), 3);
 
-    // The stored reference is the session-owned canonical copy.
     assert_eq!(
         attachments[0].source,
         Some(AttachmentSource::SessionMedia {
@@ -326,14 +327,14 @@ fn a_stored_media_reference_folds_into_a_file_sourced_attachment() {
         })
     );
     assert_eq!(attachments[0].media_type, "image");
-    // A daemon URL is a file identity, not a fetchable URL.
+
     assert_eq!(
         attachments[1].source,
         Some(AttachmentSource::File {
             file_id: "f_att2".to_string()
         })
     );
-    // A remote URL stays a URL.
+
     assert_eq!(
         attachments[2].source,
         Some(AttachmentSource::Url {
@@ -341,8 +342,6 @@ fn a_stored_media_reference_folds_into_a_file_sourced_attachment() {
         })
     );
 
-    // The turn the prompt opened names its attachments (v2's cold-fold
-    // `turn.attachmentIds`): the link a client follows to the saved path.
     let snapshot = projector.snapshot();
     let turn = snapshot
         .items
@@ -365,11 +364,6 @@ fn a_stored_media_reference_folds_into_a_file_sourced_attachment() {
     );
 }
 
-/// v2 #3764 on the v1 transcript surface: the contract's
-/// `transcriptPromptSchema` carries `clientMetadata`, and the
-/// submission's metadata object rides it as the one-element array the
-/// contract shapes. The turn's announcement upserts the same prompt
-/// and carries the metadata over rather than dropping it.
 #[test]
 fn the_prompt_entity_carries_the_submissions_client_metadata() {
     let mut projector = TranscriptProjector::new();
@@ -393,7 +387,6 @@ fn the_prompt_entity_carries_the_submissions_client_metadata() {
         other => panic!("expected a prompt upsert, got {other:?}"),
     }
 
-    // The announcement upserts the same prompt and keeps the metadata.
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
         "type": "event.message.created",
         "message": {
@@ -403,9 +396,7 @@ fn the_prompt_entity_carries_the_submissions_client_metadata() {
             "created_at": "2026-09-20T00:00:01.000Z",
         },
     })));
-    // The announcement's prompt id is the message id, which differs
-    // from the submission's prompt id — the two entities are distinct,
-    // and only the submission's carries the metadata.
+
     let prompts: Vec<&TranscriptPrompt> = ops
         .iter()
         .filter_map(|op| match op {
@@ -417,8 +408,6 @@ fn the_prompt_entity_carries_the_submissions_client_metadata() {
     assert_eq!(prompts[0].prompt_id, "msg-u1");
     assert_eq!(prompts[0].client_metadata, None);
 
-    // A submission whose prompt id IS the message id (the steer path
-    // reuses the prompt id) keeps its metadata across the announcement.
     let mut projector = TranscriptProjector::new();
     projector.apply_event(&EngineEvent::Custom(json!({
         "type": "prompt.submitted",
@@ -453,7 +442,6 @@ fn the_prompt_entity_carries_the_submissions_client_metadata() {
 fn agent_meta_subagent_and_attachment_ops() {
     let mut projector = TranscriptProjector::new();
 
-    // The engine status payload merges model/effort/context/permission.
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
         "type": "agent.status.updated",
         "model": "k3",
@@ -470,16 +458,13 @@ fn agent_meta_subagent_and_attachment_ops() {
         }
         other => panic!("expected meta.merge, got {other:?}"),
     }
-    // A phase-only activity payload carries no mergeable scalar.
+
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
         "type": "agent.status.updated",
         "phase": { "kind": "running" }
     })));
     assert!(ops.is_empty());
 
-    // `work_changed` merges the activity state. The engine publishes the
-    // typed variant on the production path, so that spelling is the one
-    // that has to work; the JSON form stays for replay-shaped input.
     let ops = projector.apply_event(&EngineEvent::SessionWorkChanged {
         busy: true,
         main_turn_active: true,
@@ -519,7 +504,6 @@ fn agent_meta_subagent_and_attachment_ops() {
         other => panic!("expected meta.merge, got {other:?}"),
     }
 
-    // Subagent lifecycle maps onto a transcript task.
     let ops = projector.apply_event(&EngineEvent::SubagentSpawned {
         subagent_id: "sub-1".into(),
         subagent_name: Some("research".into()),
@@ -551,8 +535,7 @@ fn agent_meta_subagent_and_attachment_ops() {
         TranscriptOperation::TaskUpsert { task } => {
             assert_eq!(task.state, TaskState::Completed);
             assert_eq!(task.result_summary.as_deref(), Some("done"));
-            // #3970: the durable record's four counters restore onto the
-            // folded task.
+
             let usage = task.usage.as_ref().expect("usage restored");
             assert_eq!(usage.input_other, 10);
             assert_eq!(usage.output, 4);
@@ -562,7 +545,6 @@ fn agent_meta_subagent_and_attachment_ops() {
         other => panic!("expected task upsert, got {other:?}"),
     }
 
-    // A user message with an image_url block yields a prompt + attachment.
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
         "type": "event.message.created",
         "message": {
@@ -592,9 +574,6 @@ fn agent_meta_subagent_and_attachment_ops() {
 
 #[test]
 fn wire_form_subagent_lifecycle_folds_with_usage() {
-    // The durable wire record (snake_case JSON) must parse into the typed
-    // variant and fold — previously it fell through to `Custom` and was
-    // dropped wholesale, so no task ever appeared.
     let mut projector = TranscriptProjector::new();
     projector.apply_event(&EngineEvent::from_json(json!({
         "type": "subagent.spawned",
@@ -623,9 +602,6 @@ fn wire_form_subagent_lifecycle_folds_with_usage() {
 
 #[test]
 fn a_task_registered_after_the_spawn_adopts_the_placeholder() {
-    // #3970 (Tower worker path): spawn first, task registration later —
-    // the registered id must replace the agent-keyed placeholder, and the
-    // terminal record (still keyed by agent id) must reach it.
     let mut projector = TranscriptProjector::new();
     projector.apply_event(&EngineEvent::from_json(json!({
         "type": "subagent.spawned",
@@ -633,11 +609,11 @@ fn a_task_registered_after_the_spawn_adopts_the_placeholder() {
         "run_in_background": true
     })));
     projector.apply_event(&EngineEvent::Custom(json!({
-        "type": "event.task.created",
-        "task": {
-            "id": "task-77",
-            "kind": "subagent",
-            "agent_id": "agent-7",
+        "type": "task.started",
+        "info": {
+            "taskId": "task-77",
+            "kind": "agent",
+            "agentId": "agent-7",
             "status": "running",
             "description": "worker"
         }
@@ -655,11 +631,6 @@ fn a_task_registered_after_the_spawn_adopts_the_placeholder() {
     assert_eq!(tasks[0].agent_id.as_deref(), Some("agent-7"));
 }
 
-/// The journal writers interleave: `TaskRunner` starts the subagent future
-/// before it publishes the registration, so a fast subagent's terminal event
-/// can be persisted *ahead* of `event.task.created(status = "running")`. A
-/// last-writer-wins merge turned that ordering into a task stuck at
-/// `running` forever.
 #[test]
 fn a_late_task_registration_cannot_resurrect_a_settled_task() {
     let mut projector = TranscriptProjector::new();
@@ -668,19 +639,18 @@ fn a_late_task_registration_cannot_resurrect_a_settled_task() {
         "subagent_id": "agent-7",
         "run_in_background": true
     })));
-    // Terminal first, registration second — the ordering the spawn-then-
-    // publish path produces.
+
     projector.apply_event(&EngineEvent::from_json(json!({
         "type": "subagent.completed",
         "subagent_id": "agent-7",
         "result_summary": "done"
     })));
     projector.apply_event(&EngineEvent::Custom(json!({
-        "type": "event.task.created",
-        "task": {
-            "id": "task-77",
-            "kind": "subagent",
-            "agent_id": "agent-7",
+        "type": "task.started",
+        "info": {
+            "taskId": "task-77",
+            "kind": "agent",
+            "agentId": "agent-7",
             "status": "running",
             "description": "worker"
         }
@@ -693,13 +663,11 @@ fn a_late_task_registration_cannot_resurrect_a_settled_task() {
         TaskState::Completed,
         "the late registration must not reopen a finished task"
     );
-    // The registration's own fields still land — only its state is refused.
+
     assert_eq!(tasks[0].description.as_deref(), Some("worker"));
     assert_eq!(tasks[0].task_id, "task-77");
 }
 
-/// A failure is a terminal outcome too: the generic task-completion event
-/// that follows a failed subagent must not report it as completed.
 #[test]
 fn a_settled_failure_is_not_overwritten_by_a_completion() {
     let mut projector = TranscriptProjector::new();
@@ -713,14 +681,14 @@ fn a_settled_failure_is_not_overwritten_by_a_completion() {
         "error": "boom"
     })));
     projector.apply_event(&EngineEvent::Custom(json!({
-        "type": "event.task.completed",
-        "task": {
-            "id": "agent-8",
-            "kind": "subagent",
-            "agent_id": "agent-8",
-            "status": "completed",
-            "output": "partial"
-        }
+        "type": "task.terminated",
+        "info": {
+            "taskId": "agent-8",
+            "kind": "agent",
+            "agentId": "agent-8",
+            "status": "completed"
+        },
+        "outputTail": "partial"
     })));
 
     let tasks = projector.snapshot().tasks;
@@ -733,9 +701,49 @@ fn a_settled_failure_is_not_overwritten_by_a_completion() {
 }
 
 #[test]
+fn legacy_task_records_still_project_after_the_v2_rename() {
+    let mut projector = TranscriptProjector::new();
+    projector.apply_event(&EngineEvent::Custom(json!({
+        "type": "event.task.created",
+        "task": {
+            "id": "task-legacy",
+            "kind": "bash",
+            "status": "running",
+            "description": "bg"
+        }
+    })));
+    let ops = projector.apply_event(&EngineEvent::Custom(json!({
+        "type": "event.task.progress",
+        "task_id": "task-legacy",
+        "output_chunk": "old\n",
+        "stream": "stdout"
+    })));
+    assert!(
+        matches!(
+            &ops[0],
+            TranscriptOperation::Append {
+                target: AppendTarget::Task { task_id },
+                text,
+                ..
+            } if task_id == "task-legacy" && text == "old\n"
+        ),
+        "an older journal's task.progress still appends: {ops:?}"
+    );
+    projector.apply_event(&EngineEvent::Custom(json!({
+        "type": "event.task.completed",
+        "task_id": "task-legacy",
+        "status": "completed",
+        "output_preview": "old\n"
+    })));
+
+    let tasks = projector.snapshot().tasks;
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].state, TaskState::Completed);
+    assert_eq!(tasks[0].output_tail, "old\n");
+}
+
+#[test]
 fn cold_snapshot_settles_members_to_lost_by_the_spawning_turn() {
-    // #3970: a member left running is lost unless the turn that spawned
-    // it is itself still running in the rebuild.
     let mut projector = TranscriptProjector::new();
     projector.apply_event(&EngineEvent::TurnStarted {
         agent_id: "main".into(),
@@ -761,13 +769,9 @@ fn cold_snapshot_settles_members_to_lost_by_the_spawning_turn() {
         "subagent_id": "agent-b"
     })));
 
-    // Live: both members legitimately stay running (background members
-    // outlive their spawning turn and settle on their own events).
     let live = projector.snapshot().tasks;
     assert!(live.iter().all(|t| t.state == TaskState::Running));
 
-    // Cold: agent-a's spawning turn ended → lost; agent-b's turn (t2)
-    // still runs → survives.
     let cold = projector.cold_snapshot_tasks();
     let a = cold
         .iter()
@@ -781,11 +785,6 @@ fn cold_snapshot_settles_members_to_lost_by_the_spawning_turn() {
     assert_eq!(b.state, TaskState::Running);
 }
 
-/// Reproduces the production defect: the server path publishes
-/// `event.assistant.delta` without ever emitting a typed `TurnStarted`, so
-/// the projector had no cursor and dropped every streamed chunk. The delta
-/// is self-describing (it carries `turn_id`, as v2's payload carries
-/// `turnId`), so the text now reaches the transcript lane.
 #[test]
 fn custom_assistant_delta_streams_without_a_typed_turn_start() {
     let mut projector = TranscriptProjector::new();
@@ -812,10 +811,6 @@ fn custom_assistant_delta_streams_without_a_typed_turn_start() {
     }
 }
 
-/// A thinking chunk rides its own event name — v2 keeps `thinking.delta`
-/// distinct from `assistant.delta` rather than flagging the answer stream
-/// — and opens a Thinking frame, the distinction the web client reads to
-/// render a reasoning block.
 #[test]
 fn custom_thinking_delta_opens_a_thinking_frame() {
     let mut projector = TranscriptProjector::new();
@@ -837,11 +832,6 @@ fn custom_thinking_delta_opens_a_thinking_frame() {
     }
 }
 
-/// The append offset counts UTF-16 code units, the unit JS counts: the
-/// client rejects an offset past `text.length` as a gap and re-fetches the
-/// transcript instead of splicing — so a byte offset makes every non-ASCII
-/// answer arrive in one block rather than streaming, and a char count
-/// still slices an astral character mid-surrogate-pair.
 #[test]
 fn append_offsets_count_utf16_units() {
     let mut projector = TranscriptProjector::new();
@@ -872,8 +862,6 @@ fn append_offsets_count_utf16_units() {
         other => panic!("expected append, got {other:?}"),
     }
 
-    // A third chunk continues from the code-unit count, so the client's
-    // splice matches with no gap.
     let ops = projector.apply_event(&delta("历史"));
     match ops
         .iter()
@@ -884,9 +872,6 @@ fn append_offsets_count_utf16_units() {
         other => panic!("expected append, got {other:?}"),
     }
 
-    // An astral character is one char but two code units: the offset must
-    // report 2 after a lone emoji, or the client's slice starts inside the
-    // surrogate pair and the text renders corrupted.
     let mut emoji = TranscriptProjector::new();
     emoji.apply_event(&delta("😀"));
     let ops = emoji.apply_event(&delta("好"));
@@ -903,15 +888,10 @@ fn append_offsets_count_utf16_units() {
     }
 }
 
-/// A turn opened by a streamed delta is closed by the typed `turn.ended`
-/// — the event v2 assigns the turn state to — and its step settles with
-/// it: the client only stamps a thinking block's `durationMs` once the
-/// step it belongs to has stopped running.
 #[test]
 fn turn_ended_closes_the_turn_and_its_steps() {
     let mut projector = TranscriptProjector::new();
 
-    // A turn opened by deltas, the way the server path opens one.
     projector.apply_event(&EngineEvent::Custom(json!({
         "type": "event.assistant.delta",
         "turn_id": 4,
@@ -946,7 +926,6 @@ fn turn_ended_closes_the_turn_and_its_steps() {
         "the turn's steps must settle too: {ops:?}"
     );
 
-    // The snapshot agrees, which is what the client reads.
     let snapshot = projector.snapshot();
     let turn = snapshot
         .items
@@ -964,10 +943,6 @@ fn turn_ended_closes_the_turn_and_its_steps() {
     );
 }
 
-/// `prompt.completed` owns no turn state here: v2 keeps the two entities on
-/// separate schedules (`onPromptCompleted`, coreEventMap.ts:1356), so the
-/// turn stays running until the typed `turn.ended` names it. Folding the
-/// turn here would close it on the prompt's schedule instead.
 #[test]
 fn prompt_completed_does_not_close_the_turn() {
     let mut projector = TranscriptProjector::new();
@@ -984,9 +959,7 @@ fn prompt_completed_does_not_close_the_turn() {
         "reason": "completed",
         "finishedAt": "2026-09-22T00:00:00Z",
     })));
-    // The arm settles the prompt entity — v2 `onPromptCompleted`
-    // (coreEventMap.ts:1356) emits exactly that one upsert — and folds
-    // no turn state.
+
     match ops.as_slice() {
         [TranscriptOperation::PromptUpsert { prompt }] => {
             assert_eq!(prompt.status, TranscriptPromptStatus::Completed);
@@ -1014,9 +987,6 @@ fn prompt_completed_does_not_close_the_turn() {
     );
 }
 
-/// `turn.ended` closes the turn it names and leaves every other turn
-/// alone — v2's turn state records a single `lastEnded` turn id, never a
-/// broadcast over the running turns.
 #[test]
 fn turn_ended_closes_only_the_turn_it_names() {
     let mut projector = TranscriptProjector::new();
@@ -1050,8 +1020,6 @@ fn turn_ended_closes_only_the_turn_it_names() {
     );
 }
 
-/// A failed turn reports failure rather than success, with v2's reason
-/// vocabulary on the typed event.
 #[test]
 fn a_failed_reason_closes_the_turn_as_failed() {
     let mut projector = TranscriptProjector::new();
@@ -1075,11 +1043,6 @@ fn a_failed_reason_closes_the_turn_as_failed() {
     }
 }
 
-/// v2's `turnEndReasonSchema` (turnOps.ts:97) carries `blocked` alongside
-/// the three the fork's loop produces; a blocked turn must report failed
-/// rather than silently reporting as completed. See `mapTurnEndState`
-/// (coreEventMap.ts:1608) and the same fold in the cold rebuild
-/// (`transcript/src/history/foldFacts.ts`, `mapTurnEndReason`).
 #[test]
 fn a_blocked_reason_closes_the_turn_as_failed() {
     let mut projector = TranscriptProjector::new();
@@ -1103,9 +1066,6 @@ fn a_blocked_reason_closes_the_turn_as_failed() {
     }
 }
 
-/// `turn.steer` buffers without emitting, then lands as a user frame at
-/// the head of the next step — v2 `onTurnSteered` (coreEventMap.ts:1413)
-/// buffered into `pendingSteers` and drained by `onStepStarted` (:568).
 #[test]
 fn turn_steer_buffers_until_the_next_step_begin() {
     let mut projector = TranscriptProjector::new();
@@ -1131,8 +1091,7 @@ fn turn_steer_buffers_until_the_next_step_begin() {
         "type": "llm.step.begin",
         "model": "kimi-k2",
     })));
-    // The turn has no step yet: the flush opens one (StepUpsert) and the
-    // user frame lands at its head (FrameUpsert).
+
     assert_eq!(ops.len(), 2, "step upsert + steer frame; got {ops:?}");
     assert!(matches!(ops[0], TranscriptOperation::StepUpsert { .. }));
     match &ops[1] {
@@ -1147,8 +1106,6 @@ fn turn_steer_buffers_until_the_next_step_begin() {
         other => panic!("expected frame.upsert, got {other:?}"),
     }
 
-    // The flushed user frame sits under the cursor: the next delta opens
-    // a fresh assistant frame instead of appending to it.
     projector.apply_event(&EngineEvent::AssistantDelta {
         agent_id: "main".into(),
         turn_id: "turn-4".into(),
@@ -1176,9 +1133,6 @@ fn turn_steer_buffers_until_the_next_step_begin() {
     }
 }
 
-/// The flush is gated on a running turn (ROADMAP item 34): a steer
-/// buffered after its turn ended survives the following step begin and
-/// lands in the next running turn instead of a closed one.
 #[test]
 fn the_steer_flush_waits_for_a_running_turn() {
     let mut projector = TranscriptProjector::new();
@@ -1205,7 +1159,6 @@ fn the_steer_flush_waits_for_a_running_turn() {
     })));
     assert!(ops.is_empty());
 
-    // The cursor still points at the ended turn: no flush there.
     let ops = projector.apply_event(&EngineEvent::Custom(json!({
         "type": "llm.step.begin",
         "model": "kimi-k2",
@@ -1215,7 +1168,6 @@ fn the_steer_flush_waits_for_a_running_turn() {
         "a closed turn collects no steer frames; got {ops:?}"
     );
 
-    // The next running turn picks the buffered steer up.
     projector.apply_event(&EngineEvent::TurnStarted {
         agent_id: "main".into(),
         turn_id: "turn-5".into(),
@@ -1261,8 +1213,6 @@ fn the_steer_flush_waits_for_a_running_turn() {
     );
 }
 
-/// Only a user or skill-activation steer with an array input folds —
-/// v2's `onTurnSteered` guard (coreEventMap.ts:1416).
 #[test]
 fn steer_folds_only_user_and_skill_activation_array_inputs() {
     let mut projector = TranscriptProjector::new();
@@ -1301,9 +1251,6 @@ fn steer_folds_only_user_and_skill_activation_array_inputs() {
     assert!(matches!(ops[0], TranscriptOperation::StepUpsert { .. }));
 }
 
-/// v2 `onPromptSteered` (coreEventMap.ts:1384): the active prompt stays
-/// open under the steer, each steered id settles as completed at the
-/// steer's timestamp, and the submission's fields survive.
 #[test]
 fn steered_settles_the_steered_ids_and_keeps_the_active_open() {
     let mut projector = TranscriptProjector::new();
@@ -1357,9 +1304,6 @@ fn steered_settles_the_steered_ids_and_keeps_the_active_open() {
     assert_eq!(steered.finished_at.as_deref(), Some("2026-09-22T00:00:01Z"));
 }
 
-/// The route's `unwrap_or_default` can hand an empty `activePromptId`:
-/// no entity may be created under the empty key, but the steered ids
-/// still settle (ROADMAP item 34).
 #[test]
 fn steered_with_no_active_prompt_still_settles_the_ids() {
     let mut projector = TranscriptProjector::new();
@@ -1381,9 +1325,6 @@ fn steered_with_no_active_prompt_still_settles_the_ids() {
     );
 }
 
-/// v2 `onPromptAborted` (coreEventMap.ts:1371): abortedAt settles the
-/// entity, createdAt falls back to it, and a later duplicate submission
-/// must not resurrect a terminal prompt.
 #[test]
 fn prompt_aborted_settles_the_entity_and_survives_a_duplicate_submission() {
     let mut projector = TranscriptProjector::new();
@@ -1429,8 +1370,6 @@ fn prompt_aborted_settles_the_entity_and_survives_a_duplicate_submission() {
     );
 }
 
-/// `AgentStatusUpdated.usage` merges into the agent meta as the per-model
-/// buckets plus their total and the current turn.
 #[test]
 fn agent_status_usage_merges_the_per_model_buckets() {
     let mut projector = TranscriptProjector::new();
@@ -1478,11 +1417,6 @@ fn agent_status_usage_merges_the_per_model_buckets() {
     assert_eq!(usage.current_turn.expect("current turn").output, 4);
 }
 
-// ── upstream #4280: wedged turns, restored startedAt, ordinal fallback ────
-
-/// Live fold: a new `TurnStarted` closes the previous running turn as wedged
-/// (upstream `ops/apply.ts`) — its loop never wrote a terminal event, so it
-/// renders `failed` with the additive flag, before the new turn's own upsert.
 #[test]
 fn a_new_turn_started_closes_the_previous_running_turn_as_wedged() {
     let mut projector = TranscriptProjector::new();
@@ -1521,12 +1455,10 @@ fn a_new_turn_started_closes_the_previous_running_turn_as_wedged() {
     assert_eq!(first.wedged, Some(true));
 }
 
-/// Cold replay: a turn's `startedAt` is restored from the journal record's
-/// `created_at` (upstream `recordTimeIso`), not stamped with the rebuild time.
 #[test]
 fn a_cold_replay_restores_started_at_from_the_journal_record() {
     let mut projector = TranscriptProjector::new();
-    let epoch_ms = 1_700_000_000_000i64; // 2023-11-14T22:13:20Z
+    let epoch_ms = 1_700_000_000_000i64;
     projector.apply_event_at(
         &EngineEvent::TurnStarted {
             agent_id: "main".into(),
@@ -1548,9 +1480,6 @@ fn a_cold_replay_restores_started_at_from_the_journal_record() {
     );
 }
 
-/// Cold finalization (upstream `foldWireRecordFacts` wedged pass): with
-/// nothing live (`None`), the unclosed tail turn is wedged; when it is the
-/// engine's live active turn, the tail exemption keeps it `running`.
 #[test]
 fn a_cold_rebuild_marks_the_unclosed_tail_wedged_only_when_it_is_not_live() {
     let replay = |active: Option<i64>| {
@@ -1575,7 +1504,6 @@ fn a_cold_rebuild_marks_the_unclosed_tail_wedged_only_when_it_is_not_live() {
         projector.snapshot()
     };
 
-    // Restart case: every loop is dead, so the unclosed tail is wedged too.
     let snapshot = replay(None);
     for item in &snapshot.items {
         let TranscriptItem::Turn(turn) = item else {
@@ -1585,7 +1513,6 @@ fn a_cold_rebuild_marks_the_unclosed_tail_wedged_only_when_it_is_not_live() {
         assert_eq!(turn.wedged, Some(true), "{}: {turn:?}", turn.turn_id);
     }
 
-    // Live case: the tail is the engine's active turn and stays running.
     let snapshot = replay(Some(2));
     let TranscriptItem::Turn(first) = &snapshot.items[0] else {
         panic!("expected a turn item");
@@ -1600,9 +1527,6 @@ fn a_cold_rebuild_marks_the_unclosed_tail_wedged_only_when_it_is_not_live() {
     assert_eq!(tail.wedged, None);
 }
 
-/// The `ensure_turn` ordinal fallback for an unparseable key claims
-/// `max(ordinals in use) + 1` rather than the positional slot: deterministic
-/// within a replay, and two unparseable keys cannot collide.
 #[test]
 fn unparseable_turn_keys_claim_monotonic_fallback_ordinals() {
     let mut projector = TranscriptProjector::new();
@@ -1665,9 +1589,6 @@ fn an_unclosed_model_started_swarm_stays_out_of_cold_and_live_modes() {
     assert_eq!(live_modes.and_then(|modes| modes.swarm), None);
 }
 
-/// v2 `onPromptQueued` / `onPromptStarted` (`coreEventMap.ts:1391-1430`): the
-/// queued announcement seeds a prompt entity, and the start moves it to
-/// `running` without losing the content the queued event carried.
 #[test]
 fn queued_and_started_fold_the_prompt_status() {
     let mut projector = TranscriptProjector::new();

@@ -73,16 +73,12 @@ impl HttpServer {
                     Ok(v) => v,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),
                 };
-                // Fail-closed: a body without an explicit `trusted` boolean is
-                // not a grant; only `{"trusted": true}` records trust.
+
                 let trusted = body
                     .get("trusted")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 match self.store.set_workspace_trusted(workspace_id, trusted) {
-                    // Upstream #4517 (kap-server `/untrust`): the answer is the
-                    // *effective* state after the write, which stays `true`
-                    // while a process or config override applies.
                     Ok(_) => HttpResponse::ok(&json!({
                         "trusted": self.effective_workspace_trust(trusted).await,
                     })),
@@ -202,7 +198,7 @@ impl HttpServer {
                     Err(e) => HttpResponse::internal_error(format!("Database error: {e}")),
                 }
             }
-            // Cron endpoints: session-scoped or global
+
             ("GET", p)
                 if (p.starts_with("/api/v1/sessions/") && p.ends_with("/cron"))
                     || p == "/api/v1/cron" =>
@@ -269,8 +265,6 @@ impl HttpServer {
                 };
                 let mut scheduler = self.cron_scheduler.lock().await;
                 if scheduler.add_entry(entry) {
-                    // Persist so the schedule survives a restart and is
-                    // reloaded by `run_serve`.
                     self.persist_cron_entries(&scheduler.list_entries());
                     HttpResponse::json(
                         201,
@@ -308,7 +302,6 @@ impl HttpServer {
                 };
                 let mut scheduler = self.cron_scheduler.lock().await;
                 if scheduler.remove_entry(task_id) {
-                    // Keep the persisted set in sync with the in-memory one.
                     self.persist_cron_entries(&scheduler.list_entries());
                     HttpResponse::ok(&json!({ "deleted": true, "taskId": task_id }))
                 } else {
@@ -316,7 +309,6 @@ impl HttpServer {
                 }
             }
 
-            // Tasks endpoints: session-scoped or global
             ("GET", p)
                 if (p.starts_with("/api/v1/sessions/") && p.ends_with("/tasks"))
                     || p == "/api/v1/tasks" =>
@@ -332,8 +324,7 @@ impl HttpServer {
                     }
                 }
                 let tasks = self.task_runner.list();
-                // v2 answers `{items}` only, with an optional `status` filter
-                // (kap-server/src/routes/tasks.ts:82-87).
+
                 let items: Vec<Value> = match req.query_param("status") {
                     Some(wanted) => tasks
                         .into_iter()
@@ -367,8 +358,6 @@ impl HttpServer {
                     segments[6]
                 };
                 match self.task_runner.entry(task_id) {
-                    // v2's `getTask` answers the bare wire task
-                    // (`okEnvelope(toWireTask(...))`, kap-server/src/routes/tasks.ts:134).
                     Some(entry) => HttpResponse::ok(&entry),
                     None => HttpResponse::not_found(),
                 }
@@ -474,17 +463,11 @@ impl HttpServer {
                 }
             }
 
-            // Subagent management endpoints
             _ => return HttpResponse::route_miss(),
         };
         finalize_response(req, resp)
     }
 
-    /// The trust routes report the *effective* state (upstream #4517): the
-    /// persisted flag OR'd with the `KIMI_CODE_TRUST_WORKSPACE` process
-    /// override, short-circuited to trusted while `[workspace] require_trust`
-    /// is `false`. The persisted record is what `set_workspace_trusted`
-    /// writes; the overrides never rewrite it.
     async fn effective_workspace_trust(&self, persisted: bool) -> bool {
         !self.config().await.resolve_workspace_require_trust()
             || crate::workspace_trust::env_trust_override()

@@ -246,11 +246,20 @@ impl TowerStore {
             if in_progress && !files.is_empty() {
                 let updated = &mut state.missions[mission_index];
                 updated.status = TowerMissionStatus::Blocked;
-                updated.blockers.push(format!(
-                    "tower rebase onto {} conflicted in: {} — the rebase was aborted and the worktree was restored; resolve the conflicts manually, then clear this blocker and request a fresh review",
-                    state.base,
-                    files.join(", ")
-                ));
+                let conflict_message = if updated.kind == TowerMissionKind::Artifact {
+                    format!(
+                        "tower rebase onto {} conflicted in: {} — the rebase was aborted and the worktree was restored; resolve the conflicts manually, then run TowerComplete with the current report and key_artifacts so the tower can present the new acceptance-request for fresh explicit human acceptance of the entire tip — the moved tip cannot reuse the old acceptance",
+                        state.base,
+                        files.join(", ")
+                    )
+                } else {
+                    format!(
+                        "tower rebase onto {} conflicted in: {} — the rebase was aborted and the worktree was restored; resolve the conflicts manually, then clear this blocker and request a fresh review",
+                        state.base,
+                        files.join(", ")
+                    )
+                };
+                updated.blockers.push(conflict_message);
                 let updated = updated.clone();
                 self.save(&state).await?;
                 self.render_missions_index(&state).await?;

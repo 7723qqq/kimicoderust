@@ -2,21 +2,14 @@ use super::catalog_routes::format_wire_session;
 use super::*;
 
 impl HttpServer {
-    /// Dispatch an incoming HTTP request to the appropriate route handler.
     pub async fn handle_request(&self, req: &HttpRequest) -> HttpResponse {
         let path = req.path.trim_end_matches('/');
         let method = req.method.to_uppercase();
 
-        // Before the credential: the guard is about *where* the request came
-        // from, not who sent it. A rebinding page carries no token of its own,
-        // so answering 401 first would only tell it the port is live.
         if !self.host_allowed(req.header("host")) {
             return HttpResponse::forbidden(host_guard::rejection_message(req.header("host")));
         }
 
-        // The one REST authority: health and the schema documents answer
-        // unauthenticated, matching kap-server, and everything that can read or
-        // mutate state does not.
         if !ServerAuth::is_bypassed(&method, path) {
             let decision = self.auth.check_bearer(req.header("authorization"));
             if !decision.is_allowed() {
@@ -24,7 +17,6 @@ impl HttpServer {
             }
         }
 
-        // Static file serving and SPA fallback for non-API routes
         if !path.starts_with("/api")
             && (method == "GET" || method == "HEAD")
             && let Some(assets_dir) = &self.web_assets_dir
@@ -32,9 +24,6 @@ impl HttpServer {
             return static_files::serve_static_file(assets_dir, &req.path);
         }
 
-        // Debug RPC and reflection surface for kimi-inspect. Not mounted by
-        // default: it reflects the server's internals, so it is a test tool
-        // that has to be asked for, and only on a loopback bind.
         if self.debug_endpoints_enabled()
             && path.starts_with("/api/v1/debug")
             && let Some(resp) = debug::handle_debug_route(self, req).await
@@ -170,9 +159,6 @@ impl HttpServer {
             Err(e) => return HttpResponse::bad_request(format!("Failed to apply patch: {e}")),
         };
 
-        // Persist the patched fields. A dropped write must not be reported as a
-        // successful patch: the client would keep a state the store never took,
-        // and the inverse patch (the only way back) would be gone with it.
         let mut persist_failures: Vec<String> = Vec::new();
         if let Some(new_title) = current_wire.get("title").and_then(|t| t.as_str())
             && session.title.as_deref() != Some(new_title)
@@ -207,8 +193,6 @@ impl HttpServer {
         }
 
         if !persist_failures.is_empty() {
-            // Nothing is published: no client should observe a state that the
-            // store does not hold.
             return HttpResponse::internal_error(format!(
                 "Session patch could not be persisted ({}). The stored session does not match the requested patch.",
                 persist_failures.join("; ")
@@ -232,22 +216,6 @@ impl HttpServer {
         }))
     }
 
-    /// Roll the engine-owned state domains back by `count` turns.
-    ///
-    /// `StateStoreCallbacks::checkpoint` (`callbacks.rs`) pushes one snapshot
-    /// per turn and calls it the durable undo anchor, but only the REPL's
-    /// `/undo` ever popped one — the REST route deleted transcript rows and left
-    /// `todo` / `plan` describing work the model can no longer see, so the next
-    /// turn inherited a stale plan.
-    ///
-    /// The checkpoint stack is LIFO (`rollback` pops the newest snapshot), so
-    /// `count` turns means `count` pops. `Ok(false)` means the stack is already
-    /// empty — normal for a session that never checkpointed — so the loop stops
-    /// quietly rather than reporting a failure.
-    ///
-    /// A session with no resolvable workdir is an error rather than a skip: the
-    /// caller deletes the transcript rows before calling this, so doing nothing
-    /// would leave the two permanently out of sync.
     pub(super) fn rollback_state_for_undo(
         &self,
         session_id: &str,
@@ -319,8 +287,6 @@ impl HttpServer {
             Err(e) => return HttpResponse::bad_request(format!("Failed to revert patch: {e}")),
         };
 
-        // Same contract as the forward patch: never report an undo whose
-        // restored state was not actually stored.
         let mut persist_failures: Vec<String> = Vec::new();
         if let Some(new_title) = current_wire.get("title").and_then(|t| t.as_str())
             && let Err(e) = self.store.update_session_title(session_id, Some(new_title))

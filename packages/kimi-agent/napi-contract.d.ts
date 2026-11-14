@@ -567,6 +567,12 @@ export interface JsRunTurnParams {
   sandboxMode?: string
   callerAgentId?: string
   sessionId?: string
+  /**
+   * The engine's data directory (`<home>/agent` in the CLI). The session opens
+   * `<dataDir>/sessions.db` once per directory and uses it for durable records
+   * (`permission.set_mode`); absent keeps the session in-memory-only.
+   */
+  dataDir?: string
   /** Native MCP servers configuration (P73). */
   mcpServers?: Array<JsMcpServerConfig>
   /**
@@ -615,6 +621,11 @@ export interface JsRunTurnParams {
    * `i64` because napi cannot read JS numbers as `u32`.
    */
   imageMaxEdgePx?: number
+  /**
+   * Host-resolved `[llm_requester].request_byte_budget` (v2
+   * `resolveLlmRequestByteBudget`). `None` keeps the 32 MiB default.
+   */
+  requestByteBudget?: number
   /**
    * The session model's declared capabilities (`[models.<alias>]
    * .capabilities`). `None`/empty = unknown.

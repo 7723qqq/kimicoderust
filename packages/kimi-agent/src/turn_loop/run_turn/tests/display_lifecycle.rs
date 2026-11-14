@@ -2,11 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// v2's `RunnableToolExecution.display` has to ride `tool.call.started` —
-/// that is the only channel a host sees before the call runs, and the one
-/// the approval prompt reads. The unit tests on `agent_call_display` prove
-/// its shape; this proves it is actually emitted, which is the part that
-/// would otherwise rest on code review alone.
 #[tokio::test]
 async fn a_swarm_tool_call_rides_its_display_on_the_started_event() {
     let llm = PredictTestLlm {
@@ -43,6 +38,7 @@ async fn a_swarm_tool_call_rides_its_display_on_the_started_event() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-swarm-display".into(),
@@ -89,9 +85,6 @@ async fn a_swarm_tool_call_rides_its_display_on_the_started_event() {
     assert_eq!(started["display"]["prompt"], "three-way review");
 }
 
-/// A tool that declares no display must not grow one — an empty
-/// `display` would make hosts render a card for a plain tool. `ExitPlanMode`
-/// needs host plan state to build its card, so it stays displayless.
 #[tokio::test]
 async fn a_tool_without_a_display_ships_none() {
     let llm = PredictTestLlm {
@@ -124,6 +117,7 @@ async fn a_tool_without_a_display_ships_none() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-no-display".into(),
@@ -167,9 +161,6 @@ async fn a_tool_without_a_display_ships_none() {
     );
 }
 
-/// `tool.native` only reports the outcome, so a consumer could never
-/// tell that a call had started: the lifecycle events bracket every
-/// execution, including the transport-error path.
 #[tokio::test]
 async fn test_tool_call_lifecycle_events_bracket_execution() {
     let llm = PredictTestLlm {
@@ -202,6 +193,7 @@ async fn test_tool_call_lifecycle_events_bracket_execution() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-tool-call-lifecycle".into(),
@@ -247,7 +239,7 @@ async fn test_tool_call_lifecycle_events_bracket_execution() {
         types.iter().any(|t| t == "tool.call.completed"),
         "a completed event must close the call: {types:?}"
     );
-    // The call id ties the pair to the same tool call.
+
     let started = events
         .lock()
         .unwrap()
@@ -259,12 +251,6 @@ async fn test_tool_call_lifecycle_events_bracket_execution() {
     assert_eq!(started["tool_name"], "WebSearch");
 }
 
-/// v2 pairs `TurnStepStarted` with `TurnStepCompleted` from the loop itself
-/// (loopService.ts:1393-1408). The boundary events must therefore come from
-/// `run_turn`, not from the transport: one `llm.step.begin` per step, each
-/// naming the turn and the 1-based ordinal, strictly before its `end` — a
-/// summarizer or retry request that reuses the LLM instance can no longer
-/// announce a step of its own.
 #[tokio::test]
 async fn step_boundaries_are_paired_one_begin_and_one_end_per_step() {
     let llm = PredictTestLlm {
@@ -297,6 +283,7 @@ async fn step_boundaries_are_paired_one_begin_and_one_end_per_step() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-step-boundaries".into(),
@@ -370,10 +357,6 @@ async fn step_boundaries_are_paired_one_begin_and_one_end_per_step() {
     }
 }
 
-/// A provider `content_filter` finish on the final step must surface
-/// `Filtered` (v2 throws `PROVIDER_FILTERED`, loopService.ts:877-882),
-/// which the session layer reports as a failed turn with the safety
-/// message — not as a completion.
 #[tokio::test]
 async fn test_filtered_finish_surfaces_filtered_reason() {
     struct FilteredLlm;
@@ -409,6 +392,7 @@ async fn test_filtered_finish_surfaces_filtered_reason() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-filtered".into(),
@@ -438,10 +422,6 @@ async fn test_filtered_finish_surfaces_filtered_reason() {
     assert!(matches!(turn.stop_reason, LoopTurnStopReason::Filtered));
 }
 
-/// Every filtered spelling must land on `Filtered`, and the canonical
-/// `filtered` value v2 carries must be among them — a filtered turn that
-/// falls through to `EndTurn` reports success where v2 fails the turn
-/// (`loopService.ts:877-882`).
 #[test]
 fn every_filtered_spelling_maps_to_filtered() {
     for spelling in [
@@ -482,11 +462,6 @@ fn every_filtered_spelling_maps_to_filtered() {
     }
 }
 
-/// The retry guard and the turn-level mapper are two copies of one
-/// vocabulary, and the copies drifted once: `filtered` — the value v2
-/// actually carries and the one the host delivers — reached the retry guard
-/// but not the mapper, so a filtered turn was re-requested as an empty one
-/// and then reported success. This is the gate that keeps them in step.
 #[test]
 fn the_retry_guard_and_the_turn_mapper_agree_on_every_finish_reason() {
     let vocabulary = [
@@ -519,8 +494,6 @@ fn the_retry_guard_and_the_turn_mapper_agree_on_every_finish_reason() {
     }
 }
 
-/// Drive a whole turn whose only LLM response carries `finish_reason` and
-/// `content`, and hand back the stop reason the turn ended on.
 async fn stop_reason_of_a_single_response(
     turn_id: &str,
     finish_reason: &str,
@@ -534,6 +507,7 @@ async fn stop_reason_of_a_single_response(
     let callbacks = rpc_callbacks(server);
     let turn = run_turn(
         RunTurnInput {
+            llm_request_byte_budget: u64::MAX,
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
             previous_turn_aborted: false,
             turn_id: turn_id.to_string(),
@@ -565,10 +539,6 @@ async fn stop_reason_of_a_single_response(
     turn.stop_reason
 }
 
-/// The canonical `filtered` spelling — the one v2 actually carries, and the
-/// one a host normalizing through kosong hands the engine — must fail the
-/// turn, not complete it. The turn-level test above only exercised
-/// `content_filter`, which is why the missing spelling shipped.
 #[tokio::test]
 async fn the_canonical_filtered_spelling_fails_the_turn() {
     let stop = stop_reason_of_a_single_response("test-canonical-filtered", "filtered", "").await;
@@ -578,9 +548,6 @@ async fn the_canonical_filtered_spelling_fails_the_turn() {
     );
 }
 
-/// v2 latches `turn.filtered` from the finish reason alone
-/// (`loopService.ts:1859`, `:1884-1894`) — it does not care whether the
-/// response carried content, so neither does the mapper.
 #[tokio::test]
 async fn a_filtered_response_with_content_still_fails_the_turn() {
     let stop =
@@ -591,8 +558,6 @@ async fn a_filtered_response_with_content_still_fails_the_turn() {
     );
 }
 
-/// Guard against the opposite drift: an ordinary finish reason still ends
-/// the turn normally through the whole loop, not just the mapper.
 #[tokio::test]
 async fn an_ordinary_finish_reason_completes_the_turn() {
     let stop = stop_reason_of_a_single_response("test-ordinary-stop", "stop", "hello").await;

@@ -1,0 +1,19 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/i18n. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/i18n",
+  "redEntries": [
+    {
+      "tsPath": "i18n.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "locales/en.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "locales/zh.ts",
+      "verdict": "partial"
+    }
+  ]
+}

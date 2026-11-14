@@ -10,9 +10,9 @@ description:
   en: >
       Registered tool names: Skill, Knowledge, Memory (unified action: search/read/write/list/delete/log/revert), session_query (wire-event search), lsp (experimental, off by default).
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.322Z"
-fingerprint: 738b3e9e791a5eea29001b0b1accda425dee662905af8f2bee30ea2509060eca
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-12T17:23:42.162Z"
+fingerprint: eecaf2ee1d8b9c526df0f4d0ee50ba981fcb9c755f9a2737d19190e41ca21936
 source:
   - path: "packages/kimi-agent/src/tools/skill.rs"
   - path: "packages/kimi-agent/src/tools/memory_tool.rs"

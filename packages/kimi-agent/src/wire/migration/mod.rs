@@ -1,0 +1,11 @@
+pub mod migration;
+#[path = "v1_1.rs"]
+pub mod v1_1;
+#[path = "v1_2.rs"]
+pub mod v1_2;
+#[path = "v1_3.rs"]
+pub mod v1_3;
+#[path = "v1_4.rs"]
+pub mod v1_4;
+#[path = "v1_5.rs"]
+pub mod v1_5;

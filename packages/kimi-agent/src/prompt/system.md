@@ -130,4 +130,5 @@ The applicable `AGENTS.md` instructions are:
 ```````
 ${agents_md}
 ```````
-${skills_section}${plugin_sections}${model_adaptation_section}
+${repo_memory}
+${memory_code_section}${skills_section}${plugin_sections}${model_adaptation_section}

@@ -1,35 +1,3 @@
-//! Cross-process session occupancy lock (v2 `persistence/interface/sessionLock.ts`
-//! + `persistence/backends/node-fs/sessionLockService.ts`, upstream #4246).
-//!
-//! Two processes running turns on the same session interleave their wire rows
-//! into one journal; the lock makes the later one fail loudly instead. A hold
-//! is a lock file under `<kimi home>/locks/sessions/<sessionId>.lock` whose
-//! payload names the holding process; a claimant that finds a live foreign
-//! holder gets `session.occupied`, a claimant that finds a dead one reclaims
-//! the file through v2's `.reclaim` sidecar protocol.
-//!
-//! Deliberate differences from the TS reference, each recorded so the next
-//! reader does not "fix" them back:
-//!
-//! - The engine identifies itself as a generic `kimi_code` client with no
-//!   display name, so the denial is v2's fallback wording ("another Kimi Code
-//!   process") rather than the per-product variant; v2 takes the same arm
-//!   whenever no display name is known.
-//! - The wire write guard (`SqliteSessionStore::append_wire_event_json`)
-//!   *checks* the holder instead of v2's acquire-and-retain `tryHold` guard:
-//!   a per-row acquire would create and delete a lock file twice per wire
-//!   event, and this engine's turns already hold the lock for their whole
-//!   duration — the guard's job at the store seam is refusal, not acquisition.
-//! - No `process.on('exit')` sweep. Release runs at the seams that own a hold
-//!   (turn end, session close, lease drop), and a crashed holder's file is
-//!   reclaimed by the next claimant through the same stale-holder protocol
-//!   v2 uses, so the exit listener's absence costs nothing but a stale file
-//!   that never survives the next claim.
-//! - `KIMI_CODE_SESSION_LOCK=false` disables the lock (v2
-//!   `SESSION_LOCK_ENV`), and a filesystem failure while claiming degrades to
-//!   a warning plus an unlocked turn (v2 `publish`'s catch arm) — the lock is
-//!   protection, never a new way to make a session unusable.
-
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -39,21 +7,12 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-/// v2 `SESSION_LOCK_ENV`: set to a false-ish value to run unlocked.
 pub const SESSION_LOCK_ENV: &str = "KIMI_CODE_SESSION_LOCK";
 
-/// v2 `SESSION_LOCK_RELEASE_DELAY_MS` (sessionRunGateService.ts:15): the
-/// publish is kept for this long after the session goes idle, so two
-/// back-to-back turns do not drop and re-claim the lock (and race another
-/// client through the gap).
 pub const SESSION_LOCK_RELEASE_DELAY_MS: u64 = 3000;
 
-/// v2 `LOCK_FILE_VERSION`.
 const LOCK_FILE_VERSION: u32 = 1;
 
-/// The holder payload written into the lock file (v2 `SessionLockHolder`;
-/// field names match the JSON v2 writes, so a lock file is readable by
-/// either engine).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionLockHolder {
@@ -70,9 +29,6 @@ pub struct SessionLockHolder {
 }
 
 impl Default for SessionLockHolder {
-    /// v2 `UNREADABLE_HOLDER`: a file that cannot be parsed reads as a holder
-    /// nothing can verify — and v2's `alive()` treats the unverifiable as
-    /// alive rather than deleting a lock it cannot judge.
     fn default() -> Self {
         Self {
             version: 0,
@@ -86,18 +42,13 @@ impl Default for SessionLockHolder {
     }
 }
 
-/// The denial a second claimant gets (v2 `sessionOccupiedError`, code
-/// `session.occupied` — on v2's retryable list, so hosts may surface it as
-/// "try again once the other process lets go").
 #[derive(Debug)]
 pub struct SessionOccupied {
     pub session_id: String,
-    /// Boxed: the claim path is the only producer, and keeping the `Err`
-    /// arm of every `hold`/`lease` Result small is worth one indirection.
+
     pub holder: Option<Box<SessionLockHolder>>,
 }
 
-/// v2's exact two message arms.
 pub fn session_occupied_message(holder: Option<&SessionLockHolder>) -> String {
     match holder.and_then(|h| h.client_display_name.as_deref()) {
         Some(display) => format!(
@@ -115,17 +66,9 @@ impl std::fmt::Display for SessionOccupied {
 
 impl std::error::Error for SessionOccupied {}
 
-/// The process-wide service the engine's seams use. Constructed on first use
-/// from the environment; unit tests build their own instances on tempdirs
-/// instead of touching this one.
 pub static SESSION_LOCKS: LazyLock<SessionLockService> = LazyLock::new(|| {
     #[cfg(test)]
     {
-        // Tests must not share `<home>/.kimi-code/locks/sessions`: a lock file
-        // left by another window's process — or by an earlier run — is live
-        // enough to make the claim protocol report `SessionOccupied`, which
-        // turned whole engine/session suites red at random. A per-process root
-        // keeps every test binary isolated without changing the protocol.
         let lock_dir = std::env::temp_dir()
             .join(format!("kimi-agent-test-locks-{}", std::process::id()))
             .join("sessions");
@@ -137,8 +80,6 @@ pub static SESSION_LOCKS: LazyLock<SessionLockService> = LazyLock::new(|| {
     }
 });
 
-/// v2 `SessionLockHolds` + the node-fs `SessionLockService`, one type here:
-/// the in-memory hold table and the filesystem claim protocol behind it.
 pub struct SessionLockService {
     lock_dir: PathBuf,
     hostname: String,
@@ -151,13 +92,10 @@ struct HeldState {
     token: String,
     held: bool,
     leases: usize,
-    /// When the idle grace expires. `None` means held without a deadline (an
-    /// explicit `hold`, or a lease).
+
     release_at: Option<Instant>,
 }
 
-/// Drop-releases one `hold` (v2's run-gate release, as a guard so an early
-/// `?` or a dropped turn future cannot leak the lock file).
 pub struct HoldGuard<'a> {
     service: &'a SessionLockService,
     session_id: String,
@@ -165,9 +103,6 @@ pub struct HoldGuard<'a> {
 
 impl Drop for HoldGuard<'_> {
     fn drop(&mut self) {
-        // v2 `SessionRunGateService.schedule`: the turn leaving does not end
-        // the occupancy immediately. Keeping the publish for the grace window
-        // lets the next turn reuse it and denies a foreign client the gap.
         self.service.release_after_idle_for(
             &self.session_id,
             Duration::from_millis(SESSION_LOCK_RELEASE_DELAY_MS),
@@ -175,8 +110,6 @@ impl Drop for HoldGuard<'_> {
     }
 }
 
-/// v2 `SessionLockLease`: a counted reference that releases the publish when
-/// the last lease (and no explicit hold) remains.
 pub struct SessionLockLease<'a> {
     service: &'a SessionLockService,
     session_id: String,
@@ -189,8 +122,6 @@ impl Drop for SessionLockLease<'_> {
 }
 
 impl SessionLockService {
-    /// A service on an explicit directory — the shape tests take; production
-    /// goes through [`SESSION_LOCKS`].
     pub fn new(lock_dir: PathBuf) -> Self {
         Self {
             lock_dir,
@@ -201,7 +132,7 @@ impl SessionLockService {
         }
     }
 
-    #[cfg_attr(test, allow(dead_code))] // tests build the per-process instance
+    #[cfg_attr(test, allow(dead_code))]
     fn from_env() -> Self {
         let mut service = Self::new(data_home().join("locks").join("sessions"));
         service.disabled =
@@ -209,14 +140,10 @@ impl SessionLockService {
         service
     }
 
-    /// v2 `hold`: claim the session, failing with [`SessionOccupied`] when a
-    /// live foreign process holds it. Re-holding a session this process
-    /// already holds is a no-op.
     pub fn hold(&self, session_id: &str) -> Result<(), SessionOccupied> {
         self.acquire(session_id, Mark::Hold)
     }
 
-    /// [`Self::hold`] as a drop guard — the shape the turn seams take.
     pub fn hold_guard<'a>(&'a self, session_id: &str) -> Result<HoldGuard<'a>, SessionOccupied> {
         self.hold(session_id)?;
         Ok(HoldGuard {
@@ -225,12 +152,10 @@ impl SessionLockService {
         })
     }
 
-    /// v2 `tryHold`.
     pub fn try_hold(&self, session_id: &str) -> bool {
         self.hold(session_id).is_ok()
     }
 
-    /// v2 `release`: the publish survives while leases remain.
     pub fn release(&self, session_id: &str) {
         let mut held = self.held.lock();
         let Some(state) = held.get_mut(session_id) else {
@@ -244,9 +169,6 @@ impl SessionLockService {
         Self::unpublish_if_unused_locked(&mut held, session_id, self);
     }
 
-    /// Schedule the hold's release after the v2 idle grace
-    /// (`sessionRunGateService.schedule`). A re-hold during the window cancels
-    /// the deadline, which is the point: consecutive turns reuse one publish.
     pub fn release_after_idle(&self, session_id: &str) {
         self.release_after_idle_for(
             session_id,
@@ -254,8 +176,6 @@ impl SessionLockService {
         );
     }
 
-    /// [`Self::release_after_idle`] with an explicit grace period — the seam
-    /// tests drive without waiting three seconds.
     pub fn release_after_idle_for(&self, session_id: &str, grace: Duration) {
         let mut held = self.held.lock();
         let Some(state) = held.get_mut(session_id) else {
@@ -267,8 +187,6 @@ impl SessionLockService {
         state.release_at = Some(Instant::now() + grace);
     }
 
-    /// v2 `releaseWhenIdle`: release every hold whose grace window elapsed.
-    /// Called by the periodic maintenance tick and lazily on the next claim.
     pub fn sweep_idle(&self) {
         let mut held = self.held.lock();
         let expired: Vec<String> = held
@@ -287,8 +205,6 @@ impl SessionLockService {
         }
     }
 
-    /// v2 `lease`: hold the publish without marking the session held, for a
-    /// scoped piece of work (the idle reaper's shape, upstream).
     pub fn lease<'a>(&'a self, session_id: &str) -> Result<SessionLockLease<'a>, SessionOccupied> {
         self.acquire(session_id, Mark::Lease)?;
         Ok(SessionLockLease {
@@ -306,15 +222,10 @@ impl SessionLockService {
         Self::unpublish_if_unused_locked(&mut held, session_id, self);
     }
 
-    /// v2 `held` — whether *this* process has any claim (hold or lease).
     pub fn held(&self, session_id: &str) -> bool {
         self.held.lock().contains_key(session_id)
     }
 
-    /// v2 `releaseAll` (`dispose`): every publish this service made is
-    /// withdrawn. The process-wide [`SESSION_LOCKS`] never drops, so this
-    /// runs for standalone instances — tests, and any host that tears a
-    /// service down before exit.
     pub fn release_all(&self) {
         let held = std::mem::take(&mut *self.held.lock());
         for (session_id, state) in held {
@@ -322,14 +233,11 @@ impl SessionLockService {
         }
     }
 
-    /// Where the lock files live. Tests plant holders here.
     #[doc(hidden)]
     pub fn lock_dir(&self) -> &Path {
         &self.lock_dir
     }
 
-    /// v2 `takeover`: evict a foreign holder so the next claim succeeds.
-    /// Taking over a session this process already holds is a no-op.
     pub fn takeover(&self, session_id: &str) {
         if self.held(session_id) {
             return;
@@ -352,15 +260,11 @@ impl SessionLockService {
         }
     }
 
-    /// The wire write guard's question: is this session held by a live
-    /// *other* process? Our own rows (pid match) and stale files do not
-    /// block a write; a live foreign holder does.
     pub fn occupied_by_other(&self, session_id: &str) -> Option<SessionLockHolder> {
         if self.disabled {
             return None;
         }
-        // Fast path: a session this process already holds cannot be occupied
-        // by another — and the turn seams call this once per wire row.
+
         if self.held(session_id) {
             return None;
         }
@@ -371,13 +275,9 @@ impl SessionLockService {
         self.alive(&holder).then_some(holder)
     }
 
-    /// The map check, the publish, and the flag set run under one lock: a
-    /// split version let a racing `release` delete a just-published file
-    /// between the insert and the flag set.
     fn acquire(&self, session_id: &str, mark: Mark) -> Result<(), SessionOccupied> {
         let mut held = self.held.lock();
-        // Expire a grace window before deciding anything: a caller arriving
-        // after the 3s should claim a fresh publish, not inherit a stale hold.
+
         if held.get(session_id).is_some_and(|state| {
             state.held && state.release_at.is_some_and(|at| at <= Instant::now())
         }) {
@@ -402,8 +302,7 @@ impl SessionLockService {
         match mark {
             Mark::Hold => {
                 state.held = true;
-                // A new hold inside the grace period cancels the pending
-                // release: the publish simply carries over to this turn.
+
                 state.release_at = None;
             }
             Mark::Lease => state.leases += 1,
@@ -428,17 +327,10 @@ impl SessionLockService {
         service.unpublish(session_id, &state.token);
     }
 
-    /// Whether a holder must be respected. A live **foreign** process blocks;
-    /// our own pid never does, because within one process the in-memory held
-    /// map is the authority (and a new instance replacing an old one in the
-    /// same process is not a second client).
     fn blocks(&self, holder: &SessionLockHolder) -> bool {
         holder.pid != std::process::id() && self.alive(holder)
     }
 
-    /// v2 `publish`: claim, or degrade to an unlocked token when the
-    /// filesystem cannot play along — the lock is protection, not a new
-    /// failure mode.
     fn publish(&self, session_id: &str) -> Result<String, SessionOccupied> {
         let token = format!("{}:{}", std::process::id(), ulid::Ulid::new());
         if self.disabled {
@@ -457,7 +349,6 @@ impl SessionLockService {
         }
     }
 
-    /// v2 `unpublish`: only our own token is ours to delete.
     fn unpublish(&self, session_id: &str, token: &str) {
         let path = self.lock_path(session_id);
         let ours = self
@@ -470,9 +361,6 @@ impl SessionLockService {
         }
     }
 
-    /// v2 `claim`: publish, and when the file is taken, reclaim it through
-    /// the sidecar protocol only once the holder reads dead — twice around
-    /// before conceding.
     fn claim(&self, lock_path: &Path, token: &str) -> std::io::Result<ClaimOutcome> {
         self.ensure_lock_dir()?;
         for _ in 0..2 {
@@ -490,9 +378,6 @@ impl SessionLockService {
         Ok(ClaimOutcome::Occupied(self.read_holder(lock_path)?))
     }
 
-    /// v2 `reclaim`: the `.reclaim` sidecar makes a stale-file delete
-    /// single-winner; the loser cleans up someone else's crashed reclaim and
-    /// walks away.
     fn reclaim(&self, lock_path: &Path, token: &str) -> std::io::Result<()> {
         let reclaim_path = suffixed_path(lock_path, ".reclaim");
         if !self.try_publish(&reclaim_path, &self.payload(token))? {
@@ -514,9 +399,6 @@ impl SessionLockService {
         Ok(())
     }
 
-    /// v2 `tryPublish`: the file is written whole at a temp name and
-    /// hard-linked into place, so a reader never meets a half-written holder
-    /// (link fails `EEXIST`, which is the claim's atomicity).
     fn try_publish(&self, lock_path: &Path, body: &str) -> std::io::Result<bool> {
         let tmp = suffixed_path(
             lock_path,
@@ -534,8 +416,6 @@ impl SessionLockService {
         result
     }
 
-    /// v2 `readHolder`: a missing file is no holder; a corrupt one is the
-    /// unverifiable holder v2 refuses to judge.
     fn read_holder(&self, lock_path: &Path) -> std::io::Result<Option<SessionLockHolder>> {
         let raw = match std::fs::read_to_string(lock_path) {
             Ok(raw) => raw,
@@ -545,9 +425,6 @@ impl SessionLockService {
         Ok(Some(serde_json::from_str(&raw).unwrap_or_default()))
     }
 
-    /// v2 `alive`: a holder on another hostname cannot be verified and is
-    /// assumed alive; a dead pid is dead; a live pid whose `startedAt`
-    /// predates the boot is a reused pid on a stale file.
     fn alive(&self, holder: &SessionLockHolder) -> bool {
         if !holder.hostname.is_empty() && holder.hostname != self.hostname {
             return true;
@@ -557,7 +434,7 @@ impl SessionLockService {
         }
         match boot_time_ms() {
             Some(boot) => holder.started_at >= boot,
-            // No boot clock on this platform: the pid check alone stands.
+
             None => true,
         }
     }
@@ -600,8 +477,6 @@ enum Mark {
     Lease,
 }
 
-/// `lockPath.reclaim` / `lockPath.tmp-*` — suffix on the file name, not a
-/// replaced extension (v2's `${lockPath}.reclaim` shape).
 fn suffixed_path(path: &Path, suffix: &str) -> PathBuf {
     let mut os = path.as_os_str().to_os_string();
     os.push(suffix);
@@ -612,9 +487,6 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// The data home (`KIMI_CODE_HOME`, else `~/.kimi-code`) — the same
-/// resolution `server::files` and `workflow::kimi_home` carry; duplicated
-/// here because `session` sits below both in the module graph.
 fn data_home() -> PathBuf {
     if let Some(home) = std::env::var_os("KIMI_CODE_HOME") {
         return PathBuf::from(home);
@@ -626,7 +498,6 @@ fn data_home() -> PathBuf {
     }
 }
 
-/// v2 `parseBooleanEnv`: only an explicit false-ish value disables.
 fn parse_boolean_env(value: Option<&str>) -> Option<bool> {
     let normalized = value?.trim().to_lowercase();
     if normalized.is_empty() {
@@ -639,8 +510,6 @@ fn parse_boolean_env(value: Option<&str>) -> Option<bool> {
     }
 }
 
-/// v2 writes the file `mode: 0o600`; a lock names its holder's pid and is
-/// not other users' business.
 fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -654,10 +523,6 @@ fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
     file.write_all(body)
 }
 
-/// v2 `pidAlive`: signal 0 probes existence; `EPERM` means the process is
-/// there but not ours to signal. POSIX adds the zombie check v2 runs through
-/// `ps` (a zombie is a dead holder whose lock must not block anyone);
-/// Windows stops at the handle probe, exactly as v2 does on win32.
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     let alive = unsafe { libc::kill(pid as i32, 0) } == 0
@@ -697,8 +562,6 @@ fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// v2's `Date.now() - os.uptime() * 1000`: the instant the machine booted,
-/// the reference a stale holder's `startedAt` is judged against.
 #[cfg(windows)]
 fn boot_time_ms() -> Option<i64> {
     #[link(name = "kernel32")]
@@ -752,8 +615,6 @@ mod tests {
         now_ms()
     }
 
-    /// A holder file planted by hand stands in for another process: the
-    /// claim path never looks at who planted it.
     fn plant(service: &SessionLockService, session_id: &str, holder: &SessionLockHolder) {
         std::fs::create_dir_all(&service.lock_dir).unwrap();
         std::fs::write(
@@ -763,15 +624,11 @@ mod tests {
         .unwrap();
     }
 
-    /// A holder on another host: v2 cannot verify a foreign hostname's pid and
-    /// therefore reads the holder as alive — which is what "live foreign"
-    /// means here. No test can plant a live *foreign pid* without a second
-    /// process, so the foreign hostname carries the liveness instead.
     fn live_foreign_holder() -> SessionLockHolder {
         SessionLockHolder {
             version: LOCK_FILE_VERSION,
             token: "99999:other".to_string(),
-            pid: 999_999_999, // dead on this host; the hostname is what reads alive
+            pid: 999_999_999,
             hostname: "other-host".to_string(),
             started_at: now(),
             client_identity: "kimi_code".to_string(),
@@ -779,8 +636,6 @@ mod tests {
         }
     }
 
-    /// The same payload on **this** host with a pid nothing owns: verifiably
-    /// dead, so the claim reclaims it.
     fn dead_holder() -> SessionLockHolder {
         SessionLockHolder {
             pid: 999_999_999,
@@ -847,8 +702,7 @@ mod tests {
     fn a_pre_boot_holder_is_reclaimed() {
         let dir = tempfile::tempdir().unwrap();
         let service = SessionLockService::new(dir.path().join("locks"));
-        // A live pid on this host but a start time before this boot: the pid
-        // was reused, the file is stale.
+
         let mut holder = dead_holder();
         holder.pid = std::process::id();
         holder.started_at = 0;
@@ -886,12 +740,10 @@ mod tests {
         plant(&service, "sess-g", &live_foreign_holder());
         let mut foreign = live_foreign_holder();
         foreign.hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown-host".into());
-        foreign.pid = 999_999_998; // dead on every platform
+        foreign.pid = 999_999_998;
         plant(&service, "sess-g", &foreign);
         assert!(service.occupied_by_other("sess-g").is_none());
-        // A live pid that is not ours is the only blocking case. No test can
-        // plant one without a second process, so the pid check is inverted
-        // here: our own pid never blocks us.
+
         let mut own = live_foreign_holder();
         own.token = "ours:1".to_string();
         own.pid = std::process::id();
@@ -905,8 +757,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let service = SessionLockService::new(dir.path().join("locks"));
         service.hold("sess-h").unwrap();
-        // The file changed hands behind our back (a takeover, then a foreign
-        // claim): our release must not delete the new holder's file.
+
         plant(&service, "sess-h", &live_foreign_holder());
         service.release("sess-h");
         assert!(service.lock_path("sess-h").exists());
@@ -951,8 +802,7 @@ mod tests {
         let service = SessionLockService::new(dir.path().join("locks"));
         drop(service.hold_guard("sess-rehold").unwrap());
         service.release_after_idle_for("sess-rehold", Duration::from_secs(60));
-        // A second turn starts inside the window; the same publish is reused and
-        // the deadline is cleared rather than firing under the running turn.
+
         drop(service.hold_guard("sess-rehold").unwrap());
         assert!(service.held("sess-rehold"));
         service.release_after_idle_for("sess-rehold", Duration::ZERO);

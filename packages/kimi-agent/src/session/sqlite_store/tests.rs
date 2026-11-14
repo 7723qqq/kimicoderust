@@ -1,22 +1,10 @@
 use super::*;
 
-/// A panic while the connection guard is held must stay confined to the
-/// call that caused it.
-///
-/// This is the property `parking_lot` buys and `std::sync` does not. With a
-/// poisoning std mutex, the panic below would mark the connection guard
-/// poisoned, and then **every** later `lock()` on this single connection
-/// would panic too — the whole session store dead for the process
-/// lifetime, with no recovery and nothing in the log. The test pins the
-/// non-poisoning behaviour itself, so swapping the lock type back cannot
-/// pass silently.
 #[test]
 fn a_panic_under_the_connection_guard_does_not_poison_the_store() {
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-alive", None).unwrap();
 
-    // Silence the panic message so a passing run stays quiet; restore the
-    // default hook afterwards because the process is shared.
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -26,7 +14,7 @@ fn a_panic_under_the_connection_guard_does_not_poison_the_store() {
     std::panic::set_hook(previous);
 
     assert!(caught.is_err(), "the panic must actually have happened");
-    // The point of the whole change: the store still answers.
+
     let sessions = store
         .list_sessions()
         .expect("a read after a guarded panic must still work");
@@ -36,9 +24,47 @@ fn a_panic_under_the_connection_guard_does_not_poison_the_store() {
     );
 }
 
-/// One unparseable `wire_events` payload must not decide the whole cold
-/// rebuild: the session still opens from the rows around it, and the read
-/// repairs the log so the next open does not hit the same row again.
+#[test]
+fn wire_event_payloads_filter_by_type_and_keep_order() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-payloads", None).unwrap();
+    for (id, payload, created_at) in [
+        (
+            "evt-1",
+            json!({"type": "permission.set_mode", "mode": "auto"}),
+            1,
+        ),
+        ("evt-2", json!({"type": "other"}), 2),
+        (
+            "evt-3",
+            json!({"type": "permission.set_mode", "mode": "yolo"}),
+            3,
+        ),
+    ] {
+        store
+            .append_wire_event_json(
+                id,
+                "sess-payloads",
+                payload["type"].as_str().unwrap(),
+                &payload.to_string(),
+                false,
+                false,
+                created_at,
+            )
+            .unwrap();
+    }
+    let payloads = store
+        .wire_event_payloads("sess-payloads", "permission.set_mode")
+        .unwrap();
+    assert_eq!(
+        payloads,
+        vec![
+            json!({"type": "permission.set_mode", "mode": "auto"}),
+            json!({"type": "permission.set_mode", "mode": "yolo"}),
+        ]
+    );
+}
+
 #[test]
 fn test_fold_projection_skips_a_corrupt_wire_event_row() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -62,7 +88,6 @@ fn test_fold_projection_skips_a_corrupt_wire_event_row() {
     }
     assert_eq!(store.fold_projection("sess-fold").unwrap().len(), 3);
 
-    // A crash mid-write leaves a half-serialized payload in one row.
     let truncated = "{\"content\": \"sec";
     {
         let conn = store.conn.lock();
@@ -77,13 +102,9 @@ fn test_fold_projection_skips_a_corrupt_wire_event_row() {
         .fold_projection("sess-fold")
         .expect("one corrupt row must not fail the whole fold");
     let contents: Vec<&str> = projected.iter().map(|m| m.content.as_str()).collect();
-    // The two surviving user messages are consecutive once the corrupt
-    // assistant is gone, and v2 merges consecutive real user input.
+
     assert_eq!(contents, vec!["first\n\nthird"]);
 
-    // The read repairs the log (v2 `readEntries` → `repairWireJournal`): the
-    // undecodable row is removed so the next open does not hit it again. An
-    // in-memory store has no durable place for the original, so no backup.
     let conn = store.conn.lock();
     let remaining: i64 = conn
         .query_row(
@@ -95,8 +116,6 @@ fn test_fold_projection_skips_a_corrupt_wire_event_row() {
     assert_eq!(remaining, 2, "the corrupt row was dropped");
 }
 
-/// A file over the byte cap is recorded as change metadata plus the
-/// `oversize` marker; its content never reaches the table.
 #[test]
 fn test_file_history_caps_content_bytes() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -110,13 +129,11 @@ fn test_file_history_caps_content_bytes() {
         .record_file_change("sess-big", 2, "small.txt", Some("a"), Some("b"))
         .unwrap();
 
-    // The over-cap row keeps the change metadata and is marked.
     let (changes, _) = store.get_file_history_changes("sess-big", Some(1)).unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].status, "modified");
     assert_eq!(changes[0].oversize, Some(true));
 
-    // No content on either side, and the content endpoint says why.
     let stored: (Option<String>, Option<String>, i64) = {
         let conn = store.conn.lock();
         conn.query_row(
@@ -139,8 +156,6 @@ fn test_file_history_caps_content_bytes() {
         assert!(content.content.is_none(), "phase {phase}");
     }
 
-    // A file under the cap is untouched: the marker is false and the
-    // content is still there.
     let (small, _) = store.get_file_history_changes("sess-big", Some(2)).unwrap();
     assert_eq!(small[0].oversize, Some(false));
     let small_end = store
@@ -151,15 +166,11 @@ fn test_file_history_caps_content_bytes() {
     assert_eq!(small_end.content.as_deref(), Some("b"));
 }
 
-/// v2 `checkpointService.ts:20` keeps snapshots for the last 20 turns only:
-/// recording turn 21 makes turn 1 unrestorable, and a turn's whole row set
-/// goes together (the undo path restores per turn, not per file).
 #[test]
 fn test_file_history_keeps_only_the_last_twenty_turns() {
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-window", None).unwrap();
 
-    // Turn 1 holds two files, so dropping it must drop both rows.
     store
         .record_file_change("sess-window", 1, "a.txt", None, Some("a"))
         .unwrap();
@@ -180,14 +191,12 @@ fn test_file_history_keeps_only_the_last_twenty_turns() {
         let rows = stmt.query_map([], |row| row.get(0)).unwrap();
         rows.map(|r| r.unwrap()).collect()
     };
-    // 20 retained turns × one row each: turn 1's two rows are the first to go.
+
     assert_eq!(turn_ids.len(), 20);
     assert!(!turn_ids.contains(&1), "turn 1 fell outside the window");
     assert!(turn_ids.contains(&2) && turn_ids.contains(&21));
 }
 
-/// The retention window is per session: pruning one session's old turns
-/// must not touch another session's snapshots.
 #[test]
 fn test_file_history_window_is_per_session() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -218,10 +227,6 @@ fn test_file_history_window_is_per_session() {
     );
 }
 
-/// Pruning has to give the WAL back: a `DELETE` on its own leaves the
-/// whole deleted payload sitting in the log until SQLite checkpoints on
-/// its own schedule. (The main file's high-water mark is a separate,
-/// still-open question — see `reclaim_file_history_space`.)
 #[test]
 fn test_prune_file_history_reclaims_the_wal() {
     let dir = tempfile::tempdir().unwrap();
@@ -236,8 +241,7 @@ fn test_prune_file_history_reclaims_the_wal() {
     }
     let size = |path: &Path| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let wal_path = db_path.with_extension("db-wal");
-    // The store is in WAL mode, so every byte of those rows is still in
-    // the log until a prune checkpoints it.
+
     let wal_before = size(&wal_path);
     assert!(
         wal_before > 1_000_000,
@@ -252,8 +256,7 @@ fn test_prune_file_history_reclaims_the_wal() {
         "the wal must be checkpointed and truncated, not left to grow: \
              {wal_before} -> {wal_after}"
     );
-    // The pages themselves are free for reuse even though the main file
-    // keeps its size until something runs a full VACUUM.
+
     let freelist: i64 = {
         let conn = store.conn.lock();
         conn.query_row("PRAGMA freelist_count", [], |row| row.get(0))
@@ -275,13 +278,11 @@ fn test_sqlite_session_lifecycle() {
     assert!(s_init.created_at > 0);
     assert!(s_init.updated_at >= s_init.created_at);
 
-    // Updating session without title preserves original title and updates updated_at
     store.create_session("sess-1", None).unwrap();
     let s_preserved = store.get_session("sess-1").unwrap().unwrap();
     assert_eq!(s_preserved.title.as_deref(), Some("Test Session"));
     assert!(s_preserved.updated_at >= s_init.updated_at);
 
-    // Save turn with TokenUsage
     let msgs = vec![
         LLMMessage::user("Hello"),
         LLMMessage::assistant("Hi there!"),
@@ -297,7 +298,6 @@ fn test_sqlite_session_lifecycle() {
         .save_turn("sess-1", "turn-1", 1, &msgs, Some(&usage), None)
         .unwrap();
 
-    // Verify loaded messages
     let loaded = store.load_session_history("sess-1").unwrap();
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].role, "user");
@@ -305,7 +305,6 @@ fn test_sqlite_session_lifecycle() {
     assert_eq!(loaded[1].role, "assistant");
     assert_eq!(loaded[1].content, "Hi there!");
 
-    // Verify turn record and persisted token usage
     {
         let conn = store.conn.lock();
         let (status, usage_json): (String, Option<String>) = conn
@@ -324,7 +323,6 @@ fn test_sqlite_session_lifecycle() {
         assert_eq!(parsed_usage.input_cache_read, 5);
     }
 
-    // Save a second turn and verify chronological order
     let msgs_turn2 = vec![
         LLMMessage::user("Second question"),
         LLMMessage::assistant("Second answer"),
@@ -348,7 +346,6 @@ fn test_sqlite_state_entries_and_checkpoints() {
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-1", None).unwrap();
 
-    // 1. Put and get state with complex object
     let state_val = serde_json::json!({
         "name": "commit",
         "flags": ["staged", "amend"],
@@ -360,7 +357,6 @@ fn test_sqlite_state_entries_and_checkpoints() {
     assert_eq!(read["flags"][0], "staged");
     assert_eq!(read["count"], 42);
 
-    // State overwrite updates value
     let updated_val = serde_json::json!({ "name": "commit", "count": 43 });
     store.put_state("skill", "commit", &updated_val).unwrap();
     assert_eq!(
@@ -368,17 +364,14 @@ fn test_sqlite_state_entries_and_checkpoints() {
         43
     );
 
-    // Non-existent key returns None
     assert!(store.get_state("skill", "unknown").unwrap().is_none());
     assert!(store.get_state("unknown_domain", "key").unwrap().is_none());
 
-    // 2. Save and verify checkpoint
     let chk_data = serde_json::json!({ "step": 1, "status": "in_progress" });
     store
         .save_checkpoint("sess-1", "chk-1", "Step 1", &chk_data)
         .unwrap();
 
-    // Verify checkpoint in sqlite table
     {
         let conn = store.conn.lock();
         let (sess_id, name, data_str, created_at): (String, String, String, i64) = conn
@@ -394,7 +387,6 @@ fn test_sqlite_state_entries_and_checkpoints() {
         assert!(created_at > 0);
     }
 
-    // Updating checkpoint on conflict
     let chk_data2 = serde_json::json!({ "step": 2, "status": "done" });
     store
         .save_checkpoint("sess-1", "chk-1", "Step 2 Done", &chk_data2)
@@ -412,7 +404,6 @@ fn test_sqlite_state_entries_and_checkpoints() {
         assert_eq!(data_str, serde_json::to_string(&chk_data2).unwrap());
     }
 
-    // Foreign key constraint: saving checkpoint for non-existent session fails
     let bad_chk = store.save_checkpoint(
         "non-existent-sess",
         "chk-bad",
@@ -449,6 +440,7 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
             ],
             tool_calls: vec![],
             tool_call_id: None,
+            tools: Vec::new(),
 
             prompt_id: None,
             origin: None,
@@ -474,6 +466,7 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
                 },
             ],
             tool_call_id: None,
+            tools: Vec::new(),
 
             prompt_id: None,
             origin: None,
@@ -484,6 +477,7 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
             blocks: vec![],
             tool_calls: vec![],
             tool_call_id: Some("call_read_1".into()),
+            tools: Vec::new(),
             prompt_id: None,
             origin: None,
         },
@@ -493,6 +487,7 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
             blocks: vec![],
             tool_calls: vec![],
             tool_call_id: Some("call_read_2".into()),
+            tools: Vec::new(),
             prompt_id: None,
             origin: None,
         },
@@ -505,7 +500,6 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
     let loaded = store.load_session_history("sess-structured").unwrap();
     assert_eq!(loaded.len(), 4);
 
-    // Turn 1 user message with multiple blocks
     assert_eq!(loaded[0].role, "user");
     assert_eq!(loaded[0].blocks.len(), 2);
     assert_eq!(
@@ -524,7 +518,6 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
         }
     );
 
-    // Turn 1 assistant message with multiple structured tool calls
     assert_eq!(loaded[1].role, "assistant");
     assert_eq!(loaded[1].tool_calls.len(), 2);
     assert_eq!(loaded[1].tool_calls[0].id, "call_read_1");
@@ -534,7 +527,6 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
     assert_eq!(loaded[1].tool_calls[1].name, "Grep");
     assert_eq!(loaded[1].tool_calls[1].arguments["pattern"], "TODO");
 
-    // Turn 1 tool results with corresponding tool_call_ids
     assert_eq!(loaded[2].role, "tool");
     assert_eq!(loaded[2].content, "file contents");
     assert_eq!(loaded[2].tool_call_id.as_deref(), Some("call_read_1"));
@@ -558,7 +550,6 @@ fn test_fork_session_copies_history_and_creates_new_session() {
         .save_turn("sess-orig", "turn-1", 1, &msgs, None, None)
         .unwrap();
 
-    // Fork to sess-fork with explicit title
     let ok = store
         .fork_session("sess-orig", "sess-fork", Some("Forked"), None)
         .unwrap();
@@ -574,7 +565,6 @@ fn test_fork_session_copies_history_and_creates_new_session() {
     assert_eq!(forked_history[0].content, "hello from original");
     assert_eq!(forked_history[1].content, "assistant reply");
 
-    // Subsequent turns in original do not leak into forked session (isolation)
     store
         .save_turn(
             "sess-orig",
@@ -588,7 +578,6 @@ fn test_fork_session_copies_history_and_creates_new_session() {
     assert_eq!(store.load_session_history("sess-orig").unwrap().len(), 3);
     assert_eq!(store.load_session_history("sess-fork").unwrap().len(), 2);
 
-    // Fork without title inherits original title
     let ok_inherit = store
         .fork_session("sess-orig", "sess-inherit", None, None)
         .unwrap();
@@ -597,21 +586,12 @@ fn test_fork_session_copies_history_and_creates_new_session() {
     assert_eq!(inherited.title.as_deref(), Some("Original"));
     assert_eq!(inherited.workspace_id.as_deref(), Some("wd_test_123"));
 
-    // Fork non-existent returns false
     let missing = store
         .fork_session("sess-missing", "sess-none", None, None)
         .unwrap();
     assert!(!missing);
 }
 
-/// A fork keeps the source's turn structure instead of collapsing it into one
-/// synthetic row (v2 `sliceMainRecordsAtTurn` / `copyAgentWire`).
-///
-/// Before the cut, `fork_session` called
-/// `save_turn(new, "turn-fork", 1, &history)` — a four-message, two-turn
-/// session came back as four messages under a single turn, so `list_turns`
-/// reported one row and turn-scoped reads (`/undo`'s plan, file history)
-/// had nothing to scope to.
 #[test]
 fn a_fork_preserves_the_source_turn_structure() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -650,7 +630,7 @@ fn a_fork_preserves_the_source_turn_structure() {
         "each source turn is copied as its own row, numbered consecutively"
     );
     assert_eq!(store.load_session_history("sess-whole").unwrap().len(), 4);
-    // The copy is independent: a later source turn must not leak in.
+
     store
         .save_turn(
             "sess-src",
@@ -664,9 +644,6 @@ fn a_fork_preserves_the_source_turn_structure() {
     assert_eq!(store.load_session_history("sess-whole").unwrap().len(), 4);
 }
 
-/// `turnIndex` names the last retained turn: v2 slices
-/// `records.slice(0, turnStarts[turnIndex + 1])`, so the named turn *and
-/// everything before it* are kept and later turns are dropped.
 #[test]
 fn a_turn_index_cuts_the_history_at_that_turn() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -704,10 +681,6 @@ fn a_turn_index_cuts_the_history_at_that_turn() {
     );
 }
 
-/// The compaction turn is a recognised key, not just a label: `undo` refuses
-/// to cross it by string comparison. Copying a compacted session must keep
-/// that exact id, or the fork silently loses the guard and an undo could
-/// delete a turn out from under the summary that explains it.
 #[test]
 fn a_fork_keeps_the_compaction_undo_guard() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -758,19 +731,18 @@ fn a_fork_keeps_the_compaction_undo_guard() {
         1,
         "the fork carries exactly one recognisable compaction turn"
     );
-    // The source must be untouched: reusing its key would have upserted
-    // the source's rows instead of inserting the fork's.
+
     assert_eq!(
         store.list_turns("sess-c").unwrap().len(),
         2,
         "the source keeps both of its rows"
     );
-    // And the guard still fires on the fork: undoing both turns would cross it.
+
     assert!(
         store.plan_undo_turns("sess-c-fork", 2).is_err(),
         "the fork must refuse an undo that crosses the compaction boundary"
     );
-    // Undoing only the real turn is still fine.
+
     assert_eq!(
         store.plan_undo_turns("sess-c-fork", 1).unwrap(),
         vec![2],
@@ -778,8 +750,6 @@ fn a_fork_keeps_the_compaction_undo_guard() {
     );
 }
 
-/// An index past the last turn is a client error, and it must not leave a
-/// half-created session behind.
 #[test]
 fn an_out_of_range_turn_index_is_refused_without_creating_the_child() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -816,9 +786,6 @@ fn an_out_of_range_turn_index_is_refused_without_creating_the_child() {
     );
 }
 
-/// `turnIndex` counts *visible* turns (v2 `isUserVisibleTurnRecord`), so an
-/// invisible turn sitting between two visible ones must not shift the
-/// numbering the caller sees.
 #[test]
 fn an_invisible_turn_does_not_shift_the_turn_index() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -826,7 +793,7 @@ fn an_invisible_turn_does_not_shift_the_turn_index() {
         .create_session_with_workspace("sess-src", Some("Src"), Some("wd_vis"))
         .unwrap();
     let user_origin = json!({ "kind": "user" });
-    // An auto-injected shell command is not a user-visible turn.
+
     let shell_origin = json!({ "kind": "shell_command", "phase": "output" });
     store
         .save_turn(
@@ -859,8 +826,6 @@ fn an_invisible_turn_does_not_shift_the_turn_index() {
         )
         .unwrap();
 
-    // Visible turns are index 0 (q1) and index 1 (q2); the shell turn sits
-    // between them and must be carried along as part of the prefix.
     store
         .fork_session("sess-src", "sess-cut", None, Some(1))
         .unwrap();
@@ -877,7 +842,6 @@ fn an_invisible_turn_does_not_shift_the_turn_index() {
         "the invisible shell turn rides along inside the retained prefix"
     );
 
-    // The invisible turn is not nameable on its own: index 2 is past the end.
     let err = store
         .fork_session("sess-src", "sess-cut2", None, Some(2))
         .unwrap_err();
@@ -893,11 +857,6 @@ fn an_invisible_turn_does_not_shift_the_turn_index() {
     );
 }
 
-/// v2's *first* visibility guard is the message `role`, checked before
-/// `origin.kind` (`forkTurnSlice.ts:89-91`): a turn whose opening message is
-/// not a user message is never a nameable cut point, whatever its origin
-/// says. Without that guard a `kind: "user"` turn opened by the engine
-/// itself would be offered as a cut point and silently consume index 0.
 #[test]
 fn a_non_user_opening_message_is_not_a_visible_turn() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -905,7 +864,7 @@ fn a_non_user_opening_message_is_not_a_visible_turn() {
         .create_session_with_workspace("sess-role", Some("Src"), Some("wd_role"))
         .unwrap();
     let user_origin = json!({ "kind": "user" });
-    // A genuine user turn.
+
     store
         .save_turn(
             "sess-role",
@@ -916,8 +875,7 @@ fn a_non_user_opening_message_is_not_a_visible_turn() {
             Some(&user_origin),
         )
         .unwrap();
-    // Claims `kind: "user"` — the most permissive origin there is — but
-    // opened by the assistant, so v2 excludes it on the role check alone.
+
     store
         .save_turn(
             "sess-role",
@@ -939,8 +897,6 @@ fn a_non_user_opening_message_is_not_a_visible_turn() {
         )
         .unwrap();
 
-    // Only the two real user turns are nameable, so index 2 is past the end
-    // even though three rows exist.
     let err = store
         .fork_session("sess-role", "sess-role-cut", None, Some(2))
         .unwrap_err();
@@ -955,8 +911,6 @@ fn a_non_user_opening_message_is_not_a_visible_turn() {
         "the assistant-opened turn must not be nameable, got {err:?}"
     );
 
-    // Cutting at visible index 1 keeps rows 1..=3 — the assistant turn rides
-    // along inside the retained prefix, exactly as an invisible turn does.
     store
         .fork_session("sess-role", "sess-role-ok", None, Some(1))
         .unwrap();
@@ -972,7 +926,6 @@ fn a_non_user_opening_message_is_not_a_visible_turn() {
 fn test_workspaces_crud_trust_and_session_count() {
     let store = SqliteSessionStore::in_memory().unwrap();
 
-    // Test workdir key encoding algorithm
     let key1 = encode_workdir_key("G:\\kimi\\kimi-code\\");
     assert!(key1.starts_with("wd_kimi-code_"));
     assert_eq!(key1.len(), "wd_kimi-code_".len() + 12);
@@ -984,7 +937,6 @@ fn test_workspaces_crud_trust_and_session_count() {
     let key_dot = encode_workdir_key(".");
     assert!(key_dot.starts_with("wd_workspace_"));
 
-    // 1. Create workspace
     let ws1 = store
         .create_workspace("/path/to/my-project", Some("My Project"))
         .unwrap();
@@ -993,24 +945,20 @@ fn test_workspaces_crud_trust_and_session_count() {
     assert_eq!(ws1.name, "My Project");
     assert_eq!(ws1.session_count, 0);
 
-    // Validate timestamp formats are valid ISO-8601
     let created_dt =
         chrono::DateTime::parse_from_rfc3339(&ws1.created_at).expect("valid ISO-8601 created_at");
     let last_opened_dt = chrono::DateTime::parse_from_rfc3339(&ws1.last_opened_at)
         .expect("valid ISO-8601 last_opened_at");
     assert!(last_opened_dt >= created_dt);
 
-    // 2. Fail-closed: a workspace with no explicit trust record is untrusted;
-    // an unknown workspace id is untrusted as well.
     assert!(!store.is_workspace_trusted(&ws1.id).unwrap());
     assert!(!store.is_workspace_trusted("wd_missing_workspace").unwrap());
-    // Toggle trust to true, then revoke it again
+
     assert!(store.set_workspace_trusted(&ws1.id, true).unwrap());
     assert!(store.is_workspace_trusted(&ws1.id).unwrap());
     assert!(store.set_workspace_trusted(&ws1.id, false).unwrap());
     assert!(!store.is_workspace_trusted(&ws1.id).unwrap());
 
-    // 3. Create session linked to workspace
     store
         .create_session_with_workspace("s1", Some("Session 1"), Some(&ws1.id))
         .unwrap();
@@ -1018,30 +966,25 @@ fn test_workspaces_crud_trust_and_session_count() {
         .create_session_with_workspace("s2", Some("Session 2"), Some(&ws1.id))
         .unwrap();
 
-    // 4. Query workspace again -> session_count == 2
     let ws1_updated = store.get_workspace(&ws1.id).unwrap().unwrap();
     assert_eq!(ws1_updated.session_count, 2);
 
-    // 5. Update workspace with new name on conflict
     let ws1_renamed = store
         .create_workspace("/path/to/my-project", Some("Renamed Project"))
         .unwrap();
     assert_eq!(ws1_renamed.name, "Renamed Project");
     assert_eq!(ws1_renamed.session_count, 2);
 
-    // 6. List workspaces
     let list = store.list_workspaces().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, ws1.id);
     assert_eq!(list[0].name, "Renamed Project");
 
-    // 7. Delete workspace
     let deleted = store.delete_workspace(&ws1.id).unwrap();
     assert!(deleted);
     assert!(store.get_workspace(&ws1.id).unwrap().is_none());
     assert_eq!(store.list_workspaces().unwrap().len(), 0);
 
-    // Deleting non-existent workspace returns false
     assert!(!store.delete_workspace(&ws1.id).unwrap());
 }
 
@@ -1059,7 +1002,6 @@ fn test_export_session_full_snapshot() {
         .save_turn("sess-exp", "turn-1", 1, &msgs, None, None)
         .unwrap();
 
-    // Export existing
     let export = store.export_session("sess-exp").unwrap().unwrap();
     assert_eq!(export.session.session_id, "sess-exp");
     assert_eq!(export.session.title.as_deref(), Some("Export Session"));
@@ -1068,12 +1010,10 @@ fn test_export_session_full_snapshot() {
     assert_eq!(export.messages[1].content, "Exporting now");
     assert_eq!(export.turns_count, 1);
 
-    // Validate exported_at is a concrete, valid recent ISO-8601 timestamp
     let parsed_dt = chrono::DateTime::parse_from_rfc3339(&export.exported_at)
         .expect("exported_at must be valid RFC 3339 timestamp");
     assert!(parsed_dt.timestamp_millis() <= chrono::Utc::now().timestamp_millis());
 
-    // Add second turn and export again
     store
         .save_turn(
             "sess-exp",
@@ -1088,13 +1028,9 @@ fn test_export_session_full_snapshot() {
     assert_eq!(export2.turns_count, 2);
     assert_eq!(export2.messages.len(), 3);
 
-    // Export non-existent returns None
     assert!(store.export_session("sess-missing").unwrap().is_none());
 }
 
-/// v2 bundles the session directory, whose `agents/<id>/wire.jsonl` is the raw
-/// journal. The export carries the same view over `wire_events`, with
-/// dehydrated media restored so the bundle stands on its own.
 #[test]
 fn test_export_session_bundles_the_raw_wire_journal() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -1158,10 +1094,6 @@ fn test_update_session_title() {
     assert!(!missing);
 }
 
-/// v2 `normalizeSessionMeta` + `sessionMetaTitleNeedsMigration`: a document
-/// written by an earlier build folds `customTitle` / `isCustomTitle` /
-/// `workDir` / `titleSource` into the normalized columns and is written back
-/// without the legacy keys. A second import is a no-op.
 #[test]
 fn test_legacy_session_metadata_is_imported_and_written_back() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -1211,8 +1143,6 @@ fn test_legacy_session_metadata_is_imported_and_written_back() {
     );
 }
 
-/// A normalized column wins over a stale legacy flag: an old document whose
-/// bag still says `isCustomTitle: false` must not undo a newer rename.
 #[test]
 fn test_legacy_metadata_does_not_override_a_normalized_title() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -1244,9 +1174,6 @@ fn test_legacy_metadata_does_not_override_a_normalized_title() {
     assert_eq!(metadata["isCustomTitle"], json!(true));
 }
 
-/// v2 `encodeSessionMeta`: every persisted metadata document carries the
-/// `isCustomTitle` bit derived from the session's own title kind, so a bag
-/// assembled before a rename cannot carry a stale flag.
 #[test]
 fn test_persisted_session_metadata_carries_the_compat_bit() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -1306,22 +1233,18 @@ fn test_gui_store_crud() {
     store.gui_set_item("sidebar", "expanded").unwrap();
     assert_eq!(store.gui_length().unwrap(), 2);
 
-    // Update existing
     store.gui_set_item("theme", "light").unwrap();
     assert_eq!(
         store.gui_get_item("theme").unwrap().as_deref(),
         Some("light")
     );
 
-    // Remove single item
     assert!(store.gui_remove_item("theme").unwrap());
     assert_eq!(store.gui_get_item("theme").unwrap(), None);
     assert_eq!(store.gui_length().unwrap(), 1);
 
-    // Removing non-existent item returns false
     assert!(!store.gui_remove_item("theme").unwrap());
 
-    // Clear all
     store.gui_clear().unwrap();
     assert_eq!(store.gui_length().unwrap(), 0);
 }
@@ -1358,7 +1281,6 @@ fn test_search_messages_and_titles() {
         )
         .unwrap();
 
-    // 1. Search by content keyword
     let hits = store
         .search_messages("database", None, None, 10, 0)
         .unwrap();
@@ -1372,7 +1294,6 @@ fn test_search_messages_and_titles() {
     assert!(hits[0].snippet.contains("database"));
     chrono::DateTime::parse_from_rfc3339(&hits[0].time).expect("valid ISO-8601 hit time");
 
-    // 2. Search by title keyword
     let hits_title = store
         .search_messages("Refactoring", None, None, 10, 0)
         .unwrap();
@@ -1384,7 +1305,6 @@ fn test_search_messages_and_titles() {
     assert_eq!(hits_title[0].session_title, "Refactoring Core");
     assert_eq!(hits_title[1].session_title, "Refactoring Core");
 
-    // 3. Filter by role
     let hits_assistant = store
         .search_messages("index", None, Some("assistant"), 10, 0)
         .unwrap();
@@ -1396,14 +1316,12 @@ fn test_search_messages_and_titles() {
         .unwrap();
     assert_eq!(hits_user.len(), 0);
 
-    // 4. Filter by session_id
     let hits_sess2 = store
         .search_messages("Fix", Some("sess-2"), None, 10, 0)
         .unwrap();
     assert_eq!(hits_sess2.len(), 1);
     assert_eq!(hits_sess2[0].session_id, "sess-2");
 
-    // 5. Query edge cases
     assert!(
         store
             .search_messages("", None, None, 10, 0)
@@ -1423,13 +1341,9 @@ fn test_search_messages_and_titles() {
             .is_empty()
     );
 
-    // 6. Search with limit
     let limited = store.search_messages("the", None, None, 1, 0).unwrap();
     assert_eq!(limited.len(), 1);
 
-    // 6b. Search with offset skips the first page (LIMIT/OFFSET).
-    // Note turn t1 holds two messages, so identity must include the
-    // snippet, not just (session_id, step_id).
     let page1 = store.search_messages("the", None, None, 1, 0).unwrap();
     let page2 = store.search_messages("the", None, None, 1, 1).unwrap();
     let all = store.search_messages("the", None, None, 10, 0).unwrap();
@@ -1441,7 +1355,6 @@ fn test_search_messages_and_titles() {
         "offset must advance past the first hit"
     );
 
-    // 7. Snippet extraction with query in middle of long string
     let long_text = "start_prefix ".repeat(15) + "CRITICAL_KEYWORD" + &" end_suffix".repeat(15);
     store
         .save_turn(
@@ -1461,7 +1374,6 @@ fn test_search_messages_and_titles() {
     assert!(snippet_hits[0].snippet.ends_with("..."));
     assert!(snippet_hits[0].snippet.contains("CRITICAL_KEYWORD"));
 
-    // 8. Total count
     assert_eq!(store.count_messages().unwrap(), 4);
 }
 
@@ -1472,7 +1384,6 @@ fn test_file_history_crud_and_diff() {
         .create_session("sess-fh", Some("File History Test"))
         .unwrap();
 
-    // Direct test of compute_line_diff logic
     assert_eq!(
         compute_line_diff(None, Some("line1\nline2\n")),
         ("added".to_string(), 2, 0)
@@ -1494,7 +1405,6 @@ fn test_file_history_crud_and_diff() {
         ("modified".to_string(), 0, 0)
     );
 
-    // Turn 1: Add a new file
     store
         .record_file_change(
             "sess-fh",
@@ -1505,7 +1415,6 @@ fn test_file_history_crud_and_diff() {
         )
         .unwrap();
 
-    // Turn 2: Modify the file
     store
         .record_file_change(
             "sess-fh",
@@ -1516,7 +1425,6 @@ fn test_file_history_crud_and_diff() {
         )
         .unwrap();
 
-    // Turn 3: Delete the file
     store
         .record_file_change(
             "sess-fh",
@@ -1527,7 +1435,6 @@ fn test_file_history_crud_and_diff() {
         )
         .unwrap();
 
-    // Check Turn 1 changes
     let (ch1, rec1) = store.get_file_history_changes("sess-fh", Some(1)).unwrap();
     assert!(rec1);
     assert_eq!(ch1.len(), 1);
@@ -1536,14 +1443,12 @@ fn test_file_history_crud_and_diff() {
     assert_eq!(ch1[0].additions, 3);
     assert_eq!(ch1[0].deletions, 0);
 
-    // Check Turn 2 changes
     let (ch2, rec2) = store.get_file_history_changes("sess-fh", Some(2)).unwrap();
     assert!(rec2);
     assert_eq!(ch2.len(), 1);
     assert_eq!(ch2[0].path, "src/main.rs");
     assert_eq!(ch2[0].status, "modified");
 
-    // Check Turn 3 (deletion)
     let (ch3, rec3) = store.get_file_history_changes("sess-fh", Some(3)).unwrap();
     assert!(rec3);
     assert_eq!(ch3.len(), 1);
@@ -1552,7 +1457,6 @@ fn test_file_history_crud_and_diff() {
     assert_eq!(ch3[0].additions, 0);
     assert_eq!(ch3[0].deletions, 4);
 
-    // Check turn_id = None returns changes across all turns in chronological order
     let (all_changes, all_rec) = store.get_file_history_changes("sess-fh", None).unwrap();
     assert!(all_rec);
     assert_eq!(all_changes.len(), 3);
@@ -1560,7 +1464,6 @@ fn test_file_history_crud_and_diff() {
     assert_eq!(all_changes[1].status, "modified");
     assert_eq!(all_changes[2].status, "deleted");
 
-    // Verify retention prune
     let pruned = store.prune_file_history("sess-fh", 2).unwrap();
     assert_eq!(pruned, 1);
     let (retained_changes, _) = store.get_file_history_changes("sess-fh", None).unwrap();
@@ -1568,12 +1471,10 @@ fn test_file_history_crud_and_diff() {
     assert_eq!(retained_changes[0].status, "modified");
     assert_eq!(retained_changes[1].status, "deleted");
 
-    // Non-existent turn returns recorded = false
     let (ch_none, rec_none) = store.get_file_history_changes("sess-fh", Some(99)).unwrap();
     assert!(!rec_none);
     assert!(ch_none.is_empty());
 
-    // Check content at Turn 2 phase start & end
     let start_content = store
         .get_file_history_content("sess-fh", 2, "src/main.rs", "start")
         .unwrap()
@@ -1591,7 +1492,6 @@ fn test_file_history_crud_and_diff() {
         .unwrap();
     assert!(end_content.content.unwrap().contains("println!(\"world\")"));
 
-    // Non-existent path content
     assert!(
         store
             .get_file_history_content("sess-fh", 2, "src/missing.rs", "end")
@@ -1599,7 +1499,6 @@ fn test_file_history_crud_and_diff() {
             .is_none()
     );
 
-    // Test revert_turn_file_changes restores to content_before
     let temp_ws = tempfile::tempdir().unwrap();
     let file_path = temp_ws.path().join("src/main.rs");
     std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
@@ -1625,9 +1524,6 @@ fn test_file_history_crud_and_diff() {
         "original code"
     );
 
-    // v2 `manual_edit`: a file that moved on since the tool wrote it belongs to
-    // the user. Restoring the pre-image would silently destroy that edit, so
-    // the revert refuses and leaves the file alone.
     std::fs::write(&file_path, "hand-edited after the turn").unwrap();
     let conflict = store
         .revert_turn_file_changes("sess-revert", 1, temp_ws.path())
@@ -1645,8 +1541,6 @@ fn test_file_history_crud_and_diff() {
         "the manual edit survives the refused undo"
     );
 
-    // v2 `deleted`: the file the tool modified is gone, so there is nothing to
-    // restore it from and nothing to overwrite either.
     std::fs::remove_file(&file_path).unwrap();
     let deleted = store
         .revert_turn_file_changes("sess-revert", 1, temp_ws.path())
@@ -1660,9 +1554,6 @@ fn test_file_history_crud_and_diff() {
     );
 }
 
-/// `plan_undo_turns` reports the newest turn numbers first and refuses a
-/// selection that would cross the compaction boundary — before anything
-/// is deleted, so callers can bail out ahead of reverting files.
 #[test]
 fn test_plan_undo_turns_newest_first_and_boundary_refusal() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -1685,7 +1576,7 @@ fn test_plan_undo_turns_newest_first_and_boundary_refusal() {
         .unwrap();
     let err = store.plan_undo_turns("sess-plan", 1).unwrap_err();
     assert!(err.contains("undo refused"), "unexpected error: {err}");
-    // The refusal left the history intact.
+
     assert_eq!(store.load_session_history("sess-plan").unwrap().len(), 3);
 }
 
@@ -1694,10 +1585,8 @@ fn test_next_turn_number() {
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-seq", None).unwrap();
 
-    // Fresh session starts at turn 1
     assert_eq!(store.next_turn_number("sess-seq").unwrap(), 1);
 
-    // After turn 1, next is 2
     store
         .save_turn(
             "sess-seq",
@@ -1710,7 +1599,6 @@ fn test_next_turn_number() {
         .unwrap();
     assert_eq!(store.next_turn_number("sess-seq").unwrap(), 2);
 
-    // After jump to turn 5, next is 6
     store
         .save_turn(
             "sess-seq",
@@ -1724,21 +1612,11 @@ fn test_next_turn_number() {
     assert_eq!(store.next_turn_number("sess-seq").unwrap(), 6);
 }
 
-/// v2 #3906: the symptom upstream fixed was "a steered follow-up mints a
-/// second context id, so the host prompt becomes un-undoable". The fork's
-/// undo is turn-scoped (`DELETE FROM messages WHERE turn_id = ?`), and a
-/// steer rides the active turn's id, so the host prompt and its steered
-/// follow-ups are already one undo unit — the divergence never existed
-/// here. The `prompt_id` this branch now carries is what lets the
-/// projection *show* that grouping instead of rendering the steer as its
-/// own turn. This pins the invariant so a future move to message-scoped
-/// undo does not silently break it.
 #[test]
 fn a_steer_and_its_host_prompt_are_one_undo_unit() {
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-steer-undo", None).unwrap();
 
-    // Host turn: the prompt, then an assistant reply.
     store
         .save_turn(
             "sess-steer-undo",
@@ -1752,8 +1630,7 @@ fn a_steer_and_its_host_prompt_are_one_undo_unit() {
             None,
         )
         .unwrap();
-    // The steer joins the same turn (as `admit_locked` does), carrying its
-    // prompt id.
+
     let mut steer = LLMMessage::user("actually use python");
     steer.prompt_id = Some("prompt-1".to_string());
     store
@@ -1762,10 +1639,9 @@ fn a_steer_and_its_host_prompt_are_one_undo_unit() {
 
     let history = store.load_session_history("sess-steer-undo").unwrap();
     assert_eq!(history.len(), 3, "prompt + reply + steer in one turn");
-    // The id survives the round-trip — that is what the projection reads.
+
     assert_eq!(history[2].prompt_id.as_deref(), Some("prompt-1"));
 
-    // One undo removes the whole turn, steer included.
     let undone = store.undo_turns("sess-steer-undo", 1).unwrap();
     assert_eq!(undone, 1);
     assert!(
@@ -1794,7 +1670,6 @@ fn test_undo_turns() {
 
     assert_eq!(store.load_session_history("sess-undo").unwrap().len(), 3);
 
-    // Undo 1 turn -> turn 3 deleted
     let undone = store.undo_turns("sess-undo", 1).unwrap();
     assert_eq!(undone, 1);
     let history = store.load_session_history("sess-undo").unwrap();
@@ -1802,16 +1677,107 @@ fn test_undo_turns() {
     assert_eq!(history[0].content, "1");
     assert_eq!(history[1].content, "2");
 
-    // Undo 10 turns when only 2 remain -> an error, not a short undo
     let err = store.undo_turns("sess-undo", 10).unwrap_err();
     assert!(err.contains("only 2 of 10"), "unexpected error: {err}");
     let undone_all = store.undo_turns("sess-undo", 2).unwrap();
     assert_eq!(undone_all, 2);
     assert!(store.load_session_history("sess-undo").unwrap().is_empty());
 
-    // Undo on an empty session is unavailable
     let err = store.undo_turns("sess-undo", 1).unwrap_err();
     assert!(err.contains("nothing to undo"), "unexpected error: {err}");
+}
+
+#[test]
+fn test_refresh_last_prompt_after_undo_walks_back_to_the_previous_anchor() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-last-prompt", None).unwrap();
+    store
+        .save_turn(
+            "sess-last-prompt",
+            "t1",
+            1,
+            &[LLMMessage::user("first")],
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .save_turn(
+            "sess-last-prompt",
+            "t2",
+            2,
+            &[LLMMessage::user("second")],
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .apply_prompt_metadata("sess-last-prompt", "second", "second")
+        .unwrap();
+
+    assert_eq!(
+        store
+            .refresh_last_prompt_after_undo("sess-last-prompt")
+            .unwrap()
+            .as_deref(),
+        Some("second")
+    );
+
+    store.undo_turns("sess-last-prompt", 1).unwrap();
+    assert_eq!(
+        store
+            .refresh_last_prompt_after_undo("sess-last-prompt")
+            .unwrap()
+            .as_deref(),
+        Some("first")
+    );
+
+    store.undo_turns("sess-last-prompt", 1).unwrap();
+    assert_eq!(
+        store
+            .refresh_last_prompt_after_undo("sess-last-prompt")
+            .unwrap(),
+        None
+    );
+    let session = store.get_session("sess-last-prompt").unwrap().unwrap();
+    assert_eq!(session.last_prompt, None);
+}
+
+#[test]
+fn test_refresh_last_prompt_after_undo_skips_non_anchor_turns() {
+    let store = SqliteSessionStore::in_memory().unwrap();
+    store.create_session("sess-last-prompt-skip", None).unwrap();
+    store
+        .save_turn(
+            "sess-last-prompt-skip",
+            "t1",
+            1,
+            &[LLMMessage::user("prompt")],
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .save_turn(
+            "sess-last-prompt-skip",
+            "t2",
+            2,
+            &[LLMMessage::user("subagent follow-up")],
+            None,
+            Some(&serde_json::json!({"kind": "subagent", "inTurn": true})),
+        )
+        .unwrap();
+    store
+        .apply_prompt_metadata("sess-last-prompt-skip", "subagent follow-up", "title")
+        .unwrap();
+
+    assert_eq!(
+        store
+            .refresh_last_prompt_after_undo("sess-last-prompt-skip")
+            .unwrap()
+            .as_deref(),
+        Some("prompt")
+    );
 }
 
 #[test]
@@ -1819,7 +1785,6 @@ fn test_compact_session() {
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-compact", None).unwrap();
 
-    // 1. Session with <= 2 messages returns 0
     store
         .save_turn(
             "sess-compact",
@@ -1835,7 +1800,6 @@ fn test_compact_session() {
         CompactionReport::skipped()
     );
 
-    // 2. Add many turns
     for i in 2..=15 {
         store
             .save_turn(
@@ -1851,9 +1815,7 @@ fn test_compact_session() {
             )
             .unwrap();
     }
-    // A trailing user message is never a safe split point
-    // (`can_split_after` refuses user messages), so the fold stops one
-    // short of the end and the kept tail is observable.
+
     store
         .save_turn(
             "sess-compact",
@@ -1868,7 +1830,7 @@ fn test_compact_session() {
     let pre_len = pre_history.len();
     assert!(pre_len >= 30);
 
-    let report = store
+    let (report, _) = store
         .compact_session_with_summary(
             "sess-compact",
             Some("keep decisions"),
@@ -1883,17 +1845,13 @@ fn test_compact_session() {
         pre_len - 1,
         "the trailing user message stays outside the fold"
     );
-    // The v2 shape keeps the compacted range's user input verbatim, so
-    // tokens_after can hold steady when everything fits the head/tail
-    // budgets; it must never grow past `before` plus the summary block.
+
     assert!(report.tokens_after <= report.tokens_before + 512);
 
     let post_history = store.load_session_history("sess-compact").unwrap();
     assert_eq!(post_history.len(), pre_len - removed);
     assert!(post_history.len() < pre_len);
-    // v2's compaction shape replaces the whole history: the real user input
-    // survives verbatim and completed-turn assistant messages are covered by
-    // the summary, so no old assistant message rides the tail.
+
     assert!(
         post_history
             .iter()
@@ -1915,10 +1873,6 @@ fn test_compact_session() {
         "the report counts the user messages that survived"
     );
 
-    // A normal turn recorded after the compaction is a user anchor and
-    // undoes cleanly; the trailing-pre-compaction row above has no
-    // messages of its own (the fold re-saved them under the compact turn),
-    // so it is not an anchor.
     store
         .save_turn(
             "sess-compact",
@@ -1935,14 +1889,66 @@ fn test_compact_session() {
     let undone = store.undo_turns("sess-compact", 1).unwrap();
     assert_eq!(undone, 1);
 
-    // …but an undo that would swallow the compaction summary itself is
-    // refused — the pre-compaction rows no longer exist, so deleting the
-    // boundary turn would corrupt the projection (event_store
-    // `UndoCompactionBoundary`, event_store/mod.rs:43-47).
     let err = store.undo_turns("sess-compact", 100).unwrap_err();
     assert!(
         err.contains("undo refused"),
         "expected boundary refusal, got: {err}"
+    );
+}
+
+#[test]
+fn journal_backed_compaction_keeps_the_projection_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteSessionStore::open(dir.path().join("sessions.db")).unwrap();
+    let workspace = store
+        .create_workspace("/work/compact-journal", None)
+        .unwrap();
+    store
+        .create_session_with_workspace("sess-compact-journal", None, Some(&workspace.id))
+        .unwrap();
+    for number in 1..=20u32 {
+        store
+            .save_turn(
+                "sess-compact-journal",
+                &format!("turn-{number}"),
+                number,
+                &[
+                    LLMMessage::user(format!("q{number}")),
+                    LLMMessage::assistant(format!("a{number}")),
+                ],
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    let path = store
+        .wire_journal_path("sess-compact-journal", "main")
+        .unwrap();
+    let history = store.load_session_history("sess-compact-journal").unwrap();
+    let records: Vec<serde_json::Value> = history
+        .iter()
+        .filter_map(crate::session::agent_records::history_entry)
+        .map(|mut entry| {
+            entry["type"] = serde_json::json!("context.append_message");
+            entry
+        })
+        .collect();
+    crate::session::wire_journal::write_journal_file(&path, &records).unwrap();
+    let before = store
+        .load_session_messages("sess-compact-journal")
+        .unwrap()
+        .len();
+    let (report, _) = store
+        .compact_session_with_summary("sess-compact-journal", None, Some("sum".into()))
+        .unwrap();
+    assert!(report.removed > 0);
+    assert_eq!(
+        store
+            .load_session_messages("sess-compact-journal")
+            .unwrap()
+            .len(),
+        before,
+        "journal-backed compaction must not delete projection rows"
     );
 }
 
@@ -1979,7 +1985,7 @@ fn test_compact_session_with_summary_writes_the_summary() {
         );
     }
 
-    let report = store
+    let (report, _) = store
         .compact_session_with_summary(
             "sess-summary",
             None,
@@ -2013,8 +2019,6 @@ fn test_compact_session_with_summary_writes_the_summary() {
         "the placeholder must not survive a supplied summary"
     );
 
-    // The split point is recomputed from the stored history, so a summary
-    // handed in for a history that cannot be compacted changes nothing.
     let short = SqliteSessionStore::in_memory().unwrap();
     short.create_session("sess-short", None).unwrap();
     short
@@ -2023,7 +2027,8 @@ fn test_compact_session_with_summary_writes_the_summary() {
     assert_eq!(
         short
             .compact_session_with_summary("sess-short", None, Some("unused".to_string()))
-            .unwrap(),
+            .unwrap()
+            .0,
         CompactionReport::skipped()
     );
 }
@@ -2057,15 +2062,12 @@ fn test_delete_session_cascades() {
         .record_file_change("sess-del", 1, "file.rs", None, Some("code"))
         .unwrap();
 
-    // Delete session
     let deleted = store.delete_session("sess-del").unwrap();
     assert!(deleted);
 
-    // Session is gone
     assert!(store.get_session("sess-del").unwrap().is_none());
     assert!(store.load_session_history("sess-del").unwrap().is_empty());
 
-    // Cascading deletion verified directly in tables
     {
         let conn = store.conn.lock();
         let turn_count: usize = conn
@@ -2105,7 +2107,6 @@ fn test_delete_session_cascades() {
         assert_eq!(fh_count, 0, "file history must cascade delete");
     }
 
-    // Deleting non-existent session returns false
     assert!(!store.delete_session("sess-del").unwrap());
 }
 
@@ -2116,7 +2117,6 @@ fn test_undo_turns_transactional_integrity() {
         .create_session("sess-undo", Some("Undo Test"))
         .unwrap();
 
-    // Save Turn 1
     let msgs_t1 = vec![
         LLMMessage::user("prompt 1"),
         LLMMessage::assistant("reply 1"),
@@ -2125,7 +2125,6 @@ fn test_undo_turns_transactional_integrity() {
         .save_turn("sess-undo", "t1", 1, &msgs_t1, None, None)
         .unwrap();
 
-    // Save Turn 2
     let msgs_t2 = vec![
         LLMMessage::user("prompt 2"),
         LLMMessage::assistant("reply 2"),
@@ -2134,7 +2133,6 @@ fn test_undo_turns_transactional_integrity() {
         .save_turn("sess-undo", "t2", 2, &msgs_t2, None, None)
         .unwrap();
 
-    // Save Turn 3
     let msgs_t3 = vec![
         LLMMessage::user("prompt 3"),
         LLMMessage::assistant("reply 3"),
@@ -2146,7 +2144,6 @@ fn test_undo_turns_transactional_integrity() {
     let history_before = store.load_session_history("sess-undo").unwrap();
     assert_eq!(history_before.len(), 6);
 
-    // Undo 1 turn (should remove t3)
     let undone = store.undo_turns("sess-undo", 1).unwrap();
     assert_eq!(undone, 1);
     let history_after_1 = store.load_session_history("sess-undo").unwrap();
@@ -2156,15 +2153,11 @@ fn test_undo_turns_transactional_integrity() {
     assert_eq!(history_after_1[2].content, "prompt 2");
     assert_eq!(history_after_1[3].content, "reply 2");
 
-    // Next turn number must be 3
     assert_eq!(store.next_turn_number("sess-undo").unwrap(), 3);
 
-    // Asking for more anchors than exist is an error, not a silent short
-    // undo: v2 reports SESSION_UNDO_UNAVAILABLE.
     let err = store.undo_turns("sess-undo", 10).unwrap_err();
     assert!(err.contains("only 2 of 10"), "unexpected error: {err}");
 
-    // Undo the remaining 2 anchors.
     let undone_all = store.undo_turns("sess-undo", 2).unwrap();
     assert_eq!(undone_all, 2);
     let history_empty = store.load_session_history("sess-undo").unwrap();
@@ -2172,9 +2165,6 @@ fn test_undo_turns_transactional_integrity() {
     assert_eq!(store.next_turn_number("sess-undo").unwrap(), 1);
 }
 
-/// A failure part-way through an undo must leave the session untouched: v2
-/// rechecks the switch after writing and refuses on a changed journal, while
-/// this engine runs the select/delete/update as one immediate transaction.
 #[test]
 fn test_undo_turns_rolls_back_when_a_delete_fails() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2190,8 +2180,6 @@ fn test_undo_turns_rolls_back_when_a_delete_fails() {
         )
         .unwrap();
 
-    // Make the last DELETE of the transaction fail after messages and file
-    // history have already been removed.
     store
         .conn
         .lock()
@@ -2248,7 +2236,6 @@ fn test_sqlite_patch_and_diff_state() {
     assert_eq!(patched["theme"], "light");
     assert_eq!(patched["fontSize"], 16);
 
-    // Revert using inverse patch
     let (reverted, _) = store
         .patch_state("metadata", "sess-patch-1", &inverse)
         .unwrap();
@@ -2256,8 +2243,6 @@ fn test_sqlite_patch_and_diff_state() {
     assert_eq!(reverted["fontSize"], 14);
 }
 
-/// The v3 history fold's source for interaction entities: the six
-/// interaction lifecycle types, oldest first, and nothing else.
 #[test]
 fn test_interaction_wire_events_selects_the_lifecycle_types() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2295,9 +2280,6 @@ fn test_interaction_wire_events_selects_the_lifecycle_types() {
     );
 }
 
-/// The cold baseline's source for prompt entities (`transcript::
-/// cold_prompts`): the four prompt lifecycle types, oldest first — and
-/// `turn.steer` stays out, its user frame rides the rebuilt history.
 #[test]
 fn test_prompt_wire_events_selects_the_lifecycle_types() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2332,12 +2314,6 @@ fn test_prompt_wire_events_selects_the_lifecycle_types() {
     );
 }
 
-/// ROADMAP §6.1 item 4's P2 decision: session-scoped state carries its
-/// owner in a `session_id` column, so a session delete cascades to it.
-/// Rows written before the column existed (key-encoded
-/// `agent_config` / `metadata`) are cascaded by their key pattern, and
-/// the column itself arrives by an idempotent migration on an existing
-/// database.
 #[test]
 fn test_session_scoped_state_survives_migration_and_cascades_on_delete() {
     let dir = tempfile::tempdir().unwrap();
@@ -2346,19 +2322,19 @@ fn test_session_scoped_state_survives_migration_and_cascades_on_delete() {
         let store = SqliteSessionStore::open(&path).unwrap();
         store.create_session("sess-a", Some("a")).unwrap();
         store.create_session("sess-b", Some("b")).unwrap();
-        // Legacy shape: no session_id column value.
+
         store
             .put_state("agent_config", "sess-a", &json!({ "model": "k2" }))
             .unwrap();
         store
             .put_state("metadata", "sess-a", &json!({ "permission_mode": "auto" }))
             .unwrap();
-        // A workspace-scoped row (no session of its own) must survive.
+
         store
             .put_state("plan", "workspace", &json!({ "active": true }))
             .unwrap();
     }
-    // Reopen: the migration adds the column without touching the rows.
+
     {
         let store = SqliteSessionStore::open(&path).unwrap();
         assert_eq!(
@@ -2371,7 +2347,6 @@ fn test_session_scoped_state_survives_migration_and_cascades_on_delete() {
             "legacy rows carry no column owner yet"
         );
 
-        // New-style writes name their owner.
         store
             .put_session_state(
                 "agent_config",
@@ -2385,7 +2360,6 @@ fn test_session_scoped_state_survives_migration_and_cascades_on_delete() {
         assert_eq!(owned[0].0, "agent_config");
         assert_eq!(owned[0].2, json!({ "model": "k3" }));
 
-        // The delete cascades both shapes and leaves the workspace row.
         assert!(store.delete_session("sess-a").unwrap());
         assert!(store.get_state("agent_config", "sess-a").unwrap().is_none());
         assert!(store.get_state("metadata", "sess-a").unwrap().is_none());
@@ -2406,7 +2380,6 @@ fn test_sqlite_event_store_append_query_fold_undo() {
         .create_session("sess-evt-test", Some("Event Test"))
         .unwrap();
 
-    // 1. Append user message event
     let seq1 = store
         .append_wire_event(&RawWireEvent {
             id: "evt-1".into(),
@@ -2420,7 +2393,6 @@ fn test_sqlite_event_store_append_query_fold_undo() {
         .unwrap();
     assert_eq!(seq1, 1);
 
-    // 2. Append assistant tool call event
     let seq2 = store
         .append_wire_event(&RawWireEvent {
             id: "evt-2".into(),
@@ -2441,7 +2413,6 @@ fn test_sqlite_event_store_append_query_fold_undo() {
         .unwrap();
     assert_eq!(seq2, 2);
 
-    // 3. Append tool result event
     let seq3 = store
         .append_wire_event(&RawWireEvent {
             id: "evt-3".into(),
@@ -2458,11 +2429,9 @@ fn test_sqlite_event_store_append_query_fold_undo() {
         .unwrap();
     assert_eq!(seq3, 3);
 
-    // Verify count and latest sequence
     assert_eq!(store.count_wire_events("sess-evt-test").unwrap(), 3);
     assert_eq!(store.latest_wire_event_seq("sess-evt-test").unwrap(), 3);
 
-    // Verify pagination
     let page1 = store.get_wire_events("sess-evt-test", 0, 2).unwrap();
     assert_eq!(page1.len(), 2);
     assert_eq!(page1[0].seq, 1);
@@ -2473,7 +2442,6 @@ fn test_sqlite_event_store_append_query_fold_undo() {
     assert_eq!(page2[0].seq, 3);
     assert_eq!(page2[0].event_type, "tool.result");
 
-    // Verify projection folding
     let msgs = store.fold_projection("sess-evt-test").unwrap();
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[0].role, crate::native::event_store::MessageRole::User);
@@ -2488,9 +2456,8 @@ fn test_sqlite_event_store_append_query_fold_undo() {
     assert_eq!(msgs[2].content, "4");
     assert_eq!(msgs[2].tool_call_id.as_deref(), Some("call_calc_1"));
 
-    // Verify undo to last checkpoint (evt-2 was is_checkpoint = true)
     let undone_count = store.undo_to_last_checkpoint("sess-evt-test").unwrap();
-    assert_eq!(undone_count, 2); // Deleted seq 2 and 3
+    assert_eq!(undone_count, 2);
     assert_eq!(store.count_wire_events("sess-evt-test").unwrap(), 1);
 
     let msgs_after_undo = store.fold_projection("sess-evt-test").unwrap();
@@ -2500,7 +2467,6 @@ fn test_sqlite_event_store_append_query_fold_undo() {
         crate::native::event_store::MessageRole::User
     );
 
-    // Verify compaction boundary
     store
         .checkpoint_compress("sess-evt-test", "Historical math summary")
         .unwrap();
@@ -2512,7 +2478,6 @@ fn test_sqlite_event_store_append_query_fold_undo() {
     );
     assert_eq!(msgs_compacted[0].content, "Historical math summary");
 
-    // Undoing across compaction boundary must return UndoCompactionBoundary error
     let undo_err = store.undo_to_last_checkpoint("sess-evt-test").unwrap_err();
     match undo_err {
         EventStoreError::UndoCompactionBoundary => {}
@@ -2520,8 +2485,6 @@ fn test_sqlite_event_store_append_query_fold_undo() {
     }
 }
 
-/// The outcome mirror persists, and an explicit `None` clears it — a turn
-/// that ended must not leave the previous outcome stuck on the session.
 #[test]
 fn last_turn_reason_round_trips_and_clears() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2545,16 +2508,12 @@ fn last_turn_reason_round_trips_and_clears() {
     store.set_last_turn_reason("sess-outcome", None).unwrap();
     assert_eq!(store.last_turn_reason("sess-outcome"), None);
 
-    // An unknown session is not an error: the wire asks unconditionally.
     store
         .set_last_turn_reason("sess-absent", Some("completed"))
         .unwrap();
     assert_eq!(store.last_turn_reason("sess-absent"), None);
 }
 
-/// v2 passes `touchUpdatedAt: false` for this write, and the reason matters:
-/// the outcome mirrors a turn that already ended elsewhere, so treating it
-/// as activity would reorder the session list on every turn end.
 #[test]
 fn last_turn_reason_does_not_touch_updated_at() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2637,13 +2596,8 @@ fn a_missing_root_still_gets_a_stable_key() {
     );
 }
 
-/// v2's own examples, pinned verbatim: the key is lexical, and the case fold
-/// is decided by the path's *shape*, not by the host this runs on. An earlier
-/// version of `workspace_root_key` canonicalized instead, which reached the
-/// filesystem and answered differently for symlinked roots.
 #[test]
 fn workspace_root_key_is_lexical_and_folds_by_path_shape() {
-    // v2 `workspaceService.test.ts:752-754`.
     assert_eq!(
         workspace_root_key("C:\\Users\\Foo\\Proj"),
         "c:/users/foo/proj"
@@ -2657,19 +2611,13 @@ fn workspace_root_key_is_lexical_and_folds_by_path_shape() {
         workspace_root_key("c:/users/foo/proj")
     );
 
-    // A POSIX root keeps its case *wherever this runs*: on a
-    // case-sensitive filesystem two spellings are two directories, so
-    // folding them would merge workspaces the user keeps apart.
     assert_eq!(workspace_root_key("/Home/Foo/Proj"), "/Home/Foo/Proj");
-    // A UNC root is Windows-shaped and folds.
+
     assert_eq!(
         workspace_root_key("\\\\Server\\Share\\Proj"),
         "//server/share/proj"
     );
 
-    // Shape decides, not the OS: on a case-insensitive host a POSIX-shaped
-    // root still keeps its case, and on a case-sensitive host a
-    // Windows-shaped one still folds.
     assert_ne!(
         workspace_root_key("/tmp/Case"),
         workspace_root_key("/tmp/case")
@@ -2680,8 +2628,6 @@ fn workspace_root_key_is_lexical_and_folds_by_path_shape() {
     );
 }
 
-/// Derived turns (goal/cron/task) and in-turn steers are not undo anchors;
-/// cutting at the Nth real user turn removes every turn after it too.
 #[test]
 fn test_undo_selects_user_anchors_not_derived_turns() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2703,12 +2649,10 @@ fn test_undo_selects_user_anchors_not_derived_turns() {
         .save_turn("sess-anchor", "t4", 4, &msgs, None, Some(&cron_origin))
         .unwrap();
 
-    // The newest anchor is t3; the cut also removes the newer derived t4.
     assert_eq!(store.plan_undo_turns("sess-anchor", 1).unwrap(), vec![4, 3]);
     assert_eq!(store.undo_turns("sess-anchor", 1).unwrap(), 2);
     assert_eq!(store.load_session_history("sess-anchor").unwrap().len(), 2);
 
-    // Only t1 remains as an anchor; t2 is derived and does not count.
     let err = store.undo_turns("sess-anchor", 2).unwrap_err();
     assert!(
         err.contains("only 1 of 2"),
@@ -2716,9 +2660,6 @@ fn test_undo_selects_user_anchors_not_derived_turns() {
     );
 }
 
-/// A file over the history byte cap has no stored pre-image. Treating that
-/// as "the file was added" deleted the user's file on undo; the revert must
-/// leave it untouched and not report it as reverted.
 #[test]
 fn test_revert_skips_oversize_files_instead_of_deleting_them() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2748,8 +2689,6 @@ fn test_revert_skips_oversize_files_instead_of_deleting_them() {
     );
 }
 
-/// Every appended wire row carries the protocol version that wrote it, so a
-/// later engine can tell its own rows from a newer one's.
 #[test]
 fn append_wire_event_stamps_the_current_protocol_version() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2777,8 +2716,6 @@ fn append_wire_event_stamps_the_current_protocol_version() {
     assert_eq!(stamped, WIRE_PROTOCOL_VERSION);
 }
 
-/// A journal row written by a newer engine closes every read that would
-/// interpret it: the fold and each slice helper refuse rather than half-read.
 #[test]
 fn the_wire_readers_refuse_a_newer_protocol_version() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2827,9 +2764,6 @@ fn the_wire_readers_refuse_a_newer_protocol_version() {
     }
 }
 
-/// v2 #4638: the session store's readers share the event store's gate, so a
-/// row declaring a newer minimum reader is refused on every slice, not only
-/// on the cold fold.
 #[test]
 fn the_wire_readers_refuse_a_minimum_reader_version_above_this_engine() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2879,8 +2813,6 @@ fn the_wire_readers_refuse_a_minimum_reader_version_above_this_engine() {
     }
 }
 
-/// Rows written before the column existed are NULL and read as this version:
-/// an old database opens without a stamp backfill.
 #[test]
 fn null_protocol_versions_read_as_the_current_version() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2920,8 +2852,6 @@ fn null_protocol_versions_read_as_the_current_version() {
     assert!(store.fold_projection("sess-legacy").unwrap().is_empty());
 }
 
-/// The wire write guard (v2 `bindWriteGuard`, upstream #4246): a live foreign
-/// holder closes the journal to this process; a freed one opens it again.
 #[test]
 fn the_wire_write_guard_refuses_a_foreign_held_session() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -2936,12 +2866,8 @@ fn the_wire_write_guard_refuses_a_foreign_held_session() {
         created_at: 1,
     };
 
-    // Baseline: an unheld session accepts its rows.
     store.append_wire_event(&event("evt-before")).unwrap();
 
-    // Plant a holder the way another live process writes it. The pid must be
-    // alive and not this process's: init on unix, System on Windows — the
-    // guard exempts its own pid, so a same-pid plant cannot exercise it.
     let foreign_pid: u32 = if cfg!(windows) { 4 } else { 1 };
     let lock_path = crate::session::lock::SESSION_LOCKS
         .lock_dir()
@@ -2968,14 +2894,11 @@ fn the_wire_write_guard_refuses_a_foreign_held_session() {
         other => panic!("expected SessionOccupied, got {other:?}"),
     }
 
-    // A takeover (or the foreign process exiting) frees the journal.
     crate::session::lock::SESSION_LOCKS.takeover("sess-wire-guard");
     assert!(!lock_path.exists());
     store.append_wire_event(&event("evt-after")).unwrap();
 }
 
-/// A `state_entries` row that exists but does not parse must be an error naming
-/// the entry. Reading it as `null` let the next patch overwrite the only copy.
 #[test]
 fn a_corrupt_state_entry_is_reported_instead_of_reading_as_null() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3000,8 +2923,6 @@ fn a_corrupt_state_entry_is_reported_instead_of_reading_as_null() {
         "the error names the entry: {error}"
     );
 
-    // The diff path goes through the same read, so a patch built on top of the
-    // corrupt row fails instead of overwriting it with `null` + patch.
     let error = store
         .diff_state("todo", "list", &json!([]))
         .expect_err("diffing on top of a corrupt row must fail");
@@ -3011,8 +2932,6 @@ fn a_corrupt_state_entry_is_reported_instead_of_reading_as_null() {
     );
 }
 
-/// A message row whose `blocks` column is unparseable must be reported, not
-/// silently decoded as "this message has no blocks".
 #[test]
 fn a_corrupt_blocks_column_is_reported_instead_of_reading_as_empty() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3036,11 +2955,6 @@ fn a_corrupt_blocks_column_is_reported_instead_of_reading_as_empty() {
     );
 }
 
-/// A `wire_events` payload that does not parse is skipped with a logged error
-/// (the row's `seq` is in the log line), not folded into the read as
-/// `Value::Null` and not allowed to fail the whole read: v2's reader reports
-/// the line through `onTruncate` and keeps the records that follow, and one bad
-/// row must not make a session's transcript unreadable.
 #[test]
 fn a_corrupt_wire_payload_is_skipped_and_the_rest_is_returned() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3081,10 +2995,6 @@ fn a_corrupt_wire_payload_is_skipped_and_the_rest_is_returned() {
     );
 }
 
-/// A database created before the wire version columns existed must get them on
-/// open even when `messages` already has `tool_calls`. The upgrade used to be
-/// nested under that unrelated column's check, so this database never got the
-/// wire columns and every append failed on a missing column.
 #[test]
 fn a_legacy_database_gets_the_wire_version_columns_on_open() {
     let dir = std::env::temp_dir().join(format!(
@@ -3133,8 +3043,6 @@ fn a_legacy_database_gets_the_wire_version_columns_on_open() {
         "the reader-minimum column must be added; got {columns:?}"
     );
 
-    // The upgraded database is usable: the old append path would have failed
-    // on the column that was never added.
     store.create_session("sess-legacy", None).unwrap();
     store
         .append_wire_event(&RawWireEvent {
@@ -3152,10 +3060,6 @@ fn a_legacy_database_gets_the_wire_version_columns_on_open() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// Two writers patching the same entry must not lose each other's keys: the
-/// read, the patch and the write run under one lock. The old split
-/// (`get_state` then `put_state`) let the second writer base its write on a
-/// snapshot taken before the first writer's key existed.
 #[test]
 fn concurrent_patches_to_one_entry_do_not_lose_a_key() {
     use crate::session::patch::{JsonPatchSet, PatchOp};
@@ -3185,10 +3089,6 @@ fn concurrent_patches_to_one_entry_do_not_lose_a_key() {
     assert_eq!(value["beta"], json!(1), "the second writer's key survives");
 }
 
-/// Two stores on the same file, appending concurrently: every row gets a
-/// distinct sequence and the per-session order is strictly increasing. A
-/// writer that loses the SQLite write race waits its bounded `busy_timeout`
-/// instead of dropping the event with `SQLITE_BUSY`.
 #[test]
 fn concurrent_appends_to_one_file_keep_sequences_strictly_increasing() {
     let dir = std::env::temp_dir().join(format!(
@@ -3236,8 +3136,6 @@ fn concurrent_appends_to_one_file_keep_sequences_strictly_increasing() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// An empty database file is a new, empty session store — not a read failure,
-/// and not a session whose history happens to be missing.
 #[test]
 fn an_empty_database_file_opens_as_an_empty_store() {
     let dir = std::env::temp_dir().join(format!(
@@ -3267,7 +3165,6 @@ fn generated_titles_never_replace_a_custom_title() {
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-title", None).unwrap();
 
-    // The first prompt seeds a replaceable title and always records lastPrompt.
     assert!(
         store
             .apply_prompt_metadata("sess-title", "hello", "hello")
@@ -3278,7 +3175,6 @@ fn generated_titles_never_replace_a_custom_title() {
     assert_eq!(seeded.normalized_title_kind(), Some("replaceable"));
     assert_eq!(seeded.last_prompt.as_deref(), Some("hello"));
 
-    // A user rename freezes the title.
     assert!(
         store
             .update_session_title("sess-title", Some("Mine"))
@@ -3299,7 +3195,6 @@ fn generated_titles_never_replace_a_custom_title() {
         "a title change must not disturb the recorded prompt"
     );
 
-    // `force` is the host explicitly asking for regeneration.
     assert!(
         store
             .set_generated_title_if_uncustomized("sess-title", "Forced", true)
@@ -3442,10 +3337,6 @@ fn a_frozen_environment_round_trips_and_an_unbound_session_reports_none() {
     assert_eq!(row.environment_cwd.as_deref(), Some("/work/repo"));
 }
 
-/// v2 `forkSession`'s full copy carries the source's file history, while the
-/// sliced fork drops it (`pruneTruncatedForkFiles`). The fork renumbers its
-/// turns, so the copied rows must follow the new numbers rather than point at
-/// turn ids the fork does not have.
 #[test]
 fn a_full_fork_copies_file_history_and_a_slice_keeps_none() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3506,10 +3397,6 @@ fn a_full_fork_copies_file_history_and_a_slice_keeps_none() {
     assert_eq!(source.len(), 2, "the source keeps its own history");
 }
 
-/// Deleting a session drops its file-history rows *and* asks SQLite to give
-/// the freed pages back. The rows carry whole file contents, so a delete that
-/// only unlinks them leaves the bytes in the database and WAL while reporting
-/// success.
 #[test]
 fn deleting_a_session_reclaims_its_file_history_content() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3553,10 +3440,6 @@ fn deleting_a_session_reclaims_its_file_history_content() {
     );
 }
 
-/// The fork's engine context is folded from the wire journal, so a fork that
-/// copies only the `messages`/`turns` tables opens with no history at all. The
-/// full copy has to carry every journal row, and the copy has to fold to the
-/// same projection as the source.
 #[test]
 fn a_full_fork_carries_the_wire_journal_and_folds_to_the_same_history() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3613,15 +3496,13 @@ fn a_full_fork_carries_the_wire_journal_and_folds_to_the_same_history() {
             .collect::<Vec<_>>(),
         "the copy keeps the source order"
     );
-    // `seq` is the table's global key, so the fork gets fresh numbers; they
-    // still have to be strictly increasing in copied order for the fold and the
-    // paged readers.
+
     let fork_seqs: Vec<u64> = fork_rows.iter().map(|r| r.seq).collect();
     assert!(
         fork_seqs.windows(2).all(|pair| pair[0] < pair[1]),
         "the fork's seq numbers must be strictly increasing: {fork_seqs:?}"
     );
-    // `wire_events.id` is globally UNIQUE, so ids are namespaced to the fork.
+
     assert!(
         fork_rows
             .iter()
@@ -3637,9 +3518,6 @@ fn a_full_fork_carries_the_wire_journal_and_folds_to_the_same_history() {
     assert!(!fork_fold.is_empty(), "the fork must not open empty");
 }
 
-/// A sliced fork keeps only the journal rows that belong to the retained
-/// turns. Wire rows carry no `turn_id`, so the cut is the start of the first
-/// dropped turn, and rows before it belong to the slice.
 #[test]
 fn a_sliced_fork_copies_only_the_wire_rows_before_the_cut() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3658,7 +3536,7 @@ fn a_sliced_fork_copies_only_the_wire_rows_before_the_cut() {
             )
             .unwrap();
     }
-    // Fixed timestamps: turn A runs 1000..1500 ms, turn B starts at 3000 ms.
+
     {
         let conn = store.conn.lock();
         for (turn_id, start, end) in [("turn-a", 1_000i64, 1_500i64), ("turn-b", 3_000, 3_500)] {
@@ -3700,10 +3578,6 @@ fn a_sliced_fork_copies_only_the_wire_rows_before_the_cut() {
     assert_eq!(store.list_turns("sess-slice-fork").unwrap().len(), 1);
 }
 
-/// A sliced fork cuts by journal position, not by time: two rows written in the
-/// same millisecond are ordered by `seq`, so the cut is deterministic. v2 has
-/// only `compaction_boundary` / `insufficient` as slice failures, and this
-/// ledger's cut cannot hit either.
 #[test]
 fn a_sliced_fork_cuts_by_wire_order_not_time() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3722,7 +3596,7 @@ fn a_sliced_fork_cuts_by_wire_order_not_time() {
             )
             .unwrap();
     }
-    // Both rows carry the same timestamp: the journal order already decides.
+
     for (id, content) in [("evt_in_a", "in turn a"), ("evt_in_b", "in turn b")] {
         store
             .append_wire_event(&RawWireEvent {
@@ -3746,9 +3620,6 @@ fn a_sliced_fork_cuts_by_wire_order_not_time() {
     assert_eq!(rows[0].payload["content"], "in turn a");
 }
 
-/// The engine journal marks turns with `turn.prompt`, not `message.user`; a
-/// background prompt (`origin.kind = task`) is not a user turn and must not
-/// move the cut.
 #[test]
 fn a_sliced_fork_counts_turn_prompt_anchors() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3814,8 +3685,6 @@ fn a_sliced_fork_counts_turn_prompt_anchors() {
     );
 }
 
-/// v2 replaces the child journal with one atomic file write. A copy that fails
-/// here must roll the session row back instead of leaving an empty fork.
 #[test]
 fn a_failed_wire_copy_leaves_no_fork_session() {
     let store = SqliteSessionStore::in_memory().unwrap();
@@ -3869,8 +3738,6 @@ fn a_failed_wire_copy_leaves_no_fork_session() {
     );
 }
 
-/// The blob audit is the observability that decides whether a real GC is
-/// worth building: it counts stored bytes and the blobs no row references.
 #[test]
 fn blob_usage_reports_stored_bytes_and_unreferenced_blobs() {
     use base64::Engine as _;
@@ -3895,8 +3762,7 @@ fn blob_usage_reports_stored_bytes_and_unreferenced_blobs() {
             created_at: 1,
         })
         .unwrap();
-    // A blob no row mentions stands in for the ones a delete/undo leaves
-    // behind: v2 has no refcount, so nothing reclaims it.
+
     {
         let conn = store.conn.lock();
         conn.execute(
@@ -3918,17 +3784,12 @@ fn blob_usage_reports_stored_bytes_and_unreferenced_blobs() {
     );
 }
 
-/// Deleting or archiving is a destructive write: a session another live
-/// process holds is refused instead of being removed underneath it.
 #[test]
 fn deleting_or_archiving_a_session_refuses_a_live_foreign_holder() {
     let store = SqliteSessionStore::in_memory().unwrap();
     let session = "sess-held-by-other";
     store.create_session(session, None).unwrap();
 
-    // Plant a live foreign holder in the process-wide lock directory. A
-    // foreign hostname is what makes the holder read as alive without a second
-    // process (see `session::lock` tests).
     let lock_path = crate::session::lock::SESSION_LOCKS
         .lock_dir()
         .join(format!("{session}.lock"));
@@ -3959,8 +3820,6 @@ fn deleting_or_archiving_a_session_refuses_a_live_foreign_holder() {
         "archive must refuse: {archive_error:?}"
     );
 
-    // Once the holder is gone the same calls succeed, so the guard refuses the
-    // holder rather than the operation.
     std::fs::remove_file(&lock_path).unwrap();
     assert!(store.archive_session(session).unwrap());
     assert!(store.delete_session(session).unwrap());

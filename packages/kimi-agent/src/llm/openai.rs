@@ -118,7 +118,15 @@ pub fn build_request_for_provider_with_options(
     };
     let msgs: Vec<Value> = prepared
         .iter()
-        .filter(|message| tools.is_empty() || !is_empty_system_projection(message))
+        .filter(|message| {
+            if message.tools.is_empty() {
+                return tools.is_empty() || !is_empty_system_projection(message);
+            }
+            if is_kimi {
+                return true;
+            }
+            !(message.content.is_empty() && message.blocks.is_empty())
+        })
         .map(|message| project_message(message, resolved_key.as_deref(), is_kimi))
         .collect();
 
@@ -182,20 +190,18 @@ pub fn build_request_for_provider_with_options(
         let tool_defs: Vec<Value> = tools
             .iter()
             .map(|t| {
-                if is_kimi && t.name.starts_with('$') {
-                    return json!({
-                        "type": "builtin_function",
-                        "function": { "name": t.name }
-                    });
+                if is_kimi {
+                    kimi_tool_definition(&t.name, &t.description, &t.input_schema)
+                } else {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema,
+                        }
+                    })
                 }
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.input_schema,
-                    }
-                })
             })
             .collect();
         req["tools"] = json!(tool_defs);
@@ -206,6 +212,23 @@ pub fn build_request_for_provider_with_options(
 
 fn is_empty_system_projection(message: &WireMessage) -> bool {
     message.role == "system" && message.content.is_empty() && message.blocks.is_empty()
+}
+
+fn kimi_tool_definition(name: &str, description: &str, parameters: &Value) -> Value {
+    if name.starts_with('$') {
+        return json!({
+            "type": "builtin_function",
+            "function": { "name": name }
+        });
+    }
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        }
+    })
 }
 
 fn is_extractable_media(block: &ContentBlock) -> bool {
@@ -522,6 +545,22 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>, tool_keep_parts
         obj.insert("content".into(), Value::Null);
     } else {
         obj.insert("content".into(), json!(m.content));
+    }
+    if m.role == "system" && tool_keep_parts && !m.tools.is_empty() {
+        let tools: Vec<Value> = m
+            .tools
+            .iter()
+            .map(|tool| {
+                let parameters =
+                    crate::llm::kimi_schema::normalize_kimi_tool_schema(&tool.parameters)
+                        .unwrap_or_else(|_| tool.parameters.clone());
+                kimi_tool_definition(&tool.name, &tool.description, &parameters)
+            })
+            .collect();
+        obj.insert("tools".into(), json!(tools));
+        if m.content.is_empty() && m.blocks.is_empty() {
+            obj.remove("content");
+        }
     }
     if !details.is_empty() {
         obj.insert(REASONING_DETAILS_KEY.into(), json!(details));
@@ -1013,6 +1052,55 @@ mod tests {
     use crate::llm::request_options::ResponseFormat;
 
     #[test]
+    fn kimi_keeps_a_tool_schema_message_and_other_providers_drop_it() {
+        let mut schema = WireMessage::text("system", "");
+        schema.tools = vec![kimi_core::types::ToolDescription {
+            name: "mcp__s__alpha".into(),
+            description: "alpha tool".into(),
+            parameters: json!({ "type": "object", "properties": {} }),
+            deferred: None,
+        }];
+        let messages = vec![WireMessage::text("system", "sys"), schema];
+
+        let kimi = build_request_for_provider(
+            "kimi-k2",
+            &messages,
+            &[],
+            true,
+            None,
+            None,
+            None,
+            Some("kimi"),
+            None,
+            None,
+            None,
+        );
+        let kimi_messages = kimi["messages"].as_array().unwrap();
+        assert_eq!(kimi_messages.len(), 2);
+        assert!(kimi_messages[1].get("content").is_none());
+        assert_eq!(kimi_messages[1]["tools"][0]["type"], json!("function"));
+        assert_eq!(
+            kimi_messages[1]["tools"][0]["function"]["name"],
+            json!("mcp__s__alpha")
+        );
+
+        let openai = build_request_for_provider(
+            "gpt-4o",
+            &messages,
+            &[],
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(openai["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn build_request_projects_roles_tools_and_stringifies_arguments() {
         let messages = vec![
             WireMessage::text("system", "sys"),
@@ -1102,6 +1190,7 @@ mod tests {
                 ],
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call_1".into()),
+                tools: Vec::new(),
             },
         ]
     }
@@ -1176,6 +1265,7 @@ mod tests {
                 }],
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call_2".into()),
+                tools: Vec::new(),
             },
         ];
 
@@ -1213,6 +1303,7 @@ mod tests {
                 }],
                 tool_calls: Vec::new(),
                 tool_call_id: Some("call_1".into()),
+                tools: Vec::new(),
             },
         ];
         for provider in ["kimi", "openai"] {
@@ -1252,6 +1343,7 @@ mod tests {
             ],
             tool_calls: Vec::new(),
             tool_call_id: Some("call_1".into()),
+            tools: Vec::new(),
         }];
         let req = build_request_for_provider(
             "m",
@@ -1372,6 +1464,7 @@ mod tests {
             ],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
         };
         let messages = vec![assistant];
 
@@ -1413,6 +1506,7 @@ mod tests {
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
         }
     }
 
@@ -1514,6 +1608,7 @@ mod tests {
             ],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
         };
 
         let req = build_request_full("m", &[assistant], &[], true, None, None, None);
@@ -1555,6 +1650,7 @@ mod tests {
             ],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
         };
 
         let req = build_request_full("m", &[assistant], &[], true, None, None, None);
@@ -1643,6 +1739,7 @@ mod tests {
                 blocks: response.thinking,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                tools: Vec::new(),
             }],
             &[],
             true,
@@ -1757,6 +1854,7 @@ mod tests {
                 blocks: response.thinking,
                 tool_calls: Vec::new(),
                 tool_call_id: None,
+                tools: Vec::new(),
             }],
             &[],
             true,
@@ -2065,6 +2163,7 @@ mod tests {
             blocks: vec![],
             tool_calls: vec![],
             tool_call_id: None,
+            tools: Vec::new(),
         }];
         let req_high = build_request_full("gpt-4o", &msgs, &[], true, Some("high"), None, None);
         assert_eq!(req_high["reasoning_effort"], "high");
@@ -2454,6 +2553,7 @@ mod tests {
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tools: Vec::new(),
         };
         let with_tools = build_request_full(
             "gpt-4o",

@@ -26,8 +26,7 @@ fn prompt_content_maps_uploaded_files_to_media_blocks() {
     let (prompt, blocks) = prompt_content_to_blocks(&content, &files, None).unwrap();
     assert_eq!(prompt, "look at this");
     assert_eq!(blocks.len(), 2);
-    // The bytes stay in the store: the engine's resolver reads them once
-    // it knows which model the turn runs on.
+
     match &blocks[0] {
         crate::rpc::types::ContentBlock::MediaRef { file_id, kind } => {
             assert_eq!(file_id, &png.id);
@@ -44,10 +43,6 @@ fn prompt_content_maps_uploaded_files_to_media_blocks() {
     }
 }
 
-/// ROADMAP #3747b: an inline base64 image over the model's pixel/byte
-/// budget is compressed at intake, the original persisted, and a caption
-/// naming both precedes the image — the HTTP path's half of v2's
-/// `resolvePromptMediaFiles` (the TUI path does it host-side).
 #[test]
 fn prompt_content_compresses_an_over_budget_inline_image_with_a_caption() {
     let dir = tempfile::tempdir().unwrap();
@@ -76,11 +71,9 @@ fn prompt_content_compresses_an_over_budget_inline_image_with_a_caption() {
 
     match &blocks[0] {
         crate::rpc::types::ContentBlock::Text { text, .. } => {
-            assert!(
-                text.starts_with(
-                    "<system>Image compressed to fit model limits: original 4000x3000 image/png ("
-                )
-            );
+            assert!(text.starts_with(
+                "<system>Image compressed to fit model limits: original 4000x3000 image/png ("
+            ));
             assert!(text.contains("call Read on that path"));
         }
         other => panic!("expected the compression caption, got {other:?}"),
@@ -108,10 +101,6 @@ fn prompt_content_rejects_an_unknown_file_id() {
     assert!(prompt_content_to_blocks(&content, &files, None).is_err());
 }
 
-/// `POST /api/v1/prompts` used to mint an id and answer
-/// `{"status":"enqueued"}` without touching the queue. It now delegates to
-/// the session submit path: missing session / unknown session / no engine
-/// all refuse instead of issuing a receipt for a prompt that never runs.
 #[tokio::test]
 async fn collection_prompt_route_refuses_instead_of_faking_enqueue() {
     let server = HttpServer::in_memory().unwrap();
@@ -165,7 +154,6 @@ async fn collection_prompt_route_refuses_instead_of_faking_enqueue() {
         .await;
     assert_eq!(no_engine.status, 503, "no engine attached");
 
-    // Nothing was ever admitted to the queue by the fake path.
     assert!(
         server.prompt_queue.snapshot("sess-collection").0.is_none(),
         "a refused submit must not leave a phantom active prompt"

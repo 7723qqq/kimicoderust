@@ -313,14 +313,25 @@ pub async fn execute_agent(
                 .await
                 .and_then(|r| r.session_id.clone())
                 .filter(|session| !session.is_empty());
+            let task_llm = binding_llm.as_ref().unwrap_or(&runtime.llm);
+            let model = task_llm
+                .model_alias()
+                .unwrap_or_else(|| task_llm.model_name())
+                .to_string();
+            let thinking_effort = task_llm.thinking_effort().map(str::to_string);
             runner
-                .spawn_task_with_meta(
+                .spawn_agent_task_with_meta(
                     crate::storage::TaskSpawnMeta {
                         session_id: session_id.as_deref(),
                         kind: "subagent",
                         subagent_type: Some(&profile_name),
                         agent_id: Some(agent_id.as_str()),
                         timeout_ms: None,
+                    },
+                    crate::storage::TaskAgentInfo {
+                        parent_tool_call_id: tool_call_id,
+                        model: Some(&model),
+                        thinking_effort: thinking_effort.as_deref(),
                     },
                     task_id.clone(),
                     task_desc,

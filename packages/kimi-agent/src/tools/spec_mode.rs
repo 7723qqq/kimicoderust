@@ -152,6 +152,10 @@ pub async fn execute_enter_spec_mode(
     }
 
     emit_spec_mode_enter(callbacks, agent_id, &id);
+    callbacks.telemetry(serde_json::json!({
+        "event": "spec_enter_resolved",
+        "outcome": "accepted",
+    }));
 
     ok_result(entered_spec_mode_message(&dir, &evicted))
 }
@@ -162,6 +166,9 @@ pub fn emit_spec_mode_enter(callbacks: &dyn HostCallbacks, agent_id: &str, id: &
         "agentId": agent_id,
         "id": id,
     }));
+    crate::features::helloWorld::agent::helloWorldService::HelloWorldService::exit(
+        callbacks, agent_id,
+    );
     callbacks.emit_event(serde_json::json!({
         "type": "agent.status.updated",
         "agentId": agent_id,
@@ -260,6 +267,10 @@ pub async fn execute_exit_spec_mode(
             dir.display()
         ));
     }
+    callbacks.telemetry(serde_json::json!({
+        "event": "spec_submitted",
+        "file_count": SPEC_REQUIRED_FILES.len(),
+    }));
 
     if mode == PermissionMode::Auto {
         return exit_spec(
@@ -301,6 +312,8 @@ async fn confirm_and_exit(
         question_id: format!("question_{:016x}", fastrand::u64(..)),
         turn_id: turn_id.to_string(),
         tool_call_id: tool_call_id.to_string(),
+        agent_id: Some(agent_id.to_string()),
+        session_id: None,
         background: false,
         timeout_ms: None,
         questions: vec![AskQuestionItem {
@@ -367,6 +380,10 @@ async fn exit_spec(
     selected: Option<&str>,
     auto: bool,
 ) -> ExecutableToolResult {
+    callbacks.telemetry(serde_json::json!({
+        "event": "spec_resolved",
+        "outcome": if auto { "approved_without_review" } else { "approved" },
+    }));
     match deactivate_spec(callbacks, agent_id, turn_id, tool_call_id, id).await {
         Ok(()) => ok_result(spec_exited_output(dir, selected, auto)),
         Err(result) => result,
@@ -525,7 +542,7 @@ fn declared_accesses(tool_name: &str, args: &Value) -> Vec<ToolResourceAccess> {
             path.map(read_tree_access).into_iter().collect()
         }
         "fetchurl" | "fetch_url" | "websearch" | "web_search" | "agent" => Vec::new(),
-        _ if crate::tools::github::is_github_tool(tool_name) => Vec::new(),
+        _ if crate::agent::tools::github::github_legacy::is_github_tool(tool_name) => Vec::new(),
 
         "towermerge" | "tower_merge" | "towerteardown" | "tower_teardown" => {
             vec![ToolResourceAccess::File(ToolFileAccess {
@@ -704,7 +721,11 @@ mod tests {
     }
 
     fn bridge() -> ShellPathBridge {
-        ShellPathBridge::new(&crate::native::shell::resolve_shell(None).program)
+        ShellPathBridge::new(
+            &crate::native::shell::resolve_shell(None)
+                .expect("a shell resolves")
+                .program,
+        )
     }
 
     fn workspace() -> PathBuf {

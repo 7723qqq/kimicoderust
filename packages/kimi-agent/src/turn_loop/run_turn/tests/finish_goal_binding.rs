@@ -2,7 +2,6 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-/// Callbacks wrapper recording `set_turn_goal` bindings.
 struct GoalBindingCallbacks {
     inner: Arc<dyn HostCallbacks>,
     #[allow(clippy::type_complexity)]
@@ -72,6 +71,7 @@ async fn test_turn_binds_start_goal_for_stale_check() {
         terminal_reason: None,
     };
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "turn-goal".into(),
@@ -122,6 +122,7 @@ async fn test_turn_binds_no_goal_when_goalless() {
         bound: bound.clone(),
     });
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "turn-goal-free".into(),
@@ -156,17 +157,6 @@ async fn test_turn_binds_no_goal_when_goalless() {
     );
 }
 
-// ── empty provider responses, end to end (v2 empty_response) ───────────
-
-/// A native-transport LLM that answers the first `empty_answers` calls
-/// with a 200 carrying no content, then a real answer.
-///
-/// `transport()` is `native-http` on purpose. The empty-response guard arms
-/// only for the transport that actually assembles the assistant message
-/// (see `turn_step::empty_response_retryable`) — the host-proxy leg owns its
-/// own transcript, where an empty body is a legitimate answer — so a stub
-/// left on the default `"custom"` would bypass the very thing under test and
-/// make this test pass for the wrong reason.
 struct EmptyThenAnswerLlm {
     empty_answers: u32,
     calls: AtomicU32,
@@ -216,15 +206,9 @@ impl LLM for EmptyThenAnswerLlm {
     }
 }
 
-/// A provider that behaves the way a real one does about a duplicated
-/// `tool_call_id`: it reads the request, and rejects its *shape* with a 400
-/// naming the problem. Only a request whose duplicates are gone is
-/// accepted. This is the only way to prove the strict retry is reachable
-/// from the real loop rather than merely callable.
 struct RejectsDuplicateToolCallsLlm {
     calls: AtomicU32,
-    /// Tool-call ids seen per request, recorded so the test can assert the
-    /// second request was actually clean rather than accidentally accepted.
+
     seen_per_call: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
@@ -267,9 +251,6 @@ impl LLM for RejectsDuplicateToolCallsLlm {
         }
         self.seen_per_call.lock().unwrap().push(seen);
         Box::pin(async move {
-            // The verdict is a function of the request alone. A mock that
-            // also failed "the first time" would pass this test whether or
-            // not the retry actually removed the duplicate.
             if let Some(id) = duplicate {
                 return Err(Box::new(std::io::Error::other(format!(
                     "llm http status 400: messages: tool_use ids must be unique (duplicate {id})"
@@ -293,11 +274,6 @@ impl LLM for RejectsDuplicateToolCallsLlm {
     }
 }
 
-/// End-to-end through the real loop: a history carrying a duplicated
-/// `tool_call_id` is rejected by the provider, and the turn recovers on the
-/// strict resend instead of failing the user's request. Asserts the second
-/// request really was clean — otherwise this would pass on a mock that
-/// simply stopped complaining.
 #[tokio::test]
 async fn a_turn_resends_with_the_strict_projection_after_a_shape_rejection() {
     let llm = RejectsDuplicateToolCallsLlm::new();
@@ -305,6 +281,7 @@ async fn a_turn_resends_with_the_strict_projection_after_a_shape_rejection() {
     let callbacks = rpc_callbacks(server);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "turn-strict".into(),
@@ -333,7 +310,6 @@ async fn a_turn_resends_with_the_strict_projection_after_a_shape_rejection() {
                 tool_call_id: Some("call_1".into()),
                 ..Default::default()
             },
-            // The replayed step: the same call declared a second time.
             LLMMessage {
                 role: "assistant".into(),
                 content: String::new(),
@@ -394,10 +370,6 @@ async fn a_turn_resends_with_the_strict_projection_after_a_shape_rejection() {
     );
 }
 
-/// rather than the retry helper in isolation: a provider that answers 200
-/// with nothing used to end the turn as a success, so the model stopped
-/// early and nothing — transcript, telemetry, UI — could tell it from a
-/// real reply.
 #[tokio::test]
 async fn a_turn_retries_through_empty_provider_responses_and_answers() {
     let llm = EmptyThenAnswerLlm {
@@ -409,6 +381,7 @@ async fn a_turn_retries_through_empty_provider_responses_and_answers() {
     let callbacks = rpc_callbacks(server);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "turn-empty".into(),
@@ -460,9 +433,6 @@ async fn a_turn_retries_through_empty_provider_responses_and_answers() {
     );
 }
 
-/// The other half: a provider that never answers must **fail** rather than
-/// book an empty turn as a success. Without this, the retry could mask a
-/// hard failure as a very slow success.
 #[tokio::test]
 async fn a_turn_fails_when_every_response_is_empty() {
     let llm = EmptyThenAnswerLlm {
@@ -474,6 +444,7 @@ async fn a_turn_fails_when_every_response_is_empty() {
     let callbacks = rpc_callbacks(server);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "turn-empty-forever".into(),

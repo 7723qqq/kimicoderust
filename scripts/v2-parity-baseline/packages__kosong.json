@@ -1,0 +1,139 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/kosong. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/kosong",
+  "redEntries": [
+    {
+      "tsPath": "capability.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "catalog.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "errors/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "generate.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "http/undici-agent.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "http/undici-npm.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "inspection.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "message.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "provider.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/anthropic-cache-breakpoints.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/anthropic-profile.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/anthropic-usage.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/anthropic.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/astron-models.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "providers/capability-registry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/chat-completions-stream.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/google-genai.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/kimi-errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/kimi-files.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/kimi-schema.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/kimi.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/merge-user-messages.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/openai-common.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/openai-legacy.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/openai-responses.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/reasoning-key.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/request-auth.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "providers/tool-call-id.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "request-trace.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "tokens.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "tool.ts",
+      "verdict": "partial"
+    }
+  ]
+}

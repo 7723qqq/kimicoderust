@@ -35,7 +35,11 @@ fn setup() -> (tempfile::TempDir, NativeToolset) {
 }
 
 fn bridge() -> ShellPathBridge {
-    ShellPathBridge::new(&crate::native::shell::resolve_shell(None).program)
+    ShellPathBridge::new(
+        &crate::native::shell::resolve_shell(None)
+            .expect("a shell resolves")
+            .program,
+    )
 }
 
 #[test]
@@ -527,28 +531,22 @@ async fn disclosure_readvertises_the_loaded_tool_schema() {
     assert!(!load.is_error, "{}", load.content);
 
     let after = ts.shape_tool_table(table);
-    let advertised = after
-        .iter()
-        .find(|tool| tool.name == "mcp__github__github_sample_tool")
-        .expect("a loaded deferred tool must be advertised again");
-    assert_eq!(
-        advertised.input_schema, mcp_tool.input_schema,
-        "the advertised entry must carry the real tool schema"
-    );
-    assert_eq!(
-        advertised.input_schema["properties"]["query"]["type"], "string",
-        "the schema must be the MCP definition, not a placeholder"
-    );
-
-    let names: Vec<&str> = after.iter().map(|tool| tool.name.as_str()).collect();
-    assert_eq!(
-        names
+    assert!(
+        !after
             .iter()
-            .filter(|name| **name == "mcp__github__github_sample_tool")
-            .count(),
-        1,
-        "loaded tools appear once: {names:?}"
+            .any(|tool| tool.name == "mcp__github__github_sample_tool"),
+        "a loaded dynamic tool stays out of the request table; its schema message carries it"
     );
+    let schemas = ts
+        .drain_pending_tool_schemas()
+        .expect("the loaded tool drains as a schema message");
+    assert_eq!(schemas.len(), 1);
+    assert_eq!(schemas[0].name, "mcp__github__github_sample_tool");
+    assert_eq!(
+        schemas[0].parameters["properties"]["query"]["type"], "string",
+        "the schema message must carry the MCP definition, not a placeholder"
+    );
+    assert!(ts.drain_pending_tool_schemas().is_none());
 }
 
 #[tokio::test]
@@ -683,6 +681,10 @@ async fn disclosure_refuses_a_call_to_a_deferred_unloaded_tool() {
         .await
         .expect("select_tools is a native tool");
     assert!(!load.is_error, "{}", load.content);
+    let schemas = ts
+        .drain_pending_tool_schemas()
+        .expect("the loaded tool drains as a schema message");
+    assert_eq!(schemas[0].name, "mcp__github__github_sample_tool");
     let executed = ts
         .execute_tool("mcp__github__github_sample_tool", &json!({}))
         .await
@@ -769,6 +771,70 @@ fn read_returns_numbered_lines() {
         result.content
     );
     assert!(result.content.contains("3	gamma"));
+}
+
+#[test]
+fn read_of_a_wire_journal_file_adds_the_event_log_notice() {
+    let (dir, ts) = setup();
+    let home = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        crate::session::sqlite_store::SqliteSessionStore::open(home.path().join("sessions.db"))
+            .unwrap(),
+    );
+    ts.set_session_store(store);
+
+    let journal = home
+        .path()
+        .join("sessions")
+        .join("ws")
+        .join("session-1")
+        .join("agents")
+        .join("main")
+        .join(crate::session::wire_journal::WIRE_FILE_NAME);
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    std::fs::write(&journal, "{\"type\":\"metadata\"}\n").unwrap();
+
+    let event_log = ts
+        .execute("Read", &json!({ "path": journal.to_str().unwrap() }))
+        .expect("the wire journal is readable");
+    assert!(!event_log.is_error, "content: {}", event_log.content);
+    assert!(
+        event_log.note.as_deref().unwrap_or_default().contains(
+            "Kimi Code agent event log: read one record at a time (n_lines=1); \
+                 follow Next Read for the rest of a longer record or extract fields with Bash."
+        ),
+        "note: {:?}",
+        event_log.note
+    );
+
+    let ordinary = ts
+        .execute("Read", &json!({ "path": dir.path().join("a.txt") }))
+        .expect("an ordinary file still reads");
+    assert!(
+        !ordinary
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Kimi Code agent event log")
+    );
+
+    let outside_sessions = dir
+        .path()
+        .join(crate::session::wire_journal::WIRE_FILE_NAME);
+    std::fs::write(&outside_sessions, "{\"type\":\"metadata\"}\n").unwrap();
+    let not_a_journal = ts
+        .execute(
+            "Read",
+            &json!({ "path": outside_sessions.to_str().unwrap() }),
+        )
+        .expect("the file still reads");
+    assert!(
+        !not_a_journal
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Kimi Code agent event log")
+    );
 }
 
 #[test]
@@ -1000,6 +1066,65 @@ async fn write_records_file_history_and_revert_restores_the_file() {
         !dir.path().join("fresh.txt").exists(),
         "a file the turn added is removed by the revert"
     );
+}
+
+#[tokio::test]
+async fn operation_log_wraps_native_writes_and_undo_restores_the_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@e.test"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+
+    let mut ts = NativeToolset::new(root.to_str().unwrap(), None)
+        .unwrap()
+        .with_session_id("session-operation-log")
+        .with_turn_id(1);
+    ts.operation_log = ts.operation_log.clone().with_flag_enabled(true);
+    let written = ts
+        .execute_mutating("Write", &json!({ "path": "a.txt", "content": "two\n" }))
+        .await
+        .expect("write executes natively");
+    assert!(!written.is_error, "{}", written.content);
+
+    let service = ts.operation_log_service("main");
+    let records = service.list_operations(None).await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].content.description, "Writing a.txt");
+    assert_eq!(records[0].content.origin.as_ref().unwrap().turn_id, Some(1));
+    assert_eq!(
+        records[0].content.origin.as_ref().unwrap().tool_name.as_deref(),
+        Some("Write")
+    );
+
+    ts.execute_tool("Read", &json!({ "path": "a.txt" }))
+        .await
+        .expect("read executes natively");
+    assert_eq!(service.list_operations(None).await.unwrap().len(), 1);
+
+    service.undo_operation().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "one\n"
+    );
+    service.dispose().await;
 }
 
 #[tokio::test]
@@ -2665,6 +2790,81 @@ async fn bash_result_messages_match_v2() {
 }
 
 #[tokio::test]
+async fn bash_spill_preserves_full_output_beyond_the_legacy_cap() {
+    let Some(shell) = find_bash() else { return };
+    let (_dir, ts) = setup_with_shell(Some(&shell));
+    let result = ts
+        .execute_mutating(
+            "Bash",
+            &json!({ "command": "printf '%*s' 17000000 '' | tr ' ' 'x'" }),
+        )
+        .await
+        .unwrap();
+
+    assert!(!result.is_error, "content: {}", result.content);
+    assert!(result.content.starts_with(&"x".repeat(10_000_000)));
+    let spill = result.spill.expect("long output must carry its spill");
+    assert_eq!(spill.total_chars, Some(17_000_000));
+    assert_eq!(
+        spill.suffix.as_deref(),
+        Some("Command executed successfully.")
+    );
+}
+
+#[tokio::test]
+async fn bash_error_spill_uses_utf16_total_and_keeps_failure_in_content() {
+    let Some(shell) = find_bash() else { return };
+    let (_dir, ts) = setup_with_shell(Some(&shell));
+    let command = "i=0; while [ \"$i\" -lt 20000 ]; do printf '你好😀'; i=$((i+1)); done; exit 7";
+    let result = ts
+        .execute_mutating("Bash", &json!({ "command": command }))
+        .await
+        .unwrap();
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .ends_with("Command failed with exit code: 7.")
+    );
+    let spill = result
+        .spill
+        .expect("failed long output must carry its spill");
+    assert_eq!(spill.total_chars, Some(80_000));
+    assert_eq!(spill.suffix, None);
+}
+
+#[tokio::test]
+async fn bash_accumulator_preserves_utf8_split_across_writes() {
+    let Some(shell) = find_bash() else { return };
+    let (_dir, ts) = setup_with_shell(Some(&shell));
+    let command = "printf '\\344'; sleep 0.01; printf '\\275'; sleep 0.01; printf '\\240'; sleep 0.01; printf '\\345'; sleep 0.01; printf '\\245'; sleep 0.01; printf '\\275'; sleep 0.01; printf '\\344'; sleep 0.01; printf '\\270'; sleep 0.01; printf '\\226'; sleep 0.01; printf '\\347'; sleep 0.01; printf '\\225'; sleep 0.01; printf '\\214'";
+    let result = ts
+        .execute_mutating("Bash", &json!({ "command": command }))
+        .await
+        .unwrap();
+
+    assert!(!result.is_error, "content: {}", result.content);
+    assert_eq!(result.content, "你好世界");
+}
+
+#[tokio::test]
+async fn bash_accumulator_replaces_every_invalid_utf8_byte() {
+    let Some(shell) = find_bash() else { return };
+    let (_dir, ts) = setup_with_shell(Some(&shell));
+    let result = ts
+        .execute_mutating(
+            "Bash",
+            &json!({ "command": "printf '\\377\\377\\377\\377\\377\\377\\377\\377'" }),
+        )
+        .await
+        .unwrap();
+
+    assert!(!result.is_error, "content: {}", result.content);
+    assert_eq!(result.content, "��������");
+}
+
+#[tokio::test]
 async fn powershell_runs_a_script_natively_and_keeps_utf8() {
     if find_powershell().is_none() {
         return;
@@ -3032,6 +3232,29 @@ async fn memory_tool_is_refused_for_subagents() {
     assert!(result.content.contains("main agent"), "{}", result.content);
 }
 
+#[tokio::test]
+async fn cron_tools_are_refused_for_subagents() {
+    let (_dir, ts) = setup();
+    let ts = ts.with_caller_agent_id("researcher");
+    let args = json!({
+        "cron": "* * * * *",
+        "prompt": "p",
+        "id": "01H0Z8X7YJ3K5Q9R2T4V6W8XAZ",
+    });
+    for name in ["CronList", "CronCreate", "CronDelete"] {
+        let result = ts
+            .execute_tool(name, &args)
+            .await
+            .unwrap_or_else(|| panic!("{name} is not handled by the toolset"));
+        assert!(result.is_error, "{name}: {}", result.content);
+        assert!(
+            result.content.contains("main agent"),
+            "{name}: {}",
+            result.content
+        );
+    }
+}
+
 #[test]
 fn native_tool_names_match_the_contract_file() {
     let contract: serde_json::Value =
@@ -3067,7 +3290,7 @@ fn native_tool_names_match_the_contract_file() {
     }
     for name in &v2_github {
         assert!(
-            github::is_github_tool(name),
+            crate::agent::tools::github::github_legacy::is_github_tool(name),
             "contract says {name} is a native GitHub tool but is_github_tool rejects it — add it to github.rs SPECS or fix the contract"
         );
     }
@@ -3089,6 +3312,37 @@ fn native_tool_names_match_the_contract_file() {
         accepted, contracted,
         "NATIVE_TOOL_NAMES and tool-name-contract.json disagree — update both together"
     );
+}
+
+#[test]
+fn tower_rebase_and_complete_are_native() {
+    for name in [
+        "TowerRebase",
+        "tower_rebase",
+        "TowerComplete",
+        "tower_complete",
+    ] {
+        assert!(
+            is_builtin_tool_name(name),
+            "{name} dispatches natively (tools/dispatch.rs) but is missing from NATIVE_TOOL_NAMES"
+        );
+    }
+}
+
+#[test]
+fn graph_map_and_select_aliases_are_native() {
+    for name in [
+        "MemoryGraph",
+        "RepoMap",
+        "repo_map",
+        "select_tools",
+        "selecttools",
+    ] {
+        assert!(
+            is_builtin_tool_name(name),
+            "{name} dispatches natively (tools/dispatch.rs) but is missing from NATIVE_TOOL_NAMES"
+        );
+    }
 }
 
 fn scan(display: &str, mtime: u64, total_matches: usize) -> FileScan {
@@ -3718,6 +3972,7 @@ async fn test_native_bash_background_task_runner() {
             .bash_with(
                 &json!({ "command": "echo 'bg hello'", "run_in_background": true, "description": "echo task" }),
                 None,
+                Some("call-bg-bash"),
             )
             .await
             .unwrap();
@@ -3748,6 +4003,7 @@ async fn test_native_bash_background_task_runner() {
         output.contains("bg hello"),
         "the background task's stdout must survive the drain: {entry:?}"
     );
+    assert_eq!(entry["parent_tool_call_id"], "call-bg-bash");
 }
 
 #[tokio::test]
@@ -3766,6 +4022,7 @@ async fn test_native_powershell_background_task_runner() {
                 "run_in_background": true,
                 "description": "emit bg hello"
             }),
+            None,
             None,
         )
         .await
@@ -3814,6 +4071,7 @@ async fn powershell_foreground_timeout_is_rehomed_to_the_background() {
         .powershell_with(
             &json!({ "command": "Start-Sleep -Seconds 30", "timeout": 1 }),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3842,16 +4100,9 @@ async fn powershell_foreground_timeout_is_rehomed_to_the_background() {
 }
 
 #[tokio::test]
-async fn workflow_tool_lists_without_a_subagent_runtime() {
+async fn workflow_tool_run_requires_a_subagent_runtime() {
     let (_dir, toolset) = setup();
     assert!(toolset.handles("Workflow"), "Workflow is a native tool");
-    let result = toolset
-        .execute_tool("Workflow", &serde_json::json!({ "operation": "list" }))
-        .await
-        .expect("Workflow is handled natively");
-    assert!(!result.is_error, "{}", result.content);
-    assert!(result.content.contains("deep-research"));
-
     let run = toolset
         .execute_tool(
             "Workflow",
@@ -4213,7 +4464,7 @@ mod mode_mutex_dispatch {
 
         let dir = init_repo();
         let driver = Arc::new(Driver::default());
-        let runtime = crate::tools::tower::wake::TowerWakeRuntime::new(driver.clone());
+        let runtime = crate::features::tower::wake::TowerWakeRuntime::new(driver.clone());
         let (callbacks, _) = host(false);
         let main = NativeToolset::new(dir.path().to_str().unwrap(), None)
             .unwrap()
@@ -4703,5 +4954,59 @@ async fn a_bound_agent_runs_bash_in_its_own_directory() {
         marker.content.contains("from-child"),
         "content: {}",
         marker.content
+    );
+}
+
+#[tokio::test]
+async fn notify_user_validates_title_and_message() {
+    let work = tempfile::tempdir().unwrap();
+    let ts = NativeToolset::new(work.path().to_str().unwrap(), None).unwrap();
+
+    let ok = ts
+        .execute_tool(
+            "NotifyUser",
+            &json!({ "title": "Phase", "message": "done" }),
+        )
+        .await
+        .unwrap();
+    assert!(!ok.is_error, "content: {}", ok.content);
+    assert_eq!(ok.content, "Update shown to the user.");
+
+    let empty_title = ts
+        .execute_tool("NotifyUser", &json!({ "title": "  ", "message": "x" }))
+        .await
+        .unwrap();
+    assert!(empty_title.is_error);
+    assert_eq!(empty_title.content, "title must not be empty.");
+
+    let multiline = ts
+        .execute_tool("NotifyUser", &json!({ "title": "a\nb", "message": "x" }))
+        .await
+        .unwrap();
+    assert!(multiline.is_error);
+    assert_eq!(multiline.content, "title must be a single line.");
+
+    let empty_message = ts
+        .execute_tool("NotifyUser", &json!({ "message": " " }))
+        .await
+        .unwrap();
+    assert!(empty_message.is_error);
+    assert_eq!(empty_message.content, "message must not be empty.");
+}
+
+#[tokio::test]
+async fn notify_user_reports_the_disabled_state() {
+    let work = tempfile::tempdir().unwrap();
+    let ts = NativeToolset::new(work.path().to_str().unwrap(), None)
+        .unwrap()
+        .with_notify_user_enabled(false);
+    let result = ts
+        .execute_tool("NotifyUser", &json!({ "message": "still working" }))
+        .await
+        .unwrap();
+    assert!(!result.is_error, "content: {}", result.content);
+    assert_eq!(
+        result.content,
+        "Notifications are disabled; the update was not displayed."
     );
 }

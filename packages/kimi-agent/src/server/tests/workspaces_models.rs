@@ -21,7 +21,6 @@ async fn test_http_static_assets_and_spa_routing() {
 
     let server = HttpServer::in_memory().unwrap().with_web_assets(dir.path());
 
-    // 1. Root / serves index.html
     let res_root = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -41,7 +40,6 @@ async fn test_http_static_assets_and_spa_routing() {
         b"<!DOCTYPE html><html><body>Kimi Web UI</body></html>"
     );
 
-    // 2. Static asset request
     let res_asset = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -58,7 +56,6 @@ async fn test_http_static_assets_and_spa_routing() {
     );
     assert_eq!(res_asset.body, b"console.log('web ui loaded');");
 
-    // 3. SPA deep route fallback
     let res_spa = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -78,7 +75,6 @@ async fn test_http_static_assets_and_spa_routing() {
         b"<!DOCTYPE html><html><body>Kimi Web UI</body></html>"
     );
 
-    // 4. API routes do not fallback to index.html
     let res_api = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -151,7 +147,6 @@ async fn workspace_require_trust_config_controls_effective_trust() {
 async fn test_http_workspaces_crud_and_trust() {
     let server = HttpServer::in_memory().unwrap();
 
-    // 1. Initial list is empty
     let res_list = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -165,7 +160,6 @@ async fn test_http_workspaces_crud_and_trust() {
     let val_list: Value = serde_json::from_slice(&res_list.body).unwrap();
     assert_eq!(val_list["items"].as_array().unwrap().len(), 0);
 
-    // 2. Create workspace - missing root -> 400
     let res_bad = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -177,7 +171,6 @@ async fn test_http_workspaces_crud_and_trust() {
         .await;
     assert_eq!(res_bad.status, 400);
 
-    // 3. Create valid workspace
     let res_create = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -198,7 +191,6 @@ async fn test_http_workspaces_crud_and_trust() {
     assert_eq!(ws["name"], "My Application");
     assert_eq!(ws["session_count"], 0);
 
-    // 4. Get workspace by id
     let res_get = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -212,7 +204,6 @@ async fn test_http_workspaces_crud_and_trust() {
     let val_get: Value = serde_json::from_slice(&res_get.body).unwrap();
     assert_eq!(val_get["id"], ws_id);
 
-    // 5. Fail-closed trust: a new workspace has no explicit trust record
     let res_trust = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -226,7 +217,6 @@ async fn test_http_workspaces_crud_and_trust() {
     let val_trust: Value = serde_json::from_slice(&res_trust.body).unwrap();
     assert_eq!(val_trust["trusted"], false);
 
-    // A POST without `trusted` is not an explicit grant and must stay untrusted
     let res_set_untyped = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -268,7 +258,6 @@ async fn test_http_workspaces_crud_and_trust() {
     let val_revoke_trust: Value = serde_json::from_slice(&res_revoke_trust.body).unwrap();
     assert_eq!(val_revoke_trust["trusted"], false);
 
-    // 6. Create session under workspace -> session_count updates
     server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -295,7 +284,6 @@ async fn test_http_workspaces_crud_and_trust() {
     let val_updated: Value = serde_json::from_slice(&res_get_updated.body).unwrap();
     assert_eq!(val_updated["session_count"], 1);
 
-    // 6b. Rename workspace via PATCH /api/v1/workspaces/{ws_id}
     let res_patch = server
         .handle_request(&HttpRequest {
             method: "PATCH".into(),
@@ -312,7 +300,6 @@ async fn test_http_workspaces_crud_and_trust() {
     let val_patched: Value = serde_json::from_slice(&res_patch.body).unwrap();
     assert_eq!(val_patched["name"], "Renamed Application");
 
-    // 7. Delete workspace
     let res_del = server
         .handle_request(&HttpRequest {
             method: "DELETE".into(),
@@ -324,7 +311,6 @@ async fn test_http_workspaces_crud_and_trust() {
         .await;
     assert_eq!(res_del.status, 200);
 
-    // 8. Delete non-existent -> 404
     let res_del_missing = server
         .handle_request(&HttpRequest {
             method: "DELETE".into(),
@@ -340,8 +326,7 @@ async fn test_http_workspaces_crud_and_trust() {
 #[tokio::test]
 async fn test_http_models_catalog_and_session_export() {
     let server = HttpServer::in_memory().unwrap();
-    // The catalog routes project `config.toml`, so inject a deterministic
-    // one instead of discovering the developer's config.
+
     let config: crate::config::KimiConfig = r#"
 default_model = "kimi-latest"
 
@@ -364,7 +349,6 @@ max_context_size = 128000
     .unwrap();
     *server.config_override.lock().await = Some(config);
 
-    // 1. Models catalog (config-driven, v2 `IModelCatalog.listModels`)
     let res_models = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -385,7 +369,6 @@ max_context_size = 128000
     assert_eq!(model["display_name"], "kimi-latest");
     assert_eq!(model["max_context_size"], 262144);
 
-    // 2. Session export
     server
         .store_arc()
         .create_session("sess-to-export", Some("To Export"))
@@ -420,7 +403,6 @@ max_context_size = 128000
     assert_eq!(val_exp["messages"].as_array().unwrap().len(), 1);
     assert!(val_exp["exported_at"].is_string());
 
-    // POST export works symmetrically
     let res_exp_post = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -432,7 +414,6 @@ max_context_size = 128000
         .await;
     assert_eq!(res_exp_post.status, 200);
 
-    // Export non-existent returns 404
     let res_exp_none = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -444,7 +425,6 @@ max_context_size = 128000
         .await;
     assert_eq!(res_exp_none.status, 404);
 
-    // 3. Providers listing (config-driven, credential state included)
     let res_providers = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -467,7 +447,6 @@ max_context_size = 128000
     assert!(kimi_models.contains(&json!("kimi-latest")));
     assert!(kimi_models.contains(&json!("fast")));
 
-    // 3b. Auth readiness reflects the injected config.
     let res_auth = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -483,7 +462,6 @@ max_context_size = 128000
     assert_eq!(val_auth["providers_count"], 1);
     assert_eq!(val_auth["managed_provider"], Value::Null);
 
-    // 4. Catalog providers listing
     let res_catalog_prov = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -497,7 +475,6 @@ max_context_size = 128000
     let val_cat_prov: Value = serde_json::from_slice(&res_catalog_prov.body).unwrap();
     assert!(val_cat_prov["items"].as_array().unwrap().len() >= 4);
 
-    // 5. Set default model via POST /api/v1/models/{tail}
     let res_set_default = server
         .handle_request(&HttpRequest {
             method: "POST".into(),
@@ -511,7 +488,6 @@ max_context_size = 128000
     let val_set_def: Value = serde_json::from_slice(&res_set_default.body).unwrap();
     assert_eq!(val_set_def["model"], "fast");
 
-    // 6. Prompts list
     let res_prompts = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -523,7 +499,6 @@ max_context_size = 128000
         .await;
     assert_eq!(res_prompts.status, 200);
 
-    // 7. API v2 sessions
     let res_v2_sess = server
         .handle_request(&HttpRequest {
             method: "GET".into(),
@@ -537,7 +512,6 @@ max_context_size = 128000
     let val_v2: Value = serde_json::from_slice(&res_v2_sess.body).unwrap();
     assert!(val_v2["items"].as_array().is_some());
 
-    // 8. Session init: POST /api/v1/sessions/:id:init
     let res_init = server
         .handle_request(&HttpRequest {
             method: "POST".into(),

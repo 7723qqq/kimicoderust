@@ -452,6 +452,7 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
   private buildHandleDeps(): BuildHandleDeps {
     return {
       homeDir: this.homeDir,
+      engineDataDir: this.engineDataDir,
       configPath: this.configPath,
       shellPath: this.resolvedShellPath(),
       identity: this.identity,
@@ -3730,8 +3731,8 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
           'malformed background task entry from the engine',
         );
       }
-      return {
-        kind: 'agent',
+      const kind = backgroundTaskKind(entry.kind);
+      const base = {
         taskId: String(entry.taskId ?? ''),
         description: String(entry.description ?? ''),
         status: entry.status as BackgroundTaskInfo['status'],
@@ -3739,6 +3740,15 @@ export class SDKRpcClientNative extends SDKRpcClientBase {
         endedAt: entry.endedAt ?? null,
         ...(entry.stopReason !== undefined ? { stopReason: entry.stopReason } : {}),
       };
+      if (kind === 'question') {
+        return {
+          ...base,
+          kind,
+          questionCount: Number(entry.questionCount ?? 0),
+          ...(entry.toolCallId !== undefined ? { toolCallId: entry.toolCallId } : {}),
+        };
+      }
+      return { ...base, kind } as BackgroundTaskInfo;
     });
     if (input.activeOnly) {
       tasks = tasks.filter((task) => task.status === 'running');
@@ -4670,3 +4680,9 @@ export {
   discoverSubagentsFromToolResult,
 } from './sdk-client/helpers';
 export type { SDKRpcClientNativeOptions, DiscoveredSubagent } from './sdk-client/helpers';
+
+function backgroundTaskKind(kind: string | undefined): BackgroundTaskInfo['kind'] {
+  if (kind === 'question') return 'question';
+  if (kind === 'subagent' || kind === 'agent') return 'agent';
+  return 'process';
+}

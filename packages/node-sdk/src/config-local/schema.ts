@@ -401,6 +401,18 @@ export const ImageConfigSchema = z.object({
 
 export type ImageConfig = z.infer<typeof ImageConfigSchema>;
 
+export const LlmRequesterConfigSchema = z.object({
+  /**
+   * Whole-request UTF-8 byte budget (v2 `resolveLlmRequestByteBudget`). The
+   * projector degrades/strips media before a request that would exceed it.
+   * Overrides the built-in default; the KIMI_LLM_REQUEST_BYTE_BUDGET env var
+   * wins over this value.
+   */
+  requestByteBudget: z.number().int().min(1).optional(),
+});
+
+export type LlmRequesterConfig = z.infer<typeof LlmRequesterConfigSchema>;
+
 export const ModelCatalogConfigSchema = z.object({
   /** Interval (ms) between automatic provider-model refreshes. `0` disables. */
   refreshIntervalMs: z.number().int().min(0).optional(),
@@ -545,6 +557,7 @@ export const KimiConfigSchema = z.object({
   secondaryModel: SecondaryModelConfigSchema.optional(),
   mcp: McpConfigSchema.optional(),
   image: ImageConfigSchema.optional(),
+  llmRequester: LlmRequesterConfigSchema.optional(),
   modelCatalog: ModelCatalogConfigSchema.optional(),
   experimental: ExperimentalConfigSchema.optional(),
   telemetry: z.boolean().optional(),

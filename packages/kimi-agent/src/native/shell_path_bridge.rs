@@ -1,42 +1,18 @@
-//! Shell path bridge — translate the POSIX path dialect spoken by MSYS2 /
-//! Git Bash into native win32 paths.
-//!
-//! Ported from the retired fork `packages/kaos/src/shell-path-bridge.ts`
-//! (removed in 6cfe7108ac), which ported
-//! `agent-core-v2/src/_base/execEnv/shellPathBridge.ts` from the fork's own
-//! agent-core-v2 copy; that file never existed upstream.
-//!
-//! The msys runtime gives the shell a POSIX path view native Windows cannot
-//! resolve: `/c/Users/x` is `C:\Users\x`, and `/tmp/x` is the msys temp
-//! directory, *not* `<drive-root>/tmp/x`. [`ShellPathBridge::from_shell_path`]
-//! resolves a model-supplied path for filesystem access — drive-letter forms
-//! lexically, other root-relative paths through `cygpath -w` next to the
-//! probed bash. Anything unconvertible passes through unchanged, and the whole
-//! bridge is the identity outside Windows.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::path_access::{PathClass, normalize_path};
 
-/// cygpath semantics are undefined for the virtual filesystems.
 const VIRTUAL_FS_PREFIXES: [&str; 3] = ["/dev/", "/proc/", "/sys/"];
 
-/// Native win32 path → the POSIX dialect the shell speaks.
 pub struct ShellPathBridge {
-    /// `cygpath.exe` next to the probed bash, or `None` when it is not there
-    /// (a non-msys shell, or a bash installed without the msys tools).
     cygpath: Option<PathBuf>,
-    /// `first segment -> resolved root`, memoised. Only successes are cached:
-    /// a missing `cygpath.exe` is a stable fact, but a transient spawn failure
-    /// must not poison every later lookup.
+
     roots: Mutex<HashMap<String, String>>,
 }
 
 impl ShellPathBridge {
-    /// Build a bridge for the shell at `shell_path`. Outside Windows the
-    /// bridge is the identity and no `cygpath` is looked for.
     pub fn new(shell_path: &str) -> Self {
         Self {
             cygpath: if cfg!(windows) {
@@ -48,8 +24,6 @@ impl ShellPathBridge {
         }
     }
 
-    /// Model/shell-supplied path → native win32 path. Identity when the path
-    /// is not convertible.
     pub fn to_native_path(&self, path: &str) -> String {
         if !cfg!(windows) {
             return path.to_string();
@@ -87,7 +61,6 @@ impl ShellPathBridge {
         }
     }
 
-    /// `cygpath -w /<segment>` → the native root that segment names.
     fn resolve_root_segment(&self, first_segment: &str) -> Option<String> {
         if let Some(cached) = self
             .roots
@@ -120,9 +93,6 @@ impl ShellPathBridge {
     }
 }
 
-/// Lexical translation of shell-dialect drive paths (`/c/x`, `/c:/x`,
-/// `/cygdrive/c/x`) to native win32 form — pure string rewriting, no cygpath
-/// involved. Anything else is returned unchanged.
 fn translate_shell_drive_path(path: &str) -> String {
     if let Some((letter, rest)) = match_drive_colon(path) {
         return join_drive(letter, rest);
@@ -136,7 +106,6 @@ fn translate_shell_drive_path(path: &str) -> String {
     path.to_string()
 }
 
-/// `/c:/x` — a drive letter spelled with a colon after the slash.
 fn match_drive_colon(path: &str) -> Option<(char, &str)> {
     let bytes = path.as_bytes();
     if bytes.len() < 3 || bytes[0] != b'/' || !bytes[1].is_ascii_alphabetic() || bytes[2] != b':' {
@@ -148,7 +117,6 @@ fn match_drive_colon(path: &str) -> Option<(char, &str)> {
     Some((bytes[1] as char, &path[3..]))
 }
 
-/// `/cygdrive/c/x` — the Cygwin spelling.
 fn match_cygdrive(path: &str) -> Option<(char, &str)> {
     const PREFIX: &str = "/cygdrive/";
     let rest = path.strip_prefix(PREFIX)?;
@@ -163,7 +131,6 @@ fn match_cygdrive(path: &str) -> Option<(char, &str)> {
     Some((letter, after))
 }
 
-/// `/c/x` — the Git Bash spelling.
 fn match_drive(path: &str) -> Option<(char, &str)> {
     let bytes = path.as_bytes();
     if bytes.len() < 2 || bytes[0] != b'/' || !bytes[1].is_ascii_alphabetic() {
@@ -197,8 +164,6 @@ fn is_win32_drive_absolute(path: &str) -> bool {
         && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
-/// `cygpath.exe` lives beside the msys bash, or one level up under `usr/bin`
-/// when the probed shell is the `bin/bash.exe` shim.
 fn locate_cygpath(shell_path: &str) -> Option<PathBuf> {
     let shell_dir = Path::new(shell_path).parent()?;
     let mut candidates = vec![shell_dir.join("cygpath.exe")];
@@ -237,12 +202,10 @@ mod tests {
 
     #[test]
     fn non_drive_paths_are_left_for_cygpath() {
-        // `/tmp` is the msys temp directory, not `<drive-root>/tmp` — only
-        // cygpath knows where it points, so the lexical pass must not touch it.
         assert_eq!(lexical("/tmp/x.txt"), "/tmp/x.txt");
         assert_eq!(lexical("/usr/bin/bash"), "/usr/bin/bash");
         assert_eq!(lexical("/home/user/a.txt"), "/home/user/a.txt");
-        // A multi-letter first segment is not a drive letter.
+
         assert_eq!(lexical("/cygwin/c/x"), "/cygwin/c/x");
     }
 
@@ -250,8 +213,7 @@ mod tests {
     fn dot_segments_resolve_before_the_lexical_pass() {
         assert_eq!(lexical("/./c/x"), "C:/x");
         assert_eq!(lexical("/../c/x"), "C:/x");
-        // `..` pops the first segment, so `/c/../d/x` is `/d/x` — a drive
-        // letter in its own right, not `C:/d/x`.
+
         assert_eq!(lexical("/c/../d/x"), "D:/x");
     }
 
@@ -280,8 +242,6 @@ mod tests {
 
     #[test]
     fn an_unresolvable_root_falls_back_to_the_normalized_path() {
-        // No cygpath: `/tmp` cannot be placed, so it stays as written rather
-        // than being guessed onto the current drive.
         let bridge = ShellPathBridge {
             cygpath: None,
             roots: Mutex::new(HashMap::new()),

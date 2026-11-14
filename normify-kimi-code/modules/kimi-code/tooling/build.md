@@ -10,9 +10,9 @@ description:
   en: >
       Packaging and build: tsdown configs, the ?raw asset loader, Bun single-file compilation and the CI matrix.
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.328Z"
-fingerprint: d61437b3293a59450840965a70f56c3828441c58f1d38ea78cf4d026e0e9c7c8
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-11T19:20:38.948Z"
+fingerprint: 0e2b0d96b93c9ea306b2fce6c0aceaec4aa7e9bd8f9d3316323247591976672e
 source:
   - path: "build/raw-text-plugin.mjs"
   - path: ".github/workflows/ci.yml"

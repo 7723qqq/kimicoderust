@@ -1,27 +1,12 @@
-//! PowerShell discovery and script encoding (v2 `agent/tools/os/powershell`).
-//!
-//! v2 runs the script through `pwsh` with an encoded command so no quoting
-//! layer sits between the model and PowerShell: the script is UTF-16LE,
-//! base64-encoded, and prefixed with a preamble that forces UTF-8 output —
-//! without it, a Windows console code page mangles every non-ASCII character a
-//! command prints.
-//!
-//! Only the pieces that do not need a process are here: resolution, encoding,
-//! argv construction and output normalization. The tool that uses them lives in
-//! `tools/powershell.rs`.
-
 use std::path::{Path, PathBuf};
 
-/// Forces UTF-8 on both output streams and silences the progress bar, which
-/// would otherwise arrive interleaved with stdout as ANSI control lines.
+use super::environment_probe::ProbeShellNotFound;
+use super::shell_payload::{ShellPayloadKind, find_shell_payload_pin, shell_payload_exe_path};
+
 pub const POWER_SHELL_UTF8_PREAMBLE: &str = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()\n\
 $OutputEncoding=[System.Text.UTF8Encoding]::new()\n\
 $ProgressPreference='SilentlyContinue'";
 
-/// Which PowerShell the host actually has. The distinction matters for the
-/// failure text only: `pwsh` is PowerShell 7 (installed separately), while
-/// `windows-powershell` is the Windows PowerShell 5.1 that ships with the OS and
-/// may lack cmdlets a script assumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerShellKind {
     Pwsh,
@@ -43,32 +28,6 @@ pub struct PowerShellExecutable {
     pub kind: PowerShellKind,
 }
 
-/// Why no interpreter could be resolved, with every candidate that was checked
-/// so the error can name them instead of saying "not found".
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PowerShellNotFound {
-    pub checked: Vec<PathBuf>,
-}
-
-impl PowerShellNotFound {
-    /// The message the model reads. v2 names the same three remedies: provision
-    /// the bundled payload, install PowerShell 7, or point `KIMI_PWSH_PATH` at
-    /// an executable.
-    pub fn message(&self) -> String {
-        let checked = self
-            .checked
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "PowerShell was not found on this host. Install PowerShell 7, or set KIMI_PWSH_PATH to a pwsh executable. Checked: {checked}"
-        )
-    }
-}
-
-/// The script as PowerShell receives it: preamble, the caller's script, encoded
-/// UTF-16LE and base64. v2 encodes the two joined by a newline.
 pub fn encode_script(script: &str) -> String {
     use base64::Engine as _;
     let full = format!("{POWER_SHELL_UTF8_PREAMBLE}\n{script}");
@@ -76,27 +35,15 @@ pub fn encode_script(script: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// The env v2 sets on every PowerShell spawn (`powershellTool.ts:171-175`).
-///
-/// `NO_COLOR` keeps ANSI out of captured output; the two `*_OPTOUT` variables
-/// stop a first run from printing a telemetry notice and from blocking on an
-/// update check — both surface as banner text the model would then read as
-/// command output.
 pub const POWER_SHELL_ENV: &[(&str, &str)] = &[
     ("NO_COLOR", "1"),
     ("POWERSHELL_TELEMETRY_OPTOUT", "1"),
     ("POWERSHELL_UPDATECHECK_OPTOUT", "1"),
 ];
 
-/// The description variants v2 applies at render time
-/// (`powershellTool.ts:56-77`): the template names the background behavior, so
-/// the two configurations that disable part of it must say so instead of
-/// describing a capability the agent does not have.
 pub struct DescriptionVariants;
 
 impl DescriptionVariants {
-    /// v2 `withoutBackgroundDescription`: the tool table has no TaskList /
-    /// TaskOutput / TaskStop, so a background call would be unobservable.
     pub fn without_background(description: &str) -> String {
         replace_paragraph(
             description,
@@ -105,9 +52,6 @@ impl DescriptionVariants {
         )
     }
 
-    /// v2 `withoutAutoBackgroundOnTimeout`: the foreground timeout kills the
-    /// script instead of re-homing it, and the template's sentence says the
-    /// opposite.
     pub fn without_auto_background(description: &str) -> String {
         description.replace(
             "a foreground call that hits its timeout is moved to the background instead of being killed.",
@@ -116,11 +60,6 @@ impl DescriptionVariants {
     }
 }
 
-/// Replace the paragraph that starts with `prefix` with `replacement`.
-///
-/// The template's paragraphs are separated by a blank line; a paragraph is
-/// dropped whole rather than edited in place, which is what v2's regex does and
-/// what keeps the replacement from leaving a half sentence behind.
 fn replace_paragraph(description: &str, prefix: &str, replacement: &str) -> String {
     let Some(start) = description.find(prefix) else {
         return description.to_string();
@@ -140,9 +79,6 @@ fn replace_paragraph(description: &str, prefix: &str, replacement: &str) -> Stri
     out
 }
 
-/// The argv after the executable itself. `-NoProfile` keeps a user's profile
-/// from changing output shape; `-NonInteractive` keeps a prompt from hanging the
-/// turn.
 pub fn build_args(script: &str) -> Vec<String> {
     vec![
         "-NoProfile".to_string(),
@@ -152,29 +88,23 @@ pub fn build_args(script: &str) -> Vec<String> {
     ]
 }
 
-/// PowerShell writes CRLF; the rest of this engine speaks LF.
 pub fn normalize_output(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
-/// The pieces [`resolve`] needs, injected so the search order is testable
-/// without a Windows host.
 pub struct ResolveDeps<'a> {
     pub pwsh_override: Option<&'a str>,
     pub path_env: Option<&'a str>,
     pub system_root: Option<&'a str>,
+    pub kimi_home: &'a Path,
     pub is_file: &'a dyn Fn(&Path) -> bool,
 }
 
-/// v2 `resolvePowerShellExecutable`: the explicit override wins, then `pwsh`
-/// found on `PATH`, then the two standard PowerShell 7 install roots, then the
-/// Windows PowerShell 5.1 that ships with the OS. Each candidate is recorded
-/// before it is tested, so a failure lists exactly what was tried.
-pub fn resolve(deps: ResolveDeps<'_>) -> Result<PowerShellExecutable, PowerShellNotFound> {
-    let mut checked: Vec<PathBuf> = Vec::new();
+pub fn resolve(deps: ResolveDeps<'_>) -> Result<PowerShellExecutable, ProbeShellNotFound> {
+    let mut checked: Vec<String> = Vec::new();
 
-    let accept = |path: PathBuf, kind: PowerShellKind, checked: &mut Vec<PathBuf>| {
-        checked.push(path.clone());
+    let accept = |path: PathBuf, kind: PowerShellKind, checked: &mut Vec<String>| {
+        checked.push(path.display().to_string());
         (deps.is_file)(&path).then_some(PowerShellExecutable { path, kind })
     };
 
@@ -186,6 +116,13 @@ pub fn resolve(deps: ResolveDeps<'_>) -> Result<PowerShellExecutable, PowerShell
         )
     {
         return Ok(found);
+    }
+
+    if let Some(pin) = find_shell_payload_pin(ShellPayloadKind::Pwsh) {
+        let payload_exe = shell_payload_exe_path(deps.kimi_home, pin);
+        if let Some(found) = accept(payload_exe, PowerShellKind::Pwsh, &mut checked) {
+            return Ok(found);
+        }
     }
 
     for candidate in pwsh_candidates(deps.path_env) {
@@ -200,7 +137,10 @@ pub fn resolve(deps: ResolveDeps<'_>) -> Result<PowerShellExecutable, PowerShell
         }
     }
 
-    Err(PowerShellNotFound { checked })
+    Err(ProbeShellNotFound {
+        message: "PowerShell was not found on this Windows host. Run `kimi shells provision --pwsh` to install the bundled pwsh payload, or install PowerShell 7 from https://github.com/PowerShell/PowerShell, or set KIMI_PWSH_PATH to a pwsh.exe.".to_string(),
+        checked,
+    })
 }
 
 fn pwsh_candidates(path_env: Option<&str>) -> Vec<PathBuf> {
@@ -234,8 +174,6 @@ fn windows_power_shell_candidates(system_root: Option<&str>) -> Vec<PathBuf> {
     ]
 }
 
-/// Windows paths are case-insensitive, so two spellings of the same candidate
-/// must not be probed (and reported) twice.
 fn dedupe_case_insensitive(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -305,6 +243,7 @@ mod tests {
             pwsh_override: Some(r"C:\custom\pwsh.exe"),
             path_env: Some(r"C:\tools"),
             system_root: None,
+            kimi_home: Path::new(r"C:\Users\tester\.kimi-code"),
             is_file: &|path| path == Path::new(r"C:\custom\pwsh.exe"),
         })
         .expect("the override resolves");
@@ -313,11 +252,31 @@ mod tests {
     }
 
     #[test]
+    fn the_provisioned_payload_is_probed_before_path() {
+        let kimi_home = Path::new(r"D:\kimi-home");
+        let provisioned = shell_payload_exe_path(
+            kimi_home,
+            find_shell_payload_pin(ShellPayloadKind::Pwsh).unwrap(),
+        );
+        let found = resolve(ResolveDeps {
+            pwsh_override: None,
+            path_env: Some(r"C:\tools"),
+            system_root: None,
+            kimi_home,
+            is_file: &|path| path == provisioned,
+        })
+        .expect("the provisioned pwsh resolves");
+        assert_eq!(found.path, provisioned);
+        assert_eq!(found.kind, PowerShellKind::Pwsh);
+    }
+
+    #[test]
     fn a_pwsh_on_path_is_next_and_the_install_root_is_the_last_resort() {
         let found = resolve(ResolveDeps {
             pwsh_override: None,
             path_env: Some(r"C:\tools;C:\other"),
             system_root: None,
+            kimi_home: Path::new(r"C:\Users\tester\.kimi-code"),
             is_file: &|path| path == Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe"),
         })
         .expect("the install root resolves");
@@ -333,6 +292,7 @@ mod tests {
             pwsh_override: None,
             path_env: Some(""),
             system_root: Some(r"D:\Windows"),
+            kimi_home: Path::new(r"C:\Users\tester\.kimi-code"),
             is_file: &|path| {
                 path == Path::new(r"D:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
             },
@@ -347,6 +307,7 @@ mod tests {
             pwsh_override: None,
             path_env: Some(r"C:\tools"),
             system_root: Some(r"C:\Windows"),
+            kimi_home: Path::new(r"C:\Users\tester\.kimi-code"),
             is_file: &|_| false,
         })
         .expect_err("nothing resolves");
@@ -357,7 +318,7 @@ mod tests {
                 .iter()
                 .any(|path| path.ends_with("powershell.exe"))
         );
-        let message = error.message();
+        let message = &error.message;
         assert!(message.contains("KIMI_PWSH_PATH"));
         assert!(message.contains("PowerShell 7"));
     }
@@ -399,7 +360,7 @@ If `run_in_background=true`, the script will be started as a background task and
         ));
         assert!(!rendered.contains("If `run_in_background=true`"));
         assert!(!rendered.contains("background-task panel"));
-        // The paragraphs before and after are untouched.
+
         assert!(rendered.starts_with("Execute a Windows PowerShell script natively."));
         assert!(
             rendered.contains("**Safety:** do not use this tool to escape the working directory.")

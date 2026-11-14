@@ -143,10 +143,6 @@ impl HttpServer {
                     tail
                 };
 
-                // Fail closed: an approval resolution must name its decision
-                // explicitly. Defaulting a missing/!parsable body to "approved"
-                // let any client that could reach this route grant a dangerous
-                // tool by POSTing an empty body.
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(v) => v,
                     Err(e) => {
@@ -185,10 +181,7 @@ impl HttpServer {
                     HttpResponse::not_found()
                 }
             }
-            // Two verbs, two contracts. The official Web bundle posts through a
-            // bespoke transport that hard-fails unless the response is
-            // `application/zip`; the in-tree REST clients read the export
-            // document as JSON over GET.
+
             _ => return HttpResponse::route_miss(),
         };
         finalize_response(req, resp)

@@ -1,0 +1,107 @@
+{
+  "note": "Initial unverified v2 parity baseline for apps/vscode/src. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "apps/vscode/src",
+  "redEntries": [
+    {
+      "tsPath": "bridge-handler.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "config/vscode-settings.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "extension.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "handlers/auth.handler.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "handlers/chat.handler.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "handlers/config.handler.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "handlers/file.handler.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "handlers/mcp.handler.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "handlers/session.handler.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "handlers/slash-command.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "KimiWebviewProvider.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "managers/baseline.manager.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "managers/file.manager.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "migration/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration/legacy-migration.manager.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "runtime/event-adapter.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "runtime/kimi-runtime.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "runtime/model-catalog-refresh.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "runtime/replay-adapter.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "runtime/session-runtime.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "runtime/tool-display.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "utils/hook-parts.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/notification-actions.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/region.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "utils/session-context.ts",
+      "verdict": "partial"
+    }
+  ]
+}

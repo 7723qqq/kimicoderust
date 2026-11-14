@@ -1,7 +1,3 @@
-/// Write tool — overwrite or append to a file.
-///
-/// Creates parent directories automatically.
-/// Mirrors `packages/agent-core-v2/src/agent/tools/os/write/write.ts`.
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
@@ -11,26 +7,21 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// POSIX stat mode bits.
 #[cfg(unix)]
 const S_IFMT: u32 = 0o170000;
 #[cfg(unix)]
 const S_IFDIR: u32 = 0o040000;
 
-/// Result of a write operation.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct WriteResult {
     pub bytes_written: i32,
     pub error: Option<String>,
-    /// Machine-readable error class — `io` / `parent_not_dir` / `panic`.
-    /// Every kind is the native writer's final verdict; the TS caller must
-    /// not silently re-run its own write path.
+
     pub error_kind: Option<String>,
 }
 
 impl WriteResult {
-    /// Build an error result carrying a machine-readable kind.
     fn err(kind: &str, message: String) -> Self {
         Self {
             bytes_written: 0,
@@ -40,24 +31,12 @@ impl WriteResult {
     }
 }
 
-/// Write mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
     Overwrite,
     Append,
 }
 
-/// Write content to a file.
-///
-/// Behavior:
-///   - Creates the file if it does not exist.
-///   - Creates missing parent directories automatically.
-///   - `mode`: 'overwrite' (default) or 'append'.
-///   - `atomic`: when `true` and `mode` is `overwrite`, writes via a temporary
-///     file in the same directory followed by rename. This prevents a crash
-///     from leaving a truncated destination. Symlink targets are still written
-///     through in-place so the link itself is preserved.
-///   - Returns the number of UTF-8 bytes written.
 pub fn write_file(path: &str, content: &str, mode: WriteMode, atomic: bool) -> WriteResult {
     if mode == WriteMode::Overwrite && atomic {
         return write_file_atomic(path, content);
@@ -65,12 +44,9 @@ pub fn write_file(path: &str, content: &str, mode: WriteMode, atomic: bool) -> W
     write_file_in_place(path, content, mode)
 }
 
-/// Non-atomic write: plain truncating `write_all` (or `O_APPEND` for append),
-/// matching the TS `writeText` / `appendText` semantics.
 fn write_file_in_place(path: &str, content: &str, mode: WriteMode) -> WriteResult {
     let file_path = Path::new(path);
 
-    // Ensure parent directory exists.
     if let Some(parent) = file_path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = ensure_parent_directory(parent)
@@ -83,7 +59,6 @@ fn write_file_in_place(path: &str, content: &str, mode: WriteMode) -> WriteResul
         return WriteResult::err(kind, e);
     }
 
-    // Open file with appropriate mode.
     let file = match mode {
         WriteMode::Overwrite => fs::OpenOptions::new()
             .write(true)
@@ -119,13 +94,9 @@ fn write_file_in_place(path: &str, content: &str, mode: WriteMode) -> WriteResul
     }
 }
 
-/// Atomic overwrite: write to a unique temporary file in the destination
-/// directory, fsync it, preserve the existing file's permissions when present,
-/// then rename over the destination.
 fn write_file_atomic(path: &str, content: &str) -> WriteResult {
     let file_path = Path::new(path);
 
-    // Ensure parent directory exists.
     if let Some(parent) = file_path.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = ensure_parent_directory(parent)
@@ -138,9 +109,6 @@ fn write_file_atomic(path: &str, content: &str) -> WriteResult {
         return WriteResult::err(kind, e);
     }
 
-    // Preserve symlink and special-file semantics: atomic rename is only safe
-    // for regular files. Symlinks are written through in-place; FIFOs, devices,
-    // sockets, etc. also keep the legacy path.
     if let Ok(meta) = fs::symlink_metadata(file_path) {
         let file_type = meta.file_type();
         if file_type.is_symlink() || !file_type.is_file() {
@@ -164,8 +132,6 @@ fn write_file_atomic(path: &str, content: &str) -> WriteResult {
         file.sync_all()?;
         drop(file);
 
-        // Best-effort permission preservation; a platform that cannot set
-        // permissions should still complete the write.
         if let Ok(meta) = fs::metadata(file_path) {
             let _ = fs::set_permissions(&temp_path, meta.permissions());
         }
@@ -200,7 +166,6 @@ fn unique_suffix() -> String {
 fn ensure_parent_directory(parent: &Path) -> Result<(), String> {
     match fs::metadata(parent) {
         Ok(meta) => {
-            // Check if it's a directory.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -225,10 +190,8 @@ fn ensure_parent_directory(parent: &Path) -> Result<(), String> {
         }
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                // Create parent directories recursively.
                 fs::create_dir_all(parent).map_err(|e| e.to_string())
             } else {
-                // Other errors — skip the check and let the write surface the error.
                 Ok(())
             }
         }
@@ -322,7 +285,7 @@ mod tests {
     fn test_write_utf8_bytes() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.txt");
-        // "你好" is 6 bytes in UTF-8.
+
         let result = write_file(path.to_str().unwrap(), "你好", WriteMode::Overwrite, true);
         assert!(result.error.is_none());
         assert_eq!(result.bytes_written, 6);
@@ -332,7 +295,6 @@ mod tests {
     fn test_write_error_kinds() {
         let dir = TempDir::new().unwrap();
 
-        // Parent path is an existing FILE, not a directory.
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, b"x").unwrap();
         let target = blocker.join("child.txt");
@@ -340,7 +302,6 @@ mod tests {
         assert_eq!(result.error_kind.as_deref(), Some("parent_not_dir"));
         assert!(result.error.unwrap().contains("not a directory"));
 
-        // Success carries no kind.
         let ok = dir.path().join("ok.txt");
         let result = write_file(ok.to_str().unwrap(), "data", WriteMode::Overwrite, true);
         assert!(result.error.is_none());
@@ -352,7 +313,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("new.txt");
 
-        // Append mode also creates the file when it does not exist.
         let result = write_file(path.to_str().unwrap(), "first", WriteMode::Append, false);
         assert!(result.error.is_none());
         assert_eq!(result.bytes_written, 5);
@@ -373,7 +333,7 @@ mod tests {
         let result = write_file(path.to_str().unwrap(), "", WriteMode::Overwrite, true);
         assert!(result.error.is_none());
         assert_eq!(result.bytes_written, 0);
-        // File is created and empty.
+
         let meta = fs::metadata(&path).unwrap();
         assert_eq!(meta.len(), 0);
     }
@@ -396,7 +356,6 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, "new content");
 
-        // No temporary files should remain next to the target.
         let leftovers: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -424,7 +383,6 @@ mod tests {
         );
         assert!(result.error.is_none());
 
-        // The symlink itself must remain a symlink and the target must be updated.
         assert!(
             fs::symlink_metadata(&link)
                 .unwrap()

@@ -1,23 +1,6 @@
-//! Tool resource access conflict detection.
-//!
-//! Mirrors `packages/agent-core-v2/src/tool/toolContract.ts` so the TS and
-//! Rust layers cannot drift on conflict semantics. The TS side passes
-//! `ToolAccessMeta[]` across the napi boundary; Rust does the pairwise
-//! conflict check at native speed.
-//!
-//! Only `conflict` is exposed as a napi binding; `resource_accesses_conflict`,
-//! `file_operations_conflict`, `file_accesses_overlap`, and `normalize_path`
-//! stay private to this module.
-
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
-/// Lightweight projection of a `ToolResourceAccess` for conflict detection.
-///
-/// `kind` is `"file"` or `"all"`. For `"all"`, the remaining fields are
-/// `None` and the access conflicts with everything. For `"file"`,
-/// `operation` is `"read"` / `"write"` / `"readwrite"` / `"search"`,
-/// `path` is the file path, and `recursive` marks tree-wide access.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct ToolAccessMeta {
@@ -27,11 +10,6 @@ pub struct ToolAccessMeta {
     pub recursive: Option<bool>,
 }
 
-/// Whether any access in `left` conflicts with any access in `right`.
-///
-/// Two accesses conflict when they touch overlapping file paths and at
-/// least one side writes. Read-only accesses (read, search) never conflict
-/// with each other. `kind: "all"` conflicts with everything.
 pub fn conflict(left: &[ToolAccessMeta], right: &[ToolAccessMeta]) -> bool {
     left.iter()
         .any(|l| right.iter().any(|r| resource_accesses_conflict(l, r)))
@@ -138,8 +116,6 @@ mod tests {
         }
     }
 
-    // ---- conflict: basic cases ----
-
     #[test]
     fn empty_accesses_never_conflict() {
         let empty: Vec<ToolAccessMeta> = vec![];
@@ -189,8 +165,6 @@ mod tests {
         assert!(!conflict(&a, &b));
     }
 
-    // ---- recursive path overlap ----
-
     #[test]
     fn recursive_write_conflicts_with_child_read() {
         let parent = vec![file_access("write", "/parent", true)];
@@ -219,8 +193,6 @@ mod tests {
         assert!(conflict(&read, &write));
     }
 
-    // ---- path normalization ----
-
     #[test]
     fn backslash_normalized_to_forward_slash() {
         let a = vec![file_access("write", r"C:\Users\test", false)];
@@ -248,8 +220,6 @@ mod tests {
         let b = vec![file_access("read", "/a/b", false)];
         assert!(conflict(&a, &b));
     }
-
-    // ---- multiple accesses ----
 
     #[test]
     fn multiple_accesses_any_conflict() {

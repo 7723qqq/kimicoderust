@@ -9,9 +9,6 @@ impl HttpServer {
     ) -> HttpResponse {
         let resp = match (method, path) {
             ("GET", "/api/v1/prompts") => {
-                // The live prompt queue is per session; the collection route
-                // reports every session's active + queued prompts with the
-                // owning session id attached.
                 let mut items: Vec<Value> = Vec::new();
                 for session in self.store.list_sessions().unwrap_or_default() {
                     let (active, queued) = self.prompt_queue.snapshot(&session.session_id);
@@ -27,10 +24,6 @@ impl HttpServer {
                 HttpResponse::ok(&json!({ "items": items }))
             }
             ("POST", "/api/v1/prompts") => {
-                // Collection-level submit: the session path carries the
-                // enqueue contract, so this route delegates to it instead of
-                // minting an id. Previously it answered `{"status":"enqueued"}`
-                // without touching the queue — a prompt that never ran.
                 let body: Value = match serde_json::from_slice(&req.body) {
                     Ok(v) => v,
                     Err(_) => return HttpResponse::bad_request("Invalid JSON payload"),

@@ -1,0 +1,628 @@
+{
+  "generatedAt": "2026-11-11T17:18:10.121Z",
+  "v2Root": "D:/kimi/kimi-code",
+  "pinnedCommit": "b07b21319733349c63e5284f2b2df91d77231cc8",
+  "scope": {
+    "files": 2569,
+    "lines": 472912,
+    "testFilesExcluded": true,
+    "declarationsExcluded": true
+  },
+  "note": "Initial machine pass. Only agent-core-v2/src/agent rows carry human-reviewed verdicts; all other rows are unverified. candidateRustPaths are candidates, not equivalence.",
+  "packageRows": [
+    {
+      "package": "agent-core-v2",
+      "files": 1349,
+      "lines": 190074,
+      "verdicts": {
+        "partial": {
+          "files": 51,
+          "lines": 13085
+        },
+        "na": {
+          "files": 21,
+          "lines": 1239
+        },
+        "equivalent": {
+          "files": 216,
+          "lines": 31147
+        },
+        "unported": {
+          "files": 1061,
+          "lines": 144603
+        }
+      },
+      "candidates": 313
+    },
+    {
+      "package": "apps/kimi-code",
+      "files": 425,
+      "lines": 103822,
+      "verdicts": {
+        "ui": {
+          "files": 280,
+          "lines": 74272
+        },
+        "unported": {
+          "files": 145,
+          "lines": 29550
+        }
+      },
+      "candidates": 22
+    },
+    {
+      "package": "kap-server",
+      "files": 172,
+      "lines": 32939,
+      "verdicts": {
+        "unported": {
+          "files": 172,
+          "lines": 32939
+        }
+      },
+      "candidates": 42
+    },
+    {
+      "package": "minidb",
+      "files": 62,
+      "lines": 20910,
+      "verdicts": {
+        "unported": {
+          "files": 62,
+          "lines": 20910
+        }
+      },
+      "candidates": 7
+    },
+    {
+      "package": "pi-tui",
+      "files": 45,
+      "lines": 20821,
+      "verdicts": {
+        "ui": {
+          "files": 45,
+          "lines": 20821
+        }
+      },
+      "candidates": 0
+    },
+    {
+      "package": "node-sdk",
+      "files": 51,
+      "lines": 13527,
+      "verdicts": {
+        "unported": {
+          "files": 51,
+          "lines": 13527
+        }
+      },
+      "candidates": 22
+    },
+    {
+      "package": "apps/vscode/webview-ui",
+      "files": 74,
+      "lines": 10988,
+      "verdicts": {
+        "ui": {
+          "files": 74,
+          "lines": 10988
+        }
+      },
+      "candidates": 0
+    },
+    {
+      "package": "kosong",
+      "files": 36,
+      "lines": 10420,
+      "verdicts": {
+        "unported": {
+          "files": 36,
+          "lines": 10420
+        }
+      },
+      "candidates": 16
+    },
+    {
+      "package": "apps/vis/web",
+      "files": 53,
+      "lines": 9324,
+      "verdicts": {
+        "ui": {
+          "files": 53,
+          "lines": 9324
+        }
+      },
+      "candidates": 0
+    },
+    {
+      "package": "apps/vscode",
+      "files": 41,
+      "lines": 8997,
+      "verdicts": {
+        "unported": {
+          "files": 41,
+          "lines": 8997
+        }
+      },
+      "candidates": 5
+    },
+    {
+      "package": "oauth",
+      "files": 33,
+      "lines": 8459,
+      "verdicts": {
+        "unported": {
+          "files": 33,
+          "lines": 8459
+        }
+      },
+      "candidates": 10
+    },
+    {
+      "package": "klient",
+      "files": 51,
+      "lines": 6406,
+      "verdicts": {
+        "unported": {
+          "files": 51,
+          "lines": 6406
+        }
+      },
+      "candidates": 22
+    },
+    {
+      "package": "acp-server",
+      "files": 26,
+      "lines": 5904,
+      "verdicts": {
+        "unported": {
+          "files": 26,
+          "lines": 5904
+        }
+      },
+      "candidates": 7
+    },
+    {
+      "package": "tree-sitter-bash",
+      "files": 7,
+      "lines": 5325,
+      "verdicts": {
+        "unported": {
+          "files": 7,
+          "lines": 5325
+        }
+      },
+      "candidates": 1
+    },
+    {
+      "package": "transcript",
+      "files": 27,
+      "lines": 4815,
+      "verdicts": {
+        "unported": {
+          "files": 27,
+          "lines": 4815
+        }
+      },
+      "candidates": 14
+    },
+    {
+      "package": "migration-legacy",
+      "files": 33,
+      "lines": 4312,
+      "verdicts": {
+        "unported": {
+          "files": 33,
+          "lines": 4312
+        }
+      },
+      "candidates": 4
+    },
+    {
+      "package": "apps/vis/server",
+      "files": 28,
+      "lines": 4190,
+      "verdicts": {
+        "unported": {
+          "files": 28,
+          "lines": 4190
+        }
+      },
+      "candidates": 9
+    },
+    {
+      "package": "session-import",
+      "files": 10,
+      "lines": 3865,
+      "verdicts": {
+        "unported": {
+          "files": 10,
+          "lines": 3865
+        }
+      },
+      "candidates": 2
+    },
+    {
+      "package": "remote-control",
+      "files": 5,
+      "lines": 2279,
+      "verdicts": {
+        "unported": {
+          "files": 5,
+          "lines": 2279
+        }
+      },
+      "candidates": 4
+    },
+    {
+      "package": "product",
+      "files": 16,
+      "lines": 1924,
+      "verdicts": {
+        "unported": {
+          "files": 16,
+          "lines": 1924
+        }
+      },
+      "candidates": 1
+    },
+    {
+      "package": "i18n",
+      "files": 4,
+      "lines": 1677,
+      "verdicts": {
+        "unported": {
+          "files": 4,
+          "lines": 1677
+        }
+      },
+      "candidates": 1
+    },
+    {
+      "package": "telemetry",
+      "files": 10,
+      "lines": 1423,
+      "verdicts": {
+        "unported": {
+          "files": 10,
+          "lines": 1423
+        }
+      },
+      "candidates": 2
+    },
+    {
+      "package": "i18n-shared",
+      "files": 5,
+      "lines": 439,
+      "verdicts": {
+        "unported": {
+          "files": 5,
+          "lines": 439
+        }
+      },
+      "candidates": 0
+    },
+    {
+      "package": "runtime-shared",
+      "files": 6,
+      "lines": 72,
+      "verdicts": {
+        "unported": {
+          "files": 6,
+          "lines": 72
+        }
+      },
+      "candidates": 0
+    }
+  ],
+  "totals": {
+    "files": 2569,
+    "lines": 472912,
+    "verdicts": {
+      "equivalent": {
+        "files": 216,
+        "lines": 31147
+      },
+      "partial": {
+        "files": 51,
+        "lines": 13085
+      },
+      "different": {
+        "files": 0,
+        "lines": 0
+      },
+      "missing": {
+        "files": 0,
+        "lines": 0
+      },
+      "unported": {
+        "files": 1829,
+        "lines": 312036
+      },
+      "planned": {
+        "files": 0,
+        "lines": 0
+      },
+      "ui": {
+        "files": 452,
+        "lines": 115405
+      },
+      "na": {
+        "files": 21,
+        "lines": 1239
+      }
+    },
+    "candidates": 504
+  },
+  "suspectedMissingTop30": [
+    {
+      "package": "tree-sitter-bash",
+      "unit": "packages/tree-sitter-bash",
+      "tsPath": "parser.ts",
+      "lines": 3997,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "agent-core-v2",
+      "unit": "packages/agent-core-v2",
+      "tsPath": "features/tower/protocol/store.ts",
+      "lines": 3522,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/tools/tower/store.rs",
+        "packages/kimi-agent/src/tools/tower/types.rs",
+        "packages/kimi-agent/src/tools/tower/store/complete.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "apps/kimi-code",
+      "unit": "apps/kimi-code/src",
+      "tsPath": "i18n/locales/en.ts",
+      "lines": 3461,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "apps/kimi-code",
+      "unit": "apps/kimi-code/src",
+      "tsPath": "i18n/locales/zh.ts",
+      "lines": 3340,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "node-sdk",
+      "unit": "packages/node-sdk",
+      "tsPath": "sdk-rpc-client-v2.ts",
+      "lines": 3337,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "agent-core-v2",
+      "unit": "packages/agent-core-v2",
+      "tsPath": "workspace/workspaceFs/fsService.ts",
+      "lines": 2082,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "agent-core-v2",
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/telemetry/events.ts",
+      "lines": 1811,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "agent-core-v2",
+      "unit": "packages/agent-core-v2",
+      "tsPath": "features/goal/goalService.ts",
+      "lines": 1692,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "kap-server",
+      "unit": "packages/kap-server",
+      "tsPath": "services/transcript/coreEventMap.ts",
+      "lines": 1654,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "minidb",
+      "unit": "packages/minidb",
+      "tsPath": "mini-db.ts",
+      "lines": 1600,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "kap-server",
+      "unit": "packages/kap-server",
+      "tsPath": "transport/ws/v1/sessionEventBroadcaster.ts",
+      "lines": 1594,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/ws_protocol.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "kap-server",
+      "unit": "packages/kap-server",
+      "tsPath": "search/indexCore.ts",
+      "lines": 1553,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "agent-core-v2",
+      "unit": "packages/agent-core-v2",
+      "tsPath": "features/associativeMemory/service.ts",
+      "lines": 1502,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "remote-control",
+      "unit": "packages/remote-control",
+      "tsPath": "remote-control.ts",
+      "lines": 1493,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/remote_control.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "kap-server",
+      "unit": "packages/kap-server",
+      "tsPath": "routes/sessions.ts",
+      "lines": 1424,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/idle_sessions.rs",
+        "packages/kimi-agent/src/server/route_sessions.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "apps/kimi-code",
+      "unit": "apps/kimi-code/src",
+      "tsPath": "cli/sub/provider.ts",
+      "lines": 1413,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "kosong",
+      "unit": "packages/kosong",
+      "tsPath": "providers/anthropic.ts",
+      "lines": 1391,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/llm/anthropic.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "kosong",
+      "unit": "packages/kosong",
+      "tsPath": "providers/openai-responses.ts",
+      "lines": 1288,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/llm/openai_responses.rs",
+        "packages/kimi-agent/src/llm/openai.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "node-sdk",
+      "unit": "packages/node-sdk",
+      "tsPath": "errors.ts",
+      "lines": 1269,
+      "candidateRustPaths": [
+        "packages/kimi-core/src/primitives/errors/serialize.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "apps/kimi-code",
+      "unit": "apps/kimi-code/src",
+      "tsPath": "cli/v2/run-v2-print.ts",
+      "lines": 1268,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "kap-server",
+      "unit": "packages/kap-server",
+      "tsPath": "protocol/events-zod.ts",
+      "lines": 1242,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/web_events.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "session-import",
+      "unit": "packages/session-import",
+      "tsPath": "rollout.ts",
+      "lines": 1234,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "acp-server",
+      "unit": "packages/acp-server",
+      "tsPath": "session.ts",
+      "lines": 1195,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/napi_bindings/session.rs",
+        "packages/kimi-agent/src/session/mod.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "minidb",
+      "unit": "packages/minidb",
+      "tsPath": "gen-codec.ts",
+      "lines": 1166,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "agent-core-v2",
+      "unit": "packages/agent-core-v2",
+      "tsPath": "mcpCore/connection-manager.ts",
+      "lines": 1111,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/mcp/manager.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "kosong",
+      "unit": "packages/kosong",
+      "tsPath": "providers/google-genai.ts",
+      "lines": 1101,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/llm/google_genai.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "agent-core-v2",
+      "unit": "packages/agent-core-v2",
+      "tsPath": "workspace/sessionLifecycle/sessionLifecycleService.ts",
+      "lines": 1100,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "kap-server",
+      "unit": "packages/kap-server",
+      "tsPath": "routes/fs.ts",
+      "lines": 1079,
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/route_workspaces_fs.rs"
+      ],
+      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价"
+    },
+    {
+      "package": "session-import",
+      "unit": "packages/session-import",
+      "tsPath": "claude-code.ts",
+      "lines": 1078,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    },
+    {
+      "package": "apps/kimi-code",
+      "unit": "apps/kimi-code/src",
+      "tsPath": "cli/update/preflight.ts",
+      "lines": 1051,
+      "candidateRustPaths": [],
+      "note": "未找到 Rust 候选落点；待核"
+    }
+  ]
+}

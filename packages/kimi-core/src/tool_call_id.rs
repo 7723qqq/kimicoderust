@@ -1,4 +1,3 @@
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -295,6 +294,7 @@ mod tests {
             tool_call_id: None,
             prompt_id: None,
             origin: None,
+            tools: Vec::new(),
         }]
     }
 
@@ -423,6 +423,7 @@ mod tests {
             tool_call_id: Some("Bash_1".into()),
             prompt_id: None,
             origin: None,
+            tools: Vec::new(),
         });
         normalizer.seed_from(&history);
 

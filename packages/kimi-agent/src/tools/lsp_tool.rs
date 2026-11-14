@@ -927,7 +927,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn bridge() -> ShellPathBridge {
-        ShellPathBridge::new(&crate::native::shell::resolve_shell(None).program)
+        ShellPathBridge::new(
+            &crate::native::shell::resolve_shell(None)
+                .expect("a shell resolves")
+                .program,
+        )
     }
 
     fn local_path(path: &Path) -> String {

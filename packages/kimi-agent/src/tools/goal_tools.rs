@@ -66,8 +66,9 @@ pub async fn execute_update_goal(
         return err_result("Invalid goal status. Use `active`, `complete`, or `blocked`.".into());
     }
     let mut value = serde_json::json!({ "action": "update", "status": status });
+    let reason = args.get("reason").and_then(|value| value.as_str());
     if status == "blocked"
-        && let Some(reason) = args.get("reason").and_then(|value| value.as_str())
+        && let Some(reason) = reason
     {
         value["reason"] = serde_json::Value::String(reason.to_string());
     }
@@ -88,8 +89,44 @@ pub async fn execute_update_goal(
             .to_string(),
     };
     match callbacks.state_write(request).await {
-        Ok(response) => render_update_goal(&response.value, status),
+        Ok(response) => {
+            emit_goal_update_status(callbacks, caller_agent_id, status, reason, &response.value);
+            render_update_goal(&response.value, status)
+        }
         Err(error) => map_state_error(error),
+    }
+}
+
+fn emit_goal_update_status(
+    callbacks: &dyn HostCallbacks,
+    agent_id: &str,
+    status: &str,
+    reason: Option<&str>,
+    value: &Value,
+) {
+    let Some(goal) = value.get("goal").filter(|goal| goal.is_object()) else {
+        return;
+    };
+    let mut record = serde_json::json!({
+        "type": "goal.update",
+        "agent_id": agent_id,
+        "status": status,
+    });
+    if let Some(reason) = reason {
+        record["reason"] = Value::String(reason.to_string());
+    }
+    if let Some(wall_clock_ms) = goal.get("wallClockMs").and_then(Value::as_u64) {
+        record["wallClockMs"] = serde_json::json!(wall_clock_ms);
+    }
+    if status == "active" {
+        record["wallClockResumedAt"] =
+            serde_json::json!(chrono::Utc::now().timestamp_millis() as u64);
+    }
+    callbacks.emit_event(record);
+    if status != "blocked"
+        && let Some(blocked) = crate::session::agent_records::goal_blocked_record(agent_id, goal)
+    {
+        callbacks.emit_event(blocked);
     }
 }
 
@@ -179,8 +216,37 @@ pub async fn execute_set_goal_budget(
             .to_string(),
     };
     match callbacks.state_write(request).await {
-        Ok(response) => render_set_goal_budget(&response.value, normalized, unit),
+        Ok(response) => {
+            emit_goal_update_budget(callbacks, caller_agent_id, &response.value);
+            render_set_goal_budget(&response.value, normalized, unit)
+        }
         Err(error) => map_state_error(error),
+    }
+}
+
+fn emit_goal_update_budget(callbacks: &dyn HostCallbacks, agent_id: &str, value: &Value) {
+    let Some(goal) = value.get("goal").filter(|goal| goal.is_object()) else {
+        return;
+    };
+    let Some(budget) = goal.get("budget").filter(|budget| budget.is_object()) else {
+        return;
+    };
+    let mut limits = serde_json::Map::new();
+    for key in ["tokenBudget", "turnBudget", "wallClockBudgetMs"] {
+        if let Some(limit) = budget.get(key).and_then(Value::as_u64) {
+            limits.insert(key.to_string(), serde_json::json!(limit));
+        }
+    }
+    if limits.is_empty() {
+        return;
+    }
+    callbacks.emit_event(serde_json::json!({
+        "type": "goal.update",
+        "agent_id": agent_id,
+        "budgetLimits": limits,
+    }));
+    if let Some(blocked) = crate::session::agent_records::goal_blocked_record(agent_id, goal) {
+        callbacks.emit_event(blocked);
     }
 }
 
@@ -433,6 +499,7 @@ mod tests {
         write_response: Result<StateWriteResponse, String>,
         read_received: Arc<std::sync::Mutex<Option<crate::rpc::types::StateReadRequest>>>,
         write_received: Arc<std::sync::Mutex<Option<StateWriteRequest>>>,
+        events: Arc<std::sync::Mutex<Vec<Value>>>,
     }
 
     impl HostCallbacks for ScriptedCallbacks {
@@ -474,6 +541,10 @@ mod tests {
             let response = self.write_response.clone();
             Box::pin(async move { response })
         }
+
+        fn emit_event(&self, event: Value) {
+            self.events.lock().unwrap().push(event);
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -493,6 +564,7 @@ mod tests {
                 write_response,
                 read_received: read_received.clone(),
                 write_received: write_received.clone(),
+                events: Arc::new(std::sync::Mutex::new(Vec::new())),
             },
             read_received,
             write_received,
@@ -554,6 +626,15 @@ mod tests {
         assert!(!request.undoable);
         assert_eq!(request.value["action"], "update");
         assert_eq!(request.value["status"], "active");
+        let events = callbacks.events.lock().unwrap();
+        let record = events
+            .iter()
+            .find(|event| event["type"] == "goal.update")
+            .expect("the update must be recorded");
+        assert_eq!(record["agent_id"], "main");
+        assert_eq!(record["status"], "active");
+        assert_eq!(record["wallClockMs"], 185000);
+        assert!(record["wallClockResumedAt"].as_u64().is_some());
     }
 
     #[tokio::test]
@@ -638,6 +719,14 @@ mod tests {
         assert_eq!(request.value["action"], "update");
         assert_eq!(request.value["status"], "blocked");
         assert_eq!(request.value["reason"], "contradictory");
+        let events = callbacks.events.lock().unwrap();
+        let record = events
+            .iter()
+            .find(|event| event["type"] == "goal.update")
+            .expect("the blocked update must be recorded");
+        assert_eq!(record["status"], "blocked");
+        assert_eq!(record["reason"], "contradictory");
+        assert_eq!(record["wallClockMs"], 185000);
     }
 
     #[tokio::test]
@@ -767,6 +856,21 @@ mod tests {
         assert_eq!(request.value["action"], "set_budget");
         assert_eq!(request.value["value"], 20.0);
         assert_eq!(request.value["unit"], "turns");
+        let events = callbacks.events.lock().unwrap();
+        let record = events
+            .iter()
+            .find(|event| event["type"] == "goal.update")
+            .expect("the budget change must be recorded");
+        assert_eq!(record["agent_id"], "main");
+        assert_eq!(
+            record["budgetLimits"],
+            serde_json::json!({
+                "tokenBudget": 5000,
+                "turnBudget": 10,
+                "wallClockBudgetMs": 600000,
+            })
+        );
+        assert!(record.get("status").is_none());
     }
 
     #[tokio::test]

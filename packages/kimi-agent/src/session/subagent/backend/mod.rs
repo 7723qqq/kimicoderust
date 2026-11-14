@@ -1,0 +1,17 @@
+#[path = "acpBackend.rs"]
+pub mod acp_backend;
+#[path = "backendCompat.rs"]
+pub mod backend_compat;
+#[path = "claudeCodeBackend.rs"]
+pub mod claude_code_backend;
+#[path = "codexBackend.rs"]
+pub mod codex_backend;
+#[path = "codexWire.rs"]
+pub mod codex_wire;
+#[path = "configSection.rs"]
+pub mod config_section;
+pub mod flag;
+#[path = "subagentBackend.rs"]
+pub mod subagent_backend;
+#[path = "subagentBackendService.rs"]
+pub mod subagent_backend_service;

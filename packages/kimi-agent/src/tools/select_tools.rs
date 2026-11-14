@@ -320,7 +320,8 @@ pub fn execute_select_tools(
     args: &Value,
     loadable_tools: &HashSet<String>,
     registered_tools: &HashSet<String>,
-    currently_loaded: &mut HashSet<String>,
+    currently_loaded: &HashSet<String>,
+    pending_loaded: &mut HashSet<String>,
     policy: Option<&tool_policy::ToolsFilter>,
     tracker: &mut SelectionFailureTracker,
 ) -> ExecutableToolResult {
@@ -373,7 +374,7 @@ pub fn execute_select_tools(
     if !result.to_load.is_empty() {
         lines.push(format!("Loaded: {}", result.to_load.join(", ")));
         for name in &result.to_load {
-            currently_loaded.insert(name.clone());
+            pending_loaded.insert(name.clone());
         }
     }
     if !result.already_available.is_empty() {
@@ -830,13 +831,15 @@ call select_tools with exact names to load the others."
         let loadable = set(&["tool_a", "tool_b"]);
         let registered = set(&["tool_a", "tool_b", "grep"]);
         let mut loaded = HashSet::new();
+        let mut pending = HashSet::new();
         let mut tracker = SelectionFailureTracker::default();
 
         let res1 = execute_select_tools(
             &json!({ "names": ["tool_a", "tool_a", "tool_b", "nonexistent"] }),
             &loadable,
             &registered,
-            &mut loaded,
+            &loaded,
+            &mut pending,
             None,
             &mut tracker,
         );
@@ -849,6 +852,7 @@ Call select_tools with a query to search by capability, then load an exact name;
 or use an available tool. Loadable tools: tool_a, tool_b. Do not guess aliases; use an \
 available tool or tell the user what capability is missing."
         );
+        loaded.extend(pending.drain());
         assert!(loaded.contains("tool_a"));
         assert!(loaded.contains("tool_b"));
 
@@ -856,7 +860,8 @@ available tool or tell the user what capability is missing."
             &json!({ "names": ["tool_a"] }),
             &loadable,
             &registered,
-            &mut loaded,
+            &loaded,
+            &mut pending,
             None,
             &mut tracker,
         );
@@ -867,7 +872,8 @@ available tool or tell the user what capability is missing."
             &json!({ "names": ["bogus"] }),
             &loadable,
             &registered,
-            &mut loaded,
+            &loaded,
+            &mut pending,
             None,
             &mut tracker,
         );
@@ -885,7 +891,8 @@ capability is missing."
             &json!({ "names": [] }),
             &loadable,
             &registered,
-            &mut loaded,
+            &loaded,
+            &mut pending,
             None,
             &mut tracker,
         );
@@ -899,7 +906,8 @@ capability is missing."
             &json!({}),
             &loadable,
             &registered,
-            &mut loaded,
+            &loaded,
+            &mut pending,
             None,
             &mut tracker,
         );
@@ -913,7 +921,8 @@ capability is missing."
             &json!({ "names": ["grep"] }),
             &loadable,
             &registered,
-            &mut loaded,
+            &loaded,
+            &mut pending,
             None,
             &mut tracker,
         );

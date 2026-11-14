@@ -45,7 +45,7 @@ impl ChangeNotifierState {
         &mut self,
         listing: ReadOutcome<String>,
         prompt: &str,
-        is_tool_active: &dyn Fn(&str) -> bool,
+        _is_tool_active: &dyn Fn(&str) -> bool,
     ) -> Option<String> {
         let ReadOutcome::Found(listing) = listing else {
             return None;
@@ -66,10 +66,6 @@ impl ChangeNotifierState {
             }
         }
         self.skills_listing = Some(listing.clone());
-
-        if !is_tool_active(SKILL_TOOL_NAME) {
-            return None;
-        }
         Some(skills_change_text(&listing))
     }
 

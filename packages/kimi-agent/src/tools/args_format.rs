@@ -2,7 +2,7 @@ use regex::Regex;
 use serde_json::Number;
 use std::sync::LazyLock;
 
-pub(super) fn rejects_string(name: &str, text: &str) -> bool {
+pub(crate) fn rejects_string(name: &str, text: &str) -> bool {
     match name {
         "date" => !is_date(text),
         "time" => !is_time(text, true),
@@ -30,7 +30,7 @@ pub(super) fn rejects_string(name: &str, text: &str) -> bool {
     }
 }
 
-pub(super) fn rejects_number(name: &str, number: &Number) -> bool {
+pub(crate) fn rejects_number(name: &str, number: &Number) -> bool {
     match name {
         "int32" => !is_int32(number),
         "int64" => !is_integer(number),

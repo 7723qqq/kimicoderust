@@ -101,9 +101,6 @@ fn test_extract_anthropic_llm() {
     assert_eq!(native_llm.api_key, "sk-ant-key");
 }
 
-/// v2 `ModelRecord.upgrade`: the model-retirement metadata the TUI's
-/// migration prompt reads. It is catalog data, not transport config, so it
-/// only has to parse and round-trip.
 #[test]
 fn test_model_upgrade_metadata_parses() {
     let config = KimiConfig::from_str(
@@ -125,9 +122,6 @@ retirement_at = "2026-12-01"
     assert_eq!(upgrade.retirement_at.as_deref(), Some("2026-12-01"));
 }
 
-/// The provider family travels with the resolved transport: protocol alone
-/// cannot tell Kimi (thinking object) from any other OpenAI-compatible
-/// vendor (`reasoning_effort`).
 #[test]
 fn test_extract_native_llm_carries_the_provider_type() {
     let config = KimiConfig::from_str(
@@ -148,11 +142,6 @@ model = "kimi-k3"
     assert_eq!(native.protocol, "openai");
 }
 
-/// antigravity is a subprocess bridge: it resolves without an endpoint or a
-/// credential, and carries the declared binary path and bounded waits. A
-/// provider that is *not* declared antigravity must still require a
-/// credential — there is no implicit "no Google key → use antigravity"
-/// substitution in the engine.
 #[test]
 fn antigravity_resolves_explicitly_without_credentials() {
     let config = KimiConfig::from_str(
@@ -187,8 +176,6 @@ model = "gemini-3.7-flash"
     assert_eq!(limits.idle_ms, 5_600);
     assert_eq!(limits.total_ms, 7_800);
 
-    // Same shape without `type = "antigravity"` does not resolve: a missing
-    // credential is a configuration error, not a silent provider switch.
     let plain = KimiConfig::from_str(
         r#"
 default_model = "m"
@@ -205,8 +192,6 @@ model = "gemini-3.7-flash"
     assert!(plain.extract_native_llm(Some("m")).is_none());
 }
 
-/// A one-provider config whose provider carries a credential but no
-/// endpoint, so the provider type's env/default chain is what resolves.
 fn endpoint_less_config(provider_type: &str) -> KimiConfig {
     KimiConfig::from_str(&format!(
         r#"
@@ -228,30 +213,24 @@ model = "some-model"
 fn anthropic_endpoint_falls_back_to_env_then_default() {
     let _env = crate::test_support::EnvScope::unset(&["ANTHROPIC_BASE_URL"]);
 
-    // No declared endpoint and no env: the SDK default, carried by the
-    // engine because it assembles the URL itself.
     let native = endpoint_less_config("anthropic")
         .extract_native_llm(None)
         .unwrap();
     assert_eq!(native.protocol, "anthropic");
     assert_eq!(native.base_url, "https://api.anthropic.com/v1");
 
-    // The env endpoint wins over the default and rides the same
-    // normalization a declared `base_url` does.
     unsafe { std::env::set_var("ANTHROPIC_BASE_URL", "https://ant-proxy.example.com") };
     let native = endpoint_less_config("anthropic")
         .extract_native_llm(None)
         .unwrap();
     assert_eq!(native.base_url, "https://ant-proxy.example.com/v1");
 
-    // A blank env value counts as unset (v2 `read`), so the default stands.
     unsafe { std::env::set_var("ANTHROPIC_BASE_URL", "   ") };
     let native = endpoint_less_config("anthropic")
         .extract_native_llm(None)
         .unwrap();
     assert_eq!(native.base_url, "https://api.anthropic.com/v1");
 
-    // A declared endpoint outranks the env variable.
     let declared = KimiConfig::from_str(
         r#"
 default_model = "m"
@@ -287,7 +266,6 @@ fn openai_endpoint_falls_back_to_env_then_default() {
         .unwrap();
     assert_eq!(native.base_url, "https://oai-proxy.example.com/v1");
 
-    // The Responses protocol shares the OpenAI declaration.
     unsafe { std::env::set_var("OPENAI_BASE_URL", "   ") };
     let native = endpoint_less_config("openai_responses")
         .extract_native_llm(None)
@@ -335,9 +313,6 @@ fn google_genai_endpoint_prefers_the_env_over_the_host_root() {
 
 #[test]
 fn undeclared_provider_type_without_an_endpoint_does_not_resolve() {
-    // A type the engine has no endpoint declaration for keeps the old
-    // behavior: without a declared `base_url` the model does not resolve
-    // natively and the host proxy takes it.
     assert!(
         endpoint_less_config("deepseek")
             .extract_native_llm(None)
@@ -388,10 +363,9 @@ model = "some-model"
 
 #[test]
 fn top_level_yolo_resolves_to_yolo_mode() {
-    // v1 flat form.
     let flat = KimiConfig::from_str("yolo = true\n").unwrap();
     assert_eq!(flat.build_policy_snapshot(None).mode, PermissionMode::Yolo);
-    // The sectioned form keeps working.
+
     let sectioned = KimiConfig::from_str("[agent]\nyolo = true\n").unwrap();
     assert_eq!(
         sectioned.build_policy_snapshot(None).mode,
@@ -404,7 +378,7 @@ fn top_level_plan_mode_and_default_plan_mode_parse() {
     let config = KimiConfig::from_str("plan_mode = true\ndefault_plan_mode = true\n").unwrap();
     assert_eq!(config.plan_mode, Some(true));
     assert_eq!(config.default_plan_mode, Some(true));
-    // camelCase aliases (the document schema's spelling).
+
     let camel = KimiConfig::from_str("planMode = true\ndefaultPlanMode = true\n").unwrap();
     assert_eq!(camel.plan_mode, Some(true));
     assert_eq!(camel.default_plan_mode, Some(true));
@@ -424,8 +398,6 @@ fn model_catalog_and_telemetry_parse() {
 
 #[test]
 fn auto_session_title_parses_and_defaults_to_enabled() {
-    // Absent means enabled (upstream #3962: only an explicit false
-    // disables); both spellings parse.
     let absent = KimiConfig::from_str("yolo = true\n").unwrap();
     assert_eq!(absent.auto_session_title, None);
     let off = KimiConfig::from_str("auto_session_title = false\n").unwrap();
@@ -499,7 +471,6 @@ default_effort = "high"
     assert_eq!(thinky.llm.protocol, "anthropic");
     assert_eq!(thinky.llm.thinking_budget, Some(32000));
 
-    // The session's own alias (`--model`) wins the `[main model]` marker.
     let pool = config
         .extract_secondary_model_pool(Some("thinky"))
         .unwrap()
@@ -507,9 +478,6 @@ default_effort = "high"
     assert_eq!(pool.caller_model_alias.as_deref(), Some("thinky"));
 }
 
-/// A pool whose single `fast` entry declares whatever `model_extra` says; the
-/// `[secondary_model]` section takes `tail` (its own `default_effort`, or a
-/// following `[thinking]` table).
 fn pool_effort_config(model_extra: &str, tail: &str) -> KimiConfig {
     KimiConfig::from_str(&format!(
         r#"
@@ -545,9 +513,6 @@ fn pool_fast_effort(config: &KimiConfig) -> Option<String> {
         .clone()
 }
 
-/// v2 `resolveSubagentThinking` + `declaredDefaultEffortForModel`: with no
-/// pool-wide `default_effort` the entry keeps the effort its own `[models]`
-/// record declares, when the record lists that value as supported.
 #[test]
 fn test_secondary_model_pool_entry_keeps_its_declared_effort() {
     let config = pool_effort_config(
@@ -557,8 +522,6 @@ fn test_secondary_model_pool_entry_keeps_its_declared_effort() {
     assert_eq!(pool_fast_effort(&config).as_deref(), Some("high"));
 }
 
-/// The pool-wide value is the explicit one: it wins over the entry's own
-/// declared effort, which is what "explicit beats model default" means in v2.
 #[test]
 fn test_secondary_model_pool_section_effort_beats_the_declared_one() {
     let config = pool_effort_config(
@@ -568,8 +531,6 @@ fn test_secondary_model_pool_section_effort_beats_the_declared_one() {
     assert_eq!(pool_fast_effort(&config).as_deref(), Some("low"));
 }
 
-/// v2's fallback is not "any declared value": a value outside `support_efforts`
-/// resolves to unset, and an absent list declares nothing at all.
 #[test]
 fn test_secondary_model_pool_declared_effort_needs_declared_support() {
     let unsupported = pool_effort_config(
@@ -582,8 +543,6 @@ fn test_secondary_model_pool_declared_effort_needs_declared_support() {
     assert_eq!(pool_fast_effort(&no_list), None);
 }
 
-/// `[thinking].enabled = false` leaves the subagent's thinking unset for global
-/// resolution, even when the entry declares a supported default.
 #[test]
 fn test_secondary_model_pool_declared_effort_is_dropped_when_thinking_is_disabled() {
     let config = pool_effort_config(
@@ -593,10 +552,6 @@ fn test_secondary_model_pool_declared_effort_is_dropped_when_thinking_is_disable
     assert_eq!(pool_fast_effort(&config), None);
 }
 
-/// `[agent].multi_llm` resolves each named alias into a native transport.
-/// That is what makes the race runnable at all: a racer without one is a
-/// host proxy, and every config-reading entry point answers `host/llm_chat`
-/// with an error, so such a race can never produce a winner.
 #[test]
 fn test_extract_multi_llm_resolves_native_racers() {
     let config = KimiConfig::from_str(
@@ -635,24 +590,21 @@ multi_llm = ["kimi-k2", "thinky"]
     let kimi = racers.iter().find(|racer| racer.name == "kimi-k2").unwrap();
     assert_eq!(kimi.llm.model, "kimi-k2-0711");
     assert_eq!(kimi.llm.protocol, "openai");
-    // The alias's own declared effort rides its transport, not the session's.
+
     assert_eq!(kimi.llm.reasoning_effort.as_deref(), Some("high"));
 
     let thinky = racers.iter().find(|racer| racer.name == "thinky").unwrap();
     assert_eq!(thinky.llm.protocol, "anthropic");
-    // `thinky` declares none, so it carries none — the racers are different
-    // models with their own capabilities and must not inherit each other's.
+
     assert!(thinky.llm.reasoning_effort.is_none());
     assert!(thinky.llm.thinking_budget.is_none());
 }
 
 #[test]
 fn test_extract_multi_llm_absent_and_inert_cases() {
-    // Absent key: no race, which is the default.
     let bare = KimiConfig::from_str(POOL_CONFIG).unwrap();
     assert!(bare.extract_multi_llm(None).unwrap().is_none());
 
-    // An empty list is inert rather than a one-racer race.
     let empty = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
 [agent]
@@ -662,7 +614,6 @@ multi_llm = []
     .unwrap();
     assert!(empty.extract_multi_llm(None).unwrap().is_none());
 
-    // Blank entries are trimmed away, so `["", "fast"]` is a lone racer.
     let blanks = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
 [agent]
@@ -675,8 +626,6 @@ multi_llm = ["", "  "]
 
 #[test]
 fn test_extract_multi_llm_rejects_a_lone_racer_and_unknown_alias() {
-    // One entry is not a race; silently racing a single provider would let
-    // `providers` outrank `native_llm` for no benefit.
     let lone = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
 [agent]
@@ -687,7 +636,6 @@ multi_llm = ["kimi-k2"]
     let error = lone.extract_multi_llm(None).unwrap_err();
     assert!(error.contains("at least two"), "unexpected error: {error}");
 
-    // An alias that cannot resolve names itself instead of being dropped.
     let unknown = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
 [agent]
@@ -728,9 +676,6 @@ model = "fast"
     assert_eq!(pool.default_model, "fast");
     assert_eq!(pool.models.len(), 1);
 
-    // v2: the legacy `model` key is the fallback pool only while no table
-    // exists. With a table it is not a pool default, so the section must name
-    // `default_model` even though `model` names a pool entry.
     let table_without_default = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
 [secondary_model]
@@ -749,7 +694,6 @@ model = "fast"
         "{error}"
     );
 
-    // A section with no pool keys (patch-only recipe) stays inert.
     let inert = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
 [secondary_model]
@@ -784,8 +728,6 @@ default_model = "missing"
         "{error}"
     );
 
-    // v2 #4418 removed `force`: a leftover key is ignored (with a warning)
-    // instead of failing the pool.
     let force_with_table = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
 [secondary_model]
@@ -862,7 +804,6 @@ max_attempts_per_step = 3
     .unwrap();
     assert_eq!(explicit.resolve_max_attempts_per_step(), Some(3));
 
-    // The deprecated spelling still resolves, but the current key wins.
     let deprecated = KimiConfig::from_str(
         r#"
 [loop_control]
@@ -882,7 +823,6 @@ max_retries_per_step = 5
     .unwrap();
     assert_eq!(both.resolve_max_attempts_per_step(), Some(3));
 
-    // An absent (or empty) section keeps the engine default.
     assert_eq!(
         KimiConfig::from_str(SAMPLE_CONFIG)
             .unwrap()
@@ -911,10 +851,6 @@ max_retries_per_step = 5
     assert_eq!(both.resolve_max_attempts_per_step(), Some(3), "config next");
 }
 
-/// v2 #3750: `[loop_control].compaction_max_attempts` caps one compaction
-/// round's total requests. Upstream binds no env var to the key, so the
-/// file is the only source; the schema floor is 1, so a `0` is ignored
-/// rather than read as "no attempts at all".
 #[test]
 fn test_resolve_compaction_max_attempts() {
     let explicit = KimiConfig::from_str(
@@ -926,7 +862,6 @@ compaction_max_attempts = 3
     .unwrap();
     assert_eq!(explicit.resolve_compaction_max_attempts(), Some(3));
 
-    // The camelCase spelling the TS schema writes round-trips too.
     let camel = KimiConfig::from_str(
         r#"
 [loop_control]
@@ -936,7 +871,6 @@ compactionMaxAttempts = 4
     .unwrap();
     assert_eq!(camel.resolve_compaction_max_attempts(), Some(4));
 
-    // Unset, empty, and below the schema floor all keep the engine default.
     for raw in [
         SAMPLE_CONFIG,
         "[loop_control]\n",
@@ -952,9 +886,6 @@ compactionMaxAttempts = 4
     }
 }
 
-/// v2 #3785 `assertValidSubagentDefaultEffort`: a pool-wide
-/// `default_effort` must be one every pool model can run, so a typo fails
-/// at startup instead of silently degrading the subagent's thinking.
 #[test]
 fn test_secondary_model_default_effort_validation() {
     const EFFORT_CONFIG: &str = r#"
@@ -981,12 +912,9 @@ default_effort = "{effort}"
         .unwrap()
     };
 
-    // A thinking model that declares no effort list accepts any effort.
     let no_list = config("xhigh", "capabilities = [\"thinking\"]\n");
     assert!(no_list.extract_secondary_model_pool(None).is_ok());
 
-    // A declared list bounds it, and the error names the model and the
-    // supported set.
     let bounded = config(
         "xhigh",
         "capabilities = [\"thinking\"]\nsupport_efforts = [\"low\", \"high\", \"max\"]\n",
@@ -999,16 +927,13 @@ default_effort = "{effort}"
         "{error}"
     );
 
-    // A model without thinking support rejects any concrete effort...
     let plain = config("xhigh", "capabilities = [\"tools\"]\n");
     let error = plain.extract_secondary_model_pool(None).unwrap_err();
     assert!(error.contains("does not support thinking"), "{error}");
 
-    // ...but `off` is always acceptable for it.
     let plain_off = config("off", "capabilities = [\"tools\"]\n");
     assert!(plain_off.extract_secondary_model_pool(None).is_ok());
 
-    // `off` cannot silence a model that always reasons.
     let always = config(
         "off",
         "capabilities = [\"thinking\", \"always_thinking\"]\n",
@@ -1019,19 +944,15 @@ default_effort = "{effort}"
         "{error}"
     );
 
-    // `adaptive_thinking` alone counts as thinking support.
     let adaptive = config("high", "adaptive_thinking = true\n");
     assert!(adaptive.extract_secondary_model_pool(None).is_ok());
 
-    // The effort is normalized before comparison, so casing and padding
-    // do not turn a supported effort into a failure.
     let padded = config(
         "  HIGH  ",
         "capabilities = [\"thinking\"]\nsupport_efforts = [\"low\", \"high\"]\n",
     );
     assert!(padded.extract_secondary_model_pool(None).is_ok());
 
-    // An unset effort skips the check entirely.
     let unset = KimiConfig::from_str(&format!(
         r#"{EFFORT_CONFIG}
 [secondary_model]
@@ -1042,9 +963,6 @@ default_model = "fast"
     assert!(unset.extract_secondary_model_pool(None).is_ok());
 }
 
-/// v2 #3681 `collectMalformedModelEntries`: a `[models]` entry without a
-/// `model` field cannot resolve, and the usual cause is an unquoted dotted
-/// alias — the warning spells out the quoted table name to write instead.
 #[test]
 fn test_malformed_model_entries_warn() {
     let warnings = KimiConfig::malformed_model_entries(
@@ -1080,15 +998,10 @@ model = "kimi-k2"
         warnings[1]
     );
 
-    // A config with no `[models]` table, or one that is not TOML at all,
-    // produces nothing rather than a second error.
     assert!(KimiConfig::malformed_model_entries("default_model = \"k2\"\n").is_empty());
     assert!(KimiConfig::malformed_model_entries("not = = toml").is_empty());
 }
 
-/// The same warnings the load path logs are staged on the config, which is
-/// what gives the server something to broadcast as `event.config.warning`
-/// (and the v3 `config.warning` entity) once a lane exists.
 #[test]
 fn from_file_stages_the_malformed_model_entry_warnings() {
     let dir = tempfile::tempdir().unwrap();
@@ -1120,8 +1033,6 @@ max_context_size = 1000
         config.config_warnings[0]
     );
 
-    // A file whose `[models]` entries all resolve stages nothing, so the
-    // server has no empty warning entity to broadcast.
     std::fs::write(
         &path,
         "[models.good]\nprovider = \"kimi\"\nmodel = \"kimi-k2\"\n",
@@ -1134,8 +1045,6 @@ max_context_size = 1000
             .is_empty()
     );
 
-    // Parsing alone cannot see the raw TOML an entry's shape lives in, so
-    // the staged list stays empty on that path.
     assert!(
         KimiConfig::from_str("[models.typo]\nprovider = \"kimi\"\n")
             .unwrap()
@@ -1144,16 +1053,11 @@ max_context_size = 1000
     );
 }
 
-/// v2 validates `[environments]` while the config is read (`configSection.ts`
-/// via `buildValidated`): a bad declaration set is reported at startup instead
-/// of firing on the first session. The section stays parsed, so the
-/// create/restore check still refuses it when the file is edited at runtime.
 #[test]
 fn from_file_reports_invalid_environment_declarations() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
 
-    // Declaring the built-in local environment is a config error, reported now.
     std::fs::write(&path, "[environments.dev]\ntype = \"local\"\n").unwrap();
     let config = KimiConfig::from_file(&path).unwrap();
     assert_eq!(
@@ -1172,13 +1076,12 @@ fn from_file_reports_invalid_environment_declarations() {
         "{}",
         config.config_warnings[0]
     );
-    // Not dropped: the declaration remains for the freeze/restore backstop.
+
     assert_eq!(
         config.environments.entries["dev"].kind.as_deref(),
         Some("local")
     );
 
-    // An unknown transport is the same class of error.
     std::fs::write(&path, "[environments.dev]\ntype = \"podman\"\n").unwrap();
     let config = KimiConfig::from_file(&path).unwrap();
     assert!(
@@ -1190,7 +1093,6 @@ fn from_file_reports_invalid_environment_declarations() {
         config.config_warnings
     );
 
-    // A dangling `default` too.
     std::fs::write(&path, "[environments]\ndefault = \"missing\"\n").unwrap();
     let config = KimiConfig::from_file(&path).unwrap();
     assert!(
@@ -1202,7 +1104,6 @@ fn from_file_reports_invalid_environment_declarations() {
         config.config_warnings
     );
 
-    // A reserved id cannot be declared as an entry.
     std::fs::write(&path, "[environments.local]\ntype = \"ssh\"\n").unwrap();
     let config = KimiConfig::from_file(&path).unwrap();
     assert!(
@@ -1214,7 +1115,6 @@ fn from_file_reports_invalid_environment_declarations() {
         config.config_warnings
     );
 
-    // Nor can an id with surrounding whitespace.
     std::fs::write(&path, "[environments.\" dev\"]\ntype = \"ssh\"\n").unwrap();
     let config = KimiConfig::from_file(&path).unwrap();
     assert!(
@@ -1226,7 +1126,6 @@ fn from_file_reports_invalid_environment_declarations() {
         config.config_warnings
     );
 
-    // An entry without a `type` is a declaration error, not a remote target.
     std::fs::write(&path, "[environments.dev]\nhost = \"example.test\"\n").unwrap();
     let config = KimiConfig::from_file(&path).unwrap();
     assert!(
@@ -1238,9 +1137,6 @@ fn from_file_reports_invalid_environment_declarations() {
         config.config_warnings
     );
 
-    // A malformed entry (not a table) fails the section schema, which
-    // `buildValidated` reports and drops — the same fallback to the section
-    // default v2 takes, so the rest of the file still loads.
     std::fs::write(&path, "[environments]\ndev = 3\n").unwrap();
     let config = KimiConfig::from_file(&path).unwrap();
     assert!(
@@ -1253,8 +1149,6 @@ fn from_file_reports_invalid_environment_declarations() {
     );
     assert!(config.environments.entries.is_empty());
 
-    // A well-formed declaration set is silent: declaring a remote entry is not
-    // an error, only selecting one is.
     std::fs::write(
         &path,
         "[environments.dev]\ntype = \"ssh\"\nhost = \"example.test\"\n",
@@ -1268,9 +1162,6 @@ fn from_file_reports_invalid_environment_declarations() {
     );
 }
 
-/// v2 `buildValidated` (`configService.ts:753-771`): a section that fails its
-/// schema is reported and dropped, the rest of the file still loads, and a
-/// top-level key with no schema is reported instead of vanishing silently.
 #[test]
 fn from_file_reports_unknown_and_invalid_sections() {
     let dir = tempfile::tempdir().unwrap();
@@ -1310,11 +1201,10 @@ timeout = 0
         "the out-of-range timeout must reject the section: {:?}",
         config.config_warnings
     );
-    // The valid section still loads instead of taking the file down.
+
     assert_eq!(config.loop_control.max_steps_per_turn, Some(7));
     assert!(config.hooks.is_empty());
-    // v2 `collectKeyDeprecations`: the renamed key still resolves, with a
-    // diagnostic pointing at the new spelling.
+
     assert!(
         config
             .config_warnings
@@ -1339,7 +1229,6 @@ max_steps_per_turn = 25
     .unwrap();
     assert_eq!(explicit.resolve_max_steps_per_turn(), Some(25));
 
-    // The deprecated rename still resolves, but the current key wins.
     let deprecated = KimiConfig::from_str(
         r#"
 [loop_control]
@@ -1359,7 +1248,6 @@ max_steps_per_run = 30
     .unwrap();
     assert_eq!(both.resolve_max_steps_per_turn(), Some(25));
 
-    // `0` means unlimited, exactly like an unset value.
     let unlimited = KimiConfig::from_str(
         r#"
 [loop_control]
@@ -1399,8 +1287,6 @@ api_key = "sk-bing"
 
 #[test]
 fn test_parse_services_config() {
-    // Snake_case is the file contract; the camelCase section + keys parse
-    // too (the host schema accepts both spellings).
     let config = KimiConfig::from_str(SERVICES_CONFIG).unwrap();
     let search = config.services.moonshot_search.as_ref().unwrap();
     assert_eq!(
@@ -1429,7 +1315,7 @@ fn test_parse_services_config() {
         Some("https://api.bing.microsoft.com/v7.0/search")
     );
     assert_eq!(bing.api_key.as_deref(), Some("sk-bing"));
-    // An absent section stays inert.
+
     assert!(
         KimiConfig::from_str(SAMPLE_CONFIG)
             .unwrap()
@@ -1446,8 +1332,6 @@ fn test_resolve_bing_api_service() {
     assert_eq!(bing.base_url, "https://api.bing.microsoft.com/v7.0/search");
     assert_eq!(bing.api_key.as_deref(), Some("sk-bing"));
 
-    // Env overlay: an env base URL is a credential boundary (mirrors the
-    // moonshot search resolution).
     unsafe {
         std::env::set_var("KIMI_BING_BASE_URL", "https://env.example.test/bing");
         std::env::set_var("KIMI_BING_API_KEY", "sk-env-bing");
@@ -1460,7 +1344,6 @@ fn test_resolve_bing_api_service() {
         std::env::remove_var("KIMI_BING_API_KEY");
     }
 
-    // An absent section resolves to None.
     assert!(
         KimiConfig::from_str(SAMPLE_CONFIG)
             .unwrap()
@@ -1484,15 +1367,11 @@ fn test_resolve_web_services_env_overlay() {
     assert_eq!(search.api_key.as_deref(), Some("sk-search"));
     assert_eq!(search.custom_headers.len(), 1);
 
-    // An env api key outranks the persisted one; config headers stay.
     unsafe { std::env::set_var("KIMI_WEB_SEARCH_API_KEY", "sk-env") };
     let search = config.resolve_web_search_service().unwrap();
     assert_eq!(search.api_key.as_deref(), Some("sk-env"));
     assert_eq!(search.custom_headers.len(), 1);
 
-    // An env base URL is a credential boundary: the persisted key and
-    // headers never cross into it, and a blank env key is unset rather
-    // than the config key.
     unsafe {
         std::env::set_var(
             "KIMI_WEB_SEARCH_BASE_URL",
@@ -1505,7 +1384,6 @@ fn test_resolve_web_services_env_overlay() {
     assert_eq!(search.api_key, None);
     assert!(search.custom_headers.is_empty());
 
-    // The fetch entry resolves independently of the search env overlay.
     assert_eq!(
         config
             .resolve_web_fetch_service()
@@ -1515,7 +1393,6 @@ fn test_resolve_web_services_env_overlay() {
         Some("sk-fetch")
     );
 
-    // A blank base URL (and an absent entry) resolve to None.
     unsafe { std::env::remove_var("KIMI_WEB_SEARCH_BASE_URL") };
     let blank = KimiConfig::from_str(
         r#"
@@ -1554,7 +1431,6 @@ timeoutMs = 7000
     assert_eq!(config.resolve_subagent_timeout_ms(), Some(5000));
     assert_eq!(config.resolve_swarm_timeout_ms(), Some(7000));
 
-    // The env overlay outranks the file and each knob is independent.
     unsafe { std::env::set_var("KIMI_SUBAGENT_TIMEOUT_MS", "9000") };
     assert_eq!(config.resolve_subagent_timeout_ms(), Some(9000));
     assert_eq!(config.resolve_swarm_timeout_ms(), Some(7000));
@@ -1562,9 +1438,6 @@ timeoutMs = 7000
     assert_eq!(config.resolve_swarm_timeout_ms(), Some(8000));
     unsafe { std::env::remove_var("KIMI_CODE_SWARM_TIMEOUT_MS") };
 
-    // `0` passes through — the tools read it as the engine default,
-    // matching the host-driven paths; an invalid env value falls back to
-    // the file.
     unsafe { std::env::set_var("KIMI_SUBAGENT_TIMEOUT_MS", "0") };
     assert_eq!(config.resolve_subagent_timeout_ms(), Some(0));
     unsafe { std::env::set_var("KIMI_SUBAGENT_TIMEOUT_MS", "-1") };
@@ -1572,7 +1445,6 @@ timeoutMs = 7000
     unsafe { std::env::set_var("KIMI_SUBAGENT_TIMEOUT_MS", "soon") };
     assert_eq!(config.resolve_subagent_timeout_ms(), Some(5000));
 
-    // Absent sections resolve to None (the engine keeps its 2h default).
     let absent = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
     assert_eq!(absent.resolve_subagent_timeout_ms(), None);
     assert_eq!(absent.resolve_swarm_timeout_ms(), None);
@@ -1580,8 +1452,6 @@ timeoutMs = 7000
 
 #[test]
 fn provider_custom_headers_reach_the_resolved_llm() {
-    // Self-hosted gateways carry their auth/routing in custom headers;
-    // without this the deployment 401s on every request.
     let config = KimiConfig::from_str(
         r#"
 default_model = "gw"
@@ -1611,7 +1481,6 @@ model = "gpt"
         Some("t1")
     );
 
-    // Snake_case is the file contract; both spellings must parse.
     let snake = KimiConfig::from_str(
         r#"
 default_model = "gw"
@@ -1660,14 +1529,12 @@ betaApi = true
     )
     .unwrap();
     let native = config.extract_native_llm(None).unwrap();
-    // A declared alias endpoint wins over the provider default.
+
     assert_eq!(native.base_url, "https://gateway.example.com/v1");
-    // The alias's wire protocol wins over the provider type.
+
     assert_eq!(native.protocol, "anthropic");
     assert!(native.beta_api);
 
-    // Without an alias override the provider decides, and the default is
-    // Chat Completions.
     let plain = KimiConfig::from_str(
         r#"
 default_model = "kimi"
@@ -1691,11 +1558,6 @@ model = "kimi-k2"
 
 #[test]
 fn vertexai_provider_type_resolves_the_google_protocol() {
-    // The model catalog maps `vertexai` to `google-genai`; the endpoint
-    // resolver must not answer differently, or a Vertex-shaped URL gets
-    // an OpenAI body. The endpoint declaration table still excludes it
-    // (no Vertex wire protocol, no env fallback) — only an explicitly
-    // declared `base_url` resolves.
     let config = KimiConfig::from_str(
         r#"
 default_model = "v"
@@ -1718,8 +1580,6 @@ model = "gemini-2.5-pro"
         "https://us-central1-aiplatform.googleapis.com/v1beta"
     );
 
-    // Without a declared endpoint it still does not resolve: Vertex has
-    // no default host (it is regional) and no env fallback here.
     let bare = KimiConfig::from_str(
         r#"
 default_model = "v"
@@ -1758,18 +1618,14 @@ effort = "high"
     assert!(filter.allows("Read"));
     assert!(filter.allows("mcp__github__search"), "MCP names are globs");
     assert!(!filter.allows("Write"));
-    // Thinking on: the chosen effort goes on the wire.
+
     assert_eq!(config.resolve_effort(None).as_deref(), Some("high"));
 
-    // No switch at all leaves the filter unset (every tool survives).
     let bare = KimiConfig::from_str("default_model = \"m\"\n").unwrap();
     assert!(bare.build_policy_snapshot(None).tools_filter.is_none());
     assert_eq!(bare.resolve_effort(None), None);
 }
 
-/// `[permission] dangerous_command_guard` parses under both the documented
-/// file spelling (snake_case, config-files.md) and the camelCase alias the
-/// `POST /config` JSON body (`patchConfigRequestSchema`) carries.
 #[test]
 fn permission_dangerous_command_guard_accepts_both_spellings() {
     let snake = KimiConfig::from_str("[permission]\ndangerous_command_guard = false\n").unwrap();
@@ -1784,9 +1640,6 @@ fn permission_dangerous_command_guard_accepts_both_spellings() {
     );
 }
 
-/// `[workspace] require_trust` (upstream #4517): absent and explicit `true`
-/// both keep the trust gate on; only `false` short-circuits it. Both the
-/// documented file spelling and the upstream schema's camelCase alias parse.
 #[test]
 fn workspace_require_trust_defaults_on_and_accepts_both_spellings() {
     let bare = KimiConfig::from_str("default_model = \"m\"\n").unwrap();
@@ -1804,22 +1657,15 @@ fn workspace_require_trust_defaults_on_and_accepts_both_spellings() {
 
 #[test]
 fn thinking_off_sends_the_model_off_effort() {
-    // Models whose default is to reason need the "off" effort sent
-    // explicitly instead of an omitted field (schema `offEffort`).
     let config = KimiConfig::from_str("[thinking]\nenabled = false\n").unwrap();
     assert_eq!(config.resolve_effort(Some("none")).as_deref(), Some("none"));
-    // No declared off-effort: the host-level off token still travels, so a
-    // Kimi transport can encode its protocol-level `thinking: disabled`.
+
     assert_eq!(config.resolve_effort(None).as_deref(), Some("off"));
 
     let on = KimiConfig::from_str("[thinking]\nenabled = true\neffort = \"low\"\n").unwrap();
     assert_eq!(on.resolve_effort(Some("none")).as_deref(), Some("low"));
 }
 
-/// v2 `LoopControlSchema`: the two compaction knobs the engine accepts for
-/// config parity but does not read yet. Out-of-range values are discarded
-/// (not clamped), which resolves to the engine default instead of
-/// triggering every step.
 #[test]
 fn loop_control_compaction_knobs_parse_and_ignore_out_of_range() {
     let empty = KimiConfig::from_str("").unwrap();
@@ -1836,7 +1682,6 @@ reserved_context_size = 8000
     assert_eq!(config.resolve_compaction_trigger_ratio(), Some(0.7));
     assert_eq!(config.resolve_reserved_context_size(), Some(8000));
 
-    // Schema range is 0.5..=0.99; outside it is ignored, not clamped.
     for raw in ["0.1", "1.5"] {
         let bad = KimiConfig::from_str(&format!(
             "[loop_control]
@@ -1851,7 +1696,6 @@ compaction_trigger_ratio = {raw}
         );
     }
 
-    // camelCase aliases accepted, as elsewhere in this file.
     let aliased = KimiConfig::from_str(
         "[loop_control]
 compactionTriggerRatio = 0.9
@@ -1863,7 +1707,6 @@ compactionTriggerRatio = 0.9
 
 #[test]
 fn cron_section_switches_read_and_default_off() {
-    // v2 `DEFAULT_CRON_CONFIG`: every switch defaults to false.
     let empty = KimiConfig::from_str("").unwrap();
     assert!(!empty.cron_disabled());
     assert!(!empty.cron_no_jitter());
@@ -1882,10 +1725,6 @@ no_stale = true
     assert!(config.cron_no_stale());
 }
 
-/// The camelCase spelling the v2 config section writes (`noJitter` /
-/// `noStale`) has to deserialize too: `[cron]` is parsed without
-/// `deny_unknown_fields`, so a missing alias drops the key silently —
-/// the switch reads as `false` with no error anywhere.
 #[test]
 fn cron_section_accepts_camel_case_keys() {
     let camel = KimiConfig::from_str(
@@ -1897,8 +1736,7 @@ noStale = true
     .unwrap();
     assert!(camel.cron_no_jitter());
     assert!(camel.cron_no_stale());
-    // Asserted on the field too: the resolvers read env vars first, so
-    // only the parsed value proves the alias landed.
+
     assert_eq!(camel.cron.no_jitter, Some(true));
     assert_eq!(camel.cron.no_stale, Some(true));
 }
@@ -1923,7 +1761,7 @@ scope = "project"
             .map(String::as_str),
         Some("secrets must never be written by the agent")
     );
-    // The engine echoes it in the verdict.
+
     let verdict = crate::permission::PermissionEngine::new(snapshot)
         .evaluate("Write", &serde_json::json!({ "path": "prod.env" }));
     assert!(
@@ -1938,9 +1776,32 @@ scope = "project"
 }
 
 #[test]
+fn session_runtime_scoped_rules_stay_out_of_the_user_configured_stages() {
+    let config = KimiConfig::from_str(
+        r#"
+[[permission.rules]]
+decision = "deny"
+pattern = "Write(*.env)"
+scope = "session-runtime"
+
+[[permission.rules]]
+decision = "allow"
+pattern = "Read"
+"#,
+    )
+    .unwrap();
+    let snapshot = config.build_policy_snapshot(None);
+    assert!(snapshot.deny_rules.is_empty());
+    assert!(snapshot.rule_reasons.is_empty());
+    assert_eq!(snapshot.allow_rules, vec!["Read".to_string()]);
+
+    let verdict = crate::permission::PermissionEngine::new(snapshot)
+        .evaluate("Write", &serde_json::json!({ "path": "prod.env" }));
+    assert_ne!(verdict.policy_name, "UserConfiguredDeny");
+}
+
+#[test]
 fn experimental_flags_and_default_mode_parse() {
-    // `[experimental]` is a free boolean/string map: clients probe it to
-    // gate UI features, so the engine must carry it verbatim.
     let config = KimiConfig::from_str(
         r#"
 default_permission_mode = "auto"
@@ -1959,8 +1820,7 @@ flavor = "canary"
         config.experimental.get("flavor"),
         Some(&ExperimentalValue::String("canary".into()))
     );
-    // `default_permission_mode` is the mode when `[permission].mode` is
-    // unset; `[permission].mode` still wins over it.
+
     assert_eq!(
         config.build_policy_snapshot(None).mode,
         crate::permission::PermissionMode::Auto
@@ -1978,6 +1838,11 @@ mode = "manual"
         explicit.build_policy_snapshot(None).mode,
         crate::permission::PermissionMode::Manual
     );
+}
+
+#[test]
+fn default_permission_mode_rejects_unknown_values() {
+    assert!(KimiConfig::from_str("default_permission_mode = \"plan\"").is_err());
 }
 
 #[test]
@@ -2004,7 +1869,6 @@ fn extra_skill_dirs_are_scanned() {
         .any(|skill| skill.name == "my-extra-skill");
     assert!(found, "extra_skill_dirs must feed the skill listing");
 
-    // And the prompt's skills section lists it, so the model can call it.
     let section = crate::prompt::skills_renderer::generate_skills_section_with_extra(None, &extra);
     assert!(section.contains("my-extra-skill"), "{section}");
 
@@ -2013,15 +1877,12 @@ fn extra_skill_dirs_are_scanned() {
 
 #[test]
 fn merge_all_available_skills_resolves_with_documented_default() {
-    // Unset keeps the documented default (`true`), so a file that never
-    // mentions the key behaves exactly as before.
     let absent = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
     assert!(absent.resolve_merge_all_available_skills());
 
     let off = KimiConfig::from_str("merge_all_available_skills = false\n").unwrap();
     assert!(!off.resolve_merge_all_available_skills());
 
-    // The camelCase alias the schema and the web client write is accepted.
     let camel = KimiConfig::from_str("mergeAllAvailableSkills = false\n").unwrap();
     assert!(!camel.resolve_merge_all_available_skills());
 }
@@ -2051,12 +1912,14 @@ fn merge_flag_reaches_the_prompt_skills_section() {
     .unwrap();
 
     let on =
-        crate::prompt::SystemPromptBuilder::build_default_with_skill_config(dir, Vec::new(), true);
+        crate::prompt::SystemPromptBuilder::build_default_with_skill_config(dir, Vec::new(), true)
+            .unwrap();
     assert!(on.contains("merged-a"), "{on}");
     assert!(on.contains("merged-b"), "{on}");
 
     let off =
-        crate::prompt::SystemPromptBuilder::build_default_with_skill_config(dir, Vec::new(), false);
+        crate::prompt::SystemPromptBuilder::build_default_with_skill_config(dir, Vec::new(), false)
+            .unwrap();
     assert!(off.contains("merged-a"), "{off}");
     assert!(
         !off.contains("merged-b"),
@@ -2082,7 +1945,6 @@ maxEdgePx = 800
     assert_eq!(config.resolve_image_read_byte_budget(), Some(131072));
     assert_eq!(config.resolve_image_max_edge_px(), Some(800));
 
-    // Env wins; zero and invalid values fall back to the file.
     unsafe { std::env::set_var("KIMI_IMAGE_READ_BYTE_BUDGET", "65536") };
     assert_eq!(config.resolve_image_read_byte_budget(), Some(65536));
     unsafe { std::env::set_var("KIMI_IMAGE_READ_BYTE_BUDGET", "0") };
@@ -2094,7 +1956,6 @@ maxEdgePx = 800
     assert_eq!(config.resolve_image_max_edge_px(), Some(400));
     unsafe { std::env::remove_var("KIMI_IMAGE_MAX_EDGE_PX") };
 
-    // An absent section keeps the engine defaults (None).
     let absent = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
     assert_eq!(absent.resolve_image_read_byte_budget(), None);
     assert_eq!(absent.resolve_image_max_edge_px(), None);
@@ -2124,7 +1985,6 @@ capabilities = ["thinking", "image_in"]
         Some(&["thinking".to_string(), "image_in".to_string()][..])
     );
 
-    // No declared capabilities stays unknown (None) — the lenient default.
     let bare = KimiConfig::from_str(SAMPLE_CONFIG).unwrap();
     assert_eq!(bare.extract_native_llm(None).unwrap().capabilities, None);
 }
@@ -2143,7 +2003,6 @@ keep = "all"
     .unwrap();
     assert_eq!(explicit.resolve_thinking_keep().as_deref(), Some("all"));
 
-    // Off values disable the passthrough; unset stays opt-in (no keep).
     let off = KimiConfig::from_str(
         r#"
 [thinking]
@@ -2159,7 +2018,6 @@ keep = "off"
         None
     );
 
-    // `enabled = false` gates the passthrough off.
     let disabled = KimiConfig::from_str(
         r#"
 [thinking]
@@ -2170,12 +2028,6 @@ keep = "all"
     .unwrap();
     assert_eq!(disabled.resolve_thinking_keep(), None);
 
-    // Every off value disables the passthrough, case- and
-    // whitespace-insensitively. The same six spellings are duplicated in
-    // `resolveThinkingKeep` (node-sdk/src/native/native-llm-resolver.ts),
-    // so this table is the Rust half of a cross-language contract: a
-    // spelling added on one side and not the other would silently change
-    // what a user can turn off.
     for off_value in ["false", "0", "no", "off", "none", "null"] {
         for spelling in [off_value.to_string(), off_value.to_uppercase()] {
             let config =
@@ -2187,11 +2039,10 @@ keep = "all"
             );
         }
     }
-    // Padded values trim to the same off value.
+
     let padded = KimiConfig::from_str("[thinking]\nkeep = \"  OFF  \"\n").unwrap();
     assert_eq!(padded.resolve_thinking_keep(), None);
-    // A value that merely contains an off word is not one, and a bare
-    // "all" is the enabling spelling.
+
     let partial = KimiConfig::from_str("[thinking]\nkeep = \"none-of-the-above\"\n").unwrap();
     assert_eq!(
         partial.resolve_thinking_keep().as_deref(),
@@ -2200,13 +2051,11 @@ keep = "all"
     let all = KimiConfig::from_str("[thinking]\nkeep = \"all\"\n").unwrap();
     assert_eq!(all.resolve_thinking_keep().as_deref(), Some("all"));
 
-    // Env outranks the file, off values included.
     unsafe { std::env::set_var(key, "all") };
     assert_eq!(off.resolve_thinking_keep().as_deref(), Some("all"));
     unsafe { std::env::set_var(key, "none") };
     assert_eq!(explicit.resolve_thinking_keep(), None);
 
-    // Every `[secondary_model]` entry rides the same passthrough.
     unsafe { std::env::remove_var(key) };
     let pool = KimiConfig::from_str(&format!(
         r#"{POOL_CONFIG}
@@ -2224,8 +2073,6 @@ default_model = "fast"
     assert_eq!(pool.models[0].llm.thinking_keep.as_deref(), Some("all"));
 }
 
-/// A one-provider config with the `[models.alias]` body appended, so each
-/// test below states only the fields it is about.
 fn alias_config(body: &str) -> KimiConfig {
     KimiConfig::from_str(&format!(
         r#"
@@ -2252,7 +2099,7 @@ fn model_name_wins_over_model_for_the_wire_name() {
         named.extract_native_llm(None).unwrap().model,
         "kimi-k2-0905"
     );
-    // Without `name` the entry's `model` is the wire name.
+
     assert_eq!(
         alias_config("").extract_native_llm(None).unwrap().model,
         "kimi-k2-0711"
@@ -2303,7 +2150,7 @@ reasoning_key = "reasoning"
         native.capabilities.as_deref(),
         Some(&["thinking".to_string(), "image_in".to_string()][..])
     );
-    // A field the override does not mention keeps the base value.
+
     assert_eq!(native.max_input_size, Some(262144));
     assert_eq!(native.off_effort.as_deref(), Some("none"));
 }
@@ -2311,16 +2158,16 @@ reasoning_key = "reasoning"
 #[test]
 fn a_declared_alias_resolves_to_its_entry() {
     let config = alias_config("aliases = [\"kimi-latest\"]\n");
-    // The table key still resolves directly.
+
     assert_eq!(
         config.extract_native_llm(Some("alias")).unwrap().model,
         "kimi-k2-0711"
     );
-    // A declared alias reaches the same entry.
+
     let via_alias = config.extract_native_llm(Some("kimi-latest")).unwrap();
     assert_eq!(via_alias.model, "kimi-k2-0711");
     assert_eq!(via_alias.api_key, "sk-provider-key");
-    // An undeclared name still resolves to nothing.
+
     assert!(config.extract_native_llm(Some("nope")).is_none());
 }
 
@@ -2409,8 +2256,6 @@ default_model = "fast"
     );
 }
 
-/// v2 #4210: `[mcp] defaultDeferred` is the global disclosure default, and the
-/// camelCase spelling is accepted like the two timeout keys.
 #[test]
 fn mcp_section_parses_the_global_deferred_default() {
     let camel = KimiConfig::from_str("[mcp]\ndefaultDeferred = true\n").unwrap();
@@ -2423,9 +2268,6 @@ fn mcp_section_parses_the_global_deferred_default() {
     assert_eq!(absent.mcp.default_deferred, None);
 }
 
-/// B13/B14/B15/B18: the `[models.<alias>]` request-body knobs are carried onto
-/// the native transport verbatim. Absent knobs stay `None`, so the transport
-/// keeps the body byte-identical (pinned by `RequestOptions::is_inert`).
 #[test]
 fn model_request_knobs_reach_the_native_transport() {
     let config = KimiConfig::from_str(
@@ -2489,9 +2331,6 @@ model = "gpt-y"
     assert_eq!(llm.extra_params, None);
 }
 
-/// An adaptive anthropic model takes the level on `output_config.effort` and
-/// never a token budget (v2 `encodeThinking` adaptive mode), so the resolved
-/// transport must carry the effort string — including an explicit `off`.
 #[test]
 fn adaptive_anthropic_native_llm_carries_the_effort_not_a_budget() {
     let config = KimiConfig::from_str(
@@ -2524,7 +2363,6 @@ default_effort = "high"
     );
     assert_eq!(off.thinking_budget, None);
 
-    // A plain anthropic model keeps the budget encoding.
     let config = KimiConfig::from_str(
         r#"
 [providers.anthropic]
@@ -2544,22 +2382,12 @@ model = "claude-sonnet"
     assert_eq!(plain.reasoning_effort, None);
 }
 
-/// Owns `KIMI_TOKEN_COUNTING_STRATEGY` for the duration of a test.
-///
-/// `resolve_token_counting_strategy` and `token_counting_warnings` read the
-/// process environment, so every test asserting on them has to take the same
-/// lock *and* start from "unset" — otherwise a parallel test that sets the
-/// variable is visible here (that race produced `left: Estimated` against a
-/// default that should have been `MeasuredAndEstimated`).
 fn token_counting_env() -> std::sync::MutexGuard<'static, ()> {
     let guard = crate::session::token_counting::tests::env_lock();
     unsafe { std::env::remove_var("KIMI_TOKEN_COUNTING_STRATEGY") };
     guard
 }
 
-/// D10: with no `[tokenCounting]` section and no env binding the strategy is
-/// the historical `measured+estimated`, so the gauge cannot change just by
-/// adding the config surface.
 #[test]
 fn token_counting_strategy_defaults_to_the_historical_behaviour() {
     use crate::session::token_counting::TokenCountingStrategy;
@@ -2575,8 +2403,6 @@ fn token_counting_strategy_defaults_to_the_historical_behaviour() {
     }
 }
 
-/// D10: an explicit section value takes effect (both spellings of the table
-/// name), and an invalid one is reported at load time and by name.
 #[test]
 fn token_counting_strategy_reads_the_section_and_reports_invalid_values() {
     use crate::session::token_counting::TokenCountingStrategy;
@@ -2604,9 +2430,6 @@ fn token_counting_strategy_reads_the_section_and_reports_invalid_values() {
     assert!(warnings[0].contains("measured+estimated"), "{warnings:?}");
 }
 
-/// D10: the env binding wins over the file; an invalid env spelling is
-/// reported and falls through to the file value rather than being ignored
-/// silently or masking a valid section.
 #[test]
 fn token_counting_strategy_env_overrides_and_falls_through() {
     use crate::session::token_counting::TokenCountingStrategy;
@@ -2634,16 +2457,13 @@ fn token_counting_strategy_env_overrides_and_falls_through() {
     );
 
     unsafe { std::env::remove_var(ENV) };
-    // The valid section is still honoured after the env binding disappears.
+
     assert_eq!(
         file.resolve_token_counting_strategy(),
         TokenCountingStrategy::Measured
     );
 }
 
-/// v2 `[read]` (`agent/tools/os/read/configSection.ts`): both the snake_case
-/// file contract and the camelCase alias resolve, a non-positive budget is
-/// ignored (with a load-time warning) so the built-in limits stand.
 #[test]
 fn read_section_resolves_both_spellings_and_rejects_non_positive() {
     let empty = KimiConfig::from_str("").unwrap();
@@ -2677,8 +2497,6 @@ fn read_section_resolves_both_spellings_and_rejects_non_positive() {
     );
 }
 
-/// v2 `[llm_requester].requestByteBudget`: env over file over the 32 MiB
-/// default; blank, zero and non-numeric values never win.
 #[test]
 fn llm_request_byte_budget_prefers_env_then_file_then_default() {
     let _env = crate::test_support::EnvScope::unset(&["KIMI_LLM_REQUEST_BYTE_BUDGET"]);
@@ -2713,9 +2531,6 @@ fn llm_request_byte_budget_prefers_env_then_file_then_default() {
     }
 }
 
-/// v2 `[sandbox].mode`: the enum resolves; an unknown spelling stays off and
-/// is reported on load instead of silently becoming a sandbox the user did
-/// not write.
 #[test]
 fn sandbox_mode_resolves_and_reports_unknown_spellings() {
     assert_eq!(
@@ -2752,8 +2567,6 @@ fn sandbox_mode_resolves_and_reports_unknown_spellings() {
     );
 }
 
-/// v2 `[builtinProductSkills]`: default on, file can disable it, and the env
-/// switch wins over the file in both directions.
 #[test]
 fn builtin_product_skills_env_overrides_file() {
     let _env = crate::test_support::EnvScope::unset(&["KIMI_CODE_BUILTIN_PRODUCT_SKILLS"]);
@@ -2793,9 +2606,6 @@ fn builtin_product_skills_env_overrides_file() {
     );
 }
 
-/// v2 `thinking.forcedEffort` / `KIMI_MODEL_THINKING_EFFORT`: the forced value
-/// outranks `effort` while thinking is on; an explicit `off` is not a forced
-/// effort; thinking disabled still sends the model's off token.
 #[test]
 fn thinking_forced_effort_outranks_the_chosen_effort() {
     let _env = crate::test_support::EnvScope::unset(&["KIMI_MODEL_THINKING_EFFORT"]);
@@ -2822,7 +2632,7 @@ fn thinking_forced_effort_outranks_the_chosen_effort() {
             "{invalid:?} must not override the file"
         );
     }
-    // v2 passes a non-empty forced value through verbatim, `off` included.
+
     unsafe { std::env::set_var("KIMI_MODEL_THINKING_EFFORT", "off") };
     assert_eq!(file.resolve_effort(None).as_deref(), Some("off"));
 
@@ -2837,8 +2647,6 @@ fn thinking_forced_effort_outranks_the_chosen_effort() {
     );
 }
 
-/// v2 `resolveAgentTaskConfig`: `[task]` wins over the legacy `[background]`
-/// for every shared key, and the task env bindings win over both.
 #[test]
 fn task_section_overrides_background_and_env_overrides_task() {
     let _env = crate::test_support::EnvScope::unset(&[
@@ -2897,7 +2705,6 @@ print_max_turns = 4
     assert_eq!(merged.resolve_print_wait_ceiling_s(), Some(60));
     assert_eq!(merged.resolve_print_max_turns(), Some(9));
 
-    // An unrecognized print mode falls back to the keep-alive default.
     unsafe { std::env::set_var("KIMI_CODE_BACKGROUND_PRINT_BACKGROUND_MODE", "bogus") };
     assert_eq!(
         merged.resolve_print_background_mode(),
@@ -2918,9 +2725,6 @@ print_max_turns = 4
     assert_eq!(defaults.resolve_print_background_mode(), "steer");
 }
 
-/// v2 `permissionFromToml`: legacy `deny` / `allow` / `ask` lists are folded
-/// into the snapshot with their implied decision, including the
-/// `{ tool, match }` shorthand; the same shorthand works in `[[rules]]`.
 #[test]
 fn legacy_permission_lists_and_tool_match_shorthand_resolve() {
     let config = KimiConfig::from_str(
@@ -2951,8 +2755,30 @@ match = "curl *"
     assert_eq!(snapshot.ask_rules, vec!["Edit(*)"]);
 }
 
-/// v2 `[model_overrides]`: env over file, with out-of-range values dropped so
-/// a malformed override cannot reach the wire.
+#[test]
+fn operation_log_retention_parses_safe_bounds() {
+    let config = KimiConfig::from_str(
+        r#"
+[operationLog]
+maxOperations = 12
+maxAgeMs = 0
+maxTotalBytes = 4096
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.operation_log.max_operations, Some(12));
+    assert_eq!(config.operation_log.max_age_ms, Some(0));
+    assert_eq!(config.operation_log.max_total_bytes, Some(4096));
+    assert!(
+        KimiConfig::from_str("[operationLog]\nmaxOperations = 0\n").is_err(),
+        "maxOperations must be positive"
+    );
+    assert!(
+        KimiConfig::from_str("[operationLog]\nmaxAgeMs = -1\n").is_err(),
+        "maxAgeMs must be non-negative"
+    );
+}
+
 #[test]
 fn model_overrides_prefer_env_and_drop_out_of_range_values() {
     let _env = crate::test_support::EnvScope::unset(&[
@@ -3025,9 +2851,6 @@ max_completion_tokens = 2048
     );
 }
 
-/// A stdio MCP server bound to a declared environment cannot be reached by
-/// this engine; the load reports it instead of running the server silently on
-/// the local host. The local id stays quiet.
 #[test]
 fn mcp_environment_binding_is_reported_on_load() {
     let dir = tempfile::tempdir().unwrap();
@@ -3068,8 +2891,6 @@ environment_id = "local"
     );
 }
 
-/// Provider and service fields the host/model refresh reads must survive a
-/// read instead of being dropped by serde's unknown-field handling.
 #[test]
 fn provider_and_service_auxiliary_fields_parse() {
     let config = KimiConfig::from_str(
@@ -3106,9 +2927,6 @@ oauth = { account = "me" }
     );
 }
 
-/// v2 `kimiModelEnvOverlay`: `KIMI_MODEL_NAME` plus the reserved provider
-/// bindings produce an env-only deployment without a file declaring anything;
-/// the catalog defaults and alias are filled in.
 #[test]
 fn env_model_overlay_builds_the_reserved_provider_and_alias() {
     let _env = crate::test_support::EnvScope::unset(&[
@@ -3153,7 +2971,6 @@ fn env_model_overlay_builds_the_reserved_provider_and_alias() {
     assert_eq!(native.provider_type, "kimi");
     assert_eq!(native.base_url, "https://api.moonshot.ai/v1");
 
-    // The provider type defaults to `kimi` when only a name/key is given.
     unsafe { std::env::remove_var("KIMI_MODEL_PROVIDER_TYPE") };
     let defaulted = KimiConfig::load_or_default(&path);
     assert_eq!(
@@ -3164,8 +2981,6 @@ fn env_model_overlay_builds_the_reserved_provider_and_alias() {
     );
 }
 
-/// v2 raises `CONFIG_INVALID` for a malformed overlay value; the load must
-/// fail instead of silently running the file config as if the env were unset.
 #[test]
 fn env_model_overlay_rejects_malformed_values() {
     let _env = crate::test_support::EnvScope::unset(&[
@@ -3213,8 +3028,6 @@ fn env_model_overlay_rejects_malformed_values() {
     );
 }
 
-/// v2 `loopControl.maxRalphIterations` is accepted (min -1) and reported when
-/// below the floor, rather than being dropped as an unknown nested key.
 #[test]
 fn max_ralph_iterations_parses_and_reports_below_floor() {
     let config = KimiConfig::from_str("[loop_control]\nmax_ralph_iterations = 3\n").unwrap();

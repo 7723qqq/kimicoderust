@@ -28,13 +28,11 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
             let count = self.call_count.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if count == 0 {
-                    // First call fails with a context overflow error.
                     Err(Box::new(std::io::Error::other(
                         "llm http status 400 Bad Request: context_length_exceeded",
                     ))
                         as Box<dyn std::error::Error + Send + Sync>)
                 } else if count == 1 {
-                    // The summarizer produces the replacement text.
                     Ok(LLMChatResponse {
                         content: "Earlier user and assistant discussed the task.".into(),
                         thinking: vec![],
@@ -44,12 +42,6 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
                         timing: None,
                     })
                 } else {
-                    // Third call succeeds after compaction. v2 shape:
-                    // system + the kept real user input (u1, u2, u3, all
-                    // verbatim) + the in-flight turn (the date reminder
-                    // injected after u3) + prefixed summary + continuation.
-                    // The completed-turn assistant messages (a1, a2) are
-                    // covered by the summary instead of riding the tail.
                     assert_eq!(params.messages.len(), 5);
                     assert_eq!(params.messages[0].role, "system");
                     assert_eq!(params.messages[1].content, "u1\n\nu2\n\nu3");
@@ -102,10 +94,6 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server);
 
-    // The compaction pair rides the same input: PreCompact carries the
-    // message count before the trim, PostCompact the trigger and the
-    // post-trim token count. Removing either dispatch site inside the
-    // overflow-recovery arm leaves its capture file empty.
     use crate::tools::external_hooks::capture;
     let Some(dir) = capture::dir() else {
         return;
@@ -120,7 +108,8 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
     )));
 
     let input = RunTurnInput {
-        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        llm_request_byte_budget: u64::MAX,
+        agent_id: "test-overflow-recovery-agent".to_string(),
         previous_turn_aborted: false,
         turn_id: "test-overflow-recovery".into(),
         llm: &llm,
@@ -183,13 +172,6 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
     assert!(post_payload["estimated_token_count"].as_u64().unwrap() > 0);
 }
 
-/// v2 #3750: the host's `loopControl.compactionMaxAttempts` reaches the
-/// summarizer through the turn loop, so a failing emergency compaction
-/// stops at the configured request count instead of the engine default.
-///
-/// The step overflows exactly once and then fails for an unrelated reason,
-/// so exactly one compaction round runs and the per-round cap is the only
-/// thing that could produce a second summarizer request.
 #[tokio::test]
 async fn test_compaction_attempt_cap_reaches_the_turn_loop_summarizer() {
     struct FailingSummarizerLlm {
@@ -204,9 +186,6 @@ async fn test_compaction_attempt_cap_reaches_the_turn_loop_summarizer() {
             "cap-model"
         }
         fn is_retryable_error(&self, error: &str) -> bool {
-            // Only the summarizer's 500 is retryable; the step errors must
-            // fail straight through so the test does not sit in the
-            // step-retry backoff.
             error.contains("500")
         }
         fn transport(&self) -> &'static str {
@@ -217,14 +196,20 @@ async fn test_compaction_attempt_cap_reaches_the_turn_loop_summarizer() {
             params: LLMChatParams,
         ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
         {
-            // The summarizer prompt is the only call whose system message
-            // is the summarizer instruction; the step call carries the
-            // turn's own system prompt.
-            let is_summarizer = params
-                .messages
-                .first()
-                .is_some_and(|message| message.content.contains("conversation summarizer"));
+            let is_summarizer = params.messages.last().is_some_and(|message| {
+                message
+                    .content
+                    .contains("You are about to run out of context")
+            });
             if is_summarizer {
+                assert_eq!(
+                    params
+                        .messages
+                        .first()
+                        .map(|message| message.content.as_str()),
+                    Some("sys"),
+                    "the summarizer carries the agent's profile system prompt"
+                );
                 self.summarizer_calls.fetch_add(1, Ordering::SeqCst);
                 return Box::pin(async move {
                     Err(Box::new(std::io::Error::other(
@@ -235,12 +220,8 @@ async fn test_compaction_attempt_cap_reaches_the_turn_loop_summarizer() {
             }
             let step = self.step_calls.fetch_add(1, Ordering::SeqCst);
             let message = if step == 0 {
-                // First step: a context overflow, so the emergency
-                // compaction path runs.
                 "llm http status 400 Bad Request: context_length_exceeded"
             } else {
-                // The retried step fails for a reason compaction cannot
-                // help with, ending the turn after one round.
                 "llm http status 401 Unauthorized: bad key"
             };
             Box::pin(async move {
@@ -258,6 +239,7 @@ async fn test_compaction_attempt_cap_reaches_the_turn_loop_summarizer() {
     let callbacks = rpc_callbacks(server);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-compaction-cap".into(),
@@ -322,11 +304,6 @@ async fn test_compaction_attempt_cap_reaches_the_turn_loop_summarizer() {
     );
 }
 
-/// v2 `recoverFromContextOverflow` (fullCompactionService.ts:468-478)
-/// compacts and **retries the step**, allowing
-/// `maxOverflowCompactionAttempts` (3) consecutive rounds before the turn
-/// fails. Recovering exactly once — what the loop used to do — fails a turn
-/// v2 recovers on its second or third attempt.
 #[tokio::test]
 async fn context_overflow_recovery_retries_the_step() {
     struct AlwaysOverflowLlm {
@@ -341,8 +318,6 @@ async fn context_overflow_recovery_retries_the_step() {
             "overflow-model"
         }
         fn is_retryable_error(&self, _error: &str) -> bool {
-            // Neither failure is retried by the step layer, so the only
-            // repetition this test can observe is the overflow recovery.
             false
         }
         fn transport(&self) -> &'static str {
@@ -353,14 +328,22 @@ async fn context_overflow_recovery_retries_the_step() {
             params: LLMChatParams,
         ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
         {
-            let is_summarizer = params
-                .messages
-                .first()
-                .is_some_and(|message| message.content.contains("conversation summarizer"));
+            let is_summarizer = params.messages.last().is_some_and(|message| {
+                message
+                    .content
+                    .contains("You are about to run out of context")
+            });
             let message = if is_summarizer {
+                assert_eq!(
+                    params
+                        .messages
+                        .first()
+                        .map(|message| message.content.as_str()),
+                    Some("sys"),
+                    "the summarizer carries the agent's profile system prompt"
+                );
                 self.summarizer_calls.fetch_add(1, Ordering::SeqCst);
-                // Summarise successfully so the compaction actually shrinks
-                // the history and the next round has something to do.
+
                 return Box::pin(async move {
                     Ok(LLMChatResponse {
                         content: "summary of the omitted prefix".into(),
@@ -394,8 +377,6 @@ async fn context_overflow_recovery_retries_the_step() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server);
 
-    // A history long enough that a compaction still has a prefix to remove
-    // on the second round.
     let mut messages = vec![LLMMessage {
         role: "system".into(),
         content: "sys".into(),
@@ -410,6 +391,7 @@ async fn context_overflow_recovery_retries_the_step() {
     }
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-overflow-retry".into(),
@@ -434,9 +416,7 @@ async fn context_overflow_recovery_retries_the_step() {
     assert!(run_turn(input, &callbacks).await.is_err());
     let step_calls = llm.step_calls.load(Ordering::SeqCst);
     let rounds = llm.summarizer_calls.load(Ordering::SeqCst);
-    // Each recovery round compacts (one summarizer request) and retries the
-    // step, so the rounds are what distinguishes this from the old
-    // single-shot recovery: that one produced exactly one round.
+
     assert!(
         rounds >= 2,
         "the overflow recovery must repeat, not give up after one round; \
@@ -453,25 +433,6 @@ async fn context_overflow_recovery_retries_the_step() {
     );
 }
 
-/// The emergency path used to announce `compaction.completed` and only
-/// then decide the round had done nothing. `count == 0` makes
-/// `force_compact_messages_with_summary_report` answer with a bare no-op —
-/// no summarizer request, the messages untouched,
-/// `tokensAfter == tokensBefore` — so that card claimed a success for zero
-/// work and the turn failed a line later anyway.
-///
-/// v2 gets the same outcome from the other side: `fullCompactionService`
-/// throws on an empty summary inside `compactionRound`, so
-/// `compactionWorker` never reaches its `CompactionCompleted` dispatch and
-/// the `catch` lands on `cancelActive` -> `CompactionCancelled`. The turn
-/// loop already owes a terminal event once `compaction.started` is out, so
-/// the question is only which one; `cancelled` is the one that matches
-/// what happened.
-///
-/// `[system, single user]` is what drives `count` to 0:
-/// `can_split_after` refuses to cut after a `user` message, so the split
-/// search finds no candidate and `fit_compact_count_to_window(0)` floors
-/// the count.
 #[tokio::test]
 async fn overflow_without_a_split_point_reports_cancelled_not_completed() {
     struct AlwaysOverflowLlm {
@@ -496,11 +457,20 @@ async fn overflow_without_a_split_point_reports_cancelled_not_completed() {
             params: LLMChatParams,
         ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
         {
-            let is_summarizer = params
-                .messages
-                .first()
-                .is_some_and(|message| message.content.contains("conversation summarizer"));
+            let is_summarizer = params.messages.last().is_some_and(|message| {
+                message
+                    .content
+                    .contains("You are about to run out of context")
+            });
             if is_summarizer {
+                assert_eq!(
+                    params
+                        .messages
+                        .first()
+                        .map(|message| message.content.as_str()),
+                    Some("sys"),
+                    "the summarizer carries the agent's profile system prompt"
+                );
                 self.summarizer_calls.fetch_add(1, Ordering::SeqCst);
                 return Box::pin(async move {
                     Ok(LLMChatResponse {
@@ -549,6 +519,7 @@ async fn overflow_without_a_split_point_reports_cancelled_not_completed() {
     ];
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-overflow-no-split".into(),
@@ -594,11 +565,6 @@ async fn overflow_without_a_split_point_reports_cancelled_not_completed() {
     );
 }
 
-/// A summarizer that fails outright is a different event from one that
-/// produces nothing, and until now nothing observed which one was emitted:
-/// renaming the `compaction_failed` telemetry event left every test in this
-/// module green. The event name is the whole payload a consumer routes on,
-/// so an unobserved name is an unobserved event.
 #[tokio::test]
 async fn a_failing_summarizer_reports_compaction_failed() {
     struct FailingSummarizerLlm {
@@ -623,14 +589,22 @@ async fn a_failing_summarizer_reports_compaction_failed() {
             params: LLMChatParams,
         ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
         {
-            let is_summarizer = params
-                .messages
-                .first()
-                .is_some_and(|message| message.content.contains("conversation summarizer"));
+            let is_summarizer = params.messages.last().is_some_and(|message| {
+                message
+                    .content
+                    .contains("You are about to run out of context")
+            });
             if is_summarizer {
+                assert_eq!(
+                    params
+                        .messages
+                        .first()
+                        .map(|message| message.content.as_str()),
+                    Some("sys"),
+                    "the summarizer carries the agent's profile system prompt"
+                );
                 self.summarizer_calls.fetch_add(1, Ordering::SeqCst);
-                // The failure the emergency path must report, as opposed to
-                // an empty summary, which is a no-op with its own event.
+
                 return Box::pin(async move {
                     Err(Box::new(std::io::Error::other("summarizer exploded"))
                         as Box<dyn std::error::Error + Send + Sync>)
@@ -653,8 +627,6 @@ async fn a_failing_summarizer_reports_compaction_failed() {
     let (capturing, events) = EventCapturingCallbacks::new(rpc_callbacks(server.clone()));
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
-    // A history with a split point, so the emergency path actually asks the
-    // summarizer instead of flooring the count to zero.
     let mut messages = vec![LLMMessage {
         role: "system".into(),
         content: "sys".into(),
@@ -669,6 +641,7 @@ async fn a_failing_summarizer_reports_compaction_failed() {
     }
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-compaction-failed".into(),
@@ -709,16 +682,12 @@ async fn a_failing_summarizer_reports_compaction_failed() {
         1,
         "one compaction failed once; saw {recorded:?}"
     );
-    // v2's `CompactionFailedEvent` property names and required set. `reason`
-    // and a string `turn_id` were this engine's invention: v2 has no
-    // `reason` field, its `turn_id` is a numeric per-agent turn index, and
-    // its `error_type` is the class name.
+
     assert_eq!(failed[0]["source"], "auto");
     assert!(failed[0]["tokens_before"].is_u64());
     assert!(failed[0]["duration_ms"].is_u64());
     assert_eq!(failed[0]["round"], 1, "the first overflow round");
-    // `retry_count` is the per-round budget the config allows, which is what
-    // v2 reports for the round that ran out of retries.
+
     assert!(failed[0]["retry_count"].is_u64());
     let error_type = failed[0]["error_type"].as_str().unwrap_or_default();
     assert!(
@@ -726,16 +695,11 @@ async fn a_failing_summarizer_reports_compaction_failed() {
         "the failure class must be named: {failed:?}"
     );
     assert!(failed[0].get("reason").is_none());
-    // `turn_id` is v2's numeric per-agent index. This test's wire id carries
-    // none (`test-compaction-cap`), so the property is absent rather than a
-    // string standing in for a number.
+
     assert!(failed[0].get("turn_id").is_none());
-    // `thinking_effort` is required by v2; the stub transport reports no
-    // effort, and `none` is the wire's own spelling for that.
+
     assert_eq!(failed[0]["thinking_effort"], "none");
 
-    // The terminal card still goes out: the turn owes one once
-    // compaction.started has been emitted.
     let terminal: Vec<String> = recorded
         .iter()
         .filter_map(|event| event.get("type").and_then(|kind| kind.as_str()))
@@ -745,10 +709,6 @@ async fn a_failing_summarizer_reports_compaction_failed() {
     assert_eq!(terminal, ["compaction.started", "compaction.cancelled"]);
 }
 
-/// v2 `nextProjectionPolicyForError`: a provider "request too large"
-/// degrades the older media and retries the step; a second rejection
-/// strips every media part. The step layer retries neither, so the
-/// repetition this test observes is the projection fallback's.
 #[tokio::test]
 async fn a_too_large_request_degrades_then_strips_and_retries() {
     struct TooLargeLlm {
@@ -809,9 +769,7 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
     let callbacks = rpc_callbacks(server);
     let dir = tempfile::tempdir().unwrap();
     let files = crate::server::files::FileStore::with_root(dir.path().to_path_buf());
-    // Real blobs, so the resolver inlines them instead of degrading the
-    // reference to its unavailable placeholder. The saved ids are what
-    // the messages reference.
+
     let mut file_ids = Vec::new();
     for index in 0..4 {
         let meta = files
@@ -819,15 +777,17 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
                 &format!("img-{index}.png"),
                 "image/png",
                 None,
-                &[b"\x89PNG\r\n\x1a\n" as &[u8], format!("PNGDATA-{index}").as_bytes()].concat(),
+                &[
+                    b"\x89PNG\r\n\x1a\n" as &[u8],
+                    format!("PNGDATA-{index}").as_bytes(),
+                ]
+                .concat(),
             )
             .unwrap();
         file_ids.push(meta.id);
     }
     let resolver = crate::llm::media_resolver::MediaResolver::with_store(files);
 
-    // Four media references across the history: the degrade keeps the
-    // two newest, the strip takes the rest.
     let mut messages = vec![LLMMessage {
         role: "system".into(),
         content: "sys".into(),
@@ -846,6 +806,7 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
     }
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-too-large".into(),
@@ -872,8 +833,7 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
         result.is_ok(),
         "the stripped retry must succeed: {result:?}"
     );
-    // Three step calls: the original, the degraded retry, the stripped
-    // retry — and the media count falls 4 → 2 → 0.
+
     assert_eq!(llm.step_calls.load(Ordering::SeqCst), 3);
     assert_eq!(
         llm.seen_media.lock().unwrap().as_slice(),
@@ -882,9 +842,6 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
     );
 }
 
-/// v2 #4183: interrupting the turn cancels an in-flight media upload — the
-/// resolve future is dropped, taking the upload's HTTP request with it —
-/// and an already-cancelled turn never starts one at all.
 #[tokio::test]
 async fn an_interruption_cancels_an_in_flight_media_upload() {
     struct UploadLlm {
@@ -917,9 +874,6 @@ async fn an_interruption_cancels_an_in_flight_media_upload() {
         }
     }
 
-    // A server that reports each connection and never answers: the upload
-    // stays in flight until the client gives up on it. The sockets are held
-    // so accepting one does not close it.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (conn_tx, mut conn_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -963,8 +917,6 @@ async fn an_interruption_cancels_an_in_flight_media_upload() {
     let callbacks = rpc_callbacks(server_rpc);
     let mut budget = crate::llm::media_budget::MediaBudget::default();
 
-    // Mid-upload cancellation: the resolve returns promptly with nothing,
-    // instead of the turn waiting the upload out.
     {
         let token = tokio_util::sync::CancellationToken::new();
         let call = budgeted_request(
@@ -974,6 +926,8 @@ async fn an_interruption_cancels_an_in_flight_media_upload() {
             &messages,
             callbacks.as_ref(),
             Some(&token),
+            u64::MAX,
+            None,
         );
         tokio::pin!(call);
         tokio::select! {
@@ -991,8 +945,6 @@ async fn an_interruption_cancels_an_in_flight_media_upload() {
         );
     }
 
-    // An already-cancelled token never starts the upload at all (v2's
-    // `throwIfAborted` at entry).
     let token = tokio_util::sync::CancellationToken::new();
     token.cancel();
     let out = budgeted_request(
@@ -1002,6 +954,8 @@ async fn an_interruption_cancels_an_in_flight_media_upload() {
         &messages,
         callbacks.as_ref(),
         Some(&token),
+        u64::MAX,
+        None,
     )
     .await
     .unwrap();
@@ -1015,10 +969,6 @@ async fn an_interruption_cancels_an_in_flight_media_upload() {
     server.abort();
 }
 
-/// v2 #4413: a media recovery the provider forced on one turn is agent-level
-/// state — the next turn starts from the recovered projection instead of
-/// re-sending the rejected media, and a history rewrite (undo) or a model
-/// switch invalidates it.
 #[tokio::test]
 async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
     struct RecoveringLlm {
@@ -1031,8 +981,6 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
             "sys"
         }
         fn model_name(&self) -> &str {
-            // The Mutex guard cannot escape; leak once per switch — tests run
-            // a handful of switches at most.
             let name = self.model.lock().unwrap().clone();
             Box::leak(name.into_boxed_str())
         }
@@ -1091,7 +1039,11 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
                 &format!("img-{index}.png"),
                 "image/png",
                 None,
-                &[b"\x89PNG\r\n\x1a\n" as &[u8], format!("PNGDATA-{index}").as_bytes()].concat(),
+                &[
+                    b"\x89PNG\r\n\x1a\n" as &[u8],
+                    format!("PNGDATA-{index}").as_bytes(),
+                ]
+                .concat(),
             )
             .unwrap();
         file_ids.push(meta.id);
@@ -1099,8 +1051,6 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
     let resolver = crate::llm::media_resolver::MediaResolver::with_store(files);
     let recovery = crate::llm::media_budget::SharedMediaRecovery::default();
 
-    // The session history keeps the original references; each turn gets a
-    // fresh copy (production re-reads the store per turn).
     let history = |prompt: &str| {
         let mut messages = vec![LLMMessage {
             role: "system".into(),
@@ -1126,6 +1076,7 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
         messages
     };
     let input_for = |messages: Vec<LLMMessage>, turn_id: &str| RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: turn_id.into(),
@@ -1147,7 +1098,6 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
         toolset: None,
     };
 
-    // Turn 1: the 413 fires the degrade (4 → 2) and records the recovery.
     let result = run_turn(input_for(history("one"), "t1"), &callbacks).await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(llm.step_calls.load(Ordering::SeqCst), 2);
@@ -1162,8 +1112,6 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
         Some(&crate::llm::media_budget::MediaRecoveryAction::Degraded(2)),
     );
 
-    // Turn 2: the recovery applies before the first request — no rejection
-    // needed, the projection is already degraded.
     let result = run_turn(input_for(history("two"), "t2"), &callbacks).await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(llm.step_calls.load(Ordering::SeqCst), 3);
@@ -1173,21 +1121,16 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
         "the second turn must start degraded instead of re-sending 4 media"
     );
 
-    // A model switch invalidates the recovery (v2 keys it by model alias).
     *llm.model.lock().unwrap() = "other-model".to_string();
     let result = run_turn(input_for(history("three"), "t3"), &callbacks).await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(llm.seen_media.lock().unwrap().as_slice(), &[4, 2, 2, 4]);
 
-    // Back on the original model the recovery applies again (it was keyed
-    // for it and never invalidated by the switch).
     *llm.model.lock().unwrap() = "rec-model".to_string();
     let result = run_turn(input_for(history("four"), "t4"), &callbacks).await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(llm.seen_media.lock().unwrap().as_slice(), &[4, 2, 2, 4, 2]);
 
-    // A history rewrite (undo / set_history / clear_history) advances the
-    // revision and invalidates the recovery.
     recovery.lock().unwrap().advance_revision();
     let result = run_turn(input_for(history("five"), "t5"), &callbacks).await;
     assert!(result.is_ok(), "{result:?}");
@@ -1197,10 +1140,6 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
     );
 }
 
-/// v2 `nextProjectionPolicyForError`'s image-format arm
-/// (`isImageFormatError`): the provider rejects an image, and the
-/// request is retried with every media part stripped — no degrade
-/// round, the way v2 gives it none.
 #[tokio::test]
 async fn an_image_format_rejection_strips_the_media_and_retries() {
     struct ImageFormatLlm {
@@ -1268,7 +1207,11 @@ async fn an_image_format_rejection_strips_the_media_and_retries() {
                 &format!("img-{index}.png"),
                 "image/png",
                 None,
-                &[b"\x89PNG\r\n\x1a\n" as &[u8], format!("PNGDATA-{index}").as_bytes()].concat(),
+                &[
+                    b"\x89PNG\r\n\x1a\n" as &[u8],
+                    format!("PNGDATA-{index}").as_bytes(),
+                ]
+                .concat(),
             )
             .unwrap();
         file_ids.push(meta.id);
@@ -1293,6 +1236,7 @@ async fn an_image_format_rejection_strips_the_media_and_retries() {
     }
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-image-format".into(),
@@ -1319,15 +1263,11 @@ async fn an_image_format_rejection_strips_the_media_and_retries() {
         result.is_ok(),
         "the stripped retry must succeed: {result:?}"
     );
-    // Two step calls, and the media goes straight to zero — the
-    // image-format arm has no degrade round.
+
     assert_eq!(llm.step_calls.load(Ordering::SeqCst), 2);
     assert_eq!(llm.seen_media.lock().unwrap().as_slice(), &[3, 0]);
 }
 
-/// The media budget degrades an over-budget request instead of failing it:
-/// the oldest media leave the request, the history keeps them, and the
-/// omission reaches the user as a `warning` event.
 #[tokio::test]
 async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() {
     use std::sync::Mutex;
@@ -1380,6 +1320,7 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
         }],
         tool_calls: Vec::new(),
         tool_call_id: None,
+        tools: Vec::new(),
 
         prompt_id: None,
         origin: None,
@@ -1393,6 +1334,7 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-media-budget".into(),
@@ -1429,8 +1371,7 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
         )
     };
     let omitted = |message: &LLMMessage| message.blocks.iter().any(omitted_block);
-    // Consecutive real user messages merge on the wire (v2
-    // `canMergeUserMessage`), so media are counted per block, not per message.
+
     let media: Vec<&ContentBlock> = sent
         .iter()
         .flat_map(|m| m.blocks.iter())
@@ -1470,11 +1411,131 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
     );
 }
 
-/// v2 `compaction_finished` (`fullCompactionService.ts:768-795`): a successful
-/// compaction reports the round's telemetry — the summarization request's
-/// usage included — and not only the failure event. Before this, a successful
-/// compaction produced no telemetry at all, so the cost of the summarizer call
-/// was invisible.
+#[tokio::test]
+async fn a_request_over_the_byte_budget_evicts_media_before_sending() {
+    use std::sync::Mutex;
+
+    struct CaptureLlm {
+        captured: Arc<Mutex<Vec<LLMMessage>>>,
+    }
+    impl LLM for CaptureLlm {
+        fn system_prompt(&self) -> &str {
+            "base prompt"
+        }
+        fn model_name(&self) -> &str {
+            "capture"
+        }
+        fn is_retryable_error(&self, _: &str) -> bool {
+            false
+        }
+        fn chat(
+            &self,
+            params: LLMChatParams,
+        ) -> BoxFuture<'_, Result<LLMChatResponse, Box<dyn std::error::Error + Send + Sync>>>
+        {
+            let captured = self.captured.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = params.messages.to_vec();
+                Ok(LLMChatResponse {
+                    content: String::new(),
+                    thinking: vec![],
+                    tool_calls: vec![],
+                    finish_reason: Some("stop".into()),
+                    usage: TokenUsage {
+                        input_tokens: 5,
+                        output_tokens: 3,
+                        total_tokens: 8,
+                        ..Default::default()
+                    },
+                    timing: None,
+                })
+            })
+        }
+    }
+
+    let image = |tag: &str, bytes: usize| LLMMessage {
+        role: "user".into(),
+        content: String::new(),
+        blocks: vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: format!("{tag}{}", "A".repeat(bytes)),
+            name: None,
+        }],
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tools: Vec::new(),
+
+        prompt_id: None,
+        origin: None,
+    };
+    let captured: Arc<Mutex<Vec<LLMMessage>>> = Arc::new(Mutex::new(Vec::new()));
+    let llm = CaptureLlm {
+        captured: captured.clone(),
+    };
+    let recovery: Arc<Mutex<kimi_core::types::MediaRecoveryState>> = Arc::new(Mutex::new(
+        kimi_core::types::MediaRecoveryState::default(),
+    ));
+    let server = Arc::new(RpcServer::new());
+    let (capturing, events) = EventCapturingCallbacks::new(rpc_callbacks(server.clone()));
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
+
+    let input = RunTurnInput {
+        llm_request_byte_budget: 20 * 1024 * 1024,
+        agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
+        previous_turn_aborted: false,
+        turn_id: "test-request-byte-budget".into(),
+        llm: &llm,
+        messages: vec![
+            image("a", 8 * 1024 * 1024),
+            image("b", 8 * 1024 * 1024),
+            image("c", 8 * 1024 * 1024),
+        ],
+        tools: &[],
+        tool_defs: vec![],
+        max_steps: 1,
+        max_attempts: None,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: None,
+        hook_guard: None,
+        media: None,
+        media_dropped: None,
+        media_recovery: Some(recovery.clone()),
+        toolset: None,
+    };
+
+    run_turn(input, &callbacks).await.unwrap();
+
+    assert!(
+        recovery.lock().unwrap().applicable("capture").is_some(),
+        "the proactive eviction is recorded so the next turn keeps it"
+    );
+
+    let sent = captured.lock().unwrap().clone();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(
+        matches!(
+            &sent[1].blocks[0],
+            ContentBlock::Text { text, .. } if text == "[image omitted: dropped to fit the provider request size limit; re-read the file to view it]"
+        ),
+        "the oldest media is evicted before send: {:?}",
+        sent[1].blocks[0]
+    );
+    assert!(matches!(sent[1].blocks[1], ContentBlock::Image { .. }));
+    assert!(matches!(sent[1].blocks[2], ContentBlock::Image { .. }));
+    let warnings: Vec<serde_json::Value> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.get("type").and_then(|t| t.as_str()) == Some("warning"))
+        .cloned()
+        .collect();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0]["code"], "media-degraded");
+}
+
 #[tokio::test]
 async fn a_successful_overflow_compaction_reports_compaction_finished() {
     struct UsageSummarizerLlm {
@@ -1535,8 +1596,7 @@ async fn a_successful_overflow_compaction_reports_compaction_finished() {
     let llm = UsageSummarizerLlm {
         calls: AtomicU32::new(0),
     };
-    // A history with a split point, so the emergency path actually asks the
-    // summarizer instead of flooring the count to zero.
+
     let mut messages = vec![LLMMessage {
         role: "system".into(),
         content: "sys".into(),
@@ -1554,6 +1614,7 @@ async fn a_successful_overflow_compaction_reports_compaction_finished() {
     let (capturing, events) = EventCapturingCallbacks::new(rpc_callbacks(server.clone()));
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-compaction-finished".into(),
@@ -1596,25 +1657,19 @@ async fn a_successful_overflow_compaction_reports_compaction_finished() {
     assert_eq!(payload["source"], "auto");
     assert_eq!(payload["round"], 1);
     assert_eq!(payload["retry_count"], 0);
-    // v2 reports the measured pair; it does not promise the projection
-    // shrinks (a short history plus a long summary can grow).
+
     assert!(payload["tokens_before"].as_u64().unwrap() > 0);
     assert!(payload["tokens_after"].as_u64().unwrap() > 0);
     assert!(payload["compacted_count"].as_u64().unwrap() > 0);
     assert!(payload["duration_ms"].is_u64());
     assert_eq!(payload["thinking_effort"], "none");
-    // v2 `usageTelemetry`: input_tokens is the *total* input (uncached plus
-    // both cache buckets), and the request that succeeded is the one reported.
+
     assert_eq!(payload["input_tokens"], 10);
     assert_eq!(payload["output_tokens"], 3);
     assert_eq!(payload["input_cache_read"], 2);
     assert_eq!(payload["input_cache_creation"], 1);
 }
 
-/// v2 `applyCompaction`'s `tokensAfter` in the turn loop's own gauge: after a
-/// compaction the gauge takes the summary's measured output instead of
-/// re-estimating its text, so the next threshold decision is not driven by a
-/// guess. A later `sync` with no new messages keeps the measured figure.
 #[test]
 fn the_in_turn_gauge_rebases_on_the_measured_summary_output() {
     let summary = LLMMessage {

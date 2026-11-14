@@ -104,23 +104,23 @@ impl ProgressThrottle {
 }
 
 pub mod agent_tool;
-mod args_format;
-pub mod args_validate;
-pub mod ask_user_question;
-mod bash_exec;
+pub(crate) mod args_format;
+pub use crate::tool::args_validator as args_validate;
+pub(crate) mod bash_exec;
 pub mod bash_null_redirect;
 pub mod bash_target_dirs;
 pub mod before_execute;
+pub mod builtin_assembly;
 pub mod core_tool_defs;
 pub mod create_goal;
 pub mod cron_tools;
-mod dispatch;
+pub(crate) mod dispatch;
 pub mod exit_plan_mode;
 pub mod external_hooks;
 pub mod fetch_url;
-mod file_ops;
+pub(crate) mod file_ops;
 pub mod get_goal;
-pub mod github;
+pub mod git_memory;
 pub mod goal_guard;
 pub mod goal_tools;
 pub mod knowledge_tool;
@@ -132,6 +132,7 @@ pub mod memory_filing;
 pub mod memory_history;
 pub mod memory_list;
 pub mod memory_list_handler;
+pub mod memory_graph_tool;
 pub mod memory_lock;
 pub mod memory_paths;
 pub mod memory_read;
@@ -144,16 +145,17 @@ pub mod memory_write;
 pub mod memory_write_handler;
 pub mod mode_mutex;
 pub mod moonshot_service;
+pub mod notify_user;
 pub mod plan_mode;
 pub mod powershell;
 pub mod project_identity;
 pub mod read_media;
-mod regex_js;
+pub(crate) mod regex_js;
 pub mod registry;
 pub mod resolve;
 pub mod run_code;
 pub mod sandbox;
-mod search;
+pub(crate) mod search;
 pub mod select_tools;
 pub mod session_query;
 pub mod shell_results;
@@ -241,6 +243,9 @@ pub const NATIVE_TOOL_NAMES: &[&str] = &[
     "skill",
     "knowledge",
     "memory",
+    "memorygraph",
+    "repomap",
+    "repo_map",
     "workflow",
     "run_code",
     "sessionquery",
@@ -260,8 +265,12 @@ pub const NATIVE_TOOL_NAMES: &[&str] = &[
     "tower_spawn",
     "towermerge",
     "tower_merge",
+    "towerrebase",
+    "tower_rebase",
     "towerteardown",
     "tower_teardown",
+    "towercomplete",
+    "tower_complete",
     "towersend",
     "tower_send",
     "towerinbox",
@@ -275,6 +284,7 @@ pub const NATIVE_TOOL_NAMES: &[&str] = &[
     "towerstatus",
     "tower_status",
     "select_tools",
+    "selecttools",
 ];
 
 pub fn is_native_tool_name(tool_name: &str) -> bool {
@@ -283,7 +293,7 @@ pub fn is_native_tool_name(tool_name: &str) -> bool {
 
 pub fn is_builtin_tool_name(tool_name: &str) -> bool {
     let lowered = tool_name.to_ascii_lowercase();
-    NATIVE_TOOL_NAMES.contains(&lowered.as_str()) || github::is_github_tool(tool_name)
+    NATIVE_TOOL_NAMES.contains(&lowered.as_str()) || crate::agent::tools::github::github_legacy::is_github_tool(tool_name)
 }
 
 pub fn canonical_tool_name<'a>(name: &'a str, table: &'a [ToolInfo]) -> &'a str {
@@ -410,23 +420,35 @@ pub struct NativeToolset {
 
     callbacks: Option<std::sync::Arc<dyn crate::callbacks::HostCallbacks>>,
 
-    github_credentials: Option<github::GitHubCredentials>,
+    github_credentials: Option<crate::agent::tools::github::github_legacy::GitHubCredentials>,
     caller_agent_id: Option<String>,
 
     permission_mode: Option<crate::permission::PermissionMode>,
     session_id: Option<String>,
+    non_interactive: bool,
     task_runner: Option<std::sync::Arc<crate::storage::TaskRunner>>,
 
-    tower_wake_runtime: Arc<std::sync::Mutex<Option<Arc<tower::wake::TowerWakeRuntime>>>>,
+    tower_wake_runtime:
+        Arc<std::sync::Mutex<Option<Arc<crate::features::tower::wake::TowerWakeRuntime>>>>,
 
     file_history: Arc<std::sync::Mutex<Option<FileHistoryCtx>>>,
+
+    operation_log: crate::features::operationLog::operationService::AgentOperationService,
+
+    file_memory: Option<Arc<dyn crate::agent::tools::file_memory::FileMemoryProvider>>,
+
+    git_memory: Option<Arc<crate::tools::git_memory::GitMemoryService>>,
 
     session_store:
         Arc<std::sync::Mutex<Option<Arc<crate::session::sqlite_store::SqliteSessionStore>>>>,
 
     turn_id: Arc<std::sync::atomic::AtomicUsize>,
 
+    llm_trace_id: Arc<std::sync::Mutex<Option<String>>>,
+
     loaded_tools: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+
+    tool_select_pending_loaded: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 
     selection_failures: Arc<std::sync::Mutex<crate::tools::select_tools::SelectionFailureTracker>>,
 
@@ -467,9 +489,17 @@ pub struct NativeToolset {
 
     tower_max_running_tasks: Option<u32>,
 
+    /// Whether the host advertises and displays `NotifyUser`. Mirrors v2's
+    /// `notifyUserAvailable`; when false the tool is absent from the table and
+    /// a host-forwarded call returns the suppressed-output notice.
+    notify_user_enabled: bool,
+
     provider: Option<String>,
 
     shell_bridge: std::sync::Arc<crate::native::shell_path_bridge::ShellPathBridge>,
+
+    memory_graph:
+        Arc<std::sync::Mutex<Option<Arc<crate::features::associativeMemory::service::AssociativeMemoryService>>>>,
 }
 
 #[derive(Clone)]
@@ -545,7 +575,7 @@ fn blocking_pool_failure(mutating: bool, message: String) -> Option<ExecutableTo
     }
 }
 
-fn ok_result(content: String) -> ExecutableToolResult {
+pub(crate) fn ok_result(content: String) -> ExecutableToolResult {
     ExecutableToolResult {
         spill: None,
         parts: Vec::new(),
@@ -558,7 +588,7 @@ fn ok_result(content: String) -> ExecutableToolResult {
     }
 }
 
-fn err_result(content: String) -> ExecutableToolResult {
+pub(crate) fn err_result(content: String) -> ExecutableToolResult {
     ExecutableToolResult {
         spill: None,
         parts: Vec::new(),

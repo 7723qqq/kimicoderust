@@ -5,46 +5,61 @@
 
 pub mod _base;
 pub mod acp;
+pub mod agent;
+pub mod app;
 pub mod callbacks;
 pub mod compaction;
 pub mod config;
 pub mod cron;
+pub mod debug;
 pub mod default_workspace;
 pub use kimi_core::env;
 pub mod environment;
+pub mod errors;
 pub mod events;
+pub mod features;
 pub mod goal;
 pub mod hooks;
+pub mod human;
 pub mod i18n;
 pub mod injection;
-pub mod knowledge;
 pub mod llm;
+pub mod llm_adapter;
 pub mod mcp;
+pub mod mcp_core;
 #[cfg(feature = "napi")]
 pub mod napi_bindings;
 pub mod native;
+pub mod os;
 pub mod permission;
+pub mod persistence;
 pub mod pipeline;
 pub use kimi_core::primitives;
+pub mod program;
 pub mod project_local_config;
 pub mod prompt;
 pub mod region;
+pub mod remote;
 pub mod repl;
 pub mod rpc;
 pub mod server;
 pub mod session;
 pub mod skills;
+pub mod state;
 pub mod storage;
 pub mod subagent;
 pub mod swarm;
 #[cfg(test)]
 mod test_support;
 pub use kimi_core::tool_input_display;
+pub mod tool;
 pub mod tool_result_truncation;
 pub mod tools;
 pub use kimi_core::turn_events;
 pub mod turn_loop;
+pub mod wire;
 pub mod workflow;
+pub mod workspace;
 pub mod workspace_trust;
 pub mod workspace_trust_disclosure;
 
@@ -125,6 +140,7 @@ pub fn event_store_message_to_llm(msg: crate::native::event_store::Message) -> L
         tool_call_id: msg.tool_call_id,
         prompt_id: None,
         origin: None,
+        tools: Vec::new(),
     }
 }
 
@@ -168,7 +184,9 @@ impl crate::callbacks::HostCallbacks for NativeHostCallbacks {
             // chain in `crate::permission`. It reads the tool name *and* its
             // arguments, so a Bash call still reaches `DangerousCommandAsk`
             // through `args["command"]` without a special case here.
-            let verdict = perm.evaluate(&req.tool_name, &req.arguments);
+            let accesses =
+                crate::turn_loop::tool_scheduler::infer_tool_accesses(&req.tool_name, &req.arguments);
+            let verdict = perm.evaluate_with_accesses(&req.tool_name, &req.arguments, &accesses);
             match verdict.decision {
                 VerdictDecision::Allow => Ok(crate::rpc::types::PermissionDecision::allow()),
                 VerdictDecision::Deny => Ok(crate::rpc::types::PermissionDecision::deny(
@@ -482,6 +500,7 @@ impl KimiEngine {
         };
 
         let input = crate::turn_loop::types::RunTurnInput {
+            llm_request_byte_budget: crate::config::DEFAULT_LLM_REQUEST_BYTE_BUDGET,
             agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
             max_attempts: None,
             turn_id: turn_id.clone(),

@@ -41,7 +41,22 @@ pub fn build_request_with_options(
     build_request_full(model, max_tokens, messages, tools, stream, None, None)
 }
 
-pub fn build_request_full(
+pub fn effective_max_tokens(
+    model: &str,
+    max_tokens: u32,
+    completion_cap: Option<u32>,
+    is_kimi: bool,
+) -> u32 {
+    if is_kimi {
+        return completion_cap.unwrap_or(max_tokens);
+    }
+    let capped = completion_cap
+        .map(|cap| max_tokens.min(cap))
+        .unwrap_or(max_tokens);
+    claude_max_tokens_ceiling(model).map_or(capped, |ceiling| capped.min(ceiling))
+}
+
+fn build_request_full(
     model: &str,
     max_tokens: u32,
     messages: &[WireMessage],
@@ -101,6 +116,9 @@ pub fn build_request_for_provider(
     for m in messages {
         match m.role.as_str() {
             "system" => {
+                if m.content.is_empty() && m.blocks.is_empty() {
+                    continue;
+                }
                 if !system.is_empty() {
                     system.push_str("\n\n");
                 }
@@ -196,14 +214,7 @@ pub fn build_request_for_provider(
     let thinking_budget = thinking_budget
         .filter(|budget| *budget > 0)
         .or(effort_budget);
-    let effective_max_tokens = if is_kimi {
-        completion_cap.unwrap_or(max_tokens)
-    } else {
-        let capped = completion_cap
-            .map(|cap| max_tokens.min(cap))
-            .unwrap_or(max_tokens);
-        claude_max_tokens_ceiling(model).map_or(capped, |ceiling| capped.min(ceiling))
-    };
+    let effective_max_tokens = effective_max_tokens(model, max_tokens, completion_cap, is_kimi);
     let thinking_budget = if !is_kimi && !adaptive_thinking {
         match thinking_budget {
             Some(budget) if budget > 0 && budget >= effective_max_tokens => {
@@ -1035,6 +1046,7 @@ mod tests {
                 ],
                 tool_calls: Vec::new(),
                 tool_call_id: Some("tu_1".into()),
+                tools: Vec::new(),
             },
         ];
 
@@ -1078,6 +1090,7 @@ mod tests {
                 ],
                 tool_calls: Vec::new(),
                 tool_call_id: Some("tu_1".into()),
+                tools: Vec::new(),
             },
         ];
 
@@ -1553,6 +1566,7 @@ mod tests {
             blocks: vec![],
             tool_calls: vec![],
             tool_call_id: None,
+            tools: Vec::new(),
         }];
         let req_thinking = build_request_full(
             "claude-3-7-sonnet-20250219",
@@ -1840,6 +1854,7 @@ mod tests {
                     args_parse_error: None,
                 }],
                 tool_call_id: None,
+                tools: Vec::new(),
             },
         ];
         let req = build_request("claude-3-7-sonnet", 4096, &msgs, &[]);
@@ -2032,6 +2047,7 @@ mod tests {
                 args_parse_error: None,
             }],
             tool_call_id: None,
+            tools: Vec::new(),
         }];
         let req = build_request("claude-3-7-sonnet", 4096, &msgs, &[]);
         let asst_content = req["messages"][0]["content"].as_array().unwrap();

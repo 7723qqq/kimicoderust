@@ -1,13 +1,3 @@
-/// Grep tool — content search via the `regex` crate.
-///
-/// Pure-Rust grep implementation. Supports regex patterns, case-insensitive
-/// search, context lines, output modes (content/files_with_matches/count),
-/// glob filtering, head_limit, and offset.
-///
-/// Mirrors the v2 grep tool (`agent/tools/os/grep/grepTool.ts`); `grep.ts` in
-/// that directory is only the input schema. `multiline` buffers the file
-/// whole and marks every physical line a match spans — the same `-U
-/// --multiline-dotall` contract the live engine tool implements.
 #[cfg(feature = "napi")]
 use napi_derive::napi;
 
@@ -22,19 +12,14 @@ use std::time::{Duration, Instant};
 
 use crate::native::file_type::is_sensitive_file;
 
-/// Default head limit for grep output.
 pub const DEFAULT_HEAD_LIMIT: usize = 250;
-/// Maximum stdout bytes before truncation.
+
 pub const MAX_OUTPUT_BYTES: usize = 512 * 1024;
-/// Default timeout for grep searches (milliseconds). Mirrors the TS tool's
-/// `DEFAULT_TIMEOUT_MS = 20_000` cap so a runaway walk does not stall the agent.
+
 pub const DEFAULT_TIMEOUT_MS: u64 = 20_000;
 
-/// VCS metadata directories excluded from every grep walk, regardless of
-/// `.gitignore`. Mirrors the TS `VCS_DIRECTORIES_TO_EXCLUDE` list.
 const VCS_DIRECTORIES_TO_EXCLUDE: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
 
-/// Result of a grep operation.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "napi", napi(object))]
 pub struct GrepResult {
@@ -42,13 +27,12 @@ pub struct GrepResult {
     pub error: Option<String>,
     pub match_count: i32,
     pub file_count: i32,
-    /// Sensitive files that matched but were redacted from the output.
+
     pub filtered_sensitive: Vec<String>,
-    /// True if the search terminated because the configured timeout fired.
+
     pub timed_out: bool,
 }
 
-/// Output mode for grep results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     Content,
@@ -56,13 +40,11 @@ pub enum OutputMode {
     CountMatches,
 }
 
-/// Grep configuration.
 pub struct GrepConfig {
     pub pattern: String,
     pub path: Option<String>,
     pub glob: Option<String>,
-    /// Ripgrep-style file type filter (`ts`, `py`, `rust`, ...). Resolved
-    /// against a built-in extension table — see `file_type_to_globs`.
+
     pub file_type: Option<String>,
     pub output_mode: OutputMode,
     pub case_insensitive: bool,
@@ -73,10 +55,9 @@ pub struct GrepConfig {
     pub head_limit: usize,
     pub offset: usize,
     pub multiline: bool,
-    /// Skip files excluded by `.gitignore` and friends. Defaults to false
-    /// (i.e. ignore rules apply) to mirror the TS default.
+
     pub include_ignored: bool,
-    /// Hard wall-clock timeout. `None` disables the deadline.
+
     pub timeout_ms: Option<u64>,
 }
 
@@ -102,22 +83,14 @@ impl Default for GrepConfig {
     }
 }
 
-/// A single match result.
 struct MatchEntry {
     file: PathBuf,
     line_no: usize,
     line: String,
 }
 
-/// Cap on the total file content retained by the walker for content-mode
-/// output. The emitted excerpts are themselves capped at `MAX_OUTPUT_BYTES`,
-/// so anything beyond this budget is re-read per file at emission instead of
-/// being cached — without this, a large repo can buffer hundreds of MB.
 const CONTENT_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
-/// Peek the reader's head for a NUL byte — the classic binary marker.
-/// Peek-only (`fill_buf` does not consume), so streaming can continue on
-/// the same reader. Binary file bytes must never reach the model output.
 fn starts_with_nul(reader: &mut BufReader<fs::File>) -> bool {
     reader
         .fill_buf()
@@ -125,11 +98,6 @@ fn starts_with_nul(reader: &mut BufReader<fs::File>) -> bool {
         .unwrap_or(false)
 }
 
-/// Mark which physical lines the matches of `content` span, mirroring
-/// ripgrep's `-U --multiline-dotall` behaviour (and the live engine tool's
-/// `scan_grep_file_multiline`): every line a non-overlapping match touches is
-/// a match line, and the count is rg's `--count-matches` number. Returns
-/// `(match_count, per-line match flags)`.
 fn multiline_match_lines(regex: &regex::Regex, content: &str) -> (usize, Vec<bool>) {
     let lines = content.split('\n').count();
     let mut is_match_line = vec![false; lines];
@@ -137,8 +105,7 @@ fn multiline_match_lines(regex: &regex::Regex, content: &str) -> (usize, Vec<boo
     let bytes = content.as_bytes();
     let mut cursor = 0usize;
     let mut nl = 0usize;
-    // find_iter yields non-overlapping matches in increasing order, so a
-    // single newline cursor maps byte offsets to line indices in O(file).
+
     let mut line_at = |off: usize| -> usize {
         let target = off.min(bytes.len());
         while cursor < target {
@@ -153,8 +120,6 @@ fn multiline_match_lines(regex: &regex::Regex, content: &str) -> (usize, Vec<boo
     let mut total = 0usize;
     for m in regex.find_iter(content) {
         if m.start() == m.end() && m.start() >= content.len() {
-            // Zero-width match at EOF: rg drops it unless it is the only
-            // match in a file with no trailing newline.
             let dangling_last_line = !content.is_empty() && !content.ends_with('\n');
             if !(total == 0 && dangling_last_line) {
                 continue;
@@ -180,10 +145,6 @@ fn multiline_match_lines(regex: &regex::Regex, content: &str) -> (usize, Vec<boo
     (total, is_match_line)
 }
 
-/// Read the next line from `reader` into `out`, decoding lossy (invalid
-/// UTF-8 becomes U+FFFD). Returns `false` at EOF. Unlike `BufRead::lines`,
-/// an invalid-UTF-8 line does not abort the stream — a single decoded file
-/// used to silently drop every subsequent line.
 fn read_lossy_line(reader: &mut BufReader<fs::File>, buf: &mut Vec<u8>, out: &mut String) -> bool {
     buf.clear();
     let Ok(n) = reader.read_until(b'\n', buf) else {
@@ -200,8 +161,6 @@ fn read_lossy_line(reader: &mut BufReader<fs::File>, buf: &mut Vec<u8>, out: &mu
     true
 }
 
-// ============================================================================
-/// Search for a pattern in files under the given path.
 pub fn grep_search(config: &GrepConfig) -> GrepResult {
     let pattern_str = if config.case_insensitive {
         format!("(?i){}", config.pattern)
@@ -243,17 +202,12 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
         };
     }
 
-    // If search_path is a file, search just that file.
     if search_path.is_file() {
         return search_single_file(&search_path, &regex, config);
     }
 
-    // Build walker with ignore rules (respects .gitignore, etc.).
-    // `include_ignored=true` mirrors `rg --no-ignore`: disable .gitignore /
-    // .ignore / parent rules entirely, but VCS metadata + sensitive-file
-    // guards stay on because we apply them ourselves below.
     let mut builder = WalkBuilder::new(&search_path);
-    builder.hidden(false); // Search hidden files
+    builder.hidden(false);
     if config.include_ignored {
         builder.git_ignore(false);
         builder.git_exclude(false);
@@ -265,15 +219,12 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
         builder.git_exclude(true);
     }
 
-    // Apply glob filter (user-supplied).
     let glob_filter = config
         .glob
         .as_deref()
         .and_then(|g| globset::GlobBuilder::new(g).build().ok())
         .map(|g| g.compile_matcher());
 
-    // Apply file-type filter (`type=ts` → match `*.ts`, `*.tsx`, etc.).
-    // Mirrors the TS `--type` flag forwarded to ripgrep.
     let file_type_globs: Vec<globset::GlobMatcher> = config
         .file_type
         .as_deref()
@@ -298,12 +249,8 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
     let is_files_with_matches = config.output_mode == OutputMode::FilesWithMatches;
     let needs_full_content = config.output_mode == OutputMode::Content || needs_context;
 
-    // Collect results — use parallel walker for multi-file searches.
-    // This mirrors ripgrep's internal approach (same `ignore` crate).
     let file_matches: Mutex<Vec<(PathBuf, usize, std::time::SystemTime)>> = Mutex::new(Vec::new());
-    // Cache file content for content mode to avoid re-reading matched files.
-    // Bounded by `CONTENT_CACHE_MAX_BYTES`; beyond it, files are re-read at
-    // emission instead of being buffered unboundedly.
+
     let content_cache: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
     let cached_bytes = std::sync::atomic::AtomicUsize::new(0);
     let filtered_sensitive: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -370,10 +317,10 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
                 return ignore::WalkState::Continue;
             }
 
-            // Stream file line-by-line instead of loading entirely into memory.
-            // For files_with_matches: stop at first match (early termination).
-            // For count_matches: count all matches without building output.
-            // For content mode: accumulate lines for caching.
+
+
+
+
             let file = match fs::File::open(path) {
                 Ok(f) => f,
                 Err(_) => return ignore::WalkState::Continue,
@@ -388,11 +335,11 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
             let mut line = String::new();
 
             if config.multiline {
-                // Multiline (rg `-U --multiline-dotall`): cross-line matching
-                // cannot stream, so the file is buffered whole and every
-                // physical line a match spans counts as a match line — the
-                // same contract the live engine tool implements
-                // (`tools/mod.rs` `scan_grep_file_multiline`).
+
+
+
+
+
                 let mut raw: Vec<u8> = Vec::new();
                 if reader.read_to_end(&mut raw).is_err() || raw.contains(&0) {
                     return ignore::WalkState::Continue;
@@ -401,12 +348,12 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
                 let (count, _marked) = multiline_match_lines(regex, &content);
                 match_count = count;
                 if match_count > 0 && needs_full_content {
-                    // The renderer re-marks over the whole content; the cache
-                    // carries it so the file is not re-read.
+
+
                     accumulated_content.push_str(&content);
                 }
             } else if is_files_with_matches {
-                // Early termination: stop reading as soon as we find one match.
+
                 while read_lossy_line(&mut reader, &mut line_bytes, &mut line) {
                     if regex.find(&line).is_some() {
                         match_count = 1;
@@ -414,14 +361,14 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
                     }
                 }
             } else if needs_full_content {
-                // Content mode: accumulate lines while counting matches.
+
                 while read_lossy_line(&mut reader, &mut line_bytes, &mut line) {
                     match_count += regex.find_iter(&line).count();
                     accumulated_content.push_str(&line);
                     accumulated_content.push('\n');
                 }
             } else {
-                // Count mode: just count matches.
+
                 while read_lossy_line(&mut reader, &mut line_bytes, &mut line) {
                     match_count += regex.find_iter(&line).count();
                 }
@@ -455,7 +402,6 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
     file_matches.sort_by_key(|(_, _, mtime)| std::cmp::Reverse(*mtime));
 
     let content = if needs_full_content {
-        // Use cached content from walker to avoid re-reading matched files.
         let content_map: std::collections::HashMap<&Path, &str> = content_cache
             .iter()
             .map(|(path, content)| (path.as_path(), content.as_str()))
@@ -473,9 +419,6 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
             };
             let lines: Vec<&str> = content_str.split('\n').collect();
             let matched_lines: Vec<usize> = if config.multiline {
-                // Cross-line matches cannot be found per line: re-mark the
-                // whole content with the same contract the walker used, then
-                // treat the marked lines as the match set.
                 let (_, marked) = multiline_match_lines(&regex, &content_str);
                 marked
                     .into_iter()
@@ -492,10 +435,6 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
                     .collect()
             };
 
-            // Deduplicate context lines that fall inside overlapping windows
-            // (two matches closer together than the combined context), so a
-            // directory walk emits each line once — mirroring the single-file
-            // path and ripgrep's context-merge behavior.
             let mut shown_lines: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
             for &line_idx in &matched_lines {
@@ -583,9 +522,6 @@ pub fn grep_search(config: &GrepConfig) -> GrepResult {
 }
 
 fn search_single_file(path: &Path, regex: &regex::Regex, config: &GrepConfig) -> GrepResult {
-    // Sensitive-file guard: a caller pointing grep directly at `.env`
-    // (or similar) should not be able to bypass the redaction the
-    // directory walk applies.
     let path_str = path.to_string_lossy();
     if is_sensitive_file(&path_str) {
         return GrepResult {
@@ -598,8 +534,6 @@ fn search_single_file(path: &Path, regex: &regex::Regex, config: &GrepConfig) ->
         };
     }
 
-    // Binary (NUL-containing) files are skipped entirely: their bytes must
-    // never reach the model output, and a text grep on them is meaningless.
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -623,8 +557,7 @@ fn search_single_file(path: &Path, regex: &regex::Regex, config: &GrepConfig) ->
             timed_out: false,
         };
     }
-    // Lossy decode: an invalid-UTF-8 (e.g. GBK) file is searched instead of
-    // erroring the whole call out.
+
     let content = String::from_utf8_lossy(&bytes).to_string();
 
     let lines: Vec<&str> = content.split('\n').collect();
@@ -699,20 +632,12 @@ fn search_single_file(path: &Path, regex: &regex::Regex, config: &GrepConfig) ->
 fn format_entry_bytes(entry: &MatchEntry, config: &GrepConfig) -> usize {
     let path_len = entry.file.display().to_string().len();
     if config.line_numbers {
-        path_len + 1 + 10 + 1 + entry.line.len() + 1 // path:line_no:line\n
+        path_len + 1 + 10 + 1 + entry.line.len() + 1
     } else {
-        path_len + 1 + entry.line.len() + 1 // path:line\n
+        path_len + 1 + entry.line.len() + 1
     }
 }
 
-/// Map a ripgrep-style file type name to a list of glob patterns.
-///
-/// Only the most common languages are covered. Unknown types return an
-/// empty list, which makes the search match nothing — same behaviour as
-/// `rg --type unknown`, which exits with an error. We choose to fall
-/// through silently and rely on the caller's empty result to signal the
-/// mismatch, because the agent loop has no UI to escalate a malformed
-/// type name into an actionable error.
 fn file_type_to_globs(name: &str) -> Vec<String> {
     let lower = name.to_lowercase();
     let exts: &[&str] = match lower.as_str() {
@@ -805,9 +730,6 @@ mod tests {
         assert!(result.content.contains("1:hello world"));
     }
 
-    // Regression: `multiline` used to be passed to `RegexBuilder` inverted
-    // (`multi_line(!config.multiline)`), so a `multiline: false` search built
-    // a multiline regex and a `multiline: true` search did not.
     #[test]
     fn test_grep_multiline_flag_keeps_single_line_matches() {
         let dir = TempDir::new().unwrap();
@@ -827,9 +749,6 @@ mod tests {
         );
     }
 
-    // Multiline mode buffers the file and matches across the newline: a
-    // pattern spanning two physical lines finds the file, and the content
-    // window reports both lines the match spans.
     #[test]
     fn test_grep_multiline_matches_across_newlines() {
         let dir = TempDir::new().unwrap();
@@ -859,7 +778,6 @@ mod tests {
         assert!(!result.content.contains("plain.txt"));
     }
 
-    // The same pattern without multiline must not find the cross-line match.
     #[test]
     fn test_grep_single_line_mode_does_not_span_newlines() {
         let dir = TempDir::new().unwrap();
@@ -876,8 +794,6 @@ mod tests {
         assert_eq!(result.file_count, 0);
     }
 
-    // Binary files (NUL bytes) must be skipped — their content would
-    // otherwise flow verbatim into the model output.
     #[test]
     fn test_grep_binary_file_skipped() {
         let dir = TempDir::new().unwrap();
@@ -899,13 +815,10 @@ mod tests {
         assert!(!result.content.contains("bin.dat"));
     }
 
-    // An invalid-UTF-8 line must not silently abort the rest of the file:
-    // a match on a later line used to be lost entirely.
     #[test]
     fn test_grep_invalid_utf8_does_not_truncate() {
         let dir = TempDir::new().unwrap();
-        // First line contains an invalid UTF-8 byte; the matching line
-        // comes after it. `BufRead::lines` stopped at the invalid line.
+
         let mut data: Vec<u8> = Vec::new();
         data.extend_from_slice(b"\xff\xfe broken encoding line\n");
         data.extend_from_slice(b"target match here\n");
@@ -985,7 +898,6 @@ mod tests {
 
     #[test]
     fn test_grep_nonexistent_path() {
-        // Create and immediately drop a temp dir so the path no longer exists.
         let temp_dir = TempDir::new().unwrap();
         let nonexistent = temp_dir.path().join("subdir");
         drop(temp_dir);
@@ -1044,8 +956,6 @@ mod tests {
 
     #[test]
     fn test_grep_context_dedup_overlap() {
-        // Two matches closer together than the combined context window should
-        // not duplicate the shared lines between them (mirrors rg's context merge).
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("overlap.txt");
         let mut f = fs::File::create(&file).unwrap();
@@ -1063,7 +973,7 @@ mod tests {
             ..Default::default()
         });
         assert!(result.error.is_none());
-        // Each of lines 1..=5 should appear at most once in the rendered output.
+
         for label in ["line 1", "line 3", "line 5"] {
             assert_eq!(
                 result.content.matches(label).count(),
@@ -1071,7 +981,7 @@ mod tests {
                 "{label} should not be duplicated in overlapping context"
             );
         }
-        // The matched lines themselves must still be present.
+
         assert!(result.content.contains("MATCH A"));
         assert!(result.content.contains("MATCH B"));
     }

@@ -1,0 +1,6 @@
+{
+  "note": "Red verdict baseline for check-agent-parity. The current red count must not exceed this baseline and every current red path must already be listed here. Other gate failures are never baselined. Update only with bun run check:agent-parity:update after review.",
+  "redEntries": [
+
+  ]
+}

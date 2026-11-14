@@ -1,14 +1,15 @@
-
 pub mod domains;
 
 mod codes;
 mod error2;
+mod error_message;
 mod serialize;
 
 pub use codes::{
     DuplicateCode, ErrorCode, ErrorDomain, ErrorInfo, INTERNAL_CODE, NOT_IMPLEMENTED_CODE,
     VALIDATION_FAILED_CODE, error_info, is_error_code, register_error_domain,
 };
+pub use error_message::to_error_message;
 pub use error2::{
     Error2, Error2Options, ErrorDetails, is_error2, not_implemented, unwrap_error_cause,
 };

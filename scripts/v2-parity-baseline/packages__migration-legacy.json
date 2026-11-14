@@ -1,0 +1,139 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/migration-legacy. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/migration-legacy",
+  "redEntries": [
+    {
+      "tsPath": "atomic-write.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "detect.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "imported-session.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "kimi-cli-schema.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "marker.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration-errors-log.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "paths.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "prompt.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "report.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "run-migration.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/classify.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/close-tool-calls.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/content-part.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/migrate-one.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/source.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/state-writer.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/subagents.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/tool-call-display.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/translator.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/turn-structure.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/wire-writer.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "sessions/workdir-bucket.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "source-config.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "steps/config.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "steps/mcp.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "steps/plans.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "steps/skills.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "steps/user-history.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "stub-detect.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "types.ts",
+      "verdict": "unported"
+    }
+  ]
+}

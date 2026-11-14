@@ -1,22 +1,3 @@
-//! The models.dev catalog proxy (v2 `app/kosongConfig/modelsDevUpstream.ts` +
-//! `modelsDev.ts` + `modelsDevImportService.ts`).
-//!
-//! v2 serves the provider catalog from `https://models.dev/api.json`: a
-//! 10-minute TTL cache with in-flight dedup, a stale-cache then built-in
-//! snapshot fallback chain, and an import action that writes the chosen
-//! entry into the config's `[providers.*]` / `[models.*]` sections. The
-//! fork's catalog routes previously served a hardcoded list; this module is
-//! the proxy half, and the hardcoded list stays as the built-in snapshot
-//! the fallback chain ends in (the fork's equivalent of v2's
-//! `BUILT_IN_MODELS_DEV_JSON`).
-//!
-//! The mapping is a port of v2's `modelsDev.ts`: the wire type resolves
-//! from the entry's explicit `type`, then the npm/id inference, then the
-//! openai default (bedrock/cohere are proprietary-SDK rejects); the base
-//! URL resolves from the caller's override, then the catalog's `api`, then
-//! the needs-base-url state; models filter to usable chat models and map
-//! their modalities and reasoning options onto capabilities.
-
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,16 +7,14 @@ use serde_json::{Value, json};
 
 use crate::rpc::types::BoxFuture;
 
-/// v2 `MODELS_DEV_URL`.
 pub const MODELS_DEV_URL: &str = "https://models.dev/api.json";
-/// v2 `CACHE_TTL_MS`.
+
 const CACHE_TTL: Duration = Duration::from_secs(10 * 60);
-/// v2 `UPSTREAM_FETCH_TIMEOUT_MS`.
+
 const UPSTREAM_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// v2 passes the outbound user agent; the engine has no host to ask.
+
 const USER_AGENT: &str = "kimi-agent";
 
-/// The wire types v2 knows (`KNOWN_WIRE_TYPES`); anything else is a reject.
 const KNOWN_WIRE_TYPES: [&str; 6] = [
     "anthropic",
     "openai",
@@ -45,8 +24,6 @@ const KNOWN_WIRE_TYPES: [&str; 6] = [
     "vertexai",
 ];
 
-/// v2 `PROVIDER_ID_PATTERN` (`^[\p{L}\p{N}][\p{L}\p{N}\-_ ]*$`): a letter or
-/// digit first, then letters, digits, dash, underscore or space.
 pub fn is_provider_id(id: &str) -> bool {
     let mut chars = id.chars();
     match chars.next() {
@@ -55,8 +32,6 @@ pub fn is_provider_id(id: &str) -> bool {
     }
     chars.all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' '))
 }
-
-// ── catalog types (v2 `modelsDev.ts`) ─────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelEntry {
@@ -110,12 +85,8 @@ pub struct ProviderEntry {
     pub models: Option<BTreeMap<String, ModelEntry>>,
 }
 
-/// v2 `ModelsDevCatalog`.
 pub type Catalog = BTreeMap<String, ProviderEntry>;
 
-// ── import resolution (v2 `resolveModelsDevImport`) ───────────────────────
-
-/// v2 `ModelsDevImportResolution`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImportResolution {
     Ok {
@@ -147,8 +118,6 @@ fn has_embedding_marker(value: Option<&str>) -> bool {
             .any(|segment| segment == "embed")
 }
 
-/// v2 `isUsableChatModel`: the output must carry text, the status must not
-/// be deprecated/alpha, and nothing may look like an embedding model.
 fn is_usable_chat_model(model: &ModelEntry) -> bool {
     if let Some(outputs) = model.modalities.as_ref().and_then(|m| m.output.as_ref())
         && !outputs.iter().any(|modality| modality == "text")
@@ -186,9 +155,6 @@ fn infer_declared_wire(entry: &ProviderEntry) -> Option<&'static str> {
     None
 }
 
-/// v2 `resolveModelsDevWire`: the explicit type when it is a known wire
-/// type, the inference, then the openai default — with bedrock/cohere
-/// rejected as proprietary SDKs.
 fn resolve_wire(entry: &ProviderEntry) -> Option<&'static str> {
     if let Some(explicit) = entry.r#type.as_deref() {
         if is_wire_type(explicit) {
@@ -208,7 +174,6 @@ fn resolve_wire(entry: &ProviderEntry) -> Option<&'static str> {
     Some("openai")
 }
 
-/// v2 `adaptBaseUrlForWire`: the anthropic route strips a trailing `/v1`.
 fn adapt_base_url(base_url: &str, wire: &str) -> String {
     if wire != "anthropic" {
         return base_url.to_string();
@@ -220,8 +185,6 @@ fn adapt_base_url(base_url: &str, wire: &str) -> String {
     }
 }
 
-/// v2 `modelsDevBaseUrl`: the catalog's `api`, unless it carries a
-/// placeholder.
 fn models_dev_base_url(entry: &ProviderEntry, wire: &str) -> Option<String> {
     let api = entry.api.as_deref()?;
     if api.is_empty() || api.contains("${") {
@@ -230,8 +193,6 @@ fn models_dev_base_url(entry: &ProviderEntry, wire: &str) -> Option<String> {
     Some(adapt_base_url(api, wire))
 }
 
-/// v2 `modelsDevEndpointRequired`: whether the entry cannot be used without
-/// an explicit endpoint.
 fn endpoint_required(entry: &ProviderEntry, wire: &str) -> bool {
     if entry.api.as_deref().is_some_and(|api| !api.is_empty()) {
         return true;
@@ -244,7 +205,6 @@ fn endpoint_required(entry: &ProviderEntry, wire: &str) -> bool {
     }
 }
 
-/// v2 `resolveModelsDevImport`.
 pub fn resolve_import(entry: &ProviderEntry, user_base_url: Option<&str>) -> ImportResolution {
     let Some(wire) = resolve_wire(entry) else {
         return ImportResolution::Invalid {
@@ -294,16 +254,12 @@ pub fn resolve_import(entry: &ProviderEntry, user_base_url: Option<&str>) -> Imp
     }
 }
 
-// ── model mapping (v2 `modelsDevProviderModels`) ──────────────────────────
-
-/// v2 `ModelsDevModel` — one importable model of a catalog entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DevModel {
     pub id: String,
     pub name: Option<String>,
     pub max_output_size: Option<i64>,
-    /// The capped input size (v2 `capability.max_input_tokens`): the
-    /// context window clamped to the declared input limit.
+
     pub max_input_size: Option<i64>,
     pub reasoning_key: Option<String>,
     pub support_efforts: Option<Vec<String>>,
@@ -327,7 +283,6 @@ struct ThinkingOptions {
     always_thinking: Option<bool>,
 }
 
-/// v2 `modelsDevThinkingOptions`.
 fn thinking_options(options: Option<&Vec<ReasoningOption>>) -> ThinkingOptions {
     let Some(options) = options else {
         return ThinkingOptions {
@@ -379,13 +334,11 @@ fn thinking_options(options: Option<&Vec<ReasoningOption>>) -> ThinkingOptions {
     }
 }
 
-/// v2 `modelsDevReasoningKey`: the interleaved field, when it names one.
 fn reasoning_key(interleaved: Option<&Value>) -> Option<String> {
     let field = interleaved?.get("field")?.as_str()?.trim();
     (!field.is_empty()).then(|| field.to_string())
 }
 
-/// v2 `modelsDevModelToCapability`.
 fn model_to_capability(model: &ModelEntry) -> Option<DevModel> {
     let id = model.id.as_deref().filter(|id| !id.is_empty())?;
     let context = model.limit.as_ref().and_then(|l| l.context)?;
@@ -462,10 +415,6 @@ fn infer_override_wire(npm: &str) -> Option<&'static str> {
     None
 }
 
-/// v2 has no `vertexai` wire: a Vertex provider id infers `google-genai`.
-/// The fork keeps `vertexai` as the provider type that maps onto the
-/// `google-genai` protocol (`config/mod.rs`), so the two spellings have to
-/// compare equal wherever v2 compares wires.
 fn same_wire(left: Option<&str>, right: Option<&str>) -> bool {
     fn canonical(wire: &str) -> &str {
         if wire == "vertexai" {
@@ -477,7 +426,6 @@ fn same_wire(left: Option<&str>, right: Option<&str>) -> bool {
     left.map(canonical) == right.map(canonical)
 }
 
-/// v2 `applyModelProviderOverride`.
 fn apply_provider_override(
     model: Option<DevModel>,
     raw: &ModelEntry,
@@ -494,10 +442,7 @@ fn apply_provider_override(
     {
         return None;
     }
-    // v2 falls back to `openai` when the override names a package it does not
-    // know — not to the provider's own wire. A model whose provider package
-    // disagrees with its provider is therefore dropped instead of imported
-    // under the wrong protocol.
+
     let override_wire = match override_npm.as_deref() {
         Some(npm) => Some(infer_override_wire(npm).unwrap_or("openai")),
         None => provider_wire,
@@ -534,7 +479,6 @@ fn apply_provider_override(
     None
 }
 
-/// v2 `modelsDevProviderModels`.
 pub fn provider_models(entry: &ProviderEntry) -> Vec<DevModel> {
     let provider_wire = resolve_wire(entry);
     entry
@@ -547,9 +491,6 @@ pub fn provider_models(entry: &ProviderEntry) -> Vec<DevModel> {
             apply_provider_override(model_to_capability(raw), raw, entry, provider_wire)
         })
         .map(|mut model| {
-            // v2 `wireHasProtocolThinkingDisable`: the anthropic and kimi
-            // wires encode "thinking off" on the wire, so an always-thinking
-            // flag would fight the effort selector — it is dropped there.
             let protocol = model
                 .protocol
                 .clone()
@@ -563,8 +504,6 @@ pub fn provider_models(entry: &ProviderEntry) -> Vec<DevModel> {
         })
         .collect()
 }
-
-// ── item mapping (v2 `toModelsDevProviderItem`) ───────────────────────────
 
 fn capability_strings(model: &DevModel) -> Option<Vec<String>> {
     let mut caps = Vec::new();
@@ -589,10 +528,6 @@ fn capability_strings(model: &DevModel) -> Option<Vec<String>> {
     (!caps.is_empty()).then_some(caps)
 }
 
-/// v2 `modelsDevModelToRecord`'s capability mapping: the item vocabulary,
-/// with `thinking` renamed to `always_thinking` on an always-thinking model
-/// (the fork's config engine reads both spellings — `always_thinking` is
-/// what makes the thinking default stick).
 fn record_capabilities(model: &DevModel) -> Option<Vec<String>> {
     let caps = capability_strings(model)?;
     if model.always_thinking == Some(true) {
@@ -612,8 +547,6 @@ fn record_capabilities(model: &DevModel) -> Option<Vec<String>> {
     }
 }
 
-/// v2 `modelsDevModelToRecord`: the imported model as a `[models.*]` record
-/// under the `{provider}/{model.id}` alias.
 pub fn model_write(provider_id: &str, model: &DevModel) -> crate::config::write::ModelAliasWrite {
     crate::config::write::ModelAliasWrite {
         alias_id: format!("{provider_id}/{}", model.id),
@@ -651,8 +584,6 @@ fn model_item(model: &DevModel) -> Value {
     item
 }
 
-/// v2 `toModelsDevProviderItem`: the catalog entry in the shape the REST
-/// surface and the web client read.
 pub fn provider_item(id: &str, entry: &ProviderEntry) -> Value {
     let resolution = resolve_import(entry, None);
     let models = provider_models(entry);
@@ -696,7 +627,6 @@ pub fn provider_item(id: &str, entry: &ProviderEntry) -> Value {
     item
 }
 
-/// Every catalog entry mapped to its item, in catalog order.
 pub fn provider_items(catalog: &Catalog) -> Value {
     json!({
         "items": catalog
@@ -706,8 +636,6 @@ pub fn provider_items(catalog: &Catalog) -> Value {
     })
 }
 
-// ── the cache (v2 `getModelsDevCatalog`) ──────────────────────────────────
-
 struct Cached {
     catalog: Value,
     fetched_at: Instant,
@@ -715,13 +643,8 @@ struct Cached {
 
 type Fetcher = Arc<dyn Fn() -> BoxFuture<'static, Result<Value, String>> + Send + Sync>;
 
-/// The in-flight fetch cell: one fetch per stale window, shared by every
-/// waiter (v2's `inFlight`).
 type InFlight = Arc<tokio::sync::OnceCell<Result<Value, String>>>;
 
-/// The catalog cache: TTL, in-flight dedup, and the stale-cache fallback a
-/// failed fetch lands in (v2 `fetchAndCache`). The built-in snapshot is the
-/// caller's concern — this type only ever holds fetched or stale catalogs.
 #[derive(Default)]
 pub struct CatalogCache {
     cached: Mutex<Option<Cached>>,
@@ -734,14 +657,11 @@ impl CatalogCache {
         Self::default()
     }
 
-    /// Replace the fetch (tests).
     pub fn with_fetcher(self, fetcher: Fetcher) -> Self {
         *self.fetcher.lock().unwrap_or_else(|e| e.into_inner()) = Some(fetcher);
         self
     }
 
-    /// Seed the cache with an entry fetched `age` ago (tests): the TTL
-    /// check is the only clock the cache has.
     #[cfg(test)]
     pub fn seed(self, catalog: Value, age: Duration) -> Self {
         *self.cached.lock().unwrap_or_else(|e| e.into_inner()) = Some(Cached {
@@ -751,9 +671,6 @@ impl CatalogCache {
         self
     }
 
-    /// Age the cached entry past the TTL (tests): the refresh path only runs
-    /// when the clock says the cache is stale, and `Instant` offers no way to
-    /// move the cached timestamp from outside.
     #[cfg(test)]
     pub fn expire(&self) {
         if let Some(cached) = self
@@ -766,10 +683,6 @@ impl CatalogCache {
         }
     }
 
-    /// The catalog, fetching when the cache is stale (v2
-    /// `getModelsDevCatalog`). A failed fetch falls back to the stale cache;
-    /// with no cache at all the error reaches the caller, whose built-in
-    /// snapshot ends the chain.
     pub async fn catalog(&self) -> Result<Value, String> {
         {
             let cache = self.cached.lock().unwrap_or_else(|e| e.into_inner());
@@ -786,11 +699,7 @@ impl CatalogCache {
                 .clone()
         };
         let result = cell.get_or_init(|| self.fetch_and_cache()).await;
-        // v2 clears `inFlight` in a `finally`: this window's fetch is done, so
-        // the next stale window starts a new one. Keeping a completed cell
-        // would pin the first successful catalog forever — the TTL check would
-        // fall through to the cell and read its stored value instead of
-        // refetching. A failed fetch also clears (it stores no result).
+
         let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(current) = in_flight.as_ref()
             && Arc::ptr_eq(current, &cell)
@@ -820,7 +729,6 @@ impl CatalogCache {
                 Ok(catalog)
             }
             Err(error) => {
-                // v2: a failed fetch serves the stale cache when there is one.
                 let cache = self.cached.lock().unwrap_or_else(|e| e.into_inner());
                 match cache.as_ref() {
                     Some(cached) => Ok(cached.catalog.clone()),
@@ -831,8 +739,6 @@ impl CatalogCache {
     }
 }
 
-/// The upstream fetch (v2 `fetchAndCache`'s happy path): the JSON object at
-/// [`MODELS_DEV_URL`], or the status / shape failure.
 async fn fetch_upstream() -> Result<Value, String> {
     let response = crate::llm::http::SHARED_HTTP_CLIENT
         .get(MODELS_DEV_URL)
@@ -855,18 +761,10 @@ async fn fetch_upstream() -> Result<Value, String> {
     Ok(payload)
 }
 
-/// Parse a fetched catalog payload into entries (v2's `ModelsDevCatalog`).
 pub fn parse_catalog(payload: &Value) -> Result<Catalog, String> {
     serde_json::from_value(payload.clone()).map_err(|error| format!("catalog shape: {error}"))
 }
 
-// ── the built-in snapshot (v2 `builtInModelsDev.ts`) ──────────────────────
-
-/// The built-in snapshot (v2 `BUILT_IN_MODELS_DEV_JSON`): a models.dev-shaped
-/// catalog the fallback chain ends in when the upstream fetch fails with no
-/// cache to serve. The fork's catalog routes served a hand-written item list
-/// before the proxy landed; it now rides the same mapping path as a fetched
-/// catalog, so an entry cannot exist in one and be missing in the other.
 pub fn builtin_catalog() -> Value {
     json!({
         "moonshot": {
@@ -939,8 +837,6 @@ pub fn builtin_catalog() -> Value {
     })
 }
 
-/// The built-in snapshot mapped to items — the fallback the catalog routes
-/// serve when the fetch fails (v2's `fetchAndCache` built-in branch).
 pub fn builtin_items() -> Value {
     match parse_catalog(&builtin_catalog()) {
         Ok(catalog) => provider_items(&catalog),
@@ -958,9 +854,6 @@ mod tests {
 
     #[test]
     fn the_wire_resolves_from_type_then_inference_then_default() {
-        // Explicit known type wins — but a bare anthropic entry carries no
-        // api and no npm, so v2's endpoint_required still asks for a base
-        // url.
         let explicit = entry(json!({ "type": "anthropic" }));
         assert_eq!(
             resolve_import(&explicit, None),
@@ -979,7 +872,7 @@ mod tests {
                 base_url: Some("https://example.test".into()),
             }
         );
-        // An unknown explicit type is a reject, not a fallback.
+
         let unknown = entry(json!({ "type": "bedrock" }));
         assert_eq!(
             resolve_import(&unknown, None),
@@ -987,9 +880,7 @@ mod tests {
                 reason: "unknown-explicit-type"
             }
         );
-        // npm/id inference — the inference itself counts as declared, so
-        // guessed stays false (v2: guessed = inferDeclaredWireType ===
-        // undefined).
+
         let inferred = entry(json!({ "npm": "@ai-sdk/anthropic" }));
         assert_eq!(
             resolve_import(&inferred, None),
@@ -999,7 +890,7 @@ mod tests {
                 base_url: None,
             }
         );
-        // bedrock is a proprietary-SDK reject even without an explicit type.
+
         let bedrock = entry(json!({ "npm": "@aws-sdk/amazon-bedrock" }));
         assert_eq!(
             resolve_import(&bedrock, None),
@@ -1007,8 +898,7 @@ mod tests {
                 reason: "proprietary-sdk"
             }
         );
-        // The openai default — but an entry with no npm and no api still
-        // needs an endpoint (v2: npm !== '@ai-sdk/openai').
+
         let plain = entry(json!({}));
         assert_eq!(
             resolve_import(&plain, None),
@@ -1030,7 +920,7 @@ mod tests {
                 base_url: Some("https://example.test/v1".into()),
             }
         );
-        // The user override wins and adapts to the wire.
+
         assert_eq!(
             resolve_import(
                 &entry(json!({ "type": "anthropic" })),
@@ -1042,14 +932,14 @@ mod tests {
                 base_url: Some("https://example.test".into()),
             }
         );
-        // A placeholder override is a reject.
+
         assert_eq!(
             resolve_import(&entry(json!({})), Some(r"https://${HOST}/v1")),
             ImportResolution::Invalid {
                 reason: "placeholder-base-url"
             }
         );
-        // No api and a non-default npm needs an endpoint.
+
         let needs = entry(json!({ "npm": "@acme/gateway" }));
         assert_eq!(
             resolve_import(&needs, None),
@@ -1058,9 +948,7 @@ mod tests {
                 guessed: true,
             }
         );
-        // The default npm does not — and its name still counts as an
-        // inference, so guessed stays false (v2's inferDeclaredWireType
-        // matches npm.includes('openai')).
+
         let default_npm = entry(json!({ "npm": "@ai-sdk/openai" }));
         assert_eq!(
             resolve_import(&default_npm, None),
@@ -1127,7 +1015,6 @@ mod tests {
         assert_eq!(item["models"][0]["id"], "m");
         assert_eq!(item["models"][0]["max_context_size"], 1000);
 
-        // A rejected entry carries its reason and no wire type.
         let rejected = entry(json!({ "type": "bedrock" }));
         let item = provider_item("bedrock", &rejected);
         assert_eq!(item["rejected"], true);
@@ -1153,8 +1040,6 @@ mod tests {
         assert_eq!(model.max_output_size, Some(4096));
         assert_eq!(model.always_thinking, Some(true));
 
-        // The record renames `thinking` to `always_thinking` (v2
-        // `modelsDevModelToRecord`) and carries the capped sizes.
         let write = model_write("acme", model);
         assert_eq!(write.alias_id, "acme/thinker");
         assert_eq!(write.max_input_size, Some(64000));
@@ -1163,7 +1048,7 @@ mod tests {
             write.capabilities.as_deref(),
             Some(&["always_thinking".to_string(), "tool_use".to_string()][..])
         );
-        // The REST item keeps the raw vocabulary.
+
         let item = provider_item("acme", &provider);
         assert_eq!(
             item["models"][0]["capabilities"],
@@ -1173,8 +1058,6 @@ mod tests {
 
     #[test]
     fn always_thinking_drops_on_the_anthropic_and_kimi_wires() {
-        // v2 `wireHasProtocolThinkingDisable`: those wires encode "thinking
-        // off" on the wire, so the flag would fight the effort selector.
         let effort = json!({ "type": "effort", "values": ["low"] });
         let anthropic = entry(json!({
             "type": "anthropic",
@@ -1197,9 +1080,6 @@ mod tests {
 
     #[test]
     fn a_model_override_with_an_unknown_package_falls_back_to_openai() {
-        // v2 `applyModelProviderOverride`: an unrecognized override npm means
-        // `openai`, so an anthropic provider's model is dropped instead of
-        // imported under the anthropic wire.
         let override_spec = json!({ "npm": "@acme/gateway", "api": "https://acme.test" });
         let anthropic = entry(json!({
             "type": "anthropic",
@@ -1208,8 +1088,6 @@ mod tests {
         }));
         assert!(provider_models(&anthropic).is_empty());
 
-        // Under an openai provider the fallback matches the provider wire, so
-        // the model survives with the override's endpoint.
         let openai = entry(json!({
             "api": "https://example.test",
             "models": { "m": { "id": "m", "limit": { "context": 1000 }, "provider": override_spec.clone() } },
@@ -1221,9 +1099,6 @@ mod tests {
 
     #[test]
     fn a_vertex_provider_keeps_a_model_overridden_to_the_google_package() {
-        // The fork's `vertexai` provider type is v2's `google-genai` wire, so a
-        // model whose override npm names the Google package is still on the
-        // same wire and survives with an unchanged endpoint.
         let provider = entry(json!({
             "id": "google-vertex",
             "api": "https://vertex.test",
@@ -1260,15 +1135,12 @@ mod tests {
         assert_eq!(moonshot["models"][0]["max_context_size"], 262144);
         assert_eq!(moonshot["models"][0]["reasoning"], true);
 
-        // The openai entry infers its wire from the default npm, so it is
-        // neither guessed nor endpoint-less.
         let openai = items.iter().find(|item| item["id"] == "openai").unwrap();
         assert_eq!(openai["wire_type"], "openai");
         assert_eq!(openai["guessed"], false);
         assert_eq!(openai["needs_base_url"], false);
         assert_eq!(openai["base_url"], "https://api.openai.com/v1");
 
-        // The anthropic entry keeps its endpoint un-versioned.
         let anthropic = items.iter().find(|item| item["id"] == "anthropic").unwrap();
         assert_eq!(anthropic["base_url"], "https://api.anthropic.com");
     }
@@ -1351,8 +1223,7 @@ mod tests {
 
         let first = cache.catalog().await.unwrap();
         assert_eq!(first["openai"]["name"], "Fresh");
-        // The second call inside the TTL is served from the cache the first
-        // populated.
+
         let second = cache.catalog().await.unwrap();
         assert_eq!(second["openai"]["name"], "Fresh");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1372,8 +1243,7 @@ mod tests {
         }));
 
         assert_eq!(cache.catalog().await.unwrap()["openai"]["name"], "Fresh 1");
-        // Inside the TTL the cache answers, so a completed in-flight cell must
-        // not be consulted.
+
         assert_eq!(cache.catalog().await.unwrap()["openai"]["name"], "Fresh 1");
         cache.expire();
         assert_eq!(

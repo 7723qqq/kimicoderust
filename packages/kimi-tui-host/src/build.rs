@@ -120,7 +120,7 @@ pub async fn build_session(
 
     let mcp = Arc::new(McpManager::new());
     mcp.spawn_from_config(&config).await;
-    let github = kimi_agent::tools::github::GitHubCredentials {
+    let github = kimi_agent::agent::tools::github::github_legacy::GitHubCredentials {
         token: config.github.token.clone(),
         base_url: config.github.base_url.clone(),
     };

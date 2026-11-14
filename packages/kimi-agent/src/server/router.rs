@@ -1,5 +1,3 @@
-//! Lightweight HTTP REST router for Kimi Agent API surface.
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -32,14 +30,12 @@ impl HttpRequest {
             .map(|(_, v)| v.as_str())
     }
 
-    /// Extract or generate an X-Request-ID for tracing.
     pub fn request_id(&self) -> String {
         self.header("x-request-id")
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("req_{}", fastrand::u64(..)))
     }
 
-    /// Check if the request explicitly asks for envelope wrapping.
     pub fn wants_envelope(&self) -> bool {
         if let Some(val) = self.header("x-envelope")
             && (val.eq_ignore_ascii_case("true") || val == "1")
@@ -55,8 +51,6 @@ impl HttpRequest {
     }
 }
 
-/// Percent-decode one path segment. Provider ids can carry reserved
-/// characters (`managed:kimi-code`), which clients URL-encode.
 pub fn decode_path_segment(raw: &str) -> String {
     url::form_urlencoded::parse(raw.as_bytes())
         .next()
@@ -71,15 +65,10 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
-/// Standard authentication error code used across kap-server and protocol envelope.
 pub const AUTH_ERROR_CODE: u32 = 40101;
 
-/// Internal-only marker on the [`HttpResponse::route_miss`] sentinel. It never
-/// reaches the wire: `handle_request` consumes the sentinel to try the next
-/// route domain, exactly as the one giant match used to fall through.
 const ROUTE_MISS_HEADER: &str = "x-kimi-internal-route-miss";
 
-/// Default WWW-Authenticate realm for Kimi Code authentication challenge.
 pub const DEFAULT_AUTH_REALM: &str = "kimi-code";
 
 impl HttpResponse {
@@ -121,7 +110,6 @@ impl HttpResponse {
         Self::json(200, value)
     }
 
-    /// Construct a success envelope `{ code: 0, msg: "success", data, request_id }`.
     pub fn envelope_ok(data: &Value, request_id: &str) -> Self {
         let env = serde_json::json!({
             "code": 0,
@@ -132,7 +120,6 @@ impl HttpResponse {
         Self::json(200, &env)
     }
 
-    /// Construct an error envelope `{ code, msg, data: null, request_id }`.
     pub fn envelope_err(status: u16, code: u32, msg: impl Into<String>, request_id: &str) -> Self {
         let msg_str = msg.into();
         let env = serde_json::json!({
@@ -148,17 +135,10 @@ impl HttpResponse {
         Self::json(404, &serde_json::json!({ "error": "Not Found" }))
     }
 
-    /// Internal routing sentinel: "this route domain did not claim the request".
-    ///
-    /// `handle_request` tries each domain in the original arm order and moves on
-    /// while the answer is this sentinel. Early returns from an arm bypass the
-    /// envelope negotiation exactly as they did when every arm lived in one
-    /// `match`.
     pub(crate) fn route_miss() -> Self {
         Self::not_found().with_header(ROUTE_MISS_HEADER, "1")
     }
 
-    /// Whether this response is the internal [`Self::route_miss`] sentinel.
     pub(crate) fn is_route_miss(&self) -> bool {
         self.header(ROUTE_MISS_HEADER).is_some()
     }
@@ -167,27 +147,18 @@ impl HttpResponse {
         Self::json(400, &serde_json::json!({ "error": msg.into() }))
     }
 
-    /// Construct a 403 Forbidden response — a request this server refuses to
-    /// answer on origin grounds (the DNS-rebinding `Host` check), not on
-    /// credentials.
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self::json(403, &serde_json::json!({ "error": msg.into() }))
     }
 
-    /// Construct a 401 Unauthorized response adhering to standard RFC 9110 / RFC 6750
-    /// Bearer authentication challenge and kap-server envelope conventions.
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         Self::unauthorized_with_code(AUTH_ERROR_CODE, msg)
     }
 
-    /// Construct a 401 Unauthorized response with a specific error code,
-    /// setting `WWW-Authenticate: Bearer realm="kimi-code"`.
     pub fn unauthorized_with_code(code: u32, msg: impl Into<String>) -> Self {
         Self::unauthorized_challenge(code, msg, format!("Bearer realm=\"{DEFAULT_AUTH_REALM}\""))
     }
 
-    /// Construct a 401 Unauthorized response with an explicit `WWW-Authenticate` challenge header
-    /// and normalized JSON envelope (`code`, `msg`, `message`, `error`, `data: null`).
     pub fn unauthorized_challenge(
         code: u32,
         msg: impl Into<String>,
@@ -266,7 +237,6 @@ mod tests {
 
     #[test]
     fn test_http_request_id_and_wants_envelope() {
-        // 1. Explicit request id
         let mut headers = HashMap::new();
         headers.insert("X-Request-Id".into(), "req_explicit_456".into());
         let req_with_id = HttpRequest {
@@ -278,7 +248,6 @@ mod tests {
         };
         assert_eq!(req_with_id.request_id(), "req_explicit_456");
 
-        // 2. Fallback generated request id starts with req_
         let req_fallback = HttpRequest {
             method: "GET".into(),
             path: "/".into(),
@@ -290,7 +259,6 @@ mod tests {
         assert!(gen_id.starts_with("req_"));
         assert!(gen_id.len() > 4);
 
-        // 3. wants_envelope via X-Envelope header ("true" / "1")
         for val in ["true", "TRUE", "True", "1"] {
             let mut h = HashMap::new();
             h.insert("X-Envelope".into(), val.into());
@@ -307,7 +275,6 @@ mod tests {
             );
         }
 
-        // 4. wants_envelope via query param (?envelope=1 / ?envelope=true)
         for q in [
             "envelope=1",
             "envelope=true",
@@ -327,7 +294,6 @@ mod tests {
             );
         }
 
-        // 5. Negative wants_envelope cases
         for q in ["envelope=0", "envelope=false", "foo=bar"] {
             let req = HttpRequest {
                 method: "GET".into(),
@@ -389,7 +355,6 @@ mod tests {
         assert_eq!(resp.header("x-request-id"), Some("req_test_123"));
         assert_eq!(resp.header("content-type"), Some("application/json"));
 
-        // envelope_ok
         let env_ok = HttpResponse::envelope_ok(&serde_json::json!({ "id": "sess-1" }), "req-99");
         assert_eq!(env_ok.status, 200);
         let ok_val: Value = serde_json::from_slice(&env_ok.body).unwrap();
@@ -398,7 +363,6 @@ mod tests {
         assert_eq!(ok_val["data"]["id"], "sess-1");
         assert_eq!(ok_val["request_id"], "req-99");
 
-        // envelope_err
         let env_err = HttpResponse::envelope_err(404, 40401, "Session not found", "req-err");
         assert_eq!(env_err.status, 404);
         let err_val: Value = serde_json::from_slice(&env_err.body).unwrap();
@@ -407,7 +371,6 @@ mod tests {
         assert!(err_val["data"].is_null());
         assert_eq!(err_val["request_id"], "req-err");
 
-        // not_found, bad_request, internal_error, bytes
         let nf = HttpResponse::not_found();
         assert_eq!(nf.status, 404);
         let nf_val: Value = serde_json::from_slice(&nf.body).unwrap();

@@ -10,8 +10,8 @@ description:
   en: >
       Dependency-free resolve/interpolate/detect primitives, character-for-character aligned with the engine's translation.rs and used directly by the web UI and the extension.
       
-revision: 8c50a0dfdddde7e560ee7637ad3b533551547ccc
-updated_at: "2026-11-09T19:52:51.323Z"
+revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
+updated_at: "2026-11-11T19:20:38.942Z"
 fingerprint: 34e33b3dfea434db214caed775080994e7f3c7cf4bdc1b97145fbad196151df8
 source:
   - path: "packages/i18n-shared/src/index.ts"

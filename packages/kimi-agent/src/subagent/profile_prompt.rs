@@ -68,6 +68,10 @@ impl LLM for ProfilePromptLlm {
         self.inner.thinking_effort()
     }
 
+    fn last_trace_id(&self) -> Option<String> {
+        self.inner.last_trace_id()
+    }
+
     fn media_target(&self) -> Option<crate::llm::media_resolver::MediaTarget> {
         self.inner.media_target()
     }

@@ -1,62 +1,33 @@
-//! Session title composition and the managed `chat_title` call.
-//!
-//! Mirrors v2's `sessionTitleService` + `agentTitlePromptSourceService`: the
-//! deterministic sources (`first_turn` / `user_prompts`) derive a title from
-//! the history, and `digest` asks the managed platform for one through the
-//! `chat_title` tool. The wire shape is the one `packages/oauth`'s
-//! `fetchChatTitle` already speaks — `POST {base}/tools` with
-//! `{method, params:{chat_content}}` answering `{title}`.
-//!
-//! The credential comes from the LLM's managed seam
-//! ([`crate::turn_loop::types::LLM::media_target`] +
-//! [`crate::turn_loop::types::LLM::media_upload_credential`]): both are gated
-//! on `auth_provider`, which is the engine's marker for v2's
-//! `modelSource === 'oauth-catalog'`, and together they carry exactly what a
-//! managed call needs — the base URL and a refreshed bearer token. Media
-//! upload is the other caller of that seam; the name is media-shaped but the
-//! gate and the payload are the same.
-
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::turn_loop::types::{LLM, LLMChatParams, LLMMessage};
 
-/// v2 `MAX_GENERATED_TITLE_LENGTH`.
 const MAX_GENERATED_TITLE_LENGTH: usize = 200;
-/// v2 `MAX_TITLE_INPUT_LENGTH`.
+
 const MAX_TITLE_INPUT_LENGTH: usize = 1000;
-/// v2 `MAX_TITLE_PROMPTS`.
+
 const MAX_TITLE_PROMPTS: usize = 3;
-/// v2 `MAX_TITLE_USER_SEGMENT`.
+
 const MAX_TITLE_USER_SEGMENT: usize = 400;
-/// v2 `MAX_TITLE_FIRST_TURN_ASSISTANT`.
+
 const MAX_TITLE_FIRST_TURN_ASSISTANT: usize = 300;
-/// v2 `MAX_TITLE_DIGEST_USER_SEGMENT`.
+
 const MAX_TITLE_DIGEST_USER_SEGMENT: usize = 200;
-/// v2 `MAX_TITLE_DIGEST_ASSISTANT`.
+
 const MAX_TITLE_DIGEST_ASSISTANT: usize = 200;
-/// v2 `MAX_TITLE_DIGEST_INPUT_LENGTH`.
+
 const MAX_TITLE_DIGEST_INPUT_LENGTH: usize = 3000;
-/// v2 `TITLE_DIGEST_ELISION_MARKER`.
+
 const TITLE_DIGEST_ELISION_MARKER: &str = "...";
-/// v2 `fetchChatTitle`'s default request timeout.
+
 const CHAT_TITLE_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Truncate to at most `max` characters.
-///
-/// v2 slices by UTF-16 code unit; a character count is the closest safe
-/// equivalent. `String::truncate` counts bytes and panics when the cut lands
-/// inside a code point, which a CJK prompt reaches immediately.
 fn truncate_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-/// The indices of the natural-language user prompts in `history`.
-///
-/// v2's `isNaturalLanguagePrompt` also excludes messages whose origin is not
-/// `user`; the fork's tool results carry their own `tool` role, so the role
-/// check is the whole predicate here.
 fn user_prompt_indexes(history: &[LLMMessage]) -> Vec<usize> {
     history
         .iter()
@@ -66,7 +37,6 @@ fn user_prompt_indexes(history: &[LLMMessage]) -> Vec<usize> {
         .collect()
 }
 
-/// The last assistant text in `span` (v2 `finalAssistantText`).
 fn final_assistant_text(span: &[LLMMessage]) -> Option<String> {
     span.iter()
         .rev()
@@ -76,8 +46,6 @@ fn final_assistant_text(span: &[LLMMessage]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The `chat_content` for `source`, or `None` when the history cannot supply
-/// one (v2 `composeTitleInput`).
 pub fn compose_title_input(history: &[LLMMessage], source: &str) -> Option<String> {
     let prompts = user_prompt_indexes(history);
     match source {
@@ -132,8 +100,6 @@ pub fn compose_title_input(history: &[LLMMessage], source: &str) -> Option<Strin
     }
 }
 
-/// Keep the head and the tail of a long digest, eliding the middle
-/// (v2 `elideTitleDigestTurns`).
 fn elide_digest_turns(turns: &[Vec<String>]) -> Option<String> {
     if turns.is_empty() {
         return None;
@@ -147,7 +113,7 @@ fn elide_digest_turns(turns: &[Vec<String>]) -> Option<String> {
     if joined.chars().count() <= MAX_TITLE_DIGEST_INPUT_LENGTH {
         return Some(joined);
     }
-    // The marker plus the two newlines that join it to the head and the tail.
+
     let mut budget = MAX_TITLE_DIGEST_INPUT_LENGTH - TITLE_DIGEST_ELISION_MARKER.len() - 2;
     let mut head: Vec<String> = Vec::new();
     for line in &turns[0] {
@@ -175,29 +141,27 @@ fn elide_digest_turns(turns: &[Vec<String>]) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-/// The title for `history` (v2 `generateTitle`).
-///
-/// Every source is summarized by a model:
-/// - a managed OAuth catalog provider uses the hosted `chat_title` tool;
-/// - every other provider uses an ordinary local generation request.
-///
-/// The deterministic composition only picks the excerpt that is sent; it never
-/// becomes the title itself (the old "first prompt cut to 60 chars" behavior is
-/// v2's fallback excerpt, not its title).
-/// `Ok(None)` means the history cannot supply an input — not a failure.
 pub async fn generate_session_title(
     history: &[LLMMessage],
     source: Option<&str>,
     llm: &dyn LLM,
 ) -> Result<Option<String>, String> {
+    generate_session_title_with_events(history, source, llm, crate::callbacks::MAIN_AGENT_ID, None)
+        .await
+}
+
+pub async fn generate_session_title_with_events(
+    history: &[LLMMessage],
+    source: Option<&str>,
+    llm: &dyn LLM,
+    agent_id: &str,
+    emit: Option<&(dyn Fn(serde_json::Value) + Send + Sync)>,
+) -> Result<Option<String>, String> {
     let source = source.unwrap_or("user_prompts");
     let Some(input) = compose_title_input(history, source) else {
         return Ok(None);
     };
-    // v2 `generateAndApply`: the hosted channel is used only when the managed
-    // provider exists. A failure there is logged and yields no title; it does
-    // **not** silently fall back to a local request, because the two channels
-    // can bill/behave differently.
+
     let managed = llm.media_target().filter(|target| target.uploads_media);
     if managed.is_some() {
         let Some(target) = managed else {
@@ -225,10 +189,7 @@ pub async fn generate_session_title(
         .await
         {
             Ok(title) => Ok(Some(title)),
-            // v2 force-refreshes the OAuth token once on a 401 and retries the
-            // same request. The credential seam hands out whatever the provider
-            // currently holds; asking it again after the 401 is the engine's
-            // equivalent of `getAccessToken({ force: true })`.
+
             Err(error) if error.status == Some(401) => {
                 let Some(retry_credential) = llm.media_upload_credential() else {
                     tracing::debug!("chat_title request failed: {}", error.message);
@@ -262,24 +223,42 @@ pub async fn generate_session_title(
             }
         };
     }
-    generate_local_title(&input, llm).await
+    generate_local_title(&input, llm, agent_id, emit).await
 }
 
-/// v2 `generateLocalTitle` instruction, kept separate from the interpolated
-/// excerpt so the literal stays a single catalog-visible sentence.
 const LOCAL_TITLE_PROMPT: &str = "Write a short title for this conversation, at most 40 characters. Reply with the title only: no quotes, no preamble, no trailing period.";
 
-/// The v2 `generateLocalTitle` prompt and cleanup: ask the session's own model
-/// for a short title and strip the quoting/punctuation a model tends to add.
-async fn generate_local_title(input: &str, llm: &dyn LLM) -> Result<Option<String>, String> {
+async fn generate_local_title(
+    input: &str,
+    llm: &dyn LLM,
+    agent_id: &str,
+    emit: Option<&(dyn Fn(serde_json::Value) + Send + Sync)>,
+) -> Result<Option<String>, String> {
     let prompt = format!("{LOCAL_TITLE_PROMPT}\n\n{input}");
+    let mut messages = Vec::with_capacity(2);
+    if !llm.system_prompt().is_empty() {
+        messages.push(LLMMessage::system(llm.system_prompt()));
+    }
+    messages.push(LLMMessage::user(prompt));
     let params = LLMChatParams {
-        messages: Arc::from([LLMMessage::user(prompt)]),
+        messages: Arc::from(messages),
         ..Default::default()
     };
+    if let Some(emit) = emit {
+        emit(crate::session::agent_records::llm_request_record(
+            llm,
+            &params,
+            crate::session::agent_records::LlmRequestSpec {
+                agent_id,
+                kind: "loop",
+                turn_step: None,
+                tool_select: false,
+                dropped_count: None,
+            },
+        ));
+    }
     let response = llm.chat(params).await.map_err(|e| e.to_string())?;
-    // v2 trims, then strips one leading/trailing quote character, then cuts to
-    // the maximum length. `take` avoids splitting a code point.
+
     let trimmed = response.content.trim();
     let mut unquoted = trimmed;
     if let Some(rest) = unquoted.strip_prefix(['"', '\'', '“']) {
@@ -292,14 +271,9 @@ async fn generate_local_title(input: &str, llm: &dyn LLM) -> Result<Option<Strin
     Ok((!title.is_empty()).then_some(title))
 }
 
-/// One async lock per session, so two concurrent `generateTitle` calls for the
-/// same session do not both run a model request (v2 `SessionTitleService`'s
-/// `_shared` promise). The second caller waits, then observes the title the
-/// first one applied and returns it without re-requesting.
 static TITLE_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Acquire the session's title-generation slot for the duration of one attempt.
 pub async fn title_generation_slot(session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
     let lock = {
         let mut locks = TITLE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
@@ -311,17 +285,10 @@ pub async fn title_generation_slot(session_id: &str) -> tokio::sync::OwnedMutexG
     lock.lock_owned().await
 }
 
-/// v2 `MAX_TITLE_LENGTH` (promptMetadataText.ts:4): the first prompt becomes a
-/// title of at most this many characters.
 pub const MAX_PROMPT_TITLE_LENGTH: usize = 200;
 
-/// v2 `MAX_LAST_PROMPT_LENGTH` (promptMetadataText.ts:5): the persisted
-/// `lastPrompt` keeps at most this many characters.
 pub const MAX_LAST_PROMPT_LENGTH: usize = 4000;
 
-/// v2 `promptMetadataTextFromText`: redact secrets, collapse control characters
-/// and whitespace, and cap the length. Returns `None` when nothing but
-/// whitespace remains.
 pub fn prompt_metadata_text(text: &str) -> Option<String> {
     static REDACTIONS: LazyLock<[regex::Regex; 5]> = LazyLock::new(|| {
         [
@@ -366,8 +333,6 @@ pub fn prompt_metadata_text(text: &str) -> Option<String> {
     Some(truncate_chars(sanitized, MAX_LAST_PROMPT_LENGTH))
 }
 
-/// v2 `promptMetadataTextFromContentParts`: a client's own `display_text`
-/// entries win over the rendered prompt text when every entry carries one.
 pub fn prompt_metadata_text_from_parts(
     parts_text: &str,
     client_metadata: Option<&serde_json::Value>,
@@ -391,21 +356,14 @@ pub fn prompt_metadata_text_from_parts(
     prompt_metadata_text(parts_text)
 }
 
-/// v2 `titleFromPromptMetadataText`: the sanitized first prompt, cut to the
-/// title length. This is a *placeholder* title (`replaceable`) until a model
-/// summarizes the conversation.
 pub fn title_from_prompt_metadata_text(text: &str) -> String {
     truncate_chars(text, MAX_PROMPT_TITLE_LENGTH)
 }
 
-/// The telemetry sink for one title generation attempt (v2 `ITelemetryService`).
 pub trait TitleTelemetrySink: Send + Sync {
     fn track(&self, event: serde_json::Value);
 }
 
-/// A title attempt's terminal outcome, in v2's `SessionTitleGenerationFinishedEvent`
-/// vocabulary. `Ok` carries the applied title and whether it was truncated;
-/// `Unavailable` carries the bounded reason; `Error` is an unexpected failure.
 enum TitleAttemptOutcome {
     Success {
         title_chars: usize,
@@ -415,10 +373,6 @@ enum TitleAttemptOutcome {
     Error,
 }
 
-/// Generate a title and report the attempt once, at its terminal result (v2
-/// `SessionTitleService.trackGeneration`). Skipped calls for an existing title
-/// never reach here, so every call emits one event. `force` names the trigger:
-/// a host-forced regeneration is `manual`, an ordinary one is `auto`.
 pub async fn generate_session_title_with_telemetry(
     history: &[LLMMessage],
     source: Option<&str>,
@@ -441,7 +395,6 @@ pub async fn generate_session_title_with_telemetry(
     result
 }
 
-/// Ask the managed platform for a title (v2 `fetchChatTitle`).
 pub async fn fetch_chat_title(
     base_url: &str,
     token: &str,
@@ -452,18 +405,12 @@ pub async fn fetch_chat_title(
         .map_err(|error| error.message)
 }
 
-/// The failure of one hosted title request, with the HTTP status when the
-/// server answered. v2 branches on `401` to force-refresh the token and retry
-/// exactly once (sessionTitleService.ts:143-153); the status is what makes that
-/// decision possible.
 #[derive(Debug)]
 pub struct ChatTitleError {
     pub message: String,
     pub status: Option<u16>,
 }
 
-/// v2 `parseKimiCodeCustomHeaders`: `KIMI_CODE_CUSTOM_HEADERS` holds
-/// newline-separated `Name: value` lines applied to every managed request.
 pub fn custom_title_headers() -> Vec<(String, String)> {
     let Ok(raw) = std::env::var(KIMI_CODE_CUSTOM_HEADERS_ENV) else {
         return Vec::new();
@@ -477,11 +424,8 @@ pub fn custom_title_headers() -> Vec<(String, String)> {
         .collect()
 }
 
-/// v2 `KIMI_CODE_CUSTOM_HEADERS_ENV`.
 pub const KIMI_CODE_CUSTOM_HEADERS_ENV: &str = "KIMI_CODE_CUSTOM_HEADERS";
 
-/// Ask the managed platform for a title, with the caller's custom headers
-/// merged in (v2 `fetchChatTitle(..., { headers })`).
 pub async fn fetch_chat_title_with_headers(
     base_url: &str,
     token: &str,
@@ -535,8 +479,6 @@ pub async fn fetch_chat_title_with_headers(
     Ok(truncate_chars(title, MAX_GENERATED_TITLE_LENGTH))
 }
 
-/// Build the terminal event and hand it to the sink, separated from the async
-/// call so the error arm is testable without a failing provider.
 fn report_generation_event(
     telemetry: &dyn TitleTelemetrySink,
     source: &str,
@@ -604,7 +546,7 @@ mod tests {
             compose_title_input(&with_assistant, "first_turn").as_deref(),
             Some("user: hello\nassistant: hi there")
         );
-        // A prompt with no assistant reply yet cannot title the session.
+
         let without_assistant = history(&[("hello", "")]);
         assert_eq!(compose_title_input(&without_assistant, "first_turn"), None);
     }
@@ -635,7 +577,7 @@ mod tests {
             "elided digest is {} chars",
             input.chars().count()
         );
-        // The head and the tail both survive.
+
         assert!(input.starts_with("user: xxx"));
         assert!(input.ends_with(&long));
     }
@@ -688,8 +630,6 @@ mod tests {
 
     #[test]
     fn truncation_never_splits_a_code_point() {
-        // 300 CJK characters is 900 bytes; a byte-wise cut at the 200-char
-        // budget would land inside a code point and panic.
         let prompt = "汉".repeat(300);
         let messages = vec![LLMMessage::user(prompt)];
         let title = crate::session::sqlite_store::derive_session_title(&messages, None)
@@ -705,8 +645,6 @@ mod tests {
         assert_eq!(compose_title_input(&messages, "user_prompts"), None);
     }
 
-    /// Serve one HTTP response and hand back the base URL plus a handle that
-    /// resolves to the request line and headers the client sent.
     async fn serve_once(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -768,8 +706,6 @@ mod tests {
         assert!(error.contains("HTTP 500"), "{error}");
     }
 
-    /// A provider with no managed seam that still answers ordinary chat calls
-    /// — the local title-generation channel (v2 `generateLocalTitle`).
     struct LocalLlm;
 
     impl LLM for LocalLlm {
@@ -799,6 +735,62 @@ mod tests {
                 })
             })
         }
+    }
+
+    struct RecordingTitleLlm {
+        messages: Mutex<Vec<(String, String)>>,
+    }
+
+    impl LLM for RecordingTitleLlm {
+        fn system_prompt(&self) -> &str {
+            "session prompt"
+        }
+        fn model_name(&self) -> &str {
+            "recording"
+        }
+        fn is_retryable_error(&self, _error: &str) -> bool {
+            false
+        }
+        fn chat(
+            &self,
+            params: crate::turn_loop::types::LLMChatParams,
+        ) -> crate::rpc::types::BoxFuture<
+            '_,
+            Result<
+                crate::turn_loop::types::LLMChatResponse,
+                Box<dyn std::error::Error + Send + Sync>,
+            >,
+        > {
+            *self.messages.lock().unwrap() = params
+                .messages
+                .iter()
+                .map(|message| (message.role.clone(), message.content.clone()))
+                .collect();
+            Box::pin(async {
+                Ok(crate::turn_loop::types::LLMChatResponse {
+                    content: "A title".to_string(),
+                    ..Default::default()
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_local_title_request_sends_the_system_prompt() {
+        let llm = RecordingTitleLlm {
+            messages: Mutex::new(Vec::new()),
+        };
+        let title = generate_session_title(&history(&[("hello", "world")]), None, &llm)
+            .await
+            .unwrap();
+        assert_eq!(title.as_deref(), Some("A title"));
+        let messages = llm.messages.lock().unwrap();
+        assert_eq!(
+            messages[0],
+            ("system".to_string(), "session prompt".to_string())
+        );
+        assert_eq!(messages[1].0, "user");
+        assert_eq!(messages.len(), 2);
     }
 
     struct StaticLlm;
@@ -947,5 +939,33 @@ mod tests {
         assert_eq!(events[0]["trigger"], "manual");
         assert!(events[0]["duration_ms"].is_u64());
         assert!(!events[0].to_string().contains("unexpected failure"));
+    }
+
+    #[tokio::test]
+    async fn the_local_title_request_is_emitted_as_an_llm_request() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let emit = {
+            let events = events.clone();
+            move |event: serde_json::Value| events.lock().unwrap().push(event)
+        };
+        let title = generate_session_title_with_events(
+            &history(&[("hello", "world")]),
+            None,
+            &LocalLlm,
+            "main",
+            Some(&emit),
+        )
+        .await
+        .unwrap();
+        assert_eq!(title.as_deref(), Some("A generated title"));
+        let events = events.lock().unwrap();
+        let request = events
+            .iter()
+            .find(|event| event["type"] == "llm.request")
+            .expect("the local title request must be recorded");
+        assert_eq!(request["kind"], "loop");
+        assert_eq!(request["agent_id"], "main");
+        assert_eq!(request["toolSelect"], false);
+        assert_eq!(request["messageCount"], 1);
     }
 }

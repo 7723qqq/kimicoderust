@@ -1,7 +1,3 @@
-//! Prompt-intake media preparation (v2 `agent/media/image-compress.ts`,
-//! `image-format-policy.ts`): the format gate, inline-image compression, and
-//! the compression caption the model reads.
-
 use std::path::PathBuf;
 
 use base64::Engine as _;
@@ -11,31 +7,19 @@ use crate::native::image_compress::{CompressConfig, compress_image};
 use crate::rpc::types::ContentBlock;
 use crate::server::files::FileStore;
 
-/// v2 `MAX_IMAGE_EDGE_PX` — the longest-edge budget for a prompt image.
 pub const MAX_IMAGE_EDGE_PX: u32 = 2000;
 
-/// v2 `DEFAULT_INLINE_IMAGE_BYTE_BUDGET` (3.75 MiB) — the per-image byte
-/// budget for a prompt image.
 pub const INLINE_IMAGE_BYTE_BUDGET: usize = 3_932_160;
 
-/// v2 `MAX_IMAGE_DECODE_BYTES` — over this, the image is passed through
-/// untouched rather than decoded (the decode-bomb guard the TS wrapper
-/// owns; `compress_image` itself only computes).
 pub const MAX_IMAGE_DECODE_BYTES: usize = 64 * 1024 * 1024;
 
 const FALLBACK_EDGES_PX: [u32; 6] = [2000, 1000, 768, 512, 384, 256];
 const JPEG_QUALITY_STEPS: [u8; 4] = [80, 60, 40, 20];
 
-/// The engine-side compression budget for a prompt's inline image — v2's
-/// `compressImageForModel` defaults.
 pub fn prompt_compress_config() -> CompressConfig {
     prompt_compress_config_for(None)
 }
 
-/// [`prompt_compress_config`] resolved for the provider: v2
-/// `providerImagePolicy` gives kimi a 5 MiB inline budget (baseline 3.75 MiB).
-/// The compression entry compresses to the model's budget, so a kimi image
-/// between the two limits must not be re-encoded down to the baseline.
 pub fn prompt_compress_config_for(provider: Option<&str>) -> CompressConfig {
     CompressConfig {
         max_edge: MAX_IMAGE_EDGE_PX,
@@ -45,7 +29,6 @@ pub fn prompt_compress_config_for(provider: Option<&str>) -> CompressConfig {
     }
 }
 
-/// One side of a caption's comparison (v2 `ImageVariantDescription`).
 pub struct ImageVariant {
     pub width: u32,
     pub height: u32,
@@ -53,7 +36,6 @@ pub struct ImageVariant {
     pub mime_type: String,
 }
 
-/// v2 `formatByteSize`, as the fork's SDK port words it.
 pub fn format_byte_size(bytes: usize) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
@@ -77,7 +59,6 @@ fn describe_image_variant(variant: &ImageVariant) -> String {
     }
 }
 
-/// The compression caption, v2 `buildImageCompressionCaption`.
 pub fn build_image_compression_caption(
     original: &ImageVariant,
     final_variant: &ImageVariant,
@@ -98,12 +79,6 @@ pub fn build_image_compression_caption(
     format!("<system>{}</system>", sentences.join(" "))
 }
 
-/// Persist an uncompressed original under the file store, content-addressed
-/// so the same original submitted twice occupies one blob (v2's
-/// `persistOriginalImage` wrote a sha256-named cache file; the store's
-/// `save_with_id` is the fork's dedupe seam, and its blob path is what the
-/// caption names — `Read` serves paths outside the workspace). `None` when
-/// the store cannot take it, which the caption reports as "not preserved".
 pub fn persist_original_image(
     store: &FileStore,
     bytes: &[u8],
@@ -122,13 +97,6 @@ pub fn persist_original_image(
         .and_then(|_| store.blob_path(&id))
 }
 
-/// Prepare one inline base64 image part for the model (v2's
-/// `compressBase64ForModel` + caption half of `resolvePromptMediaFiles`).
-///
-/// Returns the caption to insert before the image (when compression
-/// changed the bytes) and the block to send. A decode failure, an
-/// over-`MAX_IMAGE_DECODE_BYTES` payload, or an image already within both
-/// budgets passes through unchanged with no caption — v2's `passthrough`.
 pub fn prepare_inline_image(
     store: &FileStore,
     provider: Option<&str>,
@@ -375,14 +343,12 @@ mod tests {
             prepare_inline_image(&store, None, "image/png", &data, Some("shot.png"));
 
         let caption = caption.expect("an over-budget image is captioned");
-        assert!(
-            caption.starts_with(
-                "<system>Image compressed to fit model limits: original 4000x3000 image/"
-            )
-        );
+        assert!(caption.starts_with(
+            "<system>Image compressed to fit model limits: original 4000x3000 image/"
+        ));
         assert!(caption.contains("Fine detail may be lost."));
         assert!(caption.contains("call Read on that path"));
-        // The caption names a real persisted original.
+
         let path = caption
             .split("saved at \"")
             .nth(1)
@@ -439,7 +405,10 @@ mod tests {
         let ContentBlock::Text { text, .. } = &blocks[0] else {
             panic!("expected a notice, got {:?}", blocks[0]);
         };
-        assert!(text.contains("unsupported image format image/bmp"), "{text}");
+        assert!(
+            text.contains("unsupported image format image/bmp"),
+            "{text}"
+        );
         assert!(text.contains("PNG, JPEG, GIF, and WebP"), "{text}");
 
         let blocks =
@@ -516,8 +485,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(&dir);
         let data = base64::engine::general_purpose::STANDARD.encode(b"\x00\x00\x00\x18ftypheic");
-        let blocks =
-            image_blocks_from_base64(&store, None, "image/heic", &data, Some("a.heic"));
-        assert!(matches!(&blocks[0], ContentBlock::Text { text, .. } if text.contains("image/heic")));
+        let blocks = image_blocks_from_base64(&store, None, "image/heic", &data, Some("a.heic"));
+        assert!(
+            matches!(&blocks[0], ContentBlock::Text { text, .. } if text.contains("image/heic"))
+        );
     }
 }

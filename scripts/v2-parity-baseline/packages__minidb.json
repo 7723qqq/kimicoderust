@@ -1,0 +1,219 @@
+{
+  "note": "Initial unverified v2 parity baseline for packages/minidb. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "packages/minidb",
+  "redEntries": [
+    {
+      "tsPath": "backup.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "cluster/coordinator.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cluster/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cluster/lock-pool.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cluster/router.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cluster/shard.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cluster/topology.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cluster/types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cluster/utils.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cluster/wipe.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "codec.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "compaction.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "compound-index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "dt-index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "gen-codec.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "generation-files.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "generation-loader.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "generation.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "index-admin.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "index.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "lifecycle-status.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "lifecycle.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "lockfile.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "memory-guard.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "mini-db.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "options.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "query-engine.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "query.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "read-path.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "recovery.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "rename-replace.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "server.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "skiplist.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "snapshot.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "stats.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "store.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "text-index/builder.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "text-index/image.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "text-index/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "text-index/tokenize.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "text-index/types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "text-postings.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "text-registry.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "types.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "value-codec.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "value-reader.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wal.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "wipe.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "worker-runtime.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "worker/text-build-core.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "worker/text-build-worker.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "worker/text-build.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "write-path.ts",
+      "verdict": "partial"
+    }
+  ]
+}

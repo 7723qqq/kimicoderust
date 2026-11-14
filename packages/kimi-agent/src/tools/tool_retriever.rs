@@ -84,7 +84,7 @@ pub fn rank_tools_by_query(
     let average_length =
         documents.iter().map(Vec::len).sum::<usize>() as f64 / document_count.max(1.0);
 
-    let mut query_frequency: HashMap<&str, f64> = HashMap::new();
+    let mut query_frequency: indexmap::IndexMap<&str, f64> = indexmap::IndexMap::new();
     for term in &query_tokens {
         *query_frequency.entry(term.as_str()).or_default() += 1.0;
     }
@@ -176,9 +176,9 @@ fn push_word(word: &mut String, tokens: &mut Vec<String>) {
     }
     tokens.push(word.clone());
     if word.chars().any(is_cjk_ideograph) {
-        let chars: Vec<char> = word.chars().collect();
-        for index in 0..chars.len().saturating_sub(1) {
-            tokens.push(chars[index..index + 2].iter().collect());
+        let units: Vec<u16> = word.encode_utf16().collect();
+        for index in 0..units.len().saturating_sub(1) {
+            tokens.push(String::from_utf16_lossy(&units[index..index + 2]));
         }
     }
     word.clear();

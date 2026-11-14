@@ -1,0 +1,587 @@
+{
+  "note": "Initial unverified v2 parity baseline for apps/kimi-code/src. Generated 2026-11-13 by the machine pass. unported rows are not individually verified; candidateRustPaths are path/name/protocol candidates, not equivalence. This file is a ratchet snapshot, not proof of parity. Update only with bun run check:v2-parity:update after review.",
+  "kind": "unverified-initial",
+  "unit": "apps/kimi-code/src",
+  "redEntries": [
+    {
+      "tsPath": "built-in-catalog.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/agent-selection.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/build-info.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/commands.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/exec-server.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/goal-prompt.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/harness.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/headless-exit.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/host-identity.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/main.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/msys2-prompt.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/options.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/plugin-node-runner.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/prompt-render.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/prompt-session.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/run-prompt.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/run-shell.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/startup-error.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/acp.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/app.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/confirm.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/doctor.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/export.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/fork.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/install-desktop.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/login-flow.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/login.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/plugin-run-node.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/provider.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/session.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/shells.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/update-download.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/upgrade.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/vis.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/access-urls.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/deprecated-server.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/legacy-kill.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/networks.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/remote-control.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/rotate-token.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/run.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/sub/web/shared.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/telemetry.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/auto-install.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/cache.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/cdn.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/install-lock.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/install-state.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/native-manifest.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/native-stage.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/native-swap.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/preflight.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/prompt.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/refresh.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/rollout.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/select.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/source.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/update/types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/v2/run-v2-print.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/v2/snapshot.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/v2/validate-config.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/version-info.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "cli/version.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "constant/app.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "constant/region-urls.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "constant/startup-error.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "constant/terminal.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "constant/update.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "feedback/archive.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "feedback/codebase/filter.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "feedback/codebase/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "feedback/codebase/packager.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "feedback/codebase/scanner.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "feedback/codebase/types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "feedback/feedback-attachments.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "feedback/upload.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "generated/vis-web-asset.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "i18n/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "i18n/locales/en.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "i18n/locales/types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "i18n/locales/zh.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "main.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration/badge.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration/command.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration/detect-pending.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration/legacy-source.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration/migration-screen.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "migration/run-headless.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/asset-utils.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/bun-assets.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/minidb-worker.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/native-assets.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/native-require.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/search-worker.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/smoke-gate.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/smoke.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "native/web-assets.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-import/command.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-import/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-import/run-import.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-import/run-screen.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "session-import/screen.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/cache-hint-config.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/catalog-fetch.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/client-configs.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/clipboard/clipboard-common.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/clipboard/clipboard-has-image.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/clipboard/clipboard-image.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/clipboard/clipboard-native.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/clipboard/clipboard-osc52.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/clipboard/clipboard-text.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/experimental-features.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/git/git-status.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/history/input-history.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/image/image-mime.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/model-migration-state.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/model-switch-confirm-config.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/open-url.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/paths.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/persistence.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/plugin-marketplace.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/plugin-update-notice-state.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/process/external-editor.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/process/fd-detect.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/process/resolve-command.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/process/shell-env.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/process/stdin.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/provider-form.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/provider-managed.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/provider-write.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/recommended-effort-config.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/recommended-effort-state-store.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/recommended-effort.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/region.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/remote-control-qr.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/render-clock.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/shell-quote.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/startup-trace.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/survey-setting.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/terminal-hyperlink.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/terminal-restore.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/usage/debug-timing.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/usage/usage-format.ts",
+      "verdict": "unported"
+    }
+  ]
+}

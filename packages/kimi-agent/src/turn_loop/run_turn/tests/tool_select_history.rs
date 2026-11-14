@@ -54,6 +54,7 @@ async fn an_unsupported_prior_announcement_becomes_a_runtime_reminder() {
     };
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "tool-select-history".into(),
@@ -182,6 +183,7 @@ async fn pending_tool_updates_land_in_the_same_steps_injection_pass() {
         requests: requests.clone(),
     };
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "tool-update-pending".into(),

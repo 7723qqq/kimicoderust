@@ -134,6 +134,7 @@ pub struct JsRunTurnParams {
     pub sandbox_mode: Option<String>,
     pub caller_agent_id: Option<String>,
     pub session_id: Option<String>,
+    pub data_dir: Option<String>,
     /// Native MCP servers configuration (P73).
     pub mcp_servers: Option<Vec<JsMcpServerConfig>>,
     /// Directory of the MCP OAuth credential store (`<home>/credentials/mcp`).
@@ -163,6 +164,9 @@ pub struct JsRunTurnParams {
     /// Host-resolved `[image].read_byte_budget` (v2
     /// `resolveReadImageByteBudget`). `None` keeps the 256KB default.
     pub image_read_byte_budget: Option<i64>,
+    /// Host-resolved `[llm_requester].request_byte_budget` (v2
+    /// `resolveLlmRequestByteBudget`). `None` keeps the 32 MiB default.
+    pub request_byte_budget: Option<i64>,
     /// Host-resolved `[image].max_edge_px`. `None` keeps the 2000px default.
     /// `i64` because napi cannot read JS numbers as `u32`.
     pub image_max_edge_px: Option<i64>,

@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{err_result, ok_result};
 use crate::i18n::{LocalizedText, i18n_params};
-use crate::knowledge;
+use crate::agent::knowledge::sqlite_knowledge as knowledge;
 use crate::turn_loop::types::ExecutableToolResult;
 
 const SEARCH_LIMIT: u32 = 5;
@@ -53,7 +53,7 @@ fn user_db_path() -> Option<String> {
 
 fn ensure_open(workspace_root: &Path) -> Result<(), String> {
     let project = project_db_path(workspace_root);
-    match knowledge::open(project.clone()) {
+    match knowledge::knowledge_open(&project) {
         Ok(()) => Ok(()),
         Err(project_err) => {
             let user = user_db_path().ok_or_else(|| {
@@ -63,7 +63,7 @@ fn ensure_open(workspace_root: &Path) -> Result<(), String> {
                 )
                 .render()
             })?;
-            match knowledge::open(user.clone()) {
+            match knowledge::knowledge_open(&user) {
                 Ok(()) => Ok(()),
                 Err(user_err) => Err(LocalizedText::with_params("engine.tools.knowledge.openDbFallbackFailed", i18n_params!["project" => project, "project_err" => project_err, "user" => user, "user_err" => user_err])
                 .render()
@@ -87,7 +87,13 @@ fn execute_search(args: &Value) -> ExecutableToolResult {
         .get("tags")
         .and_then(|t| t.as_str())
         .map(str::to_string);
-    let json = match knowledge::search(query, scope, tags, SEARCH_LIMIT, SEARCH_MIN_CONFIDENCE) {
+    let json = match knowledge::knowledge_search(
+        &query,
+        scope.as_deref(),
+        tags.as_deref(),
+        SEARCH_LIMIT as usize,
+        SEARCH_MIN_CONFIDENCE,
+    ) {
         Ok(json) => json,
         Err(e) => {
             return err_result(
@@ -150,13 +156,13 @@ fn execute_add(args: &Value) -> ExecutableToolResult {
         .and_then(|s| s.as_str())
         .map(str::to_string);
 
-    let json = match knowledge::add(
-        title.to_string(),
-        category.to_string(),
-        content.to_string(),
-        tags,
-        scope,
-        "ai-learned".to_string(),
+    let json = match knowledge::knowledge_add(
+        title,
+        category,
+        content,
+        &tags,
+        scope.as_deref(),
+        "ai-learned",
         0.7,
     ) {
         Ok(json) => json,
@@ -184,7 +190,7 @@ fn execute_confirm(args: &Value) -> ExecutableToolResult {
     let Some(id) = args.get("id").and_then(|i| i.as_str()) else {
         return err_result("Error: id is required for confirm action.".into());
     };
-    match knowledge::confirm(id.to_string()) {
+    match knowledge::knowledge_confirm(id) {
         Ok(true) => ok_result(format!("Confirmed entry {id} (confidence → 1.0)")),
         Ok(false) => err_result(
             LocalizedText::with_params(
@@ -207,7 +213,7 @@ fn execute_reject(args: &Value) -> ExecutableToolResult {
     let Some(id) = args.get("id").and_then(|i| i.as_str()) else {
         return err_result("Error: id is required for reject action.".into());
     };
-    match knowledge::remove(id.to_string()) {
+    match knowledge::knowledge_remove(id) {
         Ok(true) => ok_result(
             LocalizedText::with_params(
                 "engine.tools.knowledge.rejectedAndRemoved",
@@ -283,7 +289,7 @@ pub fn knowledge_tool_def() -> crate::turn_loop::types::ToolInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::knowledge::{close_db_for_tests, test_lock};
+    use crate::agent::knowledge::sqlite_knowledge::{close_db_for_tests, test_lock};
     use serde_json::json;
 
     struct TestWorkspace {

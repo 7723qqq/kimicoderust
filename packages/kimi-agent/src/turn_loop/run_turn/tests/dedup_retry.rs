@@ -2,19 +2,7 @@ use super::super::*;
 use super::common::*;
 use super::*;
 
-// ── Tool-call dedup (v2 `toolDedupeService` mirror, G-6 #2) ─────────
-
-/// Hold the environment lock with the repeat breaker armed for this test's
-/// window, restoring the prior value on drop.
-///
-/// The ladder is opt-in (`repeat-breaker-off-by-default`, v2 commit
-/// `dadd6e4a43`), so a test that exercises it must arm the switch. The lock is
-/// held for the whole window because the variable is process-global: a parallel
-/// test reading it would otherwise see a breaker it never asked for, and a
-/// panic would otherwise leave the whole run armed.
 struct ArmedRepeatBreaker {
-    /// Declared first so it drops last: the value is restored before the next
-    /// test is allowed in.
     _lock: tokio::sync::MutexGuard<'static, ()>,
     previous: Option<String>,
 }
@@ -42,8 +30,6 @@ impl Drop for ArmedRepeatBreaker {
     }
 }
 
-/// A same-step repeat of an identical call never executes: the host
-/// runs the original once, and the repeat receives the same result.
 #[tokio::test]
 async fn test_same_step_duplicate_executes_once() {
     struct DupLlm {
@@ -78,7 +64,6 @@ async fn test_same_step_duplicate_executes_once() {
                                 extras: None,
                                 args_parse_error: None,
                             },
-                            // Same key, different call id — the repeat.
                             ToolCall {
                                 id: "tc2".into(),
                                 name: "read".into(),
@@ -124,7 +109,10 @@ async fn test_same_step_duplicate_executes_once() {
         })
     });
     let callbacks = rpc_callbacks(server.clone());
+    let (capturing, events) = EventCapturingCallbacks::new(callbacks);
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-same-step-dedup".into(),
@@ -156,7 +144,7 @@ async fn test_same_step_duplicate_executes_once() {
         1,
         "the repeat must share the original's execution"
     );
-    // Both calls keep their result messages, with identical content.
+
     let tool_msgs: Vec<&LLMMessage> = result
         .messages
         .iter()
@@ -167,10 +155,22 @@ async fn test_same_step_duplicate_executes_once() {
     assert_eq!(tool_msgs[1].tool_call_id.as_deref(), Some("tc2"));
     assert_eq!(tool_msgs[0].content, "stub");
     assert_eq!(tool_msgs[1].content, "stub");
+    let events = events.lock().unwrap();
+    let duplicate_native = events
+        .iter()
+        .position(|event| event["type"] == "tool.native" && event["tool_call_id"] == "tc2")
+        .expect("the deduplicated call must still report its result");
+    let duplicate_call = events
+        .iter()
+        .position(|event| event["type"] == "tool.call.started" && event["tool_call_id"] == "tc2")
+        .expect("the deduplicated call must be announced before its result");
+    assert!(
+        duplicate_call < duplicate_native,
+        "tool.call must precede tool.native for the deduplicated call"
+    );
+    assert_eq!(events[duplicate_call]["args"]["path"], "/a.txt");
 }
 
-/// Calls with non-native names are exempt from engine-side dedup: they
-/// run on the host, whose own dedup service stays authoritative.
 #[tokio::test]
 async fn test_same_step_duplicate_of_host_tool_still_executes_twice() {
     struct HostDupLlm {
@@ -251,6 +251,7 @@ async fn test_same_step_duplicate_of_host_tool_still_executes_twice() {
     });
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-host-tool-no-dedup".into(),
@@ -284,8 +285,6 @@ async fn test_same_step_duplicate_of_host_tool_still_executes_twice() {
     );
 }
 
-/// Cross-step repeats earn the escalating reminders, and the 12th
-/// consecutive identical call force-stops the turn as `completed`.
 #[tokio::test]
 async fn test_repeat_streak_appends_reminders_and_force_stops() {
     struct RepeatLlm {
@@ -342,7 +341,10 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
         })
     });
     let callbacks = rpc_callbacks(server.clone());
+    let (capturing, events) = EventCapturingCallbacks::new(callbacks);
+    let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-repeat-streak".into(),
@@ -354,7 +356,7 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
         }],
         tools: &[],
         tool_defs: vec![],
-        // Generous ceiling: the force stop, not max_steps, must end it.
+
         max_steps: 20,
         max_attempts: None,
         max_context_tokens: None,
@@ -368,8 +370,7 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
         media_recovery: None,
         toolset: None,
     };
-    // The ladder is opt-in (`repeat-breaker-off-by-default`, v2 commit
-    // `dadd6e4a43`): arm it for this test's window.
+
     let _breaker = ArmedRepeatBreaker::new().await;
     let result = run_turn(input, &callbacks).await.unwrap();
 
@@ -381,8 +382,7 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
         result.stop_reason,
         LoopTurnStopReason::RepeatBreaker
     ));
-    // The handoff step's tool call is refused, not executed: v2
-    // `HANDOFF_VETO_RESULT` answers it with the veto text and ends the turn.
+
     let tool_msgs: Vec<&LLMMessage> = result
         .messages
         .iter()
@@ -408,7 +408,7 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
         .find(|m| m.role == "assistant" && !m.tool_calls.is_empty())
         .expect("the vetoed call keeps its assistant message");
     assert_eq!(handoff_assistant.tool_calls[0].id, "tc12");
-    // Streak 1 and 2 stay untouched; 3 earns reminder 1.
+
     assert_eq!(tool_msgs[0].content, "stub");
     assert_eq!(tool_msgs[1].content, "stub");
     assert!(
@@ -416,9 +416,9 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
             .content
             .contains("repeated several times in a row")
     );
-    // Streak 5 embeds the count (reminder 2).
+
     assert!(tool_msgs[4].content.contains("issued 5 times in a row"));
-    // Streak 8 and 12 carry the final-response reminder; 12 stops the turn.
+
     assert!(
         tool_msgs[7]
             .content
@@ -429,16 +429,22 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
             .content
             .contains("Write your final response now")
     );
+    let events = events.lock().unwrap();
+    let native_index = events
+        .iter()
+        .position(|event| event["type"] == "tool.native" && event["tool_call_id"] == "tc12")
+        .expect("the vetoed handoff call must still report its result");
+    let call_index = events
+        .iter()
+        .position(|event| event["type"] == "tool.call.started" && event["tool_call_id"] == "tc12")
+        .expect("the vetoed handoff call must be announced before its result");
+    assert!(
+        call_index < native_index,
+        "tool.call must precede tool.native for the vetoed call"
+    );
+    assert_eq!(events[call_index]["args"]["path"], "/a.txt");
 }
 
-/// v2 `does not force-stop when the malformed argument text keeps changing`
-/// (`toolDedupe.test.ts:1361`).
-///
-/// Every payload that fails to decode carries the same `{}` arguments, so the
-/// dedupe key has to come from the text the provider sent. Keyed on the decoded
-/// value, the twelve calls below look like one call repeated twelve times and
-/// the turn is force-stopped — which is exactly what must not happen: the model
-/// is changing its payload on every attempt, so it is not stuck.
 #[tokio::test]
 async fn test_changing_malformed_payloads_do_not_force_stop() {
     struct BrokenLlm {
@@ -497,6 +503,7 @@ async fn test_changing_malformed_payloads_do_not_force_stop() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-changing-malformed".into(),
@@ -521,8 +528,7 @@ async fn test_changing_malformed_payloads_do_not_force_stop() {
         media_recovery: None,
         toolset: None,
     };
-    // The breaker has to be *on* for this to prove anything: with it off the
-    // turn could not stop early regardless of how the calls were keyed.
+
     let _breaker = ArmedRepeatBreaker::new().await;
     let result = run_turn(input, &callbacks).await.unwrap();
 
@@ -531,8 +537,7 @@ async fn test_changing_malformed_payloads_do_not_force_stop() {
         "12 rejected calls + the step that recovers"
     );
     assert_eq!(result.stop_reason, LoopTurnStopReason::EndTurn);
-    // Each call is answered with the decoder's reason — the call is never
-    // dropped — and none carries a repeat reminder.
+
     let tool_msgs: Vec<&LLMMessage> = result
         .messages
         .iter()
@@ -553,8 +558,6 @@ async fn test_changing_malformed_payloads_do_not_force_stop() {
     }
 }
 
-/// An LLM that re-issues one identical undecodable call until `stop_after`
-/// calls, then answers in text.
 struct SameBrokenCallLlm {
     raw: &'static str,
     stop_after: u32,
@@ -612,6 +615,7 @@ impl LLM for SameBrokenCallLlm {
 
 fn broken_turn_input<'a>(llm: &'a SameBrokenCallLlm, max_steps: u32) -> RunTurnInput<'a> {
     RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-rejected-repeat".into(),
@@ -638,13 +642,6 @@ fn broken_turn_input<'a>(llm: &'a SameBrokenCallLlm, max_steps: u32) -> RunTurnI
     }
 }
 
-/// v2 `counts rejected calls toward the streak and force-stops at 12, keeping
-/// the error flag` (`toolDedupe.test.ts:1131`).
-///
-/// An undecodable call never reaches the tool executor, but v2 still registers
-/// it (`registerSkipped`), so a model stuck re-issuing it is stopped instead of
-/// looping until the step cap. Answering such a call outside the plan — what
-/// this used to do — left the turn unable to see the loop at all.
 #[tokio::test]
 async fn test_repeated_rejected_calls_force_stop_the_turn() {
     let llm = SameBrokenCallLlm {
@@ -671,8 +668,7 @@ async fn test_repeated_rejected_calls_force_stop_the_turn() {
         13,
         "12 rejected calls + the call the handoff step issued"
     );
-    // The call is still answered with its own failure — the ladder appends,
-    // it never replaces — so the error text survives the reminder.
+
     for message in &tool_msgs[..12] {
         assert!(
             message.content.contains("Invalid Bash arguments"),
@@ -680,7 +676,7 @@ async fn test_repeated_rejected_calls_force_stop_the_turn() {
             message.content
         );
     }
-    // The handoff step's call is refused, not executed (v2 `HANDOFF_VETO_RESULT`).
+
     assert!(
         tool_msgs[12]
             .content
@@ -704,12 +700,6 @@ async fn test_repeated_rejected_calls_force_stop_the_turn() {
     );
 }
 
-/// v2 `runs the handoff step even when the force stop lands on the step cap`
-/// (`toolDedupe.test.ts:1319`).
-///
-/// The handoff sits outside the step loop (`settleHandoff` enqueues it
-/// `bypassMaxSteps`), so a force stop on the last permitted step still gets the
-/// one text-only step that turns the stop into a handoff.
 #[tokio::test]
 async fn test_handoff_runs_when_the_force_stop_lands_on_the_step_cap() {
     let llm = SameBrokenCallLlm {
@@ -728,10 +718,6 @@ async fn test_handoff_runs_when_the_force_stop_lands_on_the_step_cap() {
     assert_eq!(result.stop_reason, LoopTurnStopReason::RepeatBreaker);
 }
 
-// ── Turn telemetry counters ─────────────────────────────────────────
-
-/// The turn result carries the LLM retry count: the transient failure
-/// on the first chat attempt counts as one retry.
 #[tokio::test]
 async fn test_turn_result_llm_retry_counter() {
     struct RetryOnceLlm {
@@ -784,6 +770,7 @@ async fn test_turn_result_llm_retry_counter() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         turn_id: "test-retry-counter".into(),
@@ -840,11 +827,6 @@ async fn test_turn_result_llm_retry_counter() {
     );
 }
 
-/// `RunTurnInput::max_attempts` must cap the retry loop (v2
-/// `loopControl.maxAttemptsPerStep`, stepRetryService.ts:138-146): a
-/// permanently failing LLM is called exactly `max_attempts` times before
-/// the turn errors out. The engine default (no host override) is 10 —
-/// `DEFAULT_MAX_RETRY_ATTEMPTS`, pinned by the retry.rs unit test.
 #[tokio::test]
 async fn test_max_attempts_caps_llm_retries() {
     struct AlwaysFailsLlm {
@@ -877,6 +859,7 @@ async fn test_max_attempts_caps_llm_retries() {
     let callbacks = rpc_callbacks(server.clone());
 
     let input = RunTurnInput {
+        llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
         previous_turn_aborted: false,
         max_attempts: Some(2),
