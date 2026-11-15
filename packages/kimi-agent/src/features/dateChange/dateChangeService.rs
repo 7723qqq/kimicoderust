@@ -13,7 +13,7 @@ use crate::features::reminder::reminder_service::ReminderService;
 use crate::features::reminder::types::ContextInjectionContent;
 use crate::features::reminder::types::{ContextInjectionContext, ContextInjectionResult};
 use crate::human::xstate2::{
-    Action, Context, FromCallback, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
+    Action, ActorLogic, Context, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
     from_callback,
 };
 use crate::os::HostClock;
@@ -68,12 +68,14 @@ pub fn date_change_actor_logic() -> Machine {
             (
                 "beforeRestore".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::from([(
                         "runtime.restore".to_string(),
-                        Transition {
+                        vec![Transition {
                             target: Some("active".to_string()),
                             actions: Vec::new(),
-                        },
+                            ..Default::default()
+                        }],
                     )]),
                     invoke: None,
                 },
@@ -81,44 +83,51 @@ pub fn date_change_actor_logic() -> Machine {
             (
                 "active".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::new(),
                     invoke: Some(InvokeDef {
                         id: "dateChangeInjection".to_string(),
                         src: "dateChangeInjection".to_string(),
-                        input: Arc::new(|context, event| {
-                            let context = context
+                        input: Arc::new(|args| {
+                            let context = args
+                                .context
                                 .downcast_ref::<Mutex<DateChangeActorContext>>()
                                 .unwrap()
                                 .lock();
                             InvokeInput {
                                 runtime: context.runtime.clone(),
-                                restore: event.restore.clone(),
+                                restore: args.event.restore.clone(),
                             }
                         }),
+                        on_done: Vec::new(),
+                        on_error: Vec::new(),
                     }),
                 },
             ),
         ]),
         on: std::collections::HashMap::from([(
             "dateChange.disclose".to_string(),
-            Transition {
+            vec![Transition {
                 target: None,
-                actions: vec![Action::Custom(Arc::new(|context, event| {
+                actions: vec![Action::Custom(Arc::new(|context, args| {
                     let context = context
                         .downcast_ref::<Mutex<DateChangeActorContext>>()
                         .unwrap();
-                    context.lock().seed = event
+                    context.lock().seed = args
+                        .event
                         .payload
                         .get("seed")
                         .cloned()
                         .and_then(|seed| serde_json::from_value(seed).ok());
                 }))],
-            },
+                ..Default::default()
+            }],
         )]),
         actors: std::collections::HashMap::from([(
             "dateChangeInjection".to_string(),
             date_change_injection(),
         )]),
+        ..Default::default()
     }
 }
 
@@ -154,7 +163,7 @@ fn date_injection_result(
     }
 }
 
-fn date_change_injection() -> FromCallback {
+fn date_change_injection() -> ActorLogic {
     from_callback(|input| {
         let runtime = input
             .runtime

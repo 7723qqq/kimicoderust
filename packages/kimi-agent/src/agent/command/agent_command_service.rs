@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::agent::state::agent_state::StateError;
-use crate::agent::state::agent_state_service::{ListenerRegistration, Listeners};
+use crate::agent::state::errors::StateError;
+use crate::agent::state::listeners::{ListenerRegistration, Listeners};
 
 use super::agent_command::{AgentCommand, AgentCommandError, AgentCommandInfo};
 use super::command_contribution::{CommandContributions, CommandRunContext};

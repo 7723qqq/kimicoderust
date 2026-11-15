@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::agent::state::agent_state_service::{ListenerRegistration, Listeners};
+use crate::agent::state::listeners::{ListenerRegistration, Listeners};
 
 use super::agent_command::AgentCommandError;
 
@@ -80,7 +80,7 @@ impl CommandContributions {
 
     pub fn subscribe_changes<F>(&self, listener: F) -> ListenerRegistration<()>
     where
-        F: Fn(&()) -> Result<(), crate::agent::state::agent_state::StateError>
+        F: Fn(&()) -> Result<(), crate::agent::state::errors::StateError>
             + Send
             + Sync
             + 'static,

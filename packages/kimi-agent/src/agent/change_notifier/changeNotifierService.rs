@@ -11,7 +11,7 @@ use crate::_base::di::lifecycle::DisposableRef;
 use crate::app::event::event2::Event2;
 use crate::agent::profile::context::split_agents_md_files;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::features::reminder::reminder_service::ReminderService;
 use crate::features::reminder::types::ReminderNotification;
 use crate::session::agent_lifecycle::agent_lifecycle::MAIN_AGENT_ID;

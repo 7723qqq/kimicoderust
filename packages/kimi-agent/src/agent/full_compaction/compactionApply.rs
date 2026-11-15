@@ -139,7 +139,9 @@ async fn capture_wire_lines(deps: &CompactionApplyDeps) -> Option<WireLineRange>
         return None;
     }
     let end = deps.wire.line_count();
-    let ranges = deps.states.get(&full_compaction_wire_ranges_key());
+    let ranges = deps
+        .states
+        .get(&full_compaction_wire_ranges_key().state_key());
     let previous_end = ranges
         .as_array()
         .and_then(|ranges| ranges.last())
@@ -161,7 +163,9 @@ fn render_recovery_footer(
 ) -> Option<String> {
     let wire_lines = wire_lines?;
     let journal_path = deps.wire.journal_path()?;
-    let ranges = deps.states.get(&full_compaction_wire_ranges_key());
+    let ranges = deps
+        .states
+        .get(&full_compaction_wire_ranges_key().state_key());
     let mut windows = ranges
         .as_array()
         .into_iter()

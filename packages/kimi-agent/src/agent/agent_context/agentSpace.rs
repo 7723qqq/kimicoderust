@@ -12,7 +12,7 @@ use crate::agent::state::agent_model::{
     AgentModel, AgentModelBridge, AgentModelContext, AgentModelDefinition, DomainResourceRuntime,
     validate_applier_coverage,
 };
-use crate::agent::state::agent_state::StateKey;
+use crate::state::state::ReplayableStateKey;
 
 pub trait AgentSpaceHost: Send + Sync {
     fn is_active_model_definition(&self, definition: &AgentModelDefinition) -> bool;
@@ -24,7 +24,7 @@ pub trait AgentSpaceHost: Send + Sync {
         event: Value,
     ) -> crate::rpc::types::BoxFuture<'static, Result<(), String>>;
 
-    fn read_legacy_state(&self, key: &StateKey) -> Value;
+    fn read_legacy_state(&self, key: &Arc<ReplayableStateKey>) -> Value;
 }
 
 struct SpaceBridge {
@@ -36,7 +36,7 @@ impl AgentModelBridge for SpaceBridge {
         self.host.dispatch_model_event(event)
     }
 
-    fn read_legacy(&self, key: &StateKey) -> Value {
+    fn read_legacy(&self, key: &Arc<ReplayableStateKey>) -> Value {
         self.host.read_legacy_state(key)
     }
 }

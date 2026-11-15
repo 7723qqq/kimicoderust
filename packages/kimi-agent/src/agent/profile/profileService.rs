@@ -18,7 +18,7 @@ use crate::agent::change_notifier::change_notifier::{BeliefsSeed, IAgentChangeNo
 use crate::agent::environment_binding::agent_environment::IAgentEnvironmentService;
 use crate::agent::r#loop::config_section::LoopControl;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::agent::tool_executor::tool_executor::IAgentToolRegistryService;
 use crate::agent::tool_registry::tool_contribution::agent_tool_contributions;
 use crate::app::agent_identity::agent_identity::IAgentIdentity;
@@ -104,23 +104,23 @@ static AGENT_STATUS_UPDATED_CLASS: LazyLock<Event2Class> = LazyLock::new(|| Even
     schema: None,
 });
 
-pub fn profile_active_tool_names_overlay_key() -> StateKey {
+pub fn profile_active_tool_names_overlay_key() -> StateKey<Value> {
     StateKey::new("profile.activeToolNamesOverlay", || Value::Null)
 }
 
-pub fn profile_agents_md_warning_key() -> StateKey {
+pub fn profile_agents_md_warning_key() -> StateKey<Value> {
     StateKey::new("profile.agentsMdWarning", || Value::Null)
 }
 
-pub fn profile_emitted_thinking_effort_warnings_key() -> StateKey {
+pub fn profile_emitted_thinking_effort_warnings_key() -> StateKey<Value> {
     StateKey::new("profile.emittedThinkingEffortWarnings", || json!([]))
 }
 
-pub fn profile_emitted_tool_pattern_warnings_key() -> StateKey {
+pub fn profile_emitted_tool_pattern_warnings_key() -> StateKey<Value> {
     StateKey::new("profile.emittedToolPatternWarnings", || json!([]))
 }
 
-pub fn profile_emitted_plugin_budget_warnings_key() -> StateKey {
+pub fn profile_emitted_plugin_budget_warnings_key() -> StateKey<Value> {
     StateKey::new("profile.emittedPluginBudgetWarnings", || json!([]))
 }
 
@@ -1135,7 +1135,7 @@ impl AgentProfileServiceInner {
         );
     }
 
-    fn insert_emitted_warning(&self, key: &StateKey, value: String) -> bool {
+    fn insert_emitted_warning(&self, key: &StateKey<Value>, value: String) -> bool {
         let mut emitted: HashSet<String> =
             serde_json::from_value(self.states.get(key)).unwrap_or_else(|error| panic!("{error}"));
         let inserted = emitted.insert(value);

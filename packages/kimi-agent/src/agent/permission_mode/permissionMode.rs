@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::agent::state::agent_state_service::Listeners;
+use crate::agent::state::listeners::Listeners;
 
 pub use crate::agent::permission_policy::types::PermissionMode;
 

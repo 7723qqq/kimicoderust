@@ -11,7 +11,7 @@ use crate::human::llm::requester::recovery::LlmRecoveryRecord;
 use crate::human::llm::requester::requester::{
     LlmRequestConfig, LlmRequestContent, LlmRequestControl, LlmRequestEvent, LlmRequester,
 };
-use crate::human::xstate2::{FromCallback, XEvent, from_callback};
+use crate::human::xstate2::{ActorLogic, XEvent, from_callback};
 use crate::wire::record::WireAsyncError;
 
 #[derive(Clone)]
@@ -64,7 +64,7 @@ pub enum LlmEvent {
 pub fn create_request_actor(
     requester: Arc<dyn LlmRequester>,
     message_resolvers: Vec<Arc<dyn MessageResolver>>,
-) -> FromCallback {
+) -> ActorLogic {
     from_callback(move |input| {
         let requester = requester.clone();
         let message_resolvers = message_resolvers.clone();
@@ -127,10 +127,16 @@ pub fn create_request_actor(
 }
 
 pub fn actor_event_to_xevent(event: LlmEvent) -> XEvent {
+    let mut xevent = llm_event_xevent(&event);
+    xevent.data = Some(Arc::new(event));
+    xevent
+}
+
+fn llm_event_xevent(event: &LlmEvent) -> XEvent {
     match event {
         LlmEvent::Sent { recovery } => XEvent::new(
             "llm.sent",
-            recovery.map_or(Value::Null, |recovery| {
+            recovery.as_ref().map_or(Value::Null, |recovery| {
                 serde_json::json!({
                     "strategy": recovery.strategy,
                     "action": recovery.action,
@@ -177,7 +183,7 @@ pub fn actor_event_to_xevent(event: LlmEvent) -> XEvent {
     }
 }
 
-fn request_event_to_xevent(event: LlmRequestEvent) -> XEvent {
+fn request_event_to_xevent(event: &LlmRequestEvent) -> XEvent {
     let (type_, payload) = match event {
         LlmRequestEvent::Sent => ("llm.sent", Value::Null),
         LlmRequestEvent::StreamingHeaders { headers } => (

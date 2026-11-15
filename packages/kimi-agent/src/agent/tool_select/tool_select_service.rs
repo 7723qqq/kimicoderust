@@ -7,11 +7,11 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::_base::di::lifecycle::DisposableRef;
+use crate::_base::state::state_registry::StateKey;
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
 use crate::agent::context_memory::types::ContextMessage;
 use crate::agent::profile::profile::AgentProfileService;
-use crate::agent::state::agent_state::{ReplayableStateMeta, StateKey};
-use crate::agent::state::agent_state_service::{AgentStateService, StateRegistration};
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::agent::tool_executor::tool_executor::{
     IAgentToolExecutorService, IAgentToolRegistryService, ToolInfo,
 };
@@ -27,6 +27,7 @@ use crate::wire::record::WireAsyncError;
 
 use super::dynamic_tools::*;
 use super::flag::TOOL_SELECT_FLAG_ID;
+use super::tool_select_ops::tool_select_key;
 use super::tool_select::{
     IAgentToolSelectService, LoadToolsResult, ShapedToolEntry, Tool, ToolSelectAnnouncement,
     ToolSelectCapabilities,
@@ -47,17 +48,8 @@ pub trait ToolSelectPolicy: Send + Sync {
     fn policy_fingerprint(&self) -> String;
 }
 
-pub fn tool_select_state_key() -> StateKey {
-    StateKey::new("toolSelect", Arc::new(|| {
-        serde_json::to_value(ToolSelectModelState::default())
-            .expect("tool select state is serializable")
-    }))
-    .snapshot_excluded(true)
-    .replayable(ReplayableStateMeta::new(true, false))
-}
-
-pub fn tool_select_pending_loaded_key() -> StateKey {
-    StateKey::new("toolSelect.pendingLoaded", Arc::new(|| json!([])))
+pub fn tool_select_pending_loaded_key() -> StateKey<Value> {
+    StateKey::new("toolSelect.pendingLoaded", || json!([]))
 }
 
 #[derive(Default)]
@@ -73,7 +65,7 @@ pub struct AgentToolSelectService {
     tool_policy: Arc<dyn ToolSelectPolicy>,
     context: Arc<dyn IAgentContextMemoryService>,
     flags: Arc<dyn IFlagService>,
-    states: Arc<AgentStateService>,
+    states: Arc<dyn IAgentStateService>,
     telemetry: Arc<dyn ITelemetryService>,
     dispatcher: Arc<dyn IEventDispatcher>,
     agent_id: String,
@@ -83,7 +75,7 @@ pub struct AgentToolSelectService {
     notified_updates: Arc<Mutex<HashSet<String>>>,
     failures: Arc<Mutex<SelectionFailures>>,
     registrations: Mutex<Vec<DisposableRef>>,
-    _state_registrations: Vec<StateRegistration>,
+    _state_registrations: Vec<DisposableRef>,
 }
 
 impl AgentToolSelectService {
@@ -95,15 +87,15 @@ impl AgentToolSelectService {
         context: Arc<dyn IAgentContextMemoryService>,
         tool_executor: Arc<dyn IAgentToolExecutorService>,
         flags: Arc<dyn IFlagService>,
-        states: Arc<AgentStateService>,
+        states: Arc<dyn IAgentStateService>,
         telemetry: Arc<dyn ITelemetryService>,
         dispatcher: Arc<dyn IEventDispatcher>,
         agent_id: String,
         mcp_handle: Arc<dyn ISessionMcpHandle>,
         reminder: Arc<dyn ReminderService>,
-    ) -> Result<Arc<Self>, crate::agent::state::agent_state::StateError> {
+    ) -> Result<Arc<Self>, crate::agent::state::errors::StateError> {
         let state_registrations = vec![
-            states.contribute_state(tool_select_state_key())?,
+            states.contribute_state(tool_select_key().state_key())?,
             states.contribute_state(tool_select_pending_loaded_key())?,
         ];
         let this = Arc::new(Self {
@@ -140,16 +132,12 @@ impl AgentToolSelectService {
     }
 
     fn pending_loaded(&self) -> BTreeSet<String> {
-        self.states
-            .get(&tool_select_pending_loaded_key())
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
+        serde_json::from_value(self.states.get(&tool_select_pending_loaded_key())).unwrap_or_default()
     }
 
     fn set_pending_loaded(&self, pending: BTreeSet<String>) {
         if let Ok(value) = serde_json::to_value(pending) {
-            let _ = self.states.set(&tool_select_pending_loaded_key(), value);
+            self.states.set(&tool_select_pending_loaded_key(), value);
         }
     }
 
@@ -172,16 +160,12 @@ impl AgentToolSelectService {
     }
 
     fn model_state(&self) -> ToolSelectModelState {
-        self.states
-            .get(&tool_select_state_key())
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
+        serde_json::from_value(self.states.get(&tool_select_key().state_key())).unwrap_or_default()
     }
 
     fn set_model_state(&self, state: ToolSelectModelState) {
         if let Ok(value) = serde_json::to_value(state) {
-            let _ = self.states.set(&tool_select_state_key(), value);
+            self.states.set(&tool_select_key().state_key(), value);
         }
     }
 

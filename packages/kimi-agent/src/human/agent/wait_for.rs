@@ -3,35 +3,19 @@ use std::time::Duration;
 
 use futures_util::future::{BoxFuture, FutureExt, select_all};
 use indexmap::IndexMap;
-use tokio::sync::Notify;
 
 use crate::human::tool::executor::{TaskWaitInput, TaskWaitOutcome, WaitForTasks};
-use crate::human::tool::machine::ToolActor;
+use crate::human::xstate2::Actor;
 use crate::wire::record::WireAsyncError;
 
-pub type ToolActorRef = Arc<ToolActor>;
+pub type ToolActorRef = Arc<Actor>;
 
 pub trait AgentSnapshotSource: Send + Sync {
     fn snapshot_background(&self) -> IndexMap<String, ToolActorRef>;
 }
 
-fn is_done(actor: &ToolActor) -> bool {
-    matches!(actor.snapshot().1.as_str(), "succeeded" | "failed" | "aborted")
-}
-
 async fn wait_for_done(actor: ToolActorRef) {
-    let notify = Arc::new(Notify::new());
-    let listener_notify = notify.clone();
-    let listener_actor = actor.clone();
-    actor.subscribe(Arc::new(move |_| {
-        if is_done(&listener_actor) {
-            listener_notify.notify_one();
-        }
-    }));
-    if is_done(&actor) {
-        return;
-    }
-    notify.notified().await;
+    let _ = crate::human::xstate2::wait_for(&actor, |snapshot| snapshot.status == "done").await;
 }
 
 pub fn create_wait_for_tasks(self_: impl AgentSnapshotSource + 'static) -> WaitForTasks {
@@ -82,7 +66,7 @@ fn wait_for_tasks(
         let mut completed = Vec::new();
         let mut running = Vec::new();
         for (id, actor) in targets {
-            if is_done(&actor) {
+            if actor.get_snapshot().status == "done" {
                 completed.push(id);
             } else {
                 running.push(id);

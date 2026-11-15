@@ -33,7 +33,7 @@ pub struct ReminderEntry {
     pub variant: String,
 }
 use crate::human::xstate2::{
-    Action, Context, FromCallback, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
+    Action, ActorLogic, Context, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
     from_callback,
 };
 
@@ -66,12 +66,14 @@ pub fn reminder_actor_logic() -> Machine {
             (
                 "beforeRestore".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::from([(
                         "runtime.restore".to_string(),
-                        Transition {
+                        vec![Transition {
                             target: Some("active".to_string()),
                             actions: Vec::new(),
-                        },
+                            ..Default::default()
+                        }],
                     )]),
                     invoke: None,
                 },
@@ -79,20 +81,24 @@ pub fn reminder_actor_logic() -> Machine {
             (
                 "active".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::new(),
                     invoke: Some(InvokeDef {
                         id: "reminderEffects".to_string(),
                         src: "reminderEffects".to_string(),
-                        input: Arc::new(|context, event| {
-                            let context = context
+                        input: Arc::new(|args| {
+                            let context = args
+                                .context
                                 .downcast_ref::<Mutex<ReminderActorContext>>()
                                 .unwrap()
                                 .lock();
                             InvokeInput {
                                 runtime: context.runtime.clone(),
-                                restore: event.restore.clone(),
+                                restore: args.event.restore.clone(),
                             }
                         }),
+                        on_done: Vec::new(),
+                        on_error: Vec::new(),
                     }),
                 },
             ),
@@ -100,13 +106,14 @@ pub fn reminder_actor_logic() -> Machine {
         on: std::collections::HashMap::from([
             (
                 "reminder.register".to_string(),
-                Transition {
+                vec![Transition {
                     target: None,
-                    actions: vec![Action::Custom(Arc::new(|context, event| {
+                    actions: vec![Action::Custom(Arc::new(|context, args| {
                         let context = context
                             .downcast_ref::<Mutex<ReminderActorContext>>()
                             .unwrap();
-                        let entry = event
+                        let entry = args
+                            .event
                             .data
                             .clone()
                             .unwrap()
@@ -114,17 +121,19 @@ pub fn reminder_actor_logic() -> Machine {
                             .unwrap();
                         context.lock().entries.lock().push(entry);
                     }))],
-                },
+                    ..Default::default()
+                }],
             ),
             (
                 "reminder.unregister".to_string(),
-                Transition {
+                vec![Transition {
                     target: None,
-                    actions: vec![Action::Custom(Arc::new(|context, event| {
+                    actions: vec![Action::Custom(Arc::new(|context, args| {
                         let context = context
                             .downcast_ref::<Mutex<ReminderActorContext>>()
                             .unwrap();
-                        let entry = event
+                        let entry = args
+                            .event
                             .data
                             .clone()
                             .unwrap()
@@ -136,17 +145,19 @@ pub fn reminder_actor_logic() -> Machine {
                             .lock()
                             .retain(|current| !Arc::ptr_eq(current, &entry));
                     }))],
-                },
+                    ..Default::default()
+                }],
             ),
         ]),
         actors: std::collections::HashMap::from([(
             "reminderEffects".to_string(),
             reminder_effects(),
         )]),
+        ..Default::default()
     }
 }
 
-fn reminder_effects() -> FromCallback {
+fn reminder_effects() -> ActorLogic {
     from_callback(|input| {
         let runtime = input
             .runtime

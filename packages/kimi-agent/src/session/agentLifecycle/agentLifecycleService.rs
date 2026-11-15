@@ -50,7 +50,7 @@ use crate::agent::profile::profile_ops::{ProfileModelState, profile_replayable_k
 use crate::agent::scope_context::scope_context::{
     IAgentScopeContext, agent_context_of, make_agent_scope_context,
 };
-use crate::agent::state::agent_state_v2::I_AGENT_STATE_SERVICE;
+use crate::agent::state::agent_state::I_AGENT_STATE_SERVICE;
 use crate::agent::task::task::IAgentTaskService;
 use crate::agent::tool_activation::tool_activation::IAgentToolActivationService;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
@@ -62,13 +62,15 @@ use crate::app::telemetry::telemetry_service::bind_telemetry_scope;
 use crate::environment::environment::LOCAL_ENVIRONMENT_ID;
 use crate::features::tower::tower::has_pinned_permission_mode;
 use crate::human::agent::machine::{
-    AgentInput, AgentMachineSelf, AgentScopeHandle, ScopeFactoryOutput, create_agent_machine,
+    AgentEmitted, AgentInput, AgentMachineSelf, AgentScopeHandle, ScopeFactoryOutput,
+    create_agent_machine,
 };
 use crate::human::interaction::facade::interactions;
 use crate::human::session::machine::{
-    AgentActorRef, SessionEmitted, SessionEvent, SessionInput, create_session_machine,
+    AgentActorRef, SessionEmitted, SessionEvent, SessionInput, SessionMachineContext,
+    create_session_machine, session_emitted_of,
 };
-use crate::human::xstate2::{create_actor, set_root_actor_error_reporter, wait_for};
+use crate::human::xstate2::{XEvent, create_actor, set_root_actor_error_reporter, wait_for};
 use crate::persistence::interface::append_log_store::IAppendLogStore;
 use crate::persistence::interface::blob_store::IBlobStore;
 use crate::persistence::interface::session_lock::ISessionLockService;
@@ -202,10 +204,10 @@ impl AgentLifecycleService {
             reporter.error("root actor stopped on aborted operation", Some(error));
         }));
         let session_actor = create_actor(
-            create_session_machine(),
-            SessionInput {
+            create_session_machine().machine().clone(),
+            Arc::new(SessionInput {
                 request: MACHINE_LOOP_MODEL.clone(),
-            },
+            }),
         );
         session_actor.start();
         let this = Arc::new(Self {
@@ -233,10 +235,12 @@ impl AgentLifecycleService {
             subscriptions: Mutex::new(Vec::new()),
         });
         let weak = Arc::downgrade(&this);
-        this.subscriptions.lock().push(this.session_actor.on(
+        let session_subscription = this.session_actor.on(
             "agent.restarted",
-            Arc::new(move |event| {
-                let SessionEmitted::AgentRestarted { agent_id, ref_ } = event else {
+            Arc::new(move |event: &XEvent| {
+                let Some(SessionEmitted::AgentRestarted { agent_id, ref_ }) =
+                    session_emitted_of(event)
+                else {
                     return;
                 };
                 if let Some(this) = weak.upgrade()
@@ -245,7 +249,10 @@ impl AgentLifecycleService {
                     *managed.ref_.lock() = Some(ref_);
                 }
             }),
-        ));
+        );
+        this.subscriptions
+            .lock()
+            .push(Box::new(SessionSubscription(session_subscription)));
         let session_id = this.ctx.session_id();
         this.subscriptions.lock().push(this.bus.subscribe_turn_ended(
             Arc::new(move |event: TurnEnded| {
@@ -321,7 +328,10 @@ impl AgentLifecycleService {
         agent_id: String,
         opts: CreateAgentOptions,
     ) -> BoxFuture<'static, Result<Arc<AgentContext>, WireAsyncError>> {
-        if self.session_actor.get_snapshot().context.agents.contains_key(&agent_id) {
+        if session_context(&self.session_actor)
+            .agents
+            .contains_key(&agent_id)
+        {
             return Box::pin(std::future::ready(Err(agent_error(
                 AGENT_ALREADY_EXISTS,
                 format!("Agent \"{agent_id}\" already exists"),
@@ -341,13 +351,16 @@ impl AgentLifecycleService {
                 this.build_agent_scope(scope_agent_id.clone(), opts.clone(), self_, signal)
             }),
         };
-        self.session_actor.send(SessionEvent::AgentCreate {
-            agent_id: Some(agent_id.clone()),
-            logic: create_agent_machine(Default::default()),
-            input,
-        });
-        let snapshot = self.session_actor.get_snapshot();
-        let Some(entry) = snapshot.context.agents.get(&agent_id) else {
+        self.session_actor.send(
+            SessionEvent::AgentCreate {
+                agent_id: Some(agent_id.clone()),
+                logic: create_agent_machine(Default::default()),
+                input,
+            }
+            .into(),
+        );
+        let context = session_context(&self.session_actor);
+        let Some(entry) = context.agents.get(&agent_id) else {
             return Box::pin(std::future::ready(Err(format!(
                 "Agent \"{agent_id}\" was not spawned by the session actor"
             )
@@ -369,10 +382,13 @@ impl AgentLifecycleService {
         Box::pin(async move {
             let failure = Arc::new(Mutex::new(None::<String>));
             let failure_slot = failure.clone();
-            let subscription = ref_.on(
+            let subscription = AgentMachineSelf::new(ref_.clone()).on(
                 "agent.failed",
                 Arc::new(move |event| {
-                    *failure_slot.lock() = Some(event.error.to_string());
+                    let AgentEmitted::AgentFailed { error } = event else {
+                        return;
+                    };
+                    *failure_slot.lock() = Some(error.to_string());
                 }),
             );
             let waited = wait_for(&ref_, |snapshot| snapshot.value != "linking").await;
@@ -816,29 +832,31 @@ impl AgentLifecycleService {
         let this = self.clone();
         let scope_agent = agent.clone();
         let scope_handle = handle.clone();
-        self.session_actor.send(SessionEvent::AgentCreate {
-            agent_id: Some(agent_id.clone()),
-            logic: create_agent_machine(Default::default()),
-            input: AgentInput {
-                request: MACHINE_LOOP_MODEL.clone(),
-                store: None,
-                session: Some(json!({
-                    "sessionId": self.ctx.session_id(),
-                    "workspaceId": self.ctx.workspace_id(),
-                })),
-                scope_factory: Arc::new(move |self_, signal| {
-                    this.adopt_agent_scope(
-                        scope_agent.clone(),
-                        scope_handle.clone(),
-                        self_,
-                        signal,
-                    )
-                }),
-            },
-        });
-        let snapshot = self.session_actor.get_snapshot();
+        self.session_actor.send(
+            SessionEvent::AgentCreate {
+                agent_id: Some(agent_id.clone()),
+                logic: create_agent_machine(Default::default()),
+                input: AgentInput {
+                    request: MACHINE_LOOP_MODEL.clone(),
+                    store: None,
+                    session: Some(json!({
+                        "sessionId": self.ctx.session_id(),
+                        "workspaceId": self.ctx.workspace_id(),
+                    })),
+                    scope_factory: Arc::new(move |self_, signal| {
+                        this.adopt_agent_scope(
+                            scope_agent.clone(),
+                            scope_handle.clone(),
+                            self_,
+                            signal,
+                        )
+                    }),
+                },
+            }
+            .into(),
+        );
         if let Some(managed) = self.roster.lock().get(&agent_id)
-            && let Some(entry) = snapshot.context.agents.get(&agent_id)
+            && let Some(entry) = session_context(&self.session_actor).agents.get(&agent_id)
         {
             *managed.ref_.lock() = Some(entry.ref_.clone());
         }
@@ -1036,9 +1054,12 @@ impl AgentLifecycleService {
             }
             managed.kill_space();
             if managed.ref_.lock().is_some() {
-                self.session_actor.send(SessionEvent::AgentStop {
-                    agent_id: agent.agent_id.clone(),
-                });
+                self.session_actor.send(
+                    SessionEvent::AgentStop {
+                        agent_id: agent.agent_id.clone(),
+                    }
+                    .into(),
+                );
                 let ref_ = managed.ref_.lock().clone().unwrap();
                 wait_for(&ref_, |snapshot| snapshot.status == "done").await?;
             } else {
@@ -1180,6 +1201,23 @@ fn environment_binding_seed(
             cwd: Some(service.workdir.cwd()),
         }
     }
+}
+
+struct SessionSubscription(crate::human::xstate2::Subscription);
+
+impl IDisposable for SessionSubscription {
+    fn dispose(&self) {
+        self.0.unsubscribe();
+    }
+}
+
+fn session_context(actor: &AgentActorRef) -> SessionMachineContext {
+    actor
+        .get_snapshot()
+        .context
+        .downcast_ref::<SessionMachineContext>()
+        .expect("session machine context")
+        .clone()
 }
 
 fn agent_error(code: &'static str, message: String, agent_id: &str) -> WireAsyncError {

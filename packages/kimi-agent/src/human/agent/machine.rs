@@ -1,36 +1,39 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::future::BoxFuture;
+use futures_util::future::{BoxFuture, FutureExt};
 use indexmap::IndexMap;
-use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::human::agent::errors::TurnInterruptReason;
+use crate::human::agent::errors::{LOOP_MAX_STEPS_EXCEEDED_ERROR_CODE, TurnInterruptReason};
 use crate::human::agent::events::{MESSAGE_APPENDED, TURN_ENDED, TURN_STARTED};
 use crate::human::agent::origin::{SteerMessage, merge_steer_messages};
 use crate::human::agent::slices::{AgentStoreState, TurnIndexState};
 use crate::human::agent::turn::{
-    AssistantEntry, EntryMeta, HistoryMessage, SystemEntry, TurnLlmEvent, TurnOutput,
-    TurnParentEvent, TurnSignal, TurnState, TurnToolEvent, UserEntry, UserMeta,
-    create_system_entry, create_user_entry,
+    AssistantEntry, EntryMeta, HistoryMessage, SystemEntry, TurnInput, TurnLlmEvent,
+    TurnMachineLogic, TurnOutput, UserEntry, UserMeta, create_system_entry, create_user_entry,
 };
 use crate::human::agent::wait_for::{AgentSnapshotSource, ToolActorRef, create_wait_for_tasks};
-use crate::human::eventStore::eventStore::{Cause, EventStoreImpl};
+use crate::human::eventStore::actor::{StoreActorEvent, StoreActorInput, store_actor};
+use crate::human::eventStore::eventStore::EventStoreImpl;
 use crate::human::eventStore::events::ExternalEvent;
-use crate::human::llm::message::{ToolCall, UserMessage, create_user_message};
+use crate::human::llm::message::{Role, ToolCall, UserMessage, create_user_message};
+use crate::human::llm::requester::actor::{LlmEvent, actor_event_to_xevent};
 use crate::human::llm::requester::requester::LlmRequestConfig;
 use crate::human::tool::executor::{ToolExecuteInput, ToolExecutor, ToolResult};
 use crate::human::tool::machine::{
-    ToolEvent, ToolInput, ToolMachineLogic, ToolOutput,
+    ToolEvent, ToolInput, ToolMachineLogic, ToolOutput, tool_event_xevent,
 };
 use crate::human::tool::tool::ToolDefinition;
 use crate::human::utils::abort::{AbortScope, create_abort_scope, with_abort};
+use crate::human::xstate2::{
+    Action, Actor, Context, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent, assign,
+    custom, emit, enqueue_actions, from_callback, from_promise, send_to, stop_child,
+};
 use crate::wire::record::WireAsyncError;
 
 #[derive(Clone)]
@@ -88,7 +91,7 @@ pub type PromptGate = Arc<
 pub struct ScopeFactoryOutput {
     pub handle: Option<AgentScopeHandle>,
     pub store: Arc<EventStoreImpl>,
-    pub turn_logic: Arc<crate::human::agent::turn::TurnMachineLogic>,
+    pub turn_logic: Arc<TurnMachineLogic>,
     pub tool_logic: Arc<ToolMachineLogic>,
     pub tools: Vec<ToolDefinition>,
     pub request: Option<LlmRequestConfig>,
@@ -120,7 +123,7 @@ pub enum AgentEvent {
     TurnError { error: Value },
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub enum AgentReminderEntry {
     System(SystemEntry),
     User(UserEntry),
@@ -204,10 +207,10 @@ impl AgentEmitted {
 fn turn_llm_event_type(event: &TurnLlmEvent) -> &'static str {
     match event {
         TurnLlmEvent::Done { .. } => "llm.done",
-        TurnLlmEvent::Event(crate::human::llm::requester::actor::LlmEvent::Sent { .. }) => "llm.sent",
-        TurnLlmEvent::Event(crate::human::llm::requester::actor::LlmEvent::Retrying { .. }) => "llm.retrying",
-        TurnLlmEvent::Event(crate::human::llm::requester::actor::LlmEvent::Recovering { .. }) => "llm.recovering",
-        TurnLlmEvent::Event(crate::human::llm::requester::actor::LlmEvent::Request(event)) => {
+        TurnLlmEvent::Event(LlmEvent::Sent { .. }) => "llm.sent",
+        TurnLlmEvent::Event(LlmEvent::Retrying { .. }) => "llm.retrying",
+        TurnLlmEvent::Event(LlmEvent::Recovering { .. }) => "llm.recovering",
+        TurnLlmEvent::Event(LlmEvent::Request(event)) => {
             use crate::human::llm::requester::requester::LlmRequestEvent;
             match event {
                 LlmRequestEvent::Sent => "llm.sent",
@@ -249,7 +252,7 @@ pub struct AgentMachineContext {
     pub request: LlmRequestConfig,
     pub store: Option<Arc<EventStoreImpl>>,
     pub handle: Option<AgentScopeHandle>,
-    pub turn_logic: Option<Arc<crate::human::agent::turn::TurnMachineLogic>>,
+    pub turn_logic: Option<Arc<TurnMachineLogic>>,
     pub tool_logic: Option<Arc<ToolMachineLogic>>,
     pub tools: Option<Vec<ToolDefinition>>,
     pub prompt_gate: Option<PromptGate>,
@@ -267,6 +270,227 @@ pub struct AgentMachineContext {
     pub drained_entry: Option<UserEntry>,
     pub paused: bool,
     pub abort_reason: Option<Value>,
+}
+
+#[derive(Clone)]
+struct ScopeFactoryActorInput {
+    scope_factory: ScopeFactory,
+    self_: AgentMachineSelf,
+}
+
+#[derive(Clone)]
+struct PromptGateActorInput {
+    gate: Option<PromptGate>,
+    head: Option<UserEntry>,
+}
+
+#[derive(Clone)]
+struct PromptGateActorOutput {
+    id: Option<String>,
+    block: bool,
+    message: Option<UserMessage>,
+    error: Option<Value>,
+}
+
+fn context_of(context: &Context) -> &AgentMachineContext {
+    context
+        .downcast_ref::<AgentMachineContext>()
+        .expect("agent machine context")
+}
+
+fn assign_agent(
+    apply: impl Fn(&mut AgentMachineContext, &XEvent) + Send + Sync + 'static,
+) -> Action {
+    assign(move |args| {
+        let mut next = context_of(args.context).clone();
+        apply(&mut next, args.event);
+        Arc::new(next)
+    })
+}
+
+fn forward_event() -> Action {
+    custom(|_, args| args.self_.forward_to_parent(args.event.clone()))
+}
+
+fn emitted_xevent(emitted: AgentEmitted) -> XEvent {
+    XEvent {
+        type_: emitted.type_(),
+        payload: Value::Null,
+        restore: None,
+        data: Some(Arc::new(emitted)),
+    }
+}
+
+fn agent_event_of(event: &XEvent) -> Option<AgentEvent> {
+    if let Some(agent_event) = event
+        .data
+        .as_ref()
+        .and_then(|data| data.downcast_ref::<AgentEvent>())
+    {
+        return Some(agent_event.clone());
+    }
+    match event.type_.as_str() {
+        "tool.update" | "tool.detached" | "tool.done" | "tool.failed" | "tool.aborted"
+        | "tool.abort" => Some(AgentEvent::Tool(tool_event_of(event))),
+        "llm.done" => {
+            let entry = event
+                .data
+                .clone()
+                .and_then(|data| data.downcast::<AssistantEntry>().ok())?;
+            Some(AgentEvent::Llm(TurnLlmEvent::Done {
+                entry: entry.as_ref().clone(),
+            }))
+        }
+        type_ if type_.starts_with("llm.") => {
+            let llm_event = event
+                .data
+                .clone()
+                .and_then(|data| data.downcast::<LlmEvent>().ok())?;
+            Some(AgentEvent::Llm(TurnLlmEvent::Event(
+                llm_event.as_ref().clone(),
+            )))
+        }
+        "step.started" => Some(AgentEvent::StepStarted {
+            step: step_of(event),
+        }),
+        "turn.spawn_tools" => Some(AgentEvent::TurnSpawnTools {
+            tool_calls: tool_calls_of(event),
+        }),
+        "turn.reminders_consumed" => Some(AgentEvent::TurnRemindersConsumed {
+            reminders: reminders_of(event),
+        }),
+        _ => None,
+    }
+}
+
+fn agent_emitted_of(event: &XEvent) -> Option<AgentEmitted> {
+    if let Some(emitted) = event
+        .data
+        .as_ref()
+        .and_then(|data| data.downcast_ref::<AgentEmitted>())
+    {
+        return Some(emitted.clone());
+    }
+    match agent_event_of(event)? {
+        AgentEvent::Llm(event) => Some(AgentEmitted::Llm(event)),
+        AgentEvent::Tool(event) => Some(AgentEmitted::Tool(event)),
+        AgentEvent::StepStarted { step } => Some(AgentEmitted::StepStarted { step }),
+        AgentEvent::TurnRemindersConsumed { reminders } => {
+            Some(AgentEmitted::TurnRemindersConsumed { reminders })
+        }
+        _ => None,
+    }
+}
+
+fn tool_event_of(event: &XEvent) -> ToolEvent {
+    match event
+        .data
+        .clone()
+        .and_then(|data| data.downcast::<ToolEvent>().ok())
+    {
+        Some(event) => event.as_ref().clone(),
+        None => serde_json::from_value(event.payload.clone()).expect("tool event payload"),
+    }
+}
+
+fn step_of(event: &XEvent) -> u64 {
+    match event
+        .data
+        .clone()
+        .and_then(|data| data.downcast::<u64>().ok())
+    {
+        Some(step) => *step,
+        None => event
+            .payload
+            .get("step")
+            .and_then(Value::as_u64)
+            .expect("step.started step"),
+    }
+}
+
+fn tool_calls_of(event: &XEvent) -> Vec<ToolCall> {
+    match event
+        .data
+        .clone()
+        .and_then(|data| data.downcast::<Vec<ToolCall>>().ok())
+    {
+        Some(tool_calls) => tool_calls.as_ref().clone(),
+        None => serde_json::from_value(
+            event
+                .payload
+                .get("toolCalls")
+                .cloned()
+                .expect("turn.spawn_tools toolCalls"),
+        )
+        .expect("turn.spawn_tools toolCalls"),
+    }
+}
+
+fn reminders_of(event: &XEvent) -> Vec<HistoryMessage> {
+    event
+        .data
+        .clone()
+        .and_then(|data| data.downcast::<Vec<HistoryMessage>>().ok())
+        .map(|reminders| reminders.as_ref().clone())
+        .expect("turn.reminders_consumed reminders")
+}
+
+fn scope_factory_output_of(event: &XEvent) -> ScopeFactoryOutput {
+    event
+        .data
+        .clone()
+        .and_then(|data| data.downcast::<ScopeFactoryOutput>().ok())
+        .map(|output| output.as_ref().clone())
+        .expect("scope factory output")
+}
+
+fn prompt_gate_output_of(event: &XEvent) -> PromptGateActorOutput {
+    event
+        .data
+        .clone()
+        .and_then(|data| data.downcast::<PromptGateActorOutput>().ok())
+        .map(|output| output.as_ref().clone())
+        .expect("prompt gate output")
+}
+
+fn turn_output_of(event: &XEvent) -> TurnOutput {
+    event
+        .data
+        .clone()
+        .and_then(|data| data.downcast::<TurnOutput>().ok())
+        .map(|output| output.as_ref().clone())
+        .expect("turn output")
+}
+
+fn error_of(event: &XEvent) -> Value {
+    match &event.payload {
+        Value::Null => event
+            .data
+            .as_ref()
+            .and_then(|data| data.downcast_ref::<Value>().cloned())
+            .unwrap_or(Value::Null),
+        payload => payload.clone(),
+    }
+}
+
+fn store_state_of(event: &XEvent) -> AgentStoreState {
+    serde_json::from_value(
+        event
+            .payload
+            .get("state")
+            .cloned()
+            .expect("store state payload"),
+    )
+    .expect("store state payload")
+}
+
+fn store_branch_of(event: &XEvent) -> String {
+    event
+        .payload
+        .get("branch")
+        .and_then(Value::as_str)
+        .expect("store branch payload")
+        .to_string()
 }
 
 fn completion_notification(tool_call: &ToolCall, output: &ToolOutput) -> UserEntry {
@@ -302,7 +526,7 @@ fn completion_notification(tool_call: &ToolCall, output: &ToolOutput) -> UserEnt
             content.extend(result.content.clone());
             create_user_entry(
                 UserMessage {
-                    role: crate::human::llm::message::Role::User,
+                    role: Role::User,
                     content,
                 },
                 UserMeta {
@@ -322,6 +546,14 @@ fn history_ends_mid_tool_chain(messages: &[HistoryMessage]) -> bool {
     }
 }
 
+fn has_pending_work(context: &AgentMachineContext) -> bool {
+    !context.notifications.is_empty() || !context.queue.is_empty()
+}
+
+fn has_background_work(context: &AgentMachineContext) -> bool {
+    !context.background.is_empty()
+}
+
 fn history_meta_key(entry: &HistoryMessage) -> Option<&str> {
     match entry {
         HistoryMessage::System(entry) => entry.meta.as_ref().and_then(|meta| meta.key.as_deref()),
@@ -331,10 +563,60 @@ fn history_meta_key(entry: &HistoryMessage) -> Option<&str> {
     }
 }
 
-fn decode_state<T: DeserializeOwned>(state: &AgentStoreState, key: &str) -> T
-where
-    T: Default,
-{
+fn first_prompt_id(context: &AgentMachineContext) -> Option<String> {
+    context
+        .queue
+        .first()
+        .and_then(|entry| entry.meta.as_ref().and_then(|meta| meta.prompt_id.clone()))
+}
+
+fn user_meta_with_default(meta: Option<UserMeta>, source: &str) -> UserMeta {
+    let mut meta = meta.unwrap_or_default();
+    if meta.source.is_none() {
+        meta.source = Some(source.to_string());
+    }
+    meta
+}
+
+fn system_reminder_meta(meta: Option<EntryMeta>, key: &str) -> EntryMeta {
+    let mut next = EntryMeta {
+        source: Some("reminder".to_string()),
+        key: Some(key.to_string()),
+    };
+    if let Some(meta) = meta {
+        if meta.source.is_some() {
+            next.source = meta.source;
+        }
+        if meta.key.is_some() {
+            next.key = meta.key;
+        }
+    }
+    next
+}
+
+fn user_reminder_meta(meta: Option<UserMeta>, key: &str) -> UserMeta {
+    let mut next = UserMeta {
+        source: Some("reminder".to_string()),
+        key: Some(key.to_string()),
+        ..Default::default()
+    };
+    if let Some(meta) = meta {
+        if meta.source.is_some() {
+            next.source = meta.source;
+        }
+        if meta.key.is_some() {
+            next.key = meta.key;
+        }
+        next.prompt_id = meta.prompt_id;
+        next.origin = meta.origin;
+        next.tracked = meta.tracked;
+        next.created_at = meta.created_at;
+        next.user_message_id = meta.user_message_id;
+    }
+    next
+}
+
+fn decode_state<T: DeserializeOwned + Default>(state: &AgentStoreState, key: &str) -> T {
     state
         .get(key)
         .cloned()
@@ -345,14 +627,48 @@ where
 fn history_event(message: HistoryMessage) -> ExternalEvent {
     MESSAGE_APPENDED.create(Map::from_iter([(
         "message".to_string(),
-        serde_json::to_value(message).unwrap(),
+        serde_json::to_value(message).expect("history message serializes"),
     )]))
 }
 
+fn turn_started_event(turn_id: i64, queue_item_id: Option<String>) -> ExternalEvent {
+    let mut payload = Map::from_iter([("turnId".to_string(), json!(turn_id))]);
+    if let Some(queue_item_id) = queue_item_id {
+        payload.insert("queueItemId".to_string(), Value::String(queue_item_id));
+    }
+    TURN_STARTED.create(payload)
+}
+
+fn turn_ended_event(turn_id: i64, outcome: &str, error_message: Option<String>) -> ExternalEvent {
+    let mut payload = Map::from_iter([
+        ("turnId".to_string(), json!(turn_id)),
+        ("outcome".to_string(), json!(outcome)),
+    ]);
+    if let Some(error_message) = error_message {
+        payload.insert("errorMessage".to_string(), Value::String(error_message));
+    }
+    TURN_ENDED.create(payload)
+}
+
+fn store_append(events: Vec<ExternalEvent>) -> XEvent {
+    StoreActorEvent::Append(events).into_xevent()
+}
+
+fn turn_notify(messages: Vec<HistoryMessage>) -> XEvent {
+    XEvent {
+        type_: "turn.notify".to_string(),
+        payload: json!({ "messages": messages }),
+        restore: None,
+        data: Some(Arc::new(messages)),
+    }
+}
+
+fn tool_abort() -> XEvent {
+    tool_event_xevent(&ToolEvent::Abort)
+}
+
 fn interrupt_reason_value(error: &Value) -> TurnInterruptReason {
-    if error.get("code").and_then(Value::as_str)
-        == Some(crate::human::agent::errors::LOOP_MAX_STEPS_EXCEEDED_ERROR_CODE)
-    {
+    if error.get("code").and_then(Value::as_str) == Some(LOOP_MAX_STEPS_EXCEEDED_ERROR_CODE) {
         TurnInterruptReason::MaxSteps
     } else {
         TurnInterruptReason::Error
@@ -385,6 +701,308 @@ fn error_message(error: &Value) -> String {
     }
 }
 
+fn turn_output_produced(output: &TurnOutput) -> &[HistoryMessage] {
+    match output {
+        TurnOutput::Done { produced }
+        | TurnOutput::Failed { produced, .. }
+        | TurnOutput::Aborted { produced } => produced,
+    }
+}
+
+fn turn_outcome_event(context: &AgentMachineContext, output: &TurnOutput) -> AgentEmitted {
+    match output {
+        TurnOutput::Failed { error, .. } => AgentEmitted::TurnFailed {
+            error: error.clone(),
+            messages: context.messages.clone(),
+            interrupt_reason: interrupt_reason_value(error),
+            branch_id: context.branch_id.clone(),
+        },
+        TurnOutput::Aborted { .. } => AgentEmitted::TurnAborted {
+            messages: context.messages.clone(),
+            branch_id: context.branch_id.clone(),
+        },
+        TurnOutput::Done { .. } => AgentEmitted::TurnDone {
+            messages: context.messages.clone(),
+            branch_id: context.branch_id.clone(),
+        },
+    }
+}
+
+fn turn_outcome_name(output: &TurnOutput) -> &'static str {
+    match output {
+        TurnOutput::Done { .. } => "done",
+        TurnOutput::Failed { .. } => "failed",
+        TurnOutput::Aborted { .. } => "aborted",
+    }
+}
+
+fn steer_queued() -> Action {
+    enqueue_actions(|args, enqueue| {
+        let Some(AgentEvent::InputSteer { id }) = agent_event_of(args.event) else {
+            return;
+        };
+        let context = context_of(args.context);
+        let steered = context
+            .queue
+            .iter()
+            .filter(|item| {
+                item.meta
+                    .as_ref()
+                    .and_then(|meta| meta.prompt_id.as_ref())
+                    .is_some_and(|prompt_id| id.contains(prompt_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if steered.is_empty() {
+            return;
+        }
+        let merged = merge_steer_messages(
+            &steered
+                .iter()
+                .map(|item| SteerMessage {
+                    content: item.message.content.clone(),
+                    origin: item.meta.as_ref().and_then(|meta| meta.origin.clone()),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let prompt_id = if steered.len() == 1 {
+            steered[0]
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.prompt_id.clone())
+        } else {
+            None
+        };
+        let mut origin = merged.origin;
+        origin.in_turn = Some(true);
+        let mut next = context.clone();
+        next.queue.retain(|item| !steered.contains(item));
+        next.notifications.push(create_user_entry(
+            UserMessage {
+                role: Role::User,
+                content: merged.content,
+            },
+            UserMeta {
+                source: Some("input".to_string()),
+                prompt_id: prompt_id.clone(),
+                user_message_id: prompt_id,
+                origin: Some(origin),
+                ..Default::default()
+            },
+        ));
+        enqueue.assign(Arc::new(next));
+        enqueue.emit(emitted_xevent(AgentEmitted::PromptSteered {
+            queue_item_ids: steered
+                .iter()
+                .filter_map(|item| item.meta.as_ref().and_then(|meta| meta.prompt_id.clone()))
+                .collect(),
+            entries: steered,
+        }));
+    })
+}
+
+fn commit_pending_to_history() -> Action {
+    enqueue_actions(|args, enqueue| {
+        let context = context_of(args.context);
+        let head = context.queue.first().cloned();
+        let mut events = context
+            .notifications
+            .iter()
+            .cloned()
+            .map(|entry| history_event(HistoryMessage::User(entry)))
+            .collect::<Vec<_>>();
+        if let Some(head) = &head {
+            events.push(history_event(HistoryMessage::User(head.clone())));
+        }
+        if !events.is_empty() {
+            enqueue.send_to("store", store_append(events));
+        }
+        let mut next = context.clone();
+        next.messages
+            .extend(context.notifications.iter().cloned().map(HistoryMessage::User));
+        if let Some(head) = &head {
+            next.messages.push(HistoryMessage::User(head.clone()));
+        }
+        next.notifications.clear();
+        if !next.queue.is_empty() {
+            next.queue.remove(0);
+        }
+        next.drained_id = head
+            .as_ref()
+            .and_then(|entry| entry.meta.as_ref().and_then(|meta| meta.prompt_id.clone()));
+        next.drained_entry = head;
+        enqueue.assign(Arc::new(next));
+    })
+}
+
+fn reset_mirror() -> Action {
+    assign_agent(|next, event| {
+        if event.type_ != "store.reset" {
+            return;
+        }
+        let state = store_state_of(event);
+        next.messages = decode_state(&state, "history");
+        next.notifications = decode_state(&state, "notifications");
+        next.reminders = decode_state(&state, "reminders");
+        next.turn_tools.clear();
+        next.background.clear();
+        next.scope = create_abort_scope();
+        next.turn_id = decode_state::<TurnIndexState>(&state, "turnIndex").next_turn_id;
+        next.active_turn_id = None;
+        next.branch_id = store_branch_of(event);
+    })
+}
+
+fn emit_reset() -> Action {
+    emit(|args| {
+        emitted_xevent(AgentEmitted::ContextReset {
+            branch_id: context_of(args.context).branch_id.clone(),
+        })
+    })
+}
+
+fn abort_scope() -> Action {
+    custom(|_, args| context_of(args.context).scope.abort())
+}
+
+fn spawn_store() -> Action {
+    assign(|args| {
+        args.spawn.spawn_logic(
+            &store_actor(),
+            "store",
+            Arc::new(StoreActorInput {
+                store: scope_factory_output_of(args.event).store,
+            }) as Context,
+        );
+        let output = scope_factory_output_of(args.event);
+        let mut next = context_of(args.context).clone();
+        next.store = Some(output.store.clone());
+        next.handle = output.handle.clone();
+        next.turn_logic = Some(output.turn_logic.clone());
+        next.tool_logic = Some(output.tool_logic.clone());
+        next.tools = Some(output.tools.clone());
+        if let Some(request) = output.request.clone() {
+            next.request = request;
+        }
+        next.prompt_gate = output.prompt_gate.clone();
+        Arc::new(next)
+    })
+}
+
+fn spawn_turn_tools() -> Action {
+    assign(|args| {
+        let mut next = context_of(args.context).clone();
+        let Some(AgentEvent::TurnSpawnTools { tool_calls }) = agent_event_of(args.event) else {
+            return Arc::new(next);
+        };
+        let tool_logic = next.tool_logic.clone().expect("tool logic");
+        let wait_for_tasks = create_wait_for_tasks(AgentMachineSelf::new(args.self_.clone()));
+        for tool_call in tool_calls {
+            let scope = with_abort(&next.scope.signal);
+            let ref_ = args.spawn.spawn(
+                tool_logic.machine(),
+                &tool_call.id,
+                Arc::new(ToolInput {
+                    tool_call: tool_call.clone(),
+                    signal: scope.signal.clone(),
+                    wait_for_tasks: Some(wait_for_tasks.clone()),
+                }),
+            );
+            next.turn_tools.insert(
+                tool_call.id.clone(),
+                ToolEntry {
+                    tool_call,
+                    scope,
+                    ref_,
+                },
+            );
+        }
+        Arc::new(next)
+    })
+}
+
+fn abort_spawned_tools() -> Action {
+    enqueue_actions(|args, enqueue| {
+        let Some(AgentEvent::TurnSpawnTools { tool_calls }) = agent_event_of(args.event) else {
+            return;
+        };
+        let context = context_of(args.context);
+        for tool_call in tool_calls {
+            if let Some(entry) = context.turn_tools.get(&tool_call.id) {
+                entry.scope.abort();
+                enqueue.send_to_child(entry.ref_.clone(), tool_abort());
+            }
+        }
+    })
+}
+
+fn remember_abort_reason() -> Action {
+    assign_agent(|next, event| {
+        next.abort_reason = match agent_event_of(event) {
+            Some(AgentEvent::InputAbort { reason }) => reason,
+            _ => None,
+        };
+    })
+}
+
+fn abort_turn() -> Action {
+    send_to("turn", |args| {
+        XEvent::new(
+            "turn.abort",
+            json!({ "reason": context_of(args.context).abort_reason }),
+        )
+    })
+}
+
+fn abort_turn_tools() -> Action {
+    enqueue_actions(|args, enqueue| {
+        for entry in context_of(args.context).turn_tools.values() {
+            entry.scope.abort();
+            enqueue.send_to_child(entry.ref_.clone(), tool_abort());
+        }
+    })
+}
+
+fn stop_turn_tools() -> Action {
+    enqueue_actions(|args, enqueue| {
+        for (tool_call_id, entry) in &context_of(args.context).turn_tools {
+            entry.scope.abort();
+            enqueue.stop_child(tool_call_id.clone());
+        }
+    })
+}
+
+fn spawn_turn(max_steps_per_turn: Option<u64>) -> Action {
+    assign(move |args| {
+        let context = context_of(args.context);
+        let mut request = context.request.clone();
+        request.tools = context.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .filter(|tool| tool.deferred != Some(true))
+                .map(ToolDefinition::description)
+                .collect()
+        });
+        let turn_logic = context.turn_logic.as_ref().expect("turn logic");
+        args.spawn.spawn(
+            turn_logic.machine(),
+            "turn",
+            Arc::new(TurnInput {
+                request,
+                history: context.messages.clone(),
+                max_steps: max_steps_per_turn,
+                parent_signal: Some(context.scope.signal.clone()),
+            }),
+        );
+        args.context.clone()
+    })
+}
+
+fn store_reset_in_running() -> Vec<Action> {
+    vec![abort_scope(), reset_mirror(), emit_reset(), forward_event()]
+}
+
+#[derive(Clone)]
 struct DispatchExecutor {
     by_name: HashMap<String, ToolDefinition>,
 }
@@ -423,20 +1041,1035 @@ pub struct CreateAgentMachineOptions {
 }
 
 pub struct AgentMachineLogic {
-    options: CreateAgentMachineOptions,
+    machine: Machine,
 }
 
 impl AgentMachineLogic {
-    pub fn start(
+    pub fn machine(&self) -> &Machine {
+        &self.machine
+    }
+}
+
+pub struct AgentSnapshot {
+    pub context: AgentMachineContext,
+    pub value: String,
+    pub status: String,
+}
+
+pub struct AgentSubscription {
+    subscription: crate::human::xstate2::Subscription,
+}
+
+impl AgentSubscription {
+    pub fn unsubscribe(&self) {
+        self.subscription.unsubscribe();
+    }
+}
+
+#[derive(Clone)]
+pub struct AgentMachineSelf {
+    actor: Arc<Actor>,
+}
+
+impl AgentMachineSelf {
+    pub fn new(actor: Arc<Actor>) -> Self {
+        Self { actor }
+    }
+
+    pub fn send(&self, event: AgentEvent) {
+        self.actor.send(event.into());
+    }
+
+    pub fn get_snapshot(&self) -> AgentSnapshot {
+        let snapshot = self.actor.get_snapshot();
+        AgentSnapshot {
+            context: snapshot
+                .context
+                .downcast_ref::<AgentMachineContext>()
+                .expect("agent machine context")
+                .clone(),
+            value: snapshot.value,
+            status: snapshot.status,
+        }
+    }
+
+    pub fn on(
         &self,
-        input: AgentInput,
-        parent: Arc<dyn Fn(AgentEvent) + Send + Sync>,
-    ) -> Arc<AgentActor> {
-        let actor = Arc::new(AgentActor {
-            options: self.options.clone(),
-            context: Mutex::new(AgentMachineContext {
+        type_: &str,
+        handler: Arc<dyn Fn(AgentEmitted) + Send + Sync>,
+    ) -> AgentSubscription {
+        let subscription = self.actor.on(
+            type_,
+            Arc::new(move |event: &XEvent| {
+                if let Some(emitted) = agent_emitted_of(event) {
+                    handler(emitted);
+                }
+            }),
+        );
+        AgentSubscription { subscription }
+    }
+}
+
+impl AgentSnapshotSource for AgentMachineSelf {
+    fn snapshot_background(&self) -> IndexMap<String, ToolActorRef> {
+        self.actor
+            .get_snapshot()
+            .context
+            .downcast_ref::<AgentMachineContext>()
+            .expect("agent machine context")
+            .background
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.ref_.clone()))
+            .collect()
+    }
+}
+
+impl From<AgentEvent> for XEvent {
+    fn from(event: AgentEvent) -> Self {
+        match event {
+            AgentEvent::Llm(TurnLlmEvent::Event(event)) => actor_event_to_xevent(event),
+            AgentEvent::Llm(TurnLlmEvent::Done { entry }) => XEvent {
+                type_: "llm.done".to_string(),
+                payload: json!({ "entry": entry }),
+                restore: None,
+                data: Some(Arc::new(entry)),
+            },
+            AgentEvent::Tool(event) => tool_event_xevent(&event),
+            AgentEvent::InputSubmit { entry } => XEvent {
+                type_: "input.submit".to_string(),
+                payload: json!({ "entry": entry }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::InputSubmit { entry })),
+            },
+            AgentEvent::InputNotify { entry } => XEvent {
+                type_: "input.notify".to_string(),
+                payload: json!({ "entry": entry }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::InputNotify { entry })),
+            },
+            AgentEvent::InputRemind { key, entry } => XEvent {
+                type_: "input.remind".to_string(),
+                payload: json!({ "key": key, "entry": entry }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::InputRemind { key, entry })),
+            },
+            AgentEvent::InputSteer { id } => XEvent {
+                type_: "input.steer".to_string(),
+                payload: json!({ "id": id }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::InputSteer { id })),
+            },
+            AgentEvent::InputCancel { id } => XEvent {
+                type_: "input.cancel".to_string(),
+                payload: json!({ "id": id }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::InputCancel { id })),
+            },
+            AgentEvent::InputAbort { reason } => XEvent {
+                type_: "input.abort".to_string(),
+                payload: json!({ "reason": reason }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::InputAbort { reason })),
+            },
+            AgentEvent::InputPause => XEvent::new("input.pause", Value::Null),
+            AgentEvent::InputContinue => XEvent::new("input.continue", Value::Null),
+            AgentEvent::InputClose => XEvent::new("input.close", Value::Null),
+            AgentEvent::TurnSpawnTools { tool_calls } => XEvent {
+                type_: "turn.spawn_tools".to_string(),
+                payload: json!({ "toolCalls": tool_calls }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::TurnSpawnTools { tool_calls })),
+            },
+            AgentEvent::TurnDrain => XEvent::new("turn.drain", Value::Null),
+            AgentEvent::TurnRemindersConsumed { reminders } => XEvent {
+                type_: "turn.reminders_consumed".to_string(),
+                payload: json!({ "reminders": reminders }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::TurnRemindersConsumed { reminders })),
+            },
+            AgentEvent::StepStarted { step } => XEvent {
+                type_: "step.started".to_string(),
+                payload: json!({ "step": step }),
+                restore: None,
+                data: Some(Arc::new(step)),
+            },
+            AgentEvent::StoreReady { state, branch } => XEvent {
+                type_: "store.ready".to_string(),
+                payload: json!({ "state": state, "branch": branch }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::StoreReady { state, branch })),
+            },
+            AgentEvent::StoreChanged { state } => XEvent {
+                type_: "store.changed".to_string(),
+                payload: json!({ "state": state }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::StoreChanged { state })),
+            },
+            AgentEvent::StoreReset { state, branch } => XEvent {
+                type_: "store.reset".to_string(),
+                payload: json!({ "state": state, "branch": branch }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::StoreReset { state, branch })),
+            },
+            AgentEvent::StoreError { error } => XEvent {
+                type_: "store.error".to_string(),
+                payload: json!({ "error": error }),
+                restore: None,
+                data: Some(Arc::new(AgentEvent::StoreError { error })),
+            },
+            AgentEvent::TurnDone { output } => XEvent {
+                type_: "xstate.done.actor.turn".to_string(),
+                payload: Value::Null,
+                restore: None,
+                data: Some(Arc::new(output)),
+            },
+            AgentEvent::TurnError { error } => XEvent {
+                type_: "xstate.error.actor.turn".to_string(),
+                payload: error.clone(),
+                restore: None,
+                data: Some(Arc::new(error)),
+            },
+        }
+    }
+}
+
+pub fn create_agent_machine(options: CreateAgentMachineOptions) -> Arc<AgentMachineLogic> {
+    let abort_timeout_ms = options.abort_timeout_ms.unwrap_or(10_000);
+    let max_steps_per_turn = options.max_steps_per_turn;
+    let controller_guard = from_callback(|input| {
+        let scope = input
+            .runtime
+            .downcast::<AbortScope>()
+            .expect("controller guard input")
+            .as_ref()
+            .clone();
+        Box::new(move || scope.abort())
+    });
+    let scope_factory = from_promise(|input| {
+        async move {
+            let runtime = input
+                .input
+                .downcast::<ScopeFactoryActorInput>()
+                .expect("scope factory input");
+            let output = (runtime.scope_factory)(runtime.self_.clone(), input.signal.clone()).await?;
+            Ok(Arc::new(output) as Context)
+        }
+        .boxed()
+    });
+    let prompt_gate = from_promise(|input| {
+        async move {
+            let runtime = input
+                .input
+                .downcast::<PromptGateActorInput>()
+                .expect("prompt gate input");
+            let id = runtime
+                .head
+                .as_ref()
+                .and_then(|head| head.meta.as_ref().and_then(|meta| meta.prompt_id.clone()));
+            let output = match (runtime.gate.clone(), runtime.head.clone()) {
+                (Some(gate), Some(head)) => match gate(id.clone(), head.message.clone()).await {
+                    Ok(PromptGateVerdict::Bool(block)) => PromptGateActorOutput {
+                        id,
+                        block,
+                        message: None,
+                        error: None,
+                    },
+                    Ok(PromptGateVerdict::Detailed { block, message }) => PromptGateActorOutput {
+                        id,
+                        block,
+                        message,
+                        error: None,
+                    },
+                    Err(error) => PromptGateActorOutput {
+                        id,
+                        block: false,
+                        message: None,
+                        error: Some(Value::String(error.to_string())),
+                    },
+                },
+                _ => PromptGateActorOutput {
+                    id,
+                    block: false,
+                    message: None,
+                    error: None,
+                },
+            };
+            Ok(Arc::new(output) as Context)
+        }
+        .boxed()
+    });
+    let dispose_scope = from_promise(|input| {
+        async move {
+            let handle = input
+                .input
+                .downcast::<Option<AgentScopeHandle>>()
+                .expect("dispose scope input");
+            if let Some(handle) = handle.as_ref() {
+                handle.dispose_async().await?;
+            }
+            Ok(Arc::new(()) as Context)
+        }
+        .boxed()
+    });
+
+    let linking = StateNode {
+        invoke: Some(InvokeDef {
+            id: "scopeFactoryActor".to_string(),
+            src: "scopeFactoryActor".to_string(),
+            input: Arc::new(|args| InvokeInput {
+                runtime: Arc::new(ScopeFactoryActorInput {
+                    scope_factory: context_of(args.context).input.scope_factory.clone(),
+                    self_: AgentMachineSelf::new(args.self_.clone()),
+                }),
+                restore: None,
+            }),
+            on_done: vec![Transition {
+                target: Some("#agent.restoring".to_string()),
+                actions: vec![
+                    spawn_store(),
+                    emit(|_| emitted_xevent(AgentEmitted::AgentAttached)),
+                ],
+                ..Default::default()
+            }],
+            on_error: vec![Transition {
+                target: Some("#agent.disposed".to_string()),
+                actions: vec![emit(|args| emitted_xevent(AgentEmitted::AgentFailed {
+                    error: error_of(args.event),
+                }))],
+                ..Default::default()
+            }],
+        }),
+        on: HashMap::from([(
+            "input.close".to_string(),
+            vec![Transition {
+                target: Some("#agent.disposed".to_string()),
+                ..Default::default()
+            }],
+        )]),
+        ..Default::default()
+    };
+
+    let restoring = StateNode {
+        on: HashMap::from([(
+            "store.ready".to_string(),
+            vec![Transition {
+                target: Some("idle".to_string()),
+                actions: vec![assign_agent(|next, event| {
+                    let state = store_state_of(event);
+                    let stored_notifications = decode_state::<Vec<UserEntry>>(&state, "notifications");
+                    let stored_reminders = decode_state::<Vec<HistoryMessage>>(&state, "reminders");
+                    let stored_queue = decode_state::<Vec<UserEntry>>(&state, "queue");
+                    next.messages = decode_state(&state, "history");
+                    next.notifications = [stored_notifications, next.notifications.clone()].concat();
+                    next.reminders = [
+                        stored_reminders
+                            .into_iter()
+                            .filter(|entry| {
+                                !next
+                                    .reminders
+                                    .iter()
+                                    .any(|local| history_meta_key(local) == history_meta_key(entry))
+                            })
+                            .collect(),
+                        next.reminders.clone(),
+                    ]
+                    .concat();
+                    next.queue = [stored_queue, next.queue.clone()].concat();
+                    next.turn_id = decode_state::<TurnIndexState>(&state, "turnIndex").next_turn_id;
+                    next.branch_id = store_branch_of(event);
+                })],
+                ..Default::default()
+            }],
+        )]),
+        ..Default::default()
+    };
+
+    let ready_always = vec![
+        Transition {
+            target: Some("gating".to_string()),
+            guard: Some(Arc::new(|context, _| {
+                let context = context_of(context);
+                context.prompt_gate.is_some() && !context.queue.is_empty() && !context.paused
+            })),
+            ..Default::default()
+        },
+        Transition {
+            target: Some("#agent.running".to_string()),
+            guard: Some(Arc::new(|context, _| {
+                let context = context_of(context);
+                has_pending_work(context) && !context.paused
+            })),
+            actions: vec![commit_pending_to_history()],
+            ..Default::default()
+        },
+        Transition {
+            target: Some("waiting".to_string()),
+            guard: Some(Arc::new(|context, _| has_background_work(context_of(context)))),
+            ..Default::default()
+        },
+    ];
+    let waiting_always = vec![
+        Transition {
+            target: Some("gating".to_string()),
+            guard: Some(Arc::new(|context, _| {
+                let context = context_of(context);
+                context.prompt_gate.is_some() && !context.queue.is_empty() && !context.paused
+            })),
+            ..Default::default()
+        },
+        Transition {
+            target: Some("#agent.running".to_string()),
+            guard: Some(Arc::new(|context, _| {
+                let context = context_of(context);
+                has_pending_work(context) && !context.paused
+            })),
+            actions: vec![commit_pending_to_history()],
+            ..Default::default()
+        },
+    ];
+    let gating = StateNode {
+        invoke: Some(InvokeDef {
+            id: "promptGateActor".to_string(),
+            src: "promptGateActor".to_string(),
+            input: Arc::new(|args| {
+                let context = context_of(args.context);
+                InvokeInput {
+                    runtime: Arc::new(PromptGateActorInput {
+                        gate: context.prompt_gate.clone(),
+                        head: context.queue.first().cloned(),
+                    }),
+                    restore: None,
+                }
+            }),
+            on_done: vec![
+                Transition {
+                    target: Some("ready".to_string()),
+                    guard: Some(Arc::new(|context, event| {
+                        let context = context_of(context);
+                        let output = prompt_gate_output_of(event);
+                        context.paused || first_prompt_id(context) != output.id
+                    })),
+                    ..Default::default()
+                },
+                Transition {
+                    target: Some("ready".to_string()),
+                    guard: Some(Arc::new(|_, event| {
+                        prompt_gate_output_of(event).error.is_some()
+                    })),
+                    actions: vec![
+                        emit(|args| {
+                            let context = context_of(args.context);
+                            emitted_xevent(AgentEmitted::PromptGateFailed {
+                                queue_item_id: first_prompt_id(context),
+                                error: prompt_gate_output_of(args.event)
+                                    .error
+                                    .unwrap_or(Value::Null),
+                                entry: context.queue.first().cloned(),
+                            })
+                        }),
+                        assign_agent(|next, _| {
+                            if !next.queue.is_empty() {
+                                next.queue.remove(0);
+                            }
+                        }),
+                    ],
+                    ..Default::default()
+                },
+                Transition {
+                    target: Some("ready".to_string()),
+                    guard: Some(Arc::new(|_, event| prompt_gate_output_of(event).block)),
+                    actions: vec![
+                        emit(|args| {
+                            let context = context_of(args.context);
+                            emitted_xevent(AgentEmitted::PromptBlocked {
+                                queue_item_id: first_prompt_id(context),
+                                entry: context.queue.first().cloned(),
+                            })
+                        }),
+                        assign_agent(|next, _| {
+                            if !next.queue.is_empty() {
+                                next.queue.remove(0);
+                            }
+                        }),
+                    ],
+                    ..Default::default()
+                },
+                Transition {
+                    target: Some("#agent.running".to_string()),
+                    actions: vec![
+                        assign_agent(|next, event| {
+                            let rewritten = prompt_gate_output_of(event).message;
+                            let Some(head) = next.queue.first().cloned() else {
+                                return;
+                            };
+                            let Some(rewritten) = rewritten else {
+                                return;
+                            };
+                            next.queue[0] = UserEntry {
+                                message: rewritten,
+                                meta: head.meta,
+                            };
+                        }),
+                        commit_pending_to_history(),
+                    ],
+                    ..Default::default()
+                },
+            ],
+            on_error: vec![Transition {
+                target: Some("ready".to_string()),
+                actions: vec![
+                    emit(|args| {
+                        let context = context_of(args.context);
+                        emitted_xevent(AgentEmitted::PromptGateFailed {
+                            queue_item_id: first_prompt_id(context),
+                            error: error_of(args.event),
+                            entry: context.queue.first().cloned(),
+                        })
+                    }),
+                    assign_agent(|next, _| {
+                        if !next.queue.is_empty() {
+                            next.queue.remove(0);
+                        }
+                    }),
+                ],
+                ..Default::default()
+            }],
+        }),
+        ..Default::default()
+    };
+    let idle = StateNode {
+        initial: Some("ready".to_string()),
+        on: HashMap::from([(
+            "input.continue".to_string(),
+            vec![Transition {
+                target: Some("running".to_string()),
+                guard: Some(Arc::new(|context, _| {
+                    let context = context_of(context);
+                    !has_pending_work(context) && history_ends_mid_tool_chain(&context.messages)
+                })),
+                actions: vec![
+                    assign_agent(|next, _| next.paused = false),
+                    commit_pending_to_history(),
+                ],
+                ..Default::default()
+            }],
+        )]),
+        states: HashMap::from([
+            (
+                "ready".to_string(),
+                StateNode {
+                    always: ready_always,
+                    ..Default::default()
+                },
+            ),
+            (
+                "waiting".to_string(),
+                StateNode {
+                    always: waiting_always,
+                    ..Default::default()
+                },
+            ),
+            ("gating".to_string(), gating),
+        ]),
+        ..Default::default()
+    };
+
+    let mut running_on: HashMap<String, Vec<Transition>> = HashMap::new();
+    running_on.insert(
+        "xstate.done.actor.turn".to_string(),
+        vec![Transition {
+            target: Some("#agent.idle".to_string()),
+            actions: vec![
+                assign_agent(|next, event| {
+                    next.messages
+                        .extend(turn_output_produced(&turn_output_of(event)).iter().cloned());
+                }),
+                emit(|args| {
+                    emitted_xevent(turn_outcome_event(
+                        context_of(args.context),
+                        &turn_output_of(args.event),
+                    ))
+                }),
+                send_to("store", |args| {
+                    let output = turn_output_of(args.event);
+                    let context = context_of(args.context);
+                    let mut events = turn_output_produced(&output)
+                        .iter()
+                        .cloned()
+                        .map(history_event)
+                        .collect::<Vec<_>>();
+                    events.push(turn_ended_event(
+                        context.active_turn_id.unwrap_or(context.turn_id),
+                        turn_outcome_name(&output),
+                        match &output {
+                            TurnOutput::Failed { error, .. } => Some(error_message(error)),
+                            _ => None,
+                        },
+                    ));
+                    store_append(events)
+                }),
+            ],
+            ..Default::default()
+        }],
+    );
+    running_on.insert(
+        "xstate.error.actor.turn".to_string(),
+        vec![Transition {
+            target: Some("#agent.idle".to_string()),
+            actions: vec![
+                emit(|args| {
+                    let context = context_of(args.context);
+                    emitted_xevent(AgentEmitted::TurnFailed {
+                        error: error_of(args.event),
+                        messages: context.messages.clone(),
+                        interrupt_reason: interrupt_reason_value(&error_of(args.event)),
+                        branch_id: context.branch_id.clone(),
+                    })
+                }),
+                send_to("store", |args| {
+                    let context = context_of(args.context);
+                    store_append(vec![turn_ended_event(
+                        context.active_turn_id.unwrap_or(context.turn_id),
+                        "failed",
+                        Some(error_message(&error_of(args.event))),
+                    )])
+                }),
+            ],
+            ..Default::default()
+        }],
+    );
+    running_on.insert(
+        "store.reset".to_string(),
+        vec![Transition {
+            target: Some("#agent.idle".to_string()),
+            actions: store_reset_in_running(),
+            ..Default::default()
+        }],
+    );
+    running_on.insert(
+        "input.pause".to_string(),
+        vec![Transition {
+            actions: vec![
+                assign_agent(|next, _| next.paused = true),
+                send_to("turn", |_| XEvent::new("turn.pause", Value::Null)),
+            ],
+            ..Default::default()
+        }],
+    );
+    running_on.insert(
+        "input.continue".to_string(),
+        vec![Transition {
+            actions: vec![
+                assign_agent(|next, _| next.paused = false),
+                send_to("turn", |_| XEvent::new("turn.continue", Value::Null)),
+            ],
+            ..Default::default()
+        }],
+    );
+    running_on.insert(
+        "turn.drain".to_string(),
+        vec![Transition {
+            actions: vec![enqueue_actions(|args, enqueue| {
+                let context = context_of(args.context);
+                let mut messages = context
+                    .notifications
+                    .iter()
+                    .cloned()
+                    .map(HistoryMessage::User)
+                    .collect::<Vec<_>>();
+                messages.extend(context.reminders.iter().cloned());
+                enqueue.send_to("turn", turn_notify(messages.clone()));
+                if messages.is_empty() {
+                    return;
+                }
+                let mut next = context.clone();
+                next.notifications.clear();
+                next.reminders.clear();
+                enqueue.assign(Arc::new(next));
+            })],
+            ..Default::default()
+        }],
+    );
+    running_on.insert(
+        "tool.detached".to_string(),
+        vec![Transition {
+            guard: Some(Arc::new(|context, event| {
+                let ToolEvent::Detached { tool_call_id, .. } = tool_event_of(event) else {
+                    return false;
+                };
+                context_of(context).turn_tools.contains_key(&tool_call_id)
+            })),
+            actions: vec![
+                assign_agent(|next, event| {
+                    let ToolEvent::Detached { tool_call_id, .. } = tool_event_of(event) else {
+                        return;
+                    };
+                    if let Some(entry) = next.turn_tools.shift_remove(&tool_call_id) {
+                        next.background.insert(tool_call_id, entry);
+                    }
+                }),
+                send_to("turn", |args| args.event.clone()),
+                emit(|args| args.event.clone()),
+                forward_event(),
+            ],
+            ..Default::default()
+        }],
+    );
+    for event_type in ["tool.done", "tool.failed", "tool.aborted"] {
+        running_on.insert(
+            event_type.to_string(),
+            vec![Transition {
+                guard: Some(Arc::new(|context, event| {
+                    let tool_call_id = match tool_event_of(event) {
+                        ToolEvent::Done { tool_call_id, .. }
+                        | ToolEvent::Failed { tool_call_id, .. }
+                        | ToolEvent::Aborted { tool_call_id } => tool_call_id,
+                        ToolEvent::Update { .. } | ToolEvent::Detached { .. } | ToolEvent::Abort => {
+                            return false;
+                        }
+                    };
+                    let context = context_of(context);
+                    !context.background.contains_key(&tool_call_id)
+                        && context.turn_tools.contains_key(&tool_call_id)
+                })),
+                actions: vec![
+                    send_to("turn", |args| args.event.clone()),
+                    emit(|args| args.event.clone()),
+                    forward_event(),
+                ],
+                ..Default::default()
+            }],
+        );
+    }
+    for event_type in [
+        "llm.sent",
+        "step.started",
+        "llm.streaming.*",
+        "llm.done",
+        "llm.failed.syntax",
+        "llm.failed.remote",
+        "llm.retrying",
+        "llm.recovering",
+        "turn.reminders_consumed",
+    ] {
+        running_on.insert(
+            event_type.to_string(),
+            vec![Transition {
+                actions: vec![emit(|args| args.event.clone()), forward_event()],
+                ..Default::default()
+            }],
+        );
+    }
+
+    let running_active = StateNode {
+        on: HashMap::from([
+            (
+                "turn.spawn_tools".to_string(),
+                vec![Transition {
+                    actions: vec![spawn_turn_tools()],
+                    ..Default::default()
+                }],
+            ),
+            (
+                "input.steer".to_string(),
+                vec![Transition {
+                    guard: Some(Arc::new(|context, event| {
+                        let Some(AgentEvent::InputSteer { id }) = agent_event_of(event) else {
+                            return false;
+                        };
+                        context_of(context).queue.iter().any(|item| {
+                            item.meta
+                                .as_ref()
+                                .and_then(|meta| meta.prompt_id.as_ref())
+                                .is_some_and(|prompt_id| id.contains(prompt_id))
+                        })
+                    })),
+                    actions: vec![
+                        steer_queued(),
+                        send_to("turn", |_| XEvent::new("turn.steer", Value::Null)),
+                    ],
+                    ..Default::default()
+                }],
+            ),
+            (
+                "input.abort".to_string(),
+                vec![Transition {
+                    target: Some("aborting".to_string()),
+                    actions: vec![
+                        remember_abort_reason(),
+                        abort_turn(),
+                        abort_turn_tools(),
+                        emit(|_| emitted_xevent(AgentEmitted::TurnAborting)),
+                    ],
+                    ..Default::default()
+                }],
+            ),
+        ]),
+        ..Default::default()
+    };
+    let running_aborting = StateNode {
+        after: vec![(
+            "abortTimeout".to_string(),
+            Transition {
+                actions: vec![abort_turn(), stop_turn_tools()],
+                ..Default::default()
+            },
+        )],
+        on: HashMap::from([
+            (
+                "turn.spawn_tools".to_string(),
+                vec![Transition {
+                    actions: vec![spawn_turn_tools(), abort_spawned_tools()],
+                    ..Default::default()
+                }],
+            ),
+            (
+                "input.abort".to_string(),
+                vec![Transition {
+                    actions: vec![remember_abort_reason(), abort_turn(), stop_turn_tools()],
+                    ..Default::default()
+                }],
+            ),
+        ]),
+        ..Default::default()
+    };
+    let running = StateNode {
+        entry: vec![
+            assign_agent(|next, _| {
+                next.active_turn_id = Some(next.turn_id);
+                next.abort_reason = None;
+            }),
+            emit(|args| {
+                let context = context_of(args.context);
+                emitted_xevent(AgentEmitted::TurnStarted {
+                    turn_id: context.turn_id,
+                    branch_id: context.branch_id.clone(),
+                    queue_item_id: context.drained_id.clone(),
+                    entry: context.drained_entry.clone(),
+                })
+            }),
+            send_to("store", |args| {
+                let context = context_of(args.context);
+                store_append(vec![turn_started_event(
+                    context.turn_id,
+                    context.drained_id.clone(),
+                )])
+            }),
+            spawn_turn(max_steps_per_turn),
+        ],
+        exit: vec![
+            stop_child(|_| Some("turn".to_string())),
+            abort_turn_tools(),
+            stop_turn_tools(),
+            assign_agent(|next, _| next.turn_tools.clear()),
+            assign_agent(|next, _| next.turn_id += 1),
+        ],
+        initial: Some("active".to_string()),
+        on: running_on,
+        states: HashMap::from([
+            ("active".to_string(), running_active),
+            ("aborting".to_string(), running_aborting),
+        ]),
+        ..Default::default()
+    };
+
+    let closing = StateNode {
+        entry: vec![abort_scope(), abort_turn_tools(), stop_turn_tools()],
+        invoke: Some(InvokeDef {
+            id: "disposeScopeActor".to_string(),
+            src: "disposeScopeActor".to_string(),
+            input: Arc::new(|args| InvokeInput {
+                runtime: Arc::new(context_of(args.context).handle.clone()),
+                restore: None,
+            }),
+            on_done: vec![Transition {
+                target: Some("#agent.disposed".to_string()),
+                ..Default::default()
+            }],
+            on_error: vec![Transition {
+                target: Some("#agent.disposed".to_string()),
+                ..Default::default()
+            }],
+        }),
+        ..Default::default()
+    };
+    let disposed = StateNode {
+        final_: true,
+        ..Default::default()
+    };
+
+    let mut root_on: HashMap<String, Vec<Transition>> = HashMap::new();
+    root_on.insert(
+        "input.close".to_string(),
+        vec![Transition {
+            target: Some(".closing".to_string()),
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "input.submit".to_string(),
+        vec![Transition {
+            actions: vec![assign_agent(|next, event| {
+                let Some(AgentEvent::InputSubmit { entry }) = agent_event_of(event) else {
+                    return;
+                };
+                next.queue.push(create_user_entry(
+                    entry.message,
+                    user_meta_with_default(entry.meta, "input"),
+                ));
+            })],
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "input.notify".to_string(),
+        vec![Transition {
+            actions: vec![assign_agent(|next, event| {
+                let Some(AgentEvent::InputNotify { entry }) = agent_event_of(event) else {
+                    return;
+                };
+                next.notifications.push(create_user_entry(
+                    entry.message,
+                    user_meta_with_default(entry.meta, "notify"),
+                ));
+            })],
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "input.remind".to_string(),
+        vec![Transition {
+            actions: vec![assign_agent(|next, event| {
+                let Some(AgentEvent::InputRemind { key, entry }) = agent_event_of(event) else {
+                    return;
+                };
+                next.reminders
+                    .retain(|entry| history_meta_key(entry) != Some(key.as_str()));
+                match entry {
+                    AgentReminderEntry::System(entry) => {
+                        next.reminders.push(HistoryMessage::System(create_system_entry(
+                            entry.message,
+                            system_reminder_meta(entry.meta, &key),
+                        )));
+                    }
+                    AgentReminderEntry::User(entry) => {
+                        next.reminders.push(HistoryMessage::User(create_user_entry(
+                            entry.message,
+                            user_reminder_meta(entry.meta, &key),
+                        )));
+                    }
+                }
+            })],
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "input.steer".to_string(),
+        vec![Transition {
+            actions: vec![steer_queued()],
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "input.cancel".to_string(),
+        vec![Transition {
+            actions: vec![assign_agent(|next, event| {
+                let Some(AgentEvent::InputCancel { id }) = agent_event_of(event) else {
+                    return;
+                };
+                next.queue.retain(|item| {
+                    item.meta
+                        .as_ref()
+                        .and_then(|meta| meta.prompt_id.as_deref())
+                        != Some(id.as_str())
+                });
+            })],
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "store.reset".to_string(),
+        vec![Transition {
+            target: Some(".idle".to_string()),
+            actions: store_reset_in_running(),
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "input.pause".to_string(),
+        vec![Transition {
+            actions: vec![assign_agent(|next, _| next.paused = true)],
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "input.continue".to_string(),
+        vec![Transition {
+            actions: vec![assign_agent(|next, _| next.paused = false)],
+            ..Default::default()
+        }],
+    );
+    root_on.insert(
+        "store.error".to_string(),
+        vec![Transition {
+            actions: vec![forward_event()],
+            ..Default::default()
+        }],
+    );
+    root_on.insert("store.changed".to_string(), vec![Transition::default()]);
+    root_on.insert(
+        "tool.update".to_string(),
+        vec![Transition {
+            actions: vec![emit(|args| args.event.clone()), forward_event()],
+            ..Default::default()
+        }],
+    );
+    for event_type in ["tool.done", "tool.failed"] {
+        root_on.insert(
+            event_type.to_string(),
+            vec![Transition {
+                guard: Some(Arc::new(|context, event| {
+                    let tool_call_id = match tool_event_of(event) {
+                        ToolEvent::Done { tool_call_id, .. }
+                        | ToolEvent::Failed { tool_call_id, .. } => tool_call_id,
+                        _ => return false,
+                    };
+                    context_of(context).background.contains_key(&tool_call_id)
+                })),
+                actions: vec![
+                    assign_agent(|next, event| {
+                        let (tool_call_id, output) = match tool_event_of(event) {
+                            ToolEvent::Done { tool_call_id, result } => {
+                                (tool_call_id, ToolOutput::Succeeded { result })
+                            }
+                            ToolEvent::Failed { tool_call_id, error } => {
+                                (tool_call_id, ToolOutput::Failed { error })
+                            }
+                            _ => return,
+                        };
+                        if let Some(entry) = next.background.shift_remove(&tool_call_id) {
+                            next.notifications.push(completion_notification(
+                                &entry.tool_call,
+                                &output,
+                            ));
+                        }
+                    }),
+                    emit(|args| args.event.clone()),
+                    forward_event(),
+                ],
+                ..Default::default()
+            }],
+        );
+    }
+
+    let machine = Machine {
+        id: "agent".to_string(),
+        initial: "linking".to_string(),
+        context: Arc::new(|input| {
+            let input = input.downcast::<AgentInput>().expect("agent input");
+            Arc::new(AgentMachineContext {
                 request: input.request.clone(),
-                input,
+                input: input.as_ref().clone(),
                 store: None,
                 handle: None,
                 turn_logic: None,
@@ -457,1057 +2090,40 @@ impl AgentMachineLogic {
                 drained_entry: None,
                 paused: false,
                 abort_reason: None,
+            }) as Context
+        }),
+        invoke: Some(InvokeDef {
+            id: "controllerGuard".to_string(),
+            src: "controllerGuard".to_string(),
+            input: Arc::new(|args| InvokeInput {
+                runtime: Arc::new(context_of(args.context).scope.clone()),
+                restore: None,
             }),
-            state: Mutex::new(AgentState::Linking),
-            parent,
-            listeners: Mutex::new(HashMap::new()),
-            next_listener_id: AtomicU64::new(0),
-            turn: Mutex::new(None),
-            store_unsubscribe: Mutex::new(None),
-            append_lock: Arc::new(tokio::sync::Mutex::new(())),
-        });
-        actor.link();
-        actor
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentState {
-    Linking,
-    Restoring,
-    IdleReady,
-    IdleWaiting,
-    Gating,
-    RunningActive,
-    RunningAborting,
-    Closing,
-    Disposed,
-}
-
-pub struct AgentSnapshot {
-    pub context: AgentMachineContext,
-    pub value: String,
-    pub status: String,
-}
-
-pub struct AgentSubscription {
-    unsubscribe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-}
-
-impl AgentSubscription {
-    pub fn unsubscribe(&self) {
-        if let Some(unsubscribe) = self.unsubscribe.lock().take() {
-            unsubscribe();
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct AgentMachineSelf {
-    actor: Arc<AgentActor>,
-}
-
-impl AgentMachineSelf {
-    pub fn send(&self, event: AgentEvent) {
-        self.actor.send(event);
-    }
-
-    pub fn get_snapshot(&self) -> AgentSnapshot {
-        self.actor.get_snapshot()
-    }
-
-    pub fn on(
-        &self,
-        type_: &str,
-        handler: Arc<dyn Fn(AgentEmitted) + Send + Sync>,
-    ) -> AgentSubscription {
-        self.actor.on(type_, handler)
-    }
-}
-
-impl AgentSnapshotSource for AgentMachineSelf {
-    fn snapshot_background(&self) -> IndexMap<String, ToolActorRef> {
-        self.actor
-            .context
-            .lock()
-            .background
-            .iter()
-            .map(|(id, entry)| (id.clone(), entry.ref_.clone()))
-            .collect()
-    }
-}
-
-type AgentListener = Arc<dyn Fn(AgentEmitted) + Send + Sync>;
-
-pub struct AgentActor {
-    options: CreateAgentMachineOptions,
-    context: Mutex<AgentMachineContext>,
-    state: Mutex<AgentState>,
-    parent: Arc<dyn Fn(AgentEvent) + Send + Sync>,
-    listeners: Mutex<HashMap<u64, (String, AgentListener)>>,
-    next_listener_id: AtomicU64,
-    turn: Mutex<Option<Arc<crate::human::agent::turn::TurnActor>>>,
-    store_unsubscribe: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    append_lock: Arc<tokio::sync::Mutex<()>>,
-}
-
-impl AgentActor {
-    pub fn send(self: &Arc<Self>, event: AgentEvent) {
-        if *self.state.lock() == AgentState::Disposed {
-            return;
-        }
-        match event {
-            AgentEvent::InputClose => self.close(),
-            AgentEvent::InputSubmit { entry } => {
-                let meta = entry.meta.clone();
-                let entry = create_user_entry(
-                    entry.message,
-                    user_meta_with_default(meta, "input"),
-                );
-                self.context.lock().queue.push(entry);
-                self.evaluate_idle();
-            }
-            AgentEvent::InputNotify { entry } => {
-                let entry = create_user_entry(
-                    entry.message,
-                    user_meta_with_default(entry.meta, "notify"),
-                );
-                self.context.lock().notifications.push(entry);
-                self.evaluate_idle();
-            }
-            AgentEvent::InputRemind { key, entry } => {
-                let mut context = self.context.lock();
-                context.reminders.retain(|entry| history_meta_key(entry) != Some(&key));
-                let reminder = match entry {
-                    AgentReminderEntry::System(entry) => {
-                        let mut meta = entry.meta.unwrap_or_default();
-                        if meta.source.is_none() {
-                            meta.source = Some("reminder".to_string());
-                        }
-                        if meta.key.is_none() {
-                            meta.key = Some(key.clone());
-                        }
-                        HistoryMessage::System(create_system_entry(entry.message, meta))
-                    }
-                    AgentReminderEntry::User(entry) => {
-                        let mut meta = entry.meta.unwrap_or_default();
-                        if meta.source.is_none() {
-                            meta.source = Some("reminder".to_string());
-                        }
-                        if meta.key.is_none() {
-                            meta.key = Some(key.clone());
-                        }
-                        HistoryMessage::User(create_user_entry(entry.message, meta))
-                    }
-                };
-                context.reminders.push(reminder);
-            }
-            AgentEvent::InputSteer { id } => self.steer(id),
-            AgentEvent::InputCancel { id } => {
-                self.context
-                    .lock()
-                    .queue
-                    .retain(|entry| entry.meta.as_ref().and_then(|meta| meta.prompt_id.as_deref()) != Some(id.as_str()));
-            }
-            AgentEvent::InputAbort { reason } => self.abort(reason),
-            AgentEvent::InputPause => {
-                self.context.lock().paused = true;
-                if let Some(turn) = self.turn.lock().clone() {
-                    turn.send(crate::human::agent::turn::TurnEvent::Pause);
-                }
-            }
-            AgentEvent::InputContinue => self.continue_(),
-            AgentEvent::StoreReady { state, branch } => self.restore(state, branch),
-            AgentEvent::StoreReset { state, branch } => self.reset(state, branch),
-            AgentEvent::StoreChanged { .. } => {}
-            AgentEvent::StoreError { error } => self.forward(AgentEvent::StoreError { error }),
-            AgentEvent::Tool(event) => self.handle_tool(event),
-            AgentEvent::TurnSpawnTools { tool_calls } => self.spawn_turn_tools(tool_calls),
-            AgentEvent::TurnDrain => {
-                if matches!(
-                    *self.state.lock(),
-                    AgentState::RunningActive | AgentState::RunningAborting
-                ) {
-                    self.drain_turn();
-                }
-            }
-            AgentEvent::TurnRemindersConsumed { reminders } => {
-                if matches!(
-                    *self.state.lock(),
-                    AgentState::RunningActive | AgentState::RunningAborting
-                ) {
-                    self.emit(AgentEmitted::TurnRemindersConsumed {
-                        reminders: reminders.clone(),
-                    });
-                    self.forward(AgentEvent::TurnRemindersConsumed { reminders });
-                }
-            }
-            AgentEvent::StepStarted { step } => {
-                if matches!(
-                    *self.state.lock(),
-                    AgentState::RunningActive | AgentState::RunningAborting
-                ) {
-                    self.emit(AgentEmitted::StepStarted { step });
-                    self.forward(AgentEvent::StepStarted { step });
-                }
-            }
-            AgentEvent::Llm(event) => {
-                if matches!(
-                    *self.state.lock(),
-                    AgentState::RunningActive | AgentState::RunningAborting
-                ) && matches!(
-                    turn_llm_event_type(&event),
-                    "llm.sent"
-                        | "llm.streaming.headers"
-                        | "llm.streaming.part"
-                        | "llm.streaming.usage"
-                        | "llm.streaming.finish"
-                        | "llm.streaming.message_id"
-                        | "llm.done"
-                        | "llm.failed.syntax"
-                        | "llm.failed.remote"
-                        | "llm.retrying"
-                        | "llm.recovering"
-                ) {
-                    self.emit(AgentEmitted::Llm(event.clone()));
-                    self.forward(AgentEvent::Llm(event));
-                }
-            }
-            AgentEvent::TurnDone { output } => self.finish_turn(output),
-            AgentEvent::TurnError { error } => self.fail_turn(error),
-        }
-    }
-
-    pub fn get_snapshot(&self) -> AgentSnapshot {
-        let state = *self.state.lock();
-        AgentSnapshot {
-            context: self.context.lock().clone(),
-            value: match state {
-                AgentState::Linking => "linking",
-                AgentState::Restoring => "restoring",
-                AgentState::IdleReady | AgentState::IdleWaiting | AgentState::Gating => "idle",
-                AgentState::RunningActive | AgentState::RunningAborting => "running",
-                AgentState::Closing => "closing",
-                AgentState::Disposed => "disposed",
-            }
-            .to_string(),
-            status: if state == AgentState::Disposed {
-                "done"
-            } else {
-                "active"
-            }
-            .to_string(),
-        }
-    }
-
-    pub fn on(
-        self: &Arc<Self>,
-        type_: &str,
-        handler: AgentListener,
-    ) -> AgentSubscription {
-        let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
-        self.listeners.lock().insert(id, (type_.to_string(), handler));
-        let weak = Arc::downgrade(self);
-        AgentSubscription {
-            unsubscribe: Mutex::new(Some(Box::new(move || {
-                if let Some(actor) = Weak::upgrade(&weak) {
-                    actor.listeners.lock().remove(&id);
-                }
-            }))),
-        }
-    }
-
-    fn machine_self(self: &Arc<Self>) -> AgentMachineSelf {
-        AgentMachineSelf {
-            actor: self.clone(),
-        }
-    }
-
-    fn emit(&self, event: AgentEmitted) {
-        let type_ = event.type_();
-        for (wanted, listener) in self.listeners.lock().values() {
-            if wanted == &type_ {
-                listener(event.clone());
-            }
-        }
-    }
-
-    fn forward(&self, event: AgentEvent) {
-        (self.parent)(event);
-    }
-
-    fn link(self: &Arc<Self>) {
-        let this = self.clone();
-        let self_ = self.machine_self();
-        let (factory, signal) = {
-            let context = self.context.lock();
-            (context.input.scope_factory.clone(), context.scope.signal.clone())
-        };
-        tokio::spawn(async move {
-            match factory(self_, signal).await {
-                Ok(output) => this.attach(output),
-                Err(error) => {
-                    if *this.state.lock() != AgentState::Disposed {
-                        *this.state.lock() = AgentState::Disposed;
-                        this.emit(AgentEmitted::AgentFailed {
-                            error: Value::String(error.to_string()),
-                        });
-                    }
-                }
-            }
-        });
-    }
-
-    fn attach(self: &Arc<Self>, output: ScopeFactoryOutput) {
-        if *self.state.lock() != AgentState::Linking {
-            return;
-        }
-        {
-            let mut context = self.context.lock();
-            context.store = Some(output.store.clone());
-            context.handle = output.handle;
-            context.turn_logic = Some(output.turn_logic);
-            context.tool_logic = Some(output.tool_logic);
-            context.tools = Some(output.tools);
-            if let Some(request) = output.request {
-                context.request = request;
-            }
-            context.prompt_gate = output.prompt_gate;
-        }
-        *self.state.lock() = AgentState::Restoring;
-        self.emit(AgentEmitted::AgentAttached);
-        self.send(AgentEvent::StoreReady {
-            state: output.store.get_state(),
-            branch: output.store.ref_().branch,
-        });
-        let this = self.clone();
-        let store = output.store.clone();
-        let unsubscribe = output.store.subscribe(Arc::new(move |state, cause| match cause {
-            Cause::Reset { .. } => this.send(AgentEvent::StoreReset {
-                state,
-                branch: store.ref_().branch,
-            }),
-            _ => this.send(AgentEvent::StoreChanged { state }),
-        }));
-        *self.store_unsubscribe.lock() = Some(unsubscribe);
-    }
-
-    fn restore(self: &Arc<Self>, state: AgentStoreState, branch: String) {
-        if *self.state.lock() != AgentState::Restoring {
-            return;
-        }
-        let history = decode_state::<Vec<HistoryMessage>>(&state, "history");
-        let stored_notifications = decode_state::<Vec<UserEntry>>(&state, "notifications");
-        let stored_reminders = decode_state::<Vec<HistoryMessage>>(&state, "reminders");
-        let stored_queue = decode_state::<Vec<UserEntry>>(&state, "queue");
-        let turn_index = decode_state::<TurnIndexState>(&state, "turnIndex");
-        {
-            let mut context = self.context.lock();
-            context.messages = history;
-            context.notifications = [stored_notifications, context.notifications.clone()].concat();
-            context.reminders = [
-                stored_reminders
-                    .into_iter()
-                    .filter(|entry| {
-                        !context
-                            .reminders
-                            .iter()
-                            .any(|local| history_meta_key(local) == history_meta_key(entry))
-                    })
-                    .collect(),
-                context.reminders.clone(),
-            ]
-            .concat();
-            context.queue = [stored_queue, context.queue.clone()].concat();
-            context.turn_id = turn_index.next_turn_id;
-            context.branch_id = branch;
-        }
-        *self.state.lock() = AgentState::IdleReady;
-        self.evaluate_idle();
-    }
-
-    fn reset(self: &Arc<Self>, state: AgentStoreState, branch: String) {
-        let was_running = matches!(
-            *self.state.lock(),
-            AgentState::RunningActive | AgentState::RunningAborting
-        );
-        let old_scope = self.context.lock().scope.clone();
-        old_scope.abort();
-        if was_running {
-            self.turn.lock().take();
-            self.abort_turn_tools();
-            self.turn_tools_stop();
-        }
-        let turn_index = decode_state::<TurnIndexState>(&state, "turnIndex");
-        {
-            let mut context = self.context.lock();
-            context.messages = decode_state(&state, "history");
-            context.notifications = decode_state(&state, "notifications");
-            context.reminders = decode_state(&state, "reminders");
-            context.turn_tools.clear();
-            context.background.clear();
-            context.scope = create_abort_scope();
-            context.turn_id = turn_index.next_turn_id;
-            context.active_turn_id = None;
-            context.branch_id = branch.clone();
-        }
-        *self.state.lock() = AgentState::IdleReady;
-        self.emit(AgentEmitted::ContextReset {
-            branch_id: branch.clone(),
-        });
-        self.forward(AgentEvent::StoreReset { state, branch });
-        self.evaluate_idle();
-    }
-
-    fn evaluate_idle(self: &Arc<Self>) {
-        if !matches!(*self.state.lock(), AgentState::IdleReady | AgentState::IdleWaiting) {
-            return;
-        }
-        let (has_gate, has_pending, paused, has_background) = {
-            let context = self.context.lock();
-            (
-                context.prompt_gate.is_some() && !context.queue.is_empty(),
-                !context.notifications.is_empty() || !context.queue.is_empty(),
-                context.paused,
-                !context.background.is_empty(),
-            )
-        };
-        if has_gate && !paused {
-            self.start_gating();
-        } else if has_pending && !paused {
-            self.commit_pending_to_history();
-            self.start_running();
-        } else {
-            *self.state.lock() = if has_background {
-                AgentState::IdleWaiting
-            } else {
-                AgentState::IdleReady
-            };
-        }
-    }
-
-    fn start_gating(self: &Arc<Self>) {
-        *self.state.lock() = AgentState::Gating;
-        let (gate, head) = {
-            let context = self.context.lock();
-            (context.prompt_gate.clone().unwrap(), context.queue.first().cloned())
-        };
-        let Some(head) = head else {
-            *self.state.lock() = AgentState::IdleReady;
-            self.evaluate_idle();
-            return;
-        };
-        let id = head.meta.as_ref().and_then(|meta| meta.prompt_id.clone());
-        let this = self.clone();
-        tokio::spawn(async move {
-            let result = gate(id.clone(), head.message.clone()).await;
-            if *this.state.lock() != AgentState::Gating {
-                return;
-            }
-            let (paused, current_id) = {
-                let context = this.context.lock();
-                (
-                    context.paused,
-                    context.queue.first().and_then(|entry| {
-                        entry.meta.as_ref().and_then(|meta| meta.prompt_id.clone())
-                    }),
-                )
-            };
-            if paused || current_id != id {
-                *this.state.lock() = AgentState::IdleReady;
-                this.evaluate_idle();
-                return;
-            }
-            match result {
-                Err(error) => this.gate_failed(Value::String(error.to_string())),
-                Ok(PromptGateVerdict::Detailed {
-                    block: false,
-                    message: Some(message),
-                }) => {
-                    this.context.lock().queue[0].message = message;
-                    this.commit_pending_to_history();
-                    this.start_running();
-                }
-                Ok(verdict) => {
-                    let block = match verdict {
-                        PromptGateVerdict::Bool(block) => block,
-                        PromptGateVerdict::Detailed { block, .. } => block,
-                    };
-                    if block {
-                        this.emit(AgentEmitted::PromptBlocked {
-                            queue_item_id: id,
-                            entry: Some(head),
-                        });
-                        this.context.lock().queue.remove(0);
-                        *this.state.lock() = AgentState::IdleReady;
-                        this.evaluate_idle();
-                    } else {
-                        this.commit_pending_to_history();
-                        this.start_running();
-                    }
-                }
-            }
-        });
-    }
-
-    fn gate_failed(self: &Arc<Self>, error: Value) {
-        let (id, entry) = {
-            let context = self.context.lock();
-            (
-                context.queue.first().and_then(|entry| {
-                    entry.meta.as_ref().and_then(|meta| meta.prompt_id.clone())
-                }),
-                context.queue.first().cloned(),
-            )
-        };
-        self.emit(AgentEmitted::PromptGateFailed {
-            queue_item_id: id,
-            error,
-            entry,
-        });
-        if !self.context.lock().queue.is_empty() {
-            self.context.lock().queue.remove(0);
-        }
-        *self.state.lock() = AgentState::IdleReady;
-        self.evaluate_idle();
-    }
-
-    fn commit_pending_to_history(&self) {
-        let (entries, head) = {
-            let context = self.context.lock();
-            (context.notifications.clone(), context.queue.first().cloned())
-        };
-        let events = entries
-            .iter()
-            .cloned()
-            .map(HistoryMessage::User)
-            .chain(head.clone().map(HistoryMessage::User))
-            .map(history_event)
-            .collect::<Vec<_>>();
-        self.append_events(events);
-        let mut context = self.context.lock();
-        context.messages.extend(entries);
-        if let Some(head) = &head {
-            context.messages.push(HistoryMessage::User(head.clone()));
-        }
-        context.notifications.clear();
-        if !context.queue.is_empty() {
-            context.queue.remove(0);
-        }
-        context.drained_id = head
-            .as_ref()
-            .and_then(|entry| entry.meta.as_ref().and_then(|meta| meta.prompt_id.clone()));
-        context.drained_entry = head;
-    }
-
-    fn start_running(self: &Arc<Self>) {
-        let (turn_id, branch_id, queue_item_id, entry, request, history, signal, logic) = {
-            let mut context = self.context.lock();
-            context.active_turn_id = Some(context.turn_id);
-            context.abort_reason = None;
-            let mut request = context.request.clone();
-            request.tools = context.tools.as_ref().map(|tools| {
-                tools
-                    .iter()
-                    .filter(|tool| tool.deferred != Some(true))
-                    .map(ToolDefinition::description)
-                    .collect()
-            });
-            (
-                context.turn_id,
-                context.branch_id.clone(),
-                context.drained_id.clone(),
-                context.drained_entry.clone(),
-                request,
-                context.messages.clone(),
-                context.scope.signal.clone(),
-                context.turn_logic.clone().unwrap(),
-            )
-        };
-        *self.state.lock() = AgentState::RunningActive;
-        self.emit(AgentEmitted::TurnStarted {
-            turn_id,
-            branch_id: branch_id.clone(),
-            queue_item_id: queue_item_id.clone(),
-            entry: entry.clone(),
-        });
-        let mut event = Map::from_iter([("turnId".to_string(), json!(turn_id))]);
-        if let Some(queue_item_id) = queue_item_id {
-            event.insert("queueItemId".to_string(), Value::String(queue_item_id));
-        }
-        self.append_events(vec![TURN_STARTED.create(event)]);
-        let turn = logic.start(
-            crate::human::agent::turn::TurnInput {
-                request,
-                history,
-                max_steps: self.options.max_steps_per_turn,
-                parent_signal: Some(signal),
-            },
-            Arc::new({
-                let this = self.clone();
-                move |event| this.handle_turn_event(event)
-            }),
-        );
-        *self.turn.lock() = Some(turn.clone());
-        turn.on_finish(Arc::new({
-            let this = self.clone();
-            move || {
-                if let Some(turn) = this.turn.lock().clone()
-                    && let Some(output) = turn.output()
-                {
-                    this.send(AgentEvent::TurnDone { output });
-                }
-            }
-        }));
-    }
-
-    fn handle_turn_event(self: &Arc<Self>, event: TurnParentEvent) {
-        match event {
-            TurnParentEvent::Llm(event) => self.send(AgentEvent::Llm(event)),
-            TurnParentEvent::Signal(TurnSignal::StepStarted { step }) => {
-                self.send(AgentEvent::StepStarted { step });
-            }
-            TurnParentEvent::Signal(TurnSignal::SpawnTools { tool_calls }) => {
-                self.send(AgentEvent::TurnSpawnTools { tool_calls });
-            }
-            TurnParentEvent::Signal(TurnSignal::Drain) => self.send(AgentEvent::TurnDrain),
-            TurnParentEvent::Signal(TurnSignal::RemindersConsumed { reminders }) => {
-                self.send(AgentEvent::TurnRemindersConsumed { reminders });
-            }
-        }
-    }
-
-    fn finish_turn(self: &Arc<Self>, output: TurnOutput) {
-        if !matches!(*self.state.lock(), AgentState::RunningActive | AgentState::RunningAborting) {
-            return;
-        }
-        let produced = match &output {
-            TurnOutput::Done { produced }
-            | TurnOutput::Failed { produced, .. }
-            | TurnOutput::Aborted { produced } => produced.clone(),
-        };
-        self.context.lock().messages.extend(produced.clone());
-        let (messages, branch_id, turn_id) = {
-            let context = self.context.lock();
-            (
-                context.messages.clone(),
-                context.branch_id.clone(),
-                context.active_turn_id.unwrap_or(context.turn_id),
-            )
-        };
-        let (outcome, error) = match &output {
-            TurnOutput::Done { .. } => {
-                self.emit(AgentEmitted::TurnDone {
-                    messages,
-                    branch_id,
-                });
-                ("done", None)
-            }
-            TurnOutput::Aborted { .. } => {
-                self.emit(AgentEmitted::TurnAborted {
-                    messages,
-                    branch_id,
-                });
-                ("aborted", None)
-            }
-            TurnOutput::Failed { error, .. } => {
-                self.emit(AgentEmitted::TurnFailed {
-                    error: error.clone(),
-                    messages,
-                    interrupt_reason: interrupt_reason_value(error),
-                    branch_id,
-                });
-                ("failed", Some(error_message(error)))
-            }
-        };
-        let mut events = produced.into_iter().map(history_event).collect::<Vec<_>>();
-        let mut event = Map::from_iter([
-            ("turnId".to_string(), json!(turn_id)),
-            ("outcome".to_string(), json!(outcome)),
-        ]);
-        if let Some(error) = error {
-            event.insert("errorMessage".to_string(), Value::String(error));
-        }
-        events.push(TURN_ENDED.create(event));
-        self.append_events(events);
-        self.exit_running();
-    }
-
-    fn fail_turn(self: &Arc<Self>, error: Value) {
-        if !matches!(*self.state.lock(), AgentState::RunningActive | AgentState::RunningAborting) {
-            return;
-        }
-        let (messages, branch_id, turn_id) = {
-            let context = self.context.lock();
-            (
-                context.messages.clone(),
-                context.branch_id.clone(),
-                context.active_turn_id.unwrap_or(context.turn_id),
-            )
-        };
-        self.emit(AgentEmitted::TurnFailed {
-            error: error.clone(),
-            messages,
-            interrupt_reason: interrupt_reason_value(&error),
-            branch_id,
-        });
-        self.append_events(vec![TURN_ENDED.create(Map::from_iter([
-            ("turnId".to_string(), json!(turn_id)),
-            ("outcome".to_string(), json!("failed")),
-            ("errorMessage".to_string(), json!(error_message(&error))),
-        ]))]);
-        self.exit_running();
-    }
-
-    fn exit_running(self: &Arc<Self>) {
-        self.abort_turn_tools();
-        self.turn_tools_stop();
-        *self.turn.lock() = None;
-        self.context.lock().turn_id += 1;
-        *self.state.lock() = AgentState::IdleReady;
-        self.evaluate_idle();
-    }
-
-    fn drain_turn(&self) {
-        let messages = {
-            let context = self.context.lock();
-            [context.notifications.clone(), context.reminders.clone()].concat()
-        };
-        if let Some(turn) = self.turn.lock().clone() {
-            turn.send(crate::human::agent::turn::TurnEvent::Notify {
-                messages: messages.clone(),
-            });
-        }
-        if !messages.is_empty() {
-            let mut context = self.context.lock();
-            context.notifications.clear();
-            context.reminders.clear();
-        }
-    }
-
-    fn steer(self: &Arc<Self>, ids: Vec<String>) {
-        let steered = {
-            let context = self.context.lock();
-            context
-                .queue
-                .iter()
-                .filter(|entry| {
-                    entry
-                        .meta
-                        .as_ref()
-                        .and_then(|meta| meta.prompt_id.as_ref())
-                        .is_some_and(|id| ids.contains(id))
-                })
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        if steered.is_empty() {
-            return;
-        }
-        let merged = merge_steer_messages(
-            &steered
-                .iter()
-                .map(|entry| SteerMessage {
-                    content: entry.message.content.clone(),
-                    origin: entry.meta.as_ref().and_then(|meta| meta.origin.clone()),
-                })
-                .collect::<Vec<_>>(),
-        );
-        let prompt_id = if steered.len() == 1 {
-            steered[0]
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.prompt_id.clone())
-        } else {
-            None
-        };
-        {
-            let mut context = self.context.lock();
-            context.queue.retain(|entry| {
-                !entry
-                    .meta
-                    .as_ref()
-                    .and_then(|meta| meta.prompt_id.as_ref())
-                    .is_some_and(|id| ids.contains(id))
-            });
-            let mut origin = merged.origin;
-            origin.in_turn = Some(true);
-            context.notifications.push(create_user_entry(
-                UserMessage {
-                    role: crate::human::llm::message::Role::User,
-                    content: merged.content,
-                },
-                UserMeta {
-                    source: Some("input".to_string()),
-                    prompt_id: prompt_id.clone(),
-                    user_message_id: prompt_id,
-                    origin: Some(origin),
-                    ..Default::default()
-                },
-            ));
-        }
-        self.emit(AgentEmitted::PromptSteered {
-            queue_item_ids: steered
-                .iter()
-                .filter_map(|entry| entry.meta.as_ref().and_then(|meta| meta.prompt_id.clone()))
-                .collect(),
-            entries: steered,
-        });
-        if *self.state.lock() == AgentState::RunningActive
-            && let Some(turn) = self.turn.lock().clone()
-        {
-            turn.send(crate::human::agent::turn::TurnEvent::Steer);
-        }
-        self.evaluate_idle();
-    }
-
-    fn continue_(self: &Arc<Self>) {
-        self.context.lock().paused = false;
-        if let Some(turn) = self.turn.lock().clone() {
-            turn.send(crate::human::agent::turn::TurnEvent::Continue);
-        }
-        let should_resume = {
-            let context = self.context.lock();
-            matches!(*self.state.lock(), AgentState::IdleReady | AgentState::IdleWaiting)
-                && context.notifications.is_empty()
-                && context.queue.is_empty()
-                && history_ends_mid_tool_chain(&context.messages)
-        };
-        if should_resume {
-            self.commit_pending_to_history();
-            self.start_running();
-        } else {
-            self.evaluate_idle();
-        }
-    }
-
-    fn spawn_turn_tools(self: &Arc<Self>, tool_calls: Vec<ToolCall>) {
-        if !matches!(*self.state.lock(), AgentState::RunningActive | AgentState::RunningAborting) {
-            return;
-        }
-        let logic = self.context.lock().tool_logic.clone().unwrap();
-        let wait_for_tasks = create_wait_for_tasks(self.machine_self());
-        for tool_call in tool_calls {
-            let scope = with_abort(&self.context.lock().scope.signal);
-            let this = self.clone();
-            let actor = logic.start(
-                ToolInput {
-                    tool_call: tool_call.clone(),
-                    signal: scope.signal.clone(),
-                    wait_for_tasks: Some(wait_for_tasks.clone()),
-                },
-                Arc::new(move |event| this.send(AgentEvent::Tool(event))),
-            );
-            self.context.lock().turn_tools.insert(
-                tool_call.id.clone(),
-                ToolEntry {
-                    tool_call,
-                    scope: scope.clone(),
-                    ref_: actor.clone(),
-                },
-            );
-            if *self.state.lock() == AgentState::RunningAborting {
-                scope.abort();
-                actor.send(ToolEvent::Abort);
-            }
-        }
-    }
-
-    fn handle_tool(self: &Arc<Self>, event: ToolEvent) {
-        if matches!(event, ToolEvent::Update { .. }) {
-            self.emit(AgentEmitted::Tool(event.clone()));
-            self.forward(AgentEvent::Tool(event));
-            return;
-        }
-        let id = match &event {
-            ToolEvent::Update { tool_call_id, .. }
-            | ToolEvent::Detached { tool_call_id, .. }
-            | ToolEvent::Done { tool_call_id, .. }
-            | ToolEvent::Failed { tool_call_id, .. }
-            | ToolEvent::Aborted { tool_call_id } => tool_call_id.clone(),
-            ToolEvent::Abort => return,
-        };
-        let in_background = self.context.lock().background.contains_key(&id);
-        if in_background && matches!(event, ToolEvent::Done { .. } | ToolEvent::Failed { .. }) {
-            let entry = self.context.lock().background.remove(&id);
-            if let Some(entry) = entry {
-                let output = match &event {
-                    ToolEvent::Done { result, .. } => ToolOutput::Succeeded {
-                        result: result.clone(),
-                    },
-                    ToolEvent::Failed { error, .. } => ToolOutput::Failed {
-                        error: error.clone(),
-                    },
-                    _ => unreachable!(),
-                };
-                let notification = completion_notification(&entry.tool_call, &output);
-                self.context.lock().notifications.push(notification);
-            }
-            self.emit(AgentEmitted::Tool(event.clone()));
-            self.forward(AgentEvent::Tool(event));
-            self.evaluate_idle();
-            return;
-        }
-        if !matches!(*self.state.lock(), AgentState::RunningActive | AgentState::RunningAborting) {
-            return;
-        }
-        if !self.context.lock().turn_tools.contains_key(&id) {
-            return;
-        }
-        match event {
-            ToolEvent::Detached { ref tool_call_id, .. } => {
-                let entry = self.context.lock().turn_tools.remove(tool_call_id);
-                if let Some(entry) = entry {
-                    self.context.lock().background.insert(id.clone(), entry);
-                }
-                self.forward_tool_to_turn(&event);
-                self.emit(AgentEmitted::Tool(event.clone()));
-                self.forward(AgentEvent::Tool(event));
-            }
-            ToolEvent::Done { .. } | ToolEvent::Failed { .. } | ToolEvent::Aborted { .. } => {
-                self.forward_tool_to_turn(&event);
-                self.emit(AgentEmitted::Tool(event.clone()));
-                self.forward(AgentEvent::Tool(event));
-            }
-            _ => {}
-        }
-    }
-
-    fn forward_tool_to_turn(&self, event: &ToolEvent) {
-        let Some(turn) = self.turn.lock().clone() else {
-            return;
-        };
-        let event = match event {
-            ToolEvent::Detached { tool_call_id, text } => TurnToolEvent::Detached {
-                tool_call_id: tool_call_id.clone(),
-                text: text.clone(),
-            },
-            ToolEvent::Done { tool_call_id, result } => TurnToolEvent::Done {
-                tool_call_id: tool_call_id.clone(),
-                result: result.clone(),
-            },
-            ToolEvent::Failed { tool_call_id, error } => TurnToolEvent::Failed {
-                tool_call_id: tool_call_id.clone(),
-                error: Value::String(error.clone()),
-            },
-            ToolEvent::Aborted { tool_call_id } => TurnToolEvent::Aborted {
-                tool_call_id: tool_call_id.clone(),
-            },
-            _ => return,
-        };
-        turn.send(crate::human::agent::turn::TurnEvent::Tool(event));
-    }
-
-    fn abort(self: &Arc<Self>, reason: Option<Value>) {
-        if *self.state.lock() == AgentState::RunningActive {
-            self.context.lock().abort_reason = reason;
-            *self.state.lock() = AgentState::RunningAborting;
-            self.abort_turn();
-            self.abort_turn_tools();
-            self.emit(AgentEmitted::TurnAborting);
-            let this = self.clone();
-            let delay = self.options.abort_timeout_ms.unwrap_or(10_000);
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(delay)).await;
-                if *this.state.lock() == AgentState::RunningAborting {
-                    this.abort_turn();
-                    this.turn_tools_stop();
-                }
-            });
-        } else if *self.state.lock() == AgentState::RunningAborting {
-            self.context.lock().abort_reason = reason;
-            self.abort_turn();
-            self.turn_tools_stop();
-        }
-    }
-
-    fn abort_turn(&self) {
-        if let Some(turn) = self.turn.lock().clone() {
-            turn.send(crate::human::agent::turn::TurnEvent::Abort {
-                reason: self.context.lock().abort_reason.clone(),
-            });
-        }
-    }
-
-    fn abort_turn_tools(&self) {
-        for entry in self.context.lock().turn_tools.values() {
-            entry.scope.abort();
-            entry.ref_.send(ToolEvent::Abort);
-        }
-    }
-
-    fn turn_tools_stop(&self) {
-        let entries = std::mem::take(&mut self.context.lock().turn_tools);
-        for (_, entry) in entries {
-            entry.scope.abort();
-            entry.ref_.send(ToolEvent::Abort);
-        }
-    }
-
-    fn close(self: &Arc<Self>) {
-        let state = *self.state.lock();
-        if state == AgentState::Disposed {
-            return;
-        }
-        if state == AgentState::Linking {
-            self.context.lock().scope.abort();
-            *self.state.lock() = AgentState::Disposed;
-            return;
-        }
-        if matches!(state, AgentState::RunningActive | AgentState::RunningAborting) {
-            self.context.lock().turn_id += 1;
-            self.turn.lock().take();
-        }
-        *self.state.lock() = AgentState::Closing;
-        self.context.lock().scope.abort();
-        self.abort_turn_tools();
-        self.turn_tools_stop();
-        let handle = self.context.lock().handle.clone();
-        let this = self.clone();
-        tokio::spawn(async move {
-            if let Some(handle) = handle {
-                let _ = handle.dispose_async().await;
-            }
-            if let Some(unsubscribe) = this.store_unsubscribe.lock().take() {
-                unsubscribe();
-            }
-            if *this.state.lock() == AgentState::Closing {
-                *this.state.lock() = AgentState::Disposed;
-            }
-        });
-    }
-
-    fn append_events(&self, events: Vec<ExternalEvent>) {
-        if events.is_empty() {
-            return;
-        }
-        let Some(store) = self.context.lock().store.clone() else {
-            return;
-        };
-        let append_lock = self.append_lock.clone();
-        let this = self.clone();
-        tokio::spawn(async move {
-            let _guard = append_lock.lock().await;
-            if let Err(error) = store.dispatch(events).await {
-                this.send(AgentEvent::StoreError {
-                    error: json!({
-                        "code": error.code,
-                        "message": error.message,
-                    }),
-                });
-            }
-        });
-    }
-}
-
-fn user_meta_with_default(meta: Option<UserMeta>, source: &str) -> UserMeta {
-    let mut meta = meta.unwrap_or_default();
-    if meta.source.is_none() {
-        meta.source = Some(source.to_string());
-    }
-    meta
-}
-
-pub fn create_agent_machine(options: CreateAgentMachineOptions) -> Arc<AgentMachineLogic> {
-    Arc::new(AgentMachineLogic { options })
+            on_done: Vec::new(),
+            on_error: Vec::new(),
+        }),
+        states: HashMap::from([
+            ("linking".to_string(), linking),
+            ("restoring".to_string(), restoring),
+            ("idle".to_string(), idle),
+            ("running".to_string(), running),
+            ("closing".to_string(), closing),
+            ("disposed".to_string(), disposed),
+        ]),
+        on: root_on,
+        actors: HashMap::from([
+            ("storeActor".to_string(), store_actor()),
+            ("controllerGuard".to_string(), controller_guard),
+            ("scopeFactoryActor".to_string(), scope_factory),
+            ("promptGateActor".to_string(), prompt_gate),
+            ("disposeScopeActor".to_string(), dispose_scope),
+        ]),
+        delays: HashMap::from([(
+            "abortTimeout".to_string(),
+            Arc::new(move |_: &Context| Duration::from_millis(abort_timeout_ms))
+                as Arc<dyn Fn(&Context) -> Duration + Send + Sync>,
+        )]),
+        output: None,
+    };
+    Arc::new(AgentMachineLogic { machine })
 }

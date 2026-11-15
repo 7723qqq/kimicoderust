@@ -23,10 +23,11 @@ use crate::agent::context_memory::types::ContextMessage;
 use crate::agent::tool_executor::tool_executor::IAgentToolRegistryService;
 use crate::agent::tool_policy::tool_policy::IAgentToolPolicyService;
 use crate::agent::r#loop::r#loop::{IAgentLoopService, LoopNotify, LoopNotifyHandle};
-use crate::agent::state::agent_state::{
-    ReplayableStateMeta, StateError, StateKey, UndoableOptions as StateUndoableOptions,
-};
-use crate::agent::state::agent_state_service::{AgentStateService, StateRegistration};
+use crate::_base::di::lifecycle::DisposableRef;
+use crate::_base::state::state_registry::StateKey;
+use crate::agent::state::errors::StateError;
+use crate::agent::state::agent_state::IAgentStateService;
+use crate::agent::task::task_ops::task_replayable_key;
 use crate::agent::tools::task::task_wait::flag::WAIT_FOR_FLAG_ID;
 use crate::agent::undo::undo_participants::{UndoParticipant, UndoParticipantRegistry};
 use crate::app::config::config::IConfigService;
@@ -151,74 +152,32 @@ fn coerce_timeout_settlement(
     settlement
 }
 
-fn state_key(name: &str, initial: Value) -> StateKey {
-    StateKey::new(name, Arc::new(move || initial.clone()))
+fn state_key(name: &str, initial: Value) -> StateKey<Value> {
+    StateKey::new(name, move || initial.clone())
 }
 
-fn task_state_key() -> StateKey {
-    state_key("task", json!({}))
+fn task_state_key() -> StateKey<Value> {
+    task_replayable_key().state_key()
 }
 
-pub fn task_notification_delivery_key() -> StateKey {
-    let mut replayable = ReplayableStateMeta::new(true, false);
-    replayable.undoable = Some(StateUndoableOptions::default());
-    replayable.folds = vec![
-        (
-            "context.append_message".to_string(),
-            Arc::new(|state: &mut Value, payload: &str| {
-                let Ok(payload) = serde_json::from_str::<Value>(payload) else {
-                    return;
-                };
-                let message = payload.get("message").unwrap_or(&payload);
-                if let Some(origin) = task_origin_from_message(message) {
-                    push_notification_key(state, &notification_key(&origin));
-                }
-            }),
-        ),
-        (
-            "task.waitDelivered".to_string(),
-            Arc::new(|state: &mut Value, payload: &str| {
-                let Ok(payload) = serde_json::from_str::<Value>(payload) else {
-                    return;
-                };
-                for key in payload
-                    .get("keys")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                {
-                    push_notification_key(state, key);
-                }
-            }),
-        ),
-    ];
-    state_key("task.notificationDelivery", json!([])).replayable(replayable)
+pub fn task_notification_delivery_key() -> StateKey<Value> {
+    state_key("task.notificationDelivery", json!([]))
 }
 
-pub fn task_ghosts_key() -> StateKey {
+pub fn task_ghosts_key() -> StateKey<Value> {
     state_key("task.ghosts", json!({}))
 }
 
-pub fn task_scheduled_notification_keys_key() -> StateKey {
+pub fn task_scheduled_notification_keys_key() -> StateKey<Value> {
     state_key("task.scheduledNotificationKeys", json!([]))
 }
 
-pub fn task_delivered_notification_keys_key() -> StateKey {
+pub fn task_delivered_notification_keys_key() -> StateKey<Value> {
     state_key("task.deliveredNotificationKeys", json!([]))
 }
 
-pub fn task_active_task_reminder_pending_key() -> StateKey {
+pub fn task_active_task_reminder_pending_key() -> StateKey<Value> {
     state_key("task.activeTaskReminderPending", json!(false))
-}
-
-fn push_notification_key(state: &mut Value, key: &str) {
-    let Some(keys) = state.as_array_mut() else {
-        return;
-    };
-    if !keys.iter().any(|current| current.as_str() == Some(key)) {
-        keys.push(Value::String(key.to_string()));
-    }
 }
 
 pub struct AgentTaskServiceDependencies {
@@ -233,7 +192,7 @@ pub struct AgentTaskServiceDependencies {
     pub loop_service: Arc<dyn IAgentLoopService>,
     pub undo_participants: Option<Arc<UndoParticipantRegistry>>,
     pub log: Arc<dyn ILogService>,
-    pub states: Arc<AgentStateService>,
+    pub states: Arc<dyn IAgentStateService>,
     pub flags: Arc<dyn IFlagService>,
     pub tools: Arc<dyn IAgentToolRegistryService>,
     pub policy: Arc<dyn IAgentToolPolicyService>,
@@ -253,7 +212,7 @@ pub struct AgentTaskService {
     reminder: Arc<dyn ReminderService>,
     loop_service: Arc<dyn IAgentLoopService>,
     log: Arc<dyn ILogService>,
-    states: Arc<AgentStateService>,
+    states: Arc<dyn IAgentStateService>,
     lifecycle_active_fn: Arc<dyn Fn() -> bool + Send + Sync>,
     clock: Arc<dyn IHostClock>,
     timers: Arc<dyn IHostTimers>,
@@ -269,7 +228,7 @@ pub struct AgentTaskService {
     state_write_lock: Mutex<()>,
     cleanup: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
     disposed: AtomicBool,
-    _registrations: Mutex<Vec<StateRegistration>>,
+    _registrations: Mutex<Vec<DisposableRef>>,
 }
 
 impl AgentTaskService {
@@ -400,15 +359,11 @@ impl AgentTaskService {
         Ok(this)
     }
 
-    fn read_state<T>(&self, key: &StateKey) -> T
+    fn read_state<T>(&self, key: &StateKey<Value>) -> T
     where
         T: DeserializeOwned + Default,
     {
-        self.states
-            .get(key)
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
+        serde_json::from_value(self.states.get(key)).unwrap_or_default()
     }
 
     fn ghosts(&self) -> IndexMap<String, AgentTaskInfo> {
@@ -419,7 +374,7 @@ impl AgentTaskService {
         let _guard = self.state_write_lock.lock();
         let mut ghosts = self.ghosts();
         update(&mut ghosts);
-        let _ = self.states.set(
+        self.states.set(
             &task_ghosts_key(),
             serde_json::to_value(ghosts).unwrap_or_else(|_| json!({})),
         );
@@ -448,7 +403,7 @@ impl AgentTaskService {
         update(&mut keys);
         let mut keys = keys.into_iter().collect::<Vec<_>>();
         keys.sort();
-        let _ = self.states.set(&key, json!(keys));
+        self.states.set(&key, json!(keys));
     }
 
     fn active_task_reminder_pending(&self) -> bool {
@@ -457,8 +412,7 @@ impl AgentTaskService {
 
     fn set_active_task_reminder_pending(&self, value: bool) {
         let _guard = self.state_write_lock.lock();
-        let _ = self
-            .states
+        self.states
             .set(&task_active_task_reminder_pending_key(), json!(value));
     }
 

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::_base::di::lifecycle::DisposableRef;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::app::event::event2::Event2;
 use crate::state::event_dispatcher::IEventDispatcher;
 

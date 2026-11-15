@@ -42,7 +42,7 @@ use crate::agent::media::media_resolver::IAgentMediaResolverService;
 use crate::agent::profile::profile::{IAgentProfileService, ProfileModelContext};
 use crate::agent::profile::profile_ops::{WarningIssued, WarningIssuedPayload};
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::agent::tool_select::tool_select::IAgentToolSelectService;
 use crate::agent::tools::read_media_file::read_media_file::READ_MEDIA_FILE_TOOL_NAME;
 use crate::session::cache_observation::{

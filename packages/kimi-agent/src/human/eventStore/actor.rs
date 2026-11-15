@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use crate::human::eventStore::eventStore::{Cause, CombinedState, EventStoreImpl};
 use crate::human::eventStore::events::ExternalEvent;
 use crate::human::eventStore::journal::StoreJournal;
-use crate::human::xstate2::{FromCallback, XEvent, from_callback};
+use crate::human::xstate2::{ActorLogic, XEvent, from_callback};
 
 pub enum StoreActorEvent {
     Append(Vec<ExternalEvent>),
@@ -63,7 +63,7 @@ impl StoreActorEmitted {
     }
 }
 
-pub fn store_actor() -> FromCallback {
+pub fn store_actor() -> ActorLogic {
     from_callback(|input| {
         let runtime = input.runtime.downcast::<StoreActorInput>().unwrap();
         let store = runtime.store.clone();

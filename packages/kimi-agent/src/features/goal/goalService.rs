@@ -33,7 +33,7 @@ use crate::features::goal::types::{
 };
 use crate::features::reminder::types::ReminderNotification;
 use crate::human::xstate2::{
-    Action, Context, FromCallback, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
+    Action, ActorLogic, Context, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
     from_callback, send_to,
 };
 use crate::permission::PermissionMode;
@@ -2129,7 +2129,7 @@ pub struct GoalEffectHandlers {
     pub turn_ended: Arc<dyn Fn(Value) + Send + Sync>,
 }
 
-fn goal_effects() -> FromCallback {
+fn goal_effects() -> ActorLogic {
     from_callback(|input| {
         let runtime = input
             .runtime
@@ -2249,12 +2249,14 @@ pub fn goal_actor_logic() -> Machine {
             (
                 "beforeRestore".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::from([(
                         "runtime.restore".to_string(),
-                        Transition {
+                        vec![Transition {
                             target: Some("active".to_string()),
                             actions: Vec::new(),
-                        },
+                            ..Default::default()
+                        }],
                     )]),
                     invoke: None,
                 },
@@ -2262,51 +2264,59 @@ pub fn goal_actor_logic() -> Machine {
             (
                 "active".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::from([
                         (
                             "goal.deadline.refresh".to_string(),
-                            Transition {
+                            vec![Transition {
                                 target: None,
-                                actions: vec![send_to("goalEffects", |event| event.clone())],
-                            },
+                                actions: vec![send_to("goalEffects", |args| args.event.clone())],
+                                ..Default::default()
+                            }],
                         ),
                         (
                             "goal.deadline.clear".to_string(),
-                            Transition {
+                            vec![Transition {
                                 target: None,
-                                actions: vec![send_to("goalEffects", |event| event.clone())],
-                            },
+                                actions: vec![send_to("goalEffects", |args| args.event.clone())],
+                                ..Default::default()
+                            }],
                         ),
                     ]),
                     invoke: Some(InvokeDef {
                         id: "goalEffects".to_string(),
                         src: "goalEffects".to_string(),
-                        input: Arc::new(|context, event| {
-                            let context = context
+                        input: Arc::new(|args| {
+                            let context = args
+                                .context
                                 .downcast_ref::<Mutex<GoalActorContext>>()
                                 .unwrap()
                                 .lock();
                             InvokeInput {
                                 runtime: context.runtime.clone(),
-                                restore: event.restore.clone(),
+                                restore: args.event.restore.clone(),
                             }
                         }),
+                        on_done: Vec::new(),
+                        on_error: Vec::new(),
                     }),
                 },
             ),
         ]),
         on: std::collections::HashMap::from([(
             "goal.commit".to_string(),
-            Transition {
+            vec![Transition {
                 target: None,
-                actions: vec![Action::Custom(Arc::new(|context, event| {
+                actions: vec![Action::Custom(Arc::new(|context, args| {
                     let context = context.downcast_ref::<Mutex<GoalActorContext>>().unwrap();
                     context.lock().durable =
-                        serde_json::from_value(event.payload.clone()).unwrap_or_default();
+                        serde_json::from_value(args.event.payload.clone()).unwrap_or_default();
                 }))],
-            },
+                ..Default::default()
+            }],
         )]),
         actors: std::collections::HashMap::from([("goalEffects".to_string(), goal_effects())]),
+        ..Default::default()
     }
 }
 

@@ -14,7 +14,7 @@ use crate::agent::full_compaction::full_compaction::IAgentFullCompactionService;
 use crate::agent::r#loop::r#loop::IAgentLoopService;
 use crate::agent::r#loop::turn_events::{TurnEndReason, TurnStarted};
 use crate::agent::r#loop::turn_ops::{TurnEnded, TurnModelState, turn_replayable_key};
-use crate::agent::state::agent_state_v2::{I_AGENT_STATE_SERVICE, IAgentStateService};
+use crate::agent::state::agent_state::{I_AGENT_STATE_SERVICE, IAgentStateService};
 use crate::agent::task::task::IAgentTaskService;
 use crate::agent::task::task_ops::{TaskStarted, TaskTerminatedNotice};
 use crate::app::event::event_bus::IEventBus;

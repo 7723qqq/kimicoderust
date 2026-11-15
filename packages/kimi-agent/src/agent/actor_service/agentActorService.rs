@@ -9,7 +9,7 @@ use crate::agent::actor_service::agent_actor_runtime::{
     DurableAgentRuntimeParticipant,
 };
 use crate::agent::agent_context::AgentContext;
-use crate::agent::state::agent_state_service::Listeners;
+use crate::agent::state::listeners::Listeners;
 use crate::human::xstate2::{Actor, Context, Machine, XEvent, create_actor};
 use crate::rpc::types::BoxFuture;
 
@@ -64,7 +64,7 @@ struct ActorParticipant<State: PartialEq + Clone + Send + Sync + 'static> {
 
 impl<State: PartialEq + Clone + Send + Sync + 'static> ActorParticipant<State> {
     fn get_state(&self) -> State {
-        (self.read)(&self.actor.snapshot().0)
+        (self.read)(&self.actor.get_snapshot().context)
     }
 
     fn commit_state(&self, state: State, silent: bool) {
@@ -145,7 +145,7 @@ impl AgentActorService {
                     .as_ref()
                     .unwrap_or_else(|| panic!("Agent actor '{id}' has no durable state"));
                 let actor = slot.lock().as_ref().expect("actor not started").clone();
-                read(&actor.snapshot().0)
+                read(&actor.get_snapshot().context)
             })
         };
         let get_logic_state = {
@@ -154,8 +154,8 @@ impl AgentActorService {
                 slot.lock()
                     .as_ref()
                     .expect("actor not started")
-                    .snapshot()
-                    .0
+                    .get_snapshot()
+                    .context
             })
         };
         let send = {
@@ -194,8 +194,8 @@ impl AgentActorService {
         let unsubscribe = durable.as_ref().map(|durable| {
             let read = durable.read.clone();
             let emitter = emitter.clone();
-            actor.subscribe(Arc::new(move |context, _| {
-                let next = read(&context);
+            actor.subscribe(Arc::new(move |snapshot| {
+                let next = read(&snapshot.context);
                 let _ = emitter.observe(next);
             }))
         });
@@ -231,7 +231,7 @@ impl AgentActorService {
         self.register_disposable(move || {
             attachment.dispose();
             if let Some(unsubscribe) = unsubscribe {
-                unsubscribe();
+                unsubscribe.unsubscribe();
             }
             actor.stop();
         });

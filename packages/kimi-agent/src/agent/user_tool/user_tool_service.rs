@@ -10,7 +10,7 @@ use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::utils::abort::abortable;
 use crate::agent::profile::profile::IAgentProfileService;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolContext, ExecutableToolOutput, ExecutableToolResult,
     RunnableToolExecution, ToolExecution,

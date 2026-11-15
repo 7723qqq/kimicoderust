@@ -644,9 +644,9 @@ impl MachineEngine {
             None
         };
         MachineEngineSnapshot {
-            running: snapshot.value == "running",
-            aborting: snapshot.value == "running" && snapshot.context.abort_reason.is_some(),
-            waiting_for_background: snapshot.value == "idle" && !snapshot.context.background.is_empty(),
+            running: snapshot.value == "running" || snapshot.value.starts_with("running."),
+            aborting: snapshot.value == "running.aborting",
+            waiting_for_background: snapshot.value == "idle.waiting",
             paused: snapshot.context.paused,
             queue_length: snapshot.context.queue.len(),
             queue_ids: snapshot

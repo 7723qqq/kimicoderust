@@ -12,7 +12,7 @@ use crate::agent::r#loop::turn_events::TurnStarted;
 use crate::agent::r#loop::turn_ops::{
     TurnEnded, TurnModelLastEnded, TurnModelState, turn_replayable_key,
 };
-use crate::agent::state::agent_state_v2::{I_AGENT_STATE_SERVICE, IAgentStateService};
+use crate::agent::state::agent_state::{I_AGENT_STATE_SERVICE, IAgentStateService};
 use crate::agent::undo::undo_service::ContextUndone;
 use crate::app::event::event_bus::IEventBus;
 use crate::app::scopes::LifecycleScope;

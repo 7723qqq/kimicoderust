@@ -15,8 +15,9 @@ use crate::_base::utils::canonical_args::canonical_telemetry_args;
 use crate::_base::utils::env::parse_boolean_env;
 use crate::agent::r#loop::r#loop::{IAgentLoopService, LoopNotify};
 use crate::agent::r#loop::turn_ops::TurnEnded;
-use crate::agent::state::agent_state::{StateError, StateKey};
-use crate::agent::state::agent_state_service::{AgentStateService, StateRegistration};
+use crate::_base::state::state_registry::StateKey;
+use crate::agent::state::errors::StateError;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableToolOutput, ExecutableToolResult, IAgentToolExecutorService, ToolCallDupType,
 };
@@ -196,55 +197,55 @@ fn force_stop_result(result: ToolDedupeResult, reminder_text: &str) -> ToolDedup
     result
 }
 
-pub fn tool_dedupe_step_calls_key() -> StateKey {
-    StateKey::new("toolDedupe.stepCalls", Arc::new(|| json!([])))
+pub fn tool_dedupe_step_calls_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.stepCalls", || json!([]))
 }
 
-pub fn tool_dedupe_original_call_index_key() -> StateKey {
-    StateKey::new("toolDedupe.originalCallIndex", Arc::new(|| json!({})))
+pub fn tool_dedupe_original_call_index_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.originalCallIndex", || json!({}))
 }
 
-pub fn tool_dedupe_synthetic_call_ids_key() -> StateKey {
-    StateKey::new("toolDedupe.syntheticCallIds", Arc::new(|| json!([])))
+pub fn tool_dedupe_synthetic_call_ids_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.syntheticCallIds", || json!([]))
 }
 
-pub fn tool_dedupe_call_key_by_call_id_key() -> StateKey {
-    StateKey::new("toolDedupe.callKeyByCallId", Arc::new(|| json!({})))
+pub fn tool_dedupe_call_key_by_call_id_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.callKeyByCallId", || json!({}))
 }
 
-pub fn tool_dedupe_consecutive_key_key() -> StateKey {
-    StateKey::new("toolDedupe.consecutiveKey", Arc::new(|| Value::Null))
+pub fn tool_dedupe_consecutive_key_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.consecutiveKey", || Value::Null)
 }
 
-pub fn tool_dedupe_consecutive_count_key() -> StateKey {
-    StateKey::new("toolDedupe.consecutiveCount", Arc::new(|| json!(0)))
+pub fn tool_dedupe_consecutive_count_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.consecutiveCount", || json!(0))
 }
 
-pub fn tool_dedupe_active_turn_id_key() -> StateKey {
-    StateKey::new("toolDedupe.activeTurnId", Arc::new(|| Value::Null))
+pub fn tool_dedupe_active_turn_id_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.activeTurnId", || Value::Null)
 }
 
-pub fn tool_dedupe_active_step_key() -> StateKey {
-    StateKey::new("toolDedupe.activeStep", Arc::new(|| json!(0)))
+pub fn tool_dedupe_active_step_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.activeStep", || json!(0))
 }
 
-pub fn tool_dedupe_turn_call_records_key() -> StateKey {
-    StateKey::new("toolDedupe.turnCallRecords", Arc::new(|| json!({})))
+pub fn tool_dedupe_turn_call_records_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.turnCallRecords", || json!({}))
 }
 
-pub fn tool_dedupe_turn_repeat_count_key() -> StateKey {
-    StateKey::new("toolDedupe.turnRepeatCount", Arc::new(|| json!(0)))
+pub fn tool_dedupe_turn_repeat_count_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.turnRepeatCount", || json!(0))
 }
 
-pub fn tool_dedupe_handoff_phase_key() -> StateKey {
-    StateKey::new("toolDedupe.handoffPhase", Arc::new(|| json!("idle")))
+pub fn tool_dedupe_handoff_phase_key() -> StateKey<Value> {
+    StateKey::new("toolDedupe.handoffPhase", || json!("idle"))
 }
 
 struct AgentToolDedupeServiceInner {
     telemetry: Arc<dyn ITelemetryService>,
     agent_loop: Arc<dyn IAgentLoopService>,
     tool_executor: Arc<dyn IAgentToolExecutorService>,
-    states: Arc<AgentStateService>,
+    states: Arc<dyn IAgentStateService>,
     step_deferreds: Mutex<IndexMap<String, Deferred>>,
     handoff_vetoed_call_ids: Mutex<IndexSet<String>>,
     force_stopped_in_step: AtomicBool,
@@ -252,7 +253,7 @@ struct AgentToolDedupeServiceInner {
 }
 
 struct DedupeRegistrations {
-    _states: Vec<StateRegistration>,
+    _states: Vec<DisposableRef>,
     _turn_ended: DisposableRef,
     _begin_step: HookRegistration<crate::agent::r#loop::r#loop::BeforeStepContext>,
     _end_step: HookRegistration<crate::agent::r#loop::r#loop::AfterStepContext>,
@@ -270,7 +271,7 @@ impl AgentToolDedupeService {
         telemetry: Arc<dyn ITelemetryService>,
         agent_loop: Arc<dyn IAgentLoopService>,
         tool_executor: Arc<dyn IAgentToolExecutorService>,
-        states: Arc<AgentStateService>,
+        states: Arc<dyn IAgentStateService>,
         bootstrap: Arc<dyn IBootstrapService>,
         event_bus: Arc<dyn IEventBus>,
     ) -> Result<Self, StateError> {
@@ -857,14 +858,17 @@ impl AgentToolDedupeServiceInner {
 
 impl IAgentToolDedupeService for AgentToolDedupeService {}
 
-fn state_value<T: DeserializeOwned>(states: &AgentStateService, key: StateKey) -> Option<T> {
-    let value = states.get(&key).expect("tool dedupe state is readable");
+fn state_value<T: DeserializeOwned>(
+    states: &Arc<dyn IAgentStateService>,
+    key: StateKey<Value>,
+) -> Option<T> {
+    let value = states.get(&key);
     Some(serde_json::from_value(value).expect("tool dedupe state has its registered shape"))
 }
 
-fn set_state<T: Serialize>(states: &AgentStateService, key: StateKey, value: T) {
+fn set_state<T: Serialize>(states: &Arc<dyn IAgentStateService>, key: StateKey<Value>, value: T) {
     let value = serde_json::to_value(value).expect("tool dedupe state is serializable");
-    states.set(&key, value).expect("tool dedupe state is writable");
+    states.set(&key, value);
 }
 
 fn telemetry_properties(value: Value) -> Map<String, Value> {

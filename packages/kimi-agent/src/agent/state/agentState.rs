@@ -10,7 +10,7 @@ use crate::_base::event::Event;
 use crate::_base::state::state_registry::{IStateRegistry, StateChange, StateKey};
 use crate::state::state::ReplayableStateKey;
 
-use super::agent_state::StateError;
+use super::errors::StateError;
 
 pub type ReplayableStateListener =
     Arc<dyn Fn(&Arc<ReplayableStateKey>) -> Result<(), StateError> + Send + Sync>;

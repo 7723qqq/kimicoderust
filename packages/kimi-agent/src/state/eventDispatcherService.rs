@@ -15,7 +15,7 @@ use crate::_base::log::log::ILogService;
 use crate::agent::agent_context::agent_space::AgentSpaceImpl;
 use crate::agent::blob::agent_blob_service::IAgentBlobService;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::app::event::event2::{Event2, Event2Class, event2_from_record};
 use crate::app::event::event_bus::IEventBus;
 use crate::hooks::OrderedHookSlot;
@@ -34,12 +34,10 @@ use super::event_dispatcher::{
     IEventDispatcher, RestorePhase,
 };
 use super::state::{
-    ReplayableStateKey, StateFold, expanded_model_appliers, expanded_runtime_folds,
-    expanded_state_folds,
+    ReplayableStateKey, expanded_model_appliers, expanded_runtime_folds,
 };
 use super::state_contribution::{
-    EventStateContributionRecord, FoldedEventStateRegistry, StateFoldRegistration,
-    fold_event_state_contributions,
+    EventStateContributionRecord, FoldedEventStateRegistry, fold_event_state_contributions,
 };
 
 const MAX_DRAIN: usize = 1_000;

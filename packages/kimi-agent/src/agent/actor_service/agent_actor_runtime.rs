@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::agent::state::agent_state::StateError;
-use crate::agent::state::agent_state_service::Listeners;
+use crate::agent::state::errors::StateError;
+use crate::agent::state::listeners::Listeners;
 use crate::rpc::types::BoxFuture;
 
 pub trait DurableAgentRuntimeParticipant: Send + Sync {

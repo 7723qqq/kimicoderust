@@ -8,15 +8,16 @@ use futures_util::StreamExt;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use regex::Regex;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::_base::di::lifecycle::DisposableRef;
+use crate::_base::state::state_registry::StateKey;
 use crate::_base::utils::abort::{AbortSignal, abort_error, abortable};
 use crate::agent::profile::profileOps::{WarningIssued, WarningIssuedPayload};
-use crate::agent::state::agent_state::StateKey;
-use crate::agent::state::agent_state_service::{AgentStateService, StateRegistration};
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::app::file::file_service::IFileService;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::human::llm::media::path_tag::MediaPathTagKind;
@@ -59,21 +60,18 @@ const REQUEST_MEDIA_BUDGET_LOW_BYTES: usize = 10 * 1024 * 1024;
 
 static PROVIDER_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*$").unwrap());
-static MEDIA_RESOLVED_KEY: LazyLock<StateKey> = LazyLock::new(|| {
-    StateKey::new(
-        "media.resolved",
-        Arc::new(|| Value::Object(Map::new())),
-    )
+static MEDIA_RESOLVED_KEY: LazyLock<StateKey<Value>> = LazyLock::new(|| {
+    StateKey::new("media.resolved", || Value::Object(Map::new()))
 });
-static MEDIA_BUDGET_DROPPED_KEY: LazyLock<StateKey> = LazyLock::new(|| {
-    StateKey::new("media.budgetDropped", Arc::new(|| Value::Array(Vec::new())))
+static MEDIA_BUDGET_DROPPED_KEY: LazyLock<StateKey<Value>> = LazyLock::new(|| {
+    StateKey::new("media.budgetDropped", || Value::Array(Vec::new()))
 });
 
-pub fn media_resolved_key() -> &'static StateKey {
+pub fn media_resolved_key() -> &'static StateKey<Value> {
     &MEDIA_RESOLVED_KEY
 }
 
-pub fn media_budget_dropped_key() -> &'static StateKey {
+pub fn media_budget_dropped_key() -> &'static StateKey<Value> {
     &MEDIA_BUDGET_DROPPED_KEY
 }
 
@@ -104,14 +102,14 @@ pub struct AgentMediaResolverService {
     files: Arc<dyn IFileService>,
     blobs: Arc<dyn IBlobStore>,
     telemetry: Arc<dyn ITelemetryService>,
-    states: Arc<AgentStateService>,
+    states: Arc<dyn IAgentStateService>,
     media_store: Arc<dyn ISessionMediaStore>,
     dispatcher: Arc<dyn IEventDispatcher>,
     agent_id: String,
     image_memo: Mutex<ImageMemo>,
     image_upload_unsupported: Mutex<HashSet<String>>,
-    _resolved_registration: StateRegistration,
-    _budget_registration: StateRegistration,
+    _resolved_registration: DisposableRef,
+    _budget_registration: DisposableRef,
 }
 
 impl AgentMediaResolverService {
@@ -119,11 +117,11 @@ impl AgentMediaResolverService {
         files: Arc<dyn IFileService>,
         blobs: Arc<dyn IBlobStore>,
         telemetry: Arc<dyn ITelemetryService>,
-        states: Arc<AgentStateService>,
+        states: Arc<dyn IAgentStateService>,
         media_store: Arc<dyn ISessionMediaStore>,
         dispatcher: Arc<dyn IEventDispatcher>,
         agent_id: String,
-    ) -> Result<Self, crate::agent::state::agent_state::StateError> {
+    ) -> Result<Self, crate::agent::state::errors::StateError> {
         let resolved_registration = states.contribute_state(MEDIA_RESOLVED_KEY.clone())?;
         let budget_registration = states.contribute_state(MEDIA_BUDGET_DROPPED_KEY.clone())?;
         Ok(Self {
@@ -143,13 +141,13 @@ impl AgentMediaResolverService {
 
     fn resolved(&self) -> Result<HashMap<String, ContentPart>, WireAsyncError> {
         Ok(serde_json::from_value(
-            self.states.get(media_resolved_key())?,
+            self.states.get(media_resolved_key()),
         )?)
     }
 
     fn set_resolved(&self, value: HashMap<String, ContentPart>) -> Result<(), WireAsyncError> {
         self.states
-            .set(media_resolved_key(), serde_json::to_value(value)?)?;
+            .set(media_resolved_key(), serde_json::to_value(value)?);
         Ok(())
     }
 
@@ -165,13 +163,13 @@ impl AgentMediaResolverService {
 
     fn budget_dropped(&self) -> Result<HashSet<String>, WireAsyncError> {
         Ok(serde_json::from_value(
-            self.states.get(media_budget_dropped_key())?,
+            self.states.get(media_budget_dropped_key()),
         )?)
     }
 
     fn set_budget_dropped(&self, value: HashSet<String>) -> Result<(), WireAsyncError> {
         self.states
-            .set(media_budget_dropped_key(), serde_json::to_value(value)?)?;
+            .set(media_budget_dropped_key(), serde_json::to_value(value)?);
         Ok(())
     }
 

@@ -25,7 +25,7 @@ use crate::agent::r#loop::r#loop::{
 use crate::agent::r#loop::turn_events::{TurnStarted, TurnStartedPayload};
 use crate::agent::r#loop::turn_ops::{TurnEndReason, TurnEnded, TurnEndedPayload};
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::agent::task::task::AgentTaskNotificationContext;
 use crate::agent::task::task_ops::{TaskNotified, TaskStarted, TaskStartedPayload};
 use crate::agent::task::types::AgentTaskInfo;

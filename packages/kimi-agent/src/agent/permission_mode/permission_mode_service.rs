@@ -5,10 +5,9 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::_base::di::lifecycle::DisposableRef;
-use crate::agent::state::agent_state::StateError;
-use crate::agent::state::agent_state_service::Listeners;
-use crate::agent::state::agent_state_v2::IAgentStateService;
-use crate::agent::state::agent_state_service_v2::AgentStateService;
+use crate::agent::state::errors::StateError;
+use crate::agent::state::listeners::Listeners;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::callbacks::MAIN_AGENT_ID;
 use crate::events::bus::EventBus;
 use crate::permission::{PermissionEngine, PermissionMode};
@@ -264,6 +263,7 @@ impl AgentPermissionModeService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::state::agent_state_service::AgentStateService;
     use serde_json::json;
 
     #[derive(Default)]

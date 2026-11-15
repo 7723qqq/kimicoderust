@@ -25,7 +25,7 @@ use crate::features::todo::todoListReminder::{
 };
 use crate::features::todo::todoOps::ToolsUpdateStore;
 use crate::human::xstate2::{
-    Action, FromCallback, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
+    Action, ActorLogic, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
     from_callback,
 };
 
@@ -42,12 +42,14 @@ pub fn todo_actor_logic() -> Machine {
         (
             "beforeRestore".to_string(),
             StateNode {
+                final_: false,
                 on: std::collections::HashMap::from([(
                     "runtime.restore".to_string(),
-                    Transition {
+                    vec![Transition {
                         target: Some("active".to_string()),
                         actions: Vec::new(),
-                    },
+                        ..Default::default()
+                    }],
                 )]),
                 invoke: None,
             },
@@ -55,20 +57,24 @@ pub fn todo_actor_logic() -> Machine {
         (
             "active".to_string(),
             StateNode {
+                final_: false,
                 on: std::collections::HashMap::new(),
                 invoke: Some(InvokeDef {
                     id: "todoReminder".to_string(),
                     src: "todoReminder".to_string(),
-                    input: Arc::new(|context, event| {
-                        let context = context
+                    input: Arc::new(|args| {
+                        let context = args
+                            .context
                             .downcast_ref::<Mutex<TodoActorContext>>()
                             .unwrap()
                             .lock();
                         InvokeInput {
                             runtime: context.runtime.clone(),
-                            restore: event.restore.clone(),
+                            restore: args.event.restore.clone(),
                         }
                     }),
+                    on_done: Vec::new(),
+                    on_error: Vec::new(),
                 }),
             },
         ),
@@ -84,20 +90,22 @@ pub fn todo_actor_logic() -> Machine {
         states,
         on: std::collections::HashMap::from([(
             "todo.commit".to_string(),
-            Transition {
+            vec![Transition {
                 target: None,
-                actions: vec![Action::Custom(Arc::new(|context, event| {
+                actions: vec![Action::Custom(Arc::new(|context, args| {
                     let context = context.downcast_ref::<Mutex<TodoActorContext>>().unwrap();
                     context.lock().todos =
-                        serde_json::from_value(event.payload.clone()).unwrap_or_default();
+                        serde_json::from_value(args.event.payload.clone()).unwrap_or_default();
                 }))],
-            },
+                ..Default::default()
+            }],
         )]),
         actors: std::collections::HashMap::from([("todoReminder".to_string(), todo_reminder())]),
+        ..Default::default()
     }
 }
 
-fn todo_reminder() -> FromCallback {
+fn todo_reminder() -> ActorLogic {
     from_callback(|input| {
         let runtime = input
             .runtime
@@ -246,9 +254,7 @@ impl AgentTodoService {
         Self { base, actor, rev }
     }
 
-    pub fn on_did_change(
-        &self,
-    ) -> Arc<crate::agent::state::agent_state_service::Listeners<TodoState>> {
+    pub fn on_did_change(&self) -> Arc<crate::agent::state::listeners::Listeners<TodoState>> {
         self.actor.on_did_change.clone()
     }
 

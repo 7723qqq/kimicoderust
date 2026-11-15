@@ -8,7 +8,7 @@ use crate::_base::event::{Emitter, Event};
 use crate::_base::log::log::ILogService;
 use crate::agent::profile::context::{ProfileContextDeps, load_agents_md_detailed};
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::environment::environment::EnvironmentResolver;
 use crate::environment::environment::{EnvironmentBinding, EnvironmentCapability, LOCAL_ENVIRONMENT_ID};

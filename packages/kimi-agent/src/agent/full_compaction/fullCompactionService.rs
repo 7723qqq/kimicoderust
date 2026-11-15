@@ -237,7 +237,11 @@ impl AgentFullCompactionService {
                 FULL_COMPACTION_CONSECUTIVE_OVERFLOW_COMPACTIONS_KEY.clone(),
                 FULL_COMPACTION_ACTIVE_TURN_ID_KEY.clone(),
             ] {
-                registrations.add(states.contribute_state(key));
+                registrations.add(
+                    states
+                        .contribute_state(key.state_key())
+                        .unwrap_or_else(|error| panic!("{error}")),
+                );
             }
             let strategy_context = this.clone();
             let strategy = RuntimeCompactionStrategy::new(
@@ -384,11 +388,11 @@ impl AgentFullCompactionService {
     }
 
     fn state_u32(&self, key: &Arc<ReplayableStateKey>) -> u32 {
-        self.states.get(key).as_u64().unwrap_or(0) as u32
+        self.states.get(&key.state_key()).as_u64().unwrap_or(0) as u32
     }
 
     fn set_state_u32(&self, key: &Arc<ReplayableStateKey>, value: u32) {
-        self.states.set(key, json!(value));
+        self.states.set(&key.state_key(), json!(value));
     }
 
     fn compaction_count_in_turn(&self) -> u32 {
@@ -401,7 +405,7 @@ impl AgentFullCompactionService {
 
     fn observed_max_context_tokens_by_model(&self) -> HashMap<String, u32> {
         self.states
-            .get(&FULL_COMPACTION_OBSERVED_MAX_CONTEXT_TOKENS_BY_MODEL_KEY)
+            .get(&FULL_COMPACTION_OBSERVED_MAX_CONTEXT_TOKENS_BY_MODEL_KEY.state_key())
             .as_object()
             .into_iter()
             .flatten()
@@ -411,13 +415,13 @@ impl AgentFullCompactionService {
 
     fn last_compacted_token_count(&self) -> Option<u64> {
         self.states
-            .get(&FULL_COMPACTION_LAST_COMPACTED_TOKEN_COUNT_KEY)
+            .get(&FULL_COMPACTION_LAST_COMPACTED_TOKEN_COUNT_KEY.state_key())
             .as_u64()
     }
 
     fn set_last_compacted_token_count(&self, value: Option<u64>) {
         self.states.set(
-            &FULL_COMPACTION_LAST_COMPACTED_TOKEN_COUNT_KEY,
+            &FULL_COMPACTION_LAST_COMPACTED_TOKEN_COUNT_KEY.state_key(),
             value.map_or(Value::Null, |value| json!(value)),
         );
     }
@@ -431,12 +435,14 @@ impl AgentFullCompactionService {
     }
 
     fn active_turn_id(&self) -> Option<u64> {
-        self.states.get(&FULL_COMPACTION_ACTIVE_TURN_ID_KEY).as_u64()
+        self.states
+            .get(&FULL_COMPACTION_ACTIVE_TURN_ID_KEY.state_key())
+            .as_u64()
     }
 
     fn set_active_turn_id(&self, value: Option<u64>) {
         self.states.set(
-            &FULL_COMPACTION_ACTIVE_TURN_ID_KEY,
+            &FULL_COMPACTION_ACTIVE_TURN_ID_KEY.state_key(),
             value.map_or(Value::Null, |value| json!(value)),
         );
     }
@@ -567,7 +573,7 @@ impl AgentFullCompactionService {
         let mut observed_by_model = self.observed_max_context_tokens_by_model();
         observed_by_model.insert(model_alias, observed);
         self.states.set(
-            &FULL_COMPACTION_OBSERVED_MAX_CONTEXT_TOKENS_BY_MODEL_KEY,
+            &FULL_COMPACTION_OBSERVED_MAX_CONTEXT_TOKENS_BY_MODEL_KEY.state_key(),
             json!(observed_by_model),
         );
     }
@@ -730,7 +736,11 @@ impl AgentFullCompactionService {
     }
 
     fn normalize_after_replay(&self) {
-        if self.states.get(&full_compaction_key()).get("phase").and_then(Value::as_str)
+        if self
+            .states
+            .get(&full_compaction_key().state_key())
+            .get("phase")
+            .and_then(Value::as_str)
             != Some("running")
         {
             return;

@@ -16,8 +16,10 @@ use crate::agent::context_memory::types::{
 };
 use crate::agent::r#loop::r#loop::{IAgentLoopService, LoopSubmitOptions};
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state::{StateError, StateKey};
-use crate::agent::state::agent_state_service::{AgentStateService, StateRegistration};
+use crate::_base::di::lifecycle::DisposableRef;
+use crate::_base::state::state_registry::StateKey;
+use crate::agent::state::errors::StateError;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolContext, ExecutableToolOutput, IAgentToolRegistryService,
     ToolExecution,
@@ -36,11 +38,8 @@ use super::shell_command::{IAgentShellCommandService, RunShellCommandInput, RunS
 
 const SHELL_FOREGROUND_TIMEOUT_S: u64 = 2 * 60;
 
-pub static SHELL_COMMAND_TASKS_KEY: LazyLock<StateKey> = LazyLock::new(|| {
-    StateKey::new(
-        "shellCommand.tasks",
-        Arc::new(|| Value::Object(Map::new())),
-    )
+pub static SHELL_COMMAND_TASKS_KEY: LazyLock<StateKey<Value>> = LazyLock::new(|| {
+    StateKey::new("shellCommand.tasks", || Value::Object(Map::new()))
 });
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -163,10 +162,10 @@ pub struct AgentShellCommandService {
     loop_: Arc<dyn IAgentLoopService>,
     dispatcher: Arc<dyn IEventDispatcher>,
     scope_context: Arc<dyn IAgentScopeContext>,
-    states: Arc<AgentStateService>,
+    states: Arc<dyn IAgentStateService>,
     telemetry: Arc<dyn ITelemetryService>,
     controllers: Mutex<HashMap<String, Arc<AbortController>>>,
-    _registration: StateRegistration,
+    _registration: DisposableRef,
 }
 
 impl AgentShellCommandService {
@@ -176,7 +175,7 @@ impl AgentShellCommandService {
         loop_: Arc<dyn IAgentLoopService>,
         dispatcher: Arc<dyn IEventDispatcher>,
         scope_context: Arc<dyn IAgentScopeContext>,
-        states: Arc<AgentStateService>,
+        states: Arc<dyn IAgentStateService>,
         telemetry: Arc<dyn ITelemetryService>,
     ) -> Result<Self, StateError> {
         let registration = states.contribute_state(SHELL_COMMAND_TASKS_KEY.clone())?;
@@ -194,11 +193,7 @@ impl AgentShellCommandService {
     }
 
     fn tasks(&self) -> HashMap<String, String> {
-        self.states
-            .get(&SHELL_COMMAND_TASKS_KEY)
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
+        serde_json::from_value(self.states.get(&SHELL_COMMAND_TASKS_KEY)).unwrap_or_default()
     }
 
     fn task_id(&self, command_id: &str) -> Option<String> {
@@ -208,8 +203,7 @@ impl AgentShellCommandService {
     fn remove_task_id(&self, command_id: &str) {
         let mut tasks = self.tasks();
         tasks.remove(command_id);
-        let _ = self
-            .states
+        self.states
             .set(&SHELL_COMMAND_TASKS_KEY, serde_json::to_value(tasks).unwrap());
     }
 
@@ -510,15 +504,11 @@ impl IAgentShellCommandService for AgentShellCommandService {
     }
 }
 
-fn read_tasks(states: &Arc<AgentStateService>) -> HashMap<String, String> {
-    states
-        .get(&SHELL_COMMAND_TASKS_KEY)
-        .ok()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default()
+fn read_tasks(states: &Arc<dyn IAgentStateService>) -> HashMap<String, String> {
+    serde_json::from_value(states.get(&SHELL_COMMAND_TASKS_KEY)).unwrap_or_default()
 }
 
-fn task_id_for(states: &Arc<AgentStateService>, command_id: &str) -> Option<String> {
+fn task_id_for(states: &Arc<dyn IAgentStateService>, command_id: &str) -> Option<String> {
     read_tasks(states).get(command_id).cloned()
 }
 

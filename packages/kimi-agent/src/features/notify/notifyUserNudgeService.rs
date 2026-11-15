@@ -22,7 +22,7 @@ use crate::features::reminder::types::{
     ContextInjectionContent, ContextInjectionContext, ContextInjectionResult,
 };
 use crate::human::xstate2::{
-    Context, FromCallback, InvokeDef, InvokeInput, Machine, StateNode, Transition, from_callback,
+    ActorLogic, Context, InvokeDef, InvokeInput, Machine, StateNode, Transition, from_callback,
 };
 use crate::tools::notify_user::NOTIFY_USER_TOOL_NAME;
 
@@ -39,12 +39,14 @@ pub fn notify_user_nudge_actor_logic() -> Machine {
             (
                 "beforeRestore".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::from([(
                         "runtime.restore".to_string(),
-                        Transition {
+                        vec![Transition {
                             target: Some("active".to_string()),
                             actions: Vec::new(),
-                        },
+                            ..Default::default()
+                        }],
                     )]),
                     invoke: None,
                 },
@@ -52,19 +54,23 @@ pub fn notify_user_nudge_actor_logic() -> Machine {
             (
                 "active".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::new(),
                     invoke: Some(InvokeDef {
                         id: "notifyUserNudgeReminders".to_string(),
                         src: "notifyUserNudgeReminders".to_string(),
-                        input: Arc::new(|context, event| {
-                            let context = context
+                        input: Arc::new(|args| {
+                            let context = args
+                                .context
                                 .downcast_ref::<NotifyUserNudgeActorContext>()
                                 .unwrap();
                             InvokeInput {
                                 runtime: context.runtime.clone(),
-                                restore: event.restore.clone(),
+                                restore: args.event.restore.clone(),
                             }
                         }),
+                        on_done: Vec::new(),
+                        on_error: Vec::new(),
                     }),
                 },
             ),
@@ -74,10 +80,11 @@ pub fn notify_user_nudge_actor_logic() -> Machine {
             "notifyUserNudgeReminders".to_string(),
             notify_user_nudge_reminders(),
         )]),
+        ..Default::default()
     }
 }
 
-fn notify_user_nudge_reminders() -> FromCallback {
+fn notify_user_nudge_reminders() -> ActorLogic {
     from_callback(|input| {
         let runtime = input
             .runtime

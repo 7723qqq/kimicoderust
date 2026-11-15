@@ -9,7 +9,7 @@ use super::swarm::AGENT_SWARM_SERVICE_ID;
 use crate::agent::actor_service::services::TelemetryService;
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
 use crate::agent::scope_context::scopeContext::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::agent::tool_approval::tool_approval::IAgentToolApprovalService;
 use crate::app::event::event_bus::IEventBus;
 use crate::features::reminder::reminder_service::ReminderService;

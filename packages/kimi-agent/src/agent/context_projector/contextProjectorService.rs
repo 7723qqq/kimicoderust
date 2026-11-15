@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::_base::di::lifecycle::DisposableRef;
 use crate::_base::log::log::ILogService;
 use crate::agent::context_memory::types::ContextMessage;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::llm_adapter::contract::message::Message;
 use crate::state::state::{ReplayableOptions, ReplayableStateKey};

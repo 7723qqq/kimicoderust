@@ -31,7 +31,7 @@ use crate::features::cron::internal::jitter::{
 use crate::features::reminder::reminder_service::ReminderService;
 use crate::features::reminder::types::ReminderNotification;
 use crate::human::xstate2::{
-    Action, Context, FromCallback, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
+    Action, ActorLogic, Context, InvokeDef, InvokeInput, Machine, StateNode, Transition, XEvent,
     from_callback, send_to,
 };
 
@@ -353,7 +353,7 @@ async fn tick_cron(
     Ok(())
 }
 
-fn cron_effects() -> FromCallback {
+fn cron_effects() -> ActorLogic {
     from_callback(|input| {
         let runtime = input
             .runtime
@@ -491,17 +491,19 @@ pub fn cron_actor_logic() -> Machine {
             (
                 "beforeRestore".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::from([
                         (
                             "runtime.restore".to_string(),
-                            Transition {
+                            vec![Transition {
                                 target: Some("active".to_string()),
                                 actions: Vec::new(),
-                            },
+                                ..Default::default()
+                            }],
                         ),
                         (
                             "cron.tick".to_string(),
-                            Transition {
+                            vec![Transition {
                                 target: None,
                                 actions: vec![Action::Custom(Arc::new(|_, event| {
                                     if let Some(completion) = event
@@ -514,7 +516,8 @@ pub fn cron_actor_logic() -> Machine {
                                             .send(Err("Cron runtime is not restored".to_string()));
                                     }
                                 }))],
-                            },
+                                ..Default::default()
+                            }],
                         ),
                     ]),
                     invoke: None,
@@ -523,46 +526,54 @@ pub fn cron_actor_logic() -> Machine {
             (
                 "active".to_string(),
                 StateNode {
+                    final_: false,
                     on: std::collections::HashMap::from([(
                         "cron.tick".to_string(),
-                        Transition {
+                        vec![Transition {
                             target: None,
-                            actions: vec![send_to("cronEffects", |event| event.clone())],
-                        },
+                            actions: vec![send_to("cronEffects", |args| args.event.clone())],
+                            ..Default::default()
+                        }],
                     )]),
                     invoke: Some(InvokeDef {
                         id: "cronEffects".to_string(),
                         src: "cronEffects".to_string(),
-                        input: Arc::new(|context, event| {
-                            let context = context
+                        input: Arc::new(|args| {
+                            let context = args
+                                .context
                                 .downcast_ref::<Mutex<CronActorContext>>()
                                 .unwrap()
                                 .lock();
                             InvokeInput {
                                 runtime: context.runtime.clone(),
-                                restore: event.restore.clone(),
+                                restore: args.event.restore.clone(),
                             }
                         }),
+                        on_done: Vec::new(),
+                        on_error: Vec::new(),
                     }),
                 },
             ),
         ]),
         on: std::collections::HashMap::from([(
             "cron.commit".to_string(),
-            Transition {
+            vec![Transition {
                 target: None,
-                actions: vec![Action::Custom(Arc::new(|context, event| {
+                actions: vec![Action::Custom(Arc::new(|context, args| {
                     let context = context.downcast_ref::<Mutex<CronActorContext>>().unwrap();
-                    context.lock().model = event
+                    context.lock().model = args
+                        .event
                         .payload
                         .get("model")
                         .cloned()
                         .and_then(|model| serde_json::from_value(model).ok())
                         .unwrap_or_default();
                 }))],
-            },
+                ..Default::default()
+            }],
         )]),
         actors: std::collections::HashMap::from([("cronEffects".to_string(), cron_effects())]),
+        ..Default::default()
     }
 }
 

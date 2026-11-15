@@ -5,8 +5,8 @@ use indexmap::{IndexMap, IndexSet};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::agent::state::agent_state::StateKey;
-use crate::agent::state::agent_state_service::AgentStateService;
+use crate::_base::state::state_registry::StateKey;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::injection::find_agents_md_in_dir;
 use crate::prompt::agents_md::{
     AGENTS_MD_PLAIN_NAMES, dirs_root_to_leaf, extract_agents_md_paths_from_prompt, load_agents_md,
@@ -15,16 +15,16 @@ use crate::tools::bash_target_dirs::bash_target_dirs;
 
 pub const DISCOVERY_REMINDER_VARIANT: &str = "agents_md";
 
-pub fn agents_md_reminder_known_key() -> StateKey {
-    StateKey::new("agentsMdReminder.known", Arc::new(|| json!([])))
+pub fn agents_md_reminder_known_key() -> StateKey<Value> {
+    StateKey::new("agentsMdReminder.known", || json!([]))
 }
 
-pub fn agents_md_reminder_cwd_key() -> StateKey {
-    StateKey::new("agentsMdReminder.cwd", Arc::new(|| Value::Null))
+pub fn agents_md_reminder_cwd_key() -> StateKey<Value> {
+    StateKey::new("agentsMdReminder.cwd", || Value::Null)
 }
 
-pub fn agents_md_reminder_seeded_key() -> StateKey {
-    StateKey::new("agentsMdReminder.seeded", Arc::new(|| json!(false)))
+pub fn agents_md_reminder_seeded_key() -> StateKey<Value> {
+    StateKey::new("agentsMdReminder.seeded", || json!(false))
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +139,7 @@ pub fn reminder_text(paths: &[String]) -> String {
 }
 
 pub struct AgentAgentsMdReminderService {
-    states: Arc<AgentStateService>,
+    states: Arc<dyn IAgentStateService>,
     session_cwd: PathBuf,
     brand_home: Option<PathBuf>,
     host_home: PathBuf,
@@ -151,12 +151,12 @@ pub struct AgentAgentsMdReminderService {
 
 impl AgentAgentsMdReminderService {
     pub fn new(
-        states: Arc<AgentStateService>,
+        states: Arc<dyn IAgentStateService>,
         session_cwd: PathBuf,
         brand_home: Option<PathBuf>,
         host_home: PathBuf,
         telemetry: Arc<dyn Fn(Value) + Send + Sync>,
-    ) -> Result<Self, crate::agent::state::agent_state::StateError> {
+    ) -> Result<Self, crate::agent::state::errors::StateError> {
         let service = Self {
             states,
             session_cwd,
@@ -190,18 +190,10 @@ impl AgentAgentsMdReminderService {
             queue.remove(&host_path(Path::new(path)));
         }
         drop(queue);
-        if let Err(error) = self
-            .states
-            .set(&agents_md_reminder_cwd_key(), json!(cwd.to_string_lossy()))
-        {
-            panic!("{error}");
-        }
-        if let Err(error) = self
-            .states
-            .set(&agents_md_reminder_seeded_key(), json!(true))
-        {
-            panic!("{error}");
-        }
+        self.states
+            .set(&agents_md_reminder_cwd_key(), json!(cwd.to_string_lossy()));
+        self.states
+            .set(&agents_md_reminder_seeded_key(), json!(true));
     }
 
     pub fn restore_seed(&self, system_prompt: &str, agents_md_paths: Option<&[String]>) {
@@ -251,7 +243,6 @@ impl AgentAgentsMdReminderService {
     fn known(&self) -> IndexSet<String> {
         self.states
             .get(&agents_md_reminder_known_key())
-            .unwrap_or_else(|error| panic!("{error}"))
             .as_array()
             .cloned()
             .map(|paths| {
@@ -265,18 +256,13 @@ impl AgentAgentsMdReminderService {
 
     fn set_known(&self, known: &IndexSet<String>) {
         let paths: Vec<String> = known.iter().cloned().collect();
-        if let Err(error) = self
-            .states
-            .set(&agents_md_reminder_known_key(), json!(paths))
-        {
-            panic!("{error}");
-        }
+        self.states
+            .set(&agents_md_reminder_known_key(), json!(paths));
     }
 
     fn seeded(&self) -> bool {
         self.states
             .get(&agents_md_reminder_seeded_key())
-            .unwrap_or_else(|error| panic!("{error}"))
             .as_bool()
             .unwrap_or(false)
     }
@@ -284,7 +270,6 @@ impl AgentAgentsMdReminderService {
     fn agent_cwd(&self) -> PathBuf {
         self.states
             .get(&agents_md_reminder_cwd_key())
-            .unwrap_or_else(|error| panic!("{error}"))
             .as_str()
             .map(PathBuf::from)
             .unwrap_or_else(|| self.session_cwd.clone())

@@ -6,7 +6,7 @@ use super::super::plan::IAgentPlanService;
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
 use crate::agent::context_memory::types::ContextMessage;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::features::reminder::reminder_service::ReminderService;
 use crate::features::reminder::types::{
     ContextInjectionContent, ContextInjectionContext, ContextInjectionResult,

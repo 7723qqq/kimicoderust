@@ -7,7 +7,7 @@ use crate::agent::context_memory::types::{ContextMessage, PromptOrigin};
 use crate::agent::context_memory::vacuous_content::is_vacuous_content_part;
 use crate::agent::r#loop::turn_events::{TurnEndReason, TurnInterruptReason};
 use crate::agent::r#loop::turn_ops::{TurnEnded, TurnEndedPayload};
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::app::event::event_bus::IEventBus;
 use crate::features::reminder::reminder_service::ReminderService;
 use crate::features::reminder::types::ReminderNotification;

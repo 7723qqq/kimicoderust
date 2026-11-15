@@ -16,7 +16,7 @@ use super::planToTodoConverter::{PlanToTodoOutcome, try_convert_plan_to_todos};
 use crate::_base::di::lifecycle::DisposableRef;
 use crate::_base::utils::hero_slug::generate_hero_slug;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state_v2::IAgentStateService;
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::callbacks::MAIN_AGENT_ID;
 use crate::environment::environment::EnvironmentPath;

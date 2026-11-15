@@ -13,12 +13,12 @@ use crate::_base::di::lifecycle::{DisposableRef, to_disposable};
 use crate::_base::errors::errors::SharedError;
 use crate::_base::event::{AsyncEmitter, Event};
 use crate::_base::log::log::ILogService;
+use crate::_base::state::state_registry::StateKey;
 use crate::_base::utils::abort::{
     AbortController, AbortSignal, abortable, is_abort_error, is_user_cancellation,
     link_abort_signal,
 };
-use crate::agent::state::agent_state::StateKey;
-use crate::agent::state::agent_state_service::{AgentStateService, StateRegistration};
+use crate::agent::state::agent_state::IAgentStateService;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::human::llm::message::{ContentPart, ToolCall};
 use crate::state::event_dispatcher::IEventDispatcher;
@@ -42,12 +42,12 @@ const ABORT_GRACE_MS: u64 = 2_000;
 const TOOL_OUTPUT_EMPTY: &str = "Tool output is empty.";
 const TOOL_OUTPUT_NON_TEXT: &str = "Tool returned non-text content.";
 
-pub fn tool_executor_tool_call_dup_types_key() -> StateKey {
-    StateKey::new("toolExecutor.toolCallDupTypes", Arc::new(|| json!({})))
+pub fn tool_executor_tool_call_dup_types_key() -> StateKey<Value> {
+    StateKey::new("toolExecutor.toolCallDupTypes", || json!({}))
 }
 
-pub fn tool_executor_dup_type_turn_id_key() -> StateKey {
-    StateKey::new("toolExecutor.dupTypeTurnId", Arc::new(|| Value::Null))
+pub fn tool_executor_dup_type_turn_id_key() -> StateKey<Value> {
+    StateKey::new("toolExecutor.dupTypeTurnId", || Value::Null)
 }
 
 #[derive(Clone)]
@@ -144,7 +144,7 @@ pub struct AgentToolExecutorService {
     dispatcher: Arc<dyn IEventDispatcher>,
     telemetry: Arc<dyn ITelemetryService>,
     result_truncation: Arc<dyn IAgentToolResultTruncationService>,
-    states: Arc<AgentStateService>,
+    states: Arc<dyn IAgentStateService>,
     log: Option<Arc<dyn ILogService>>,
     before_execute_emitter: BeforeToolExecuteEmitter,
     will_execute_emitter: AsyncEmitter<WillExecuteToolEvent>,
@@ -152,7 +152,7 @@ pub struct AgentToolExecutorService {
     missing_tool_describer: Arc<Mutex<Option<MissingToolDescriber>>>,
     unavailable_tool_describer: Arc<Mutex<Option<UnavailableToolDescriber>>>,
     tool_call_guard: Arc<Mutex<Option<ToolCallGuard>>>,
-    _registrations: Vec<StateRegistration>,
+    _registrations: Vec<DisposableRef>,
 }
 
 impl AgentToolExecutorService {
@@ -162,9 +162,9 @@ impl AgentToolExecutorService {
         dispatcher: Arc<dyn IEventDispatcher>,
         telemetry: Arc<dyn ITelemetryService>,
         result_truncation: Arc<dyn IAgentToolResultTruncationService>,
-        states: Arc<AgentStateService>,
+        states: Arc<dyn IAgentStateService>,
         log: Option<Arc<dyn ILogService>>,
-    ) -> Result<Self, crate::agent::state::agent_state::StateError> {
+    ) -> Result<Self, crate::agent::state::errors::StateError> {
         let registrations = vec![
             states.contribute_state(tool_executor_tool_call_dup_types_key())?,
             states.contribute_state(tool_executor_dup_type_turn_id_key())?,
@@ -188,17 +188,13 @@ impl AgentToolExecutorService {
     }
 
     fn tool_call_dup_types(&self) -> HashMap<String, ToolCallDupType> {
-        self.states
-            .get(&tool_executor_tool_call_dup_types_key())
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())
+        serde_json::from_value(self.states.get(&tool_executor_tool_call_dup_types_key()))
             .unwrap_or_default()
     }
 
     fn set_tool_call_dup_types(&self, value: HashMap<String, ToolCallDupType>) {
         if let Ok(value) = serde_json::to_value(value) {
-            let _ = self
-                .states
+            self.states
                 .set(&tool_executor_tool_call_dup_types_key(), value);
         }
     }
@@ -206,12 +202,11 @@ impl AgentToolExecutorService {
     fn dup_type_turn_id(&self) -> Option<u64> {
         self.states
             .get(&tool_executor_dup_type_turn_id_key())
-            .ok()
-            .and_then(|value| value.as_u64())
+            .as_u64()
     }
 
     fn set_dup_type_turn_id(&self, value: Option<u64>) {
-        let _ = self.states.set(
+        self.states.set(
             &tool_executor_dup_type_turn_id_key(),
             value.map_or(Value::Null, Value::from),
         );

@@ -17,9 +17,9 @@ use crate::app::scopes::LifecycleScope;
 use crate::session::state::session_state::ISessionStateService;
 use crate::state::state::ReplayableStateKey;
 
-use super::agent_state::StateError;
-use super::agent_state_service::Listeners;
-use super::agent_state_v2::{IAgentStateService, ReplayableStateListener};
+use super::errors::StateError;
+use super::listeners::Listeners;
+use super::agent_state::{IAgentStateService, ReplayableStateListener};
 
 pub struct AgentStateService {
     registry: Arc<StateRegistry>,

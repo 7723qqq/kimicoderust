@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::agent::agent_context::AgentContext;
-use crate::agent::state::agent_state::StateKey;
+use crate::state::state::ReplayableStateKey;
 use crate::app::event::event2::{Event2Class, register_event2_class};
 use crate::rpc::types::BoxFuture;
 
@@ -18,7 +18,7 @@ pub trait DomainResourceRuntime: Send + Sync {
 pub trait AgentModelBridge: Send + Sync {
     fn dispatch(&self, event: Value) -> BoxFuture<'static, Result<(), String>>;
 
-    fn read_legacy(&self, key: &StateKey) -> Value;
+    fn read_legacy(&self, key: &Arc<ReplayableStateKey>) -> Value;
 }
 
 pub struct AgentModelContext {
@@ -98,7 +98,7 @@ impl AgentModel {
         }
     }
 
-    pub fn read_legacy(&self, key: &StateKey) -> Value {
+    pub fn read_legacy(&self, key: &Arc<ReplayableStateKey>) -> Value {
         self.bridge.read_legacy(key)
     }
 
