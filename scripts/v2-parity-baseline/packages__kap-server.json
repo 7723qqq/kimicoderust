@@ -618,6 +618,34 @@
     {
       "tsPath": "version.ts",
       "verdict": "partial"
+    },
+    {
+      "tsPath": "protocol/conversation.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "routes/conversation.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "services/conversation/conversationFeed.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "services/conversation/conversationFold.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "services/conversation/conversationItems.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "services/conversation/conversationService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "services/conversation/taskNotifications.ts",
+      "verdict": "unported"
     }
   ]
 }

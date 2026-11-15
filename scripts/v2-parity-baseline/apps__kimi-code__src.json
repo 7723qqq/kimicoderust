@@ -280,38 +280,6 @@
       "verdict": "unported"
     },
     {
-      "tsPath": "feedback/archive.ts",
-      "verdict": "unported"
-    },
-    {
-      "tsPath": "feedback/codebase/filter.ts",
-      "verdict": "unported"
-    },
-    {
-      "tsPath": "feedback/codebase/index.ts",
-      "verdict": "unported"
-    },
-    {
-      "tsPath": "feedback/codebase/packager.ts",
-      "verdict": "unported"
-    },
-    {
-      "tsPath": "feedback/codebase/scanner.ts",
-      "verdict": "unported"
-    },
-    {
-      "tsPath": "feedback/codebase/types.ts",
-      "verdict": "unported"
-    },
-    {
-      "tsPath": "feedback/feedback-attachments.ts",
-      "verdict": "unported"
-    },
-    {
-      "tsPath": "feedback/upload.ts",
-      "verdict": "unported"
-    },
-    {
       "tsPath": "generated/vis-web-asset.ts",
       "verdict": "unported"
     },
@@ -581,6 +549,10 @@
     },
     {
       "tsPath": "utils/usage/usage-format.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "utils/readonly-bash.ts",
       "verdict": "unported"
     }
   ]

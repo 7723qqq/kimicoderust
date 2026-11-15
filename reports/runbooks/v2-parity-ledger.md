@@ -24,6 +24,161 @@ Its latest mapping scanned 1444 v2 files against 383 Rust files. A heuristic
 mapping is not a behavior proof: the per-delta entries and tests below remain
 the acceptance evidence.
 
+## 2026-11-15 re-pin to d71a56ce2 (48 commits)
+
+Both ledgers now pin `d71a56ce2f6a55589fd500c176f93cae6a39d425`:
+`scripts/agent-parity-manifest.json` moved from `573bfd0644` and
+`scripts/v2-parity-manifest.json` from `b07b2131`. The range
+`b07b2131..d71a56ce2` is 48 commits. No `--update` pass was run: every changed
+row was edited by hand, and only the touched unit baselines received targeted
+entries. Baselines after this batch: agent 0 → 19, `packages/agent-core-v2`
+631 → 670, `packages/kap-server` 154 → 161, `apps/kimi-code/src` 145 → 138
+(eight zombie rows removed, one new row added).
+
+### Commit triage (all 48)
+
+Class vocabulary: 行为 = engine behavior; 宿主 = kap-server/host behavior;
+TUI = apps/kimi-code UI behavior; 测试; 文档·台账; 工具; 重构·清理; 发布元数据.
+
+| sha | class | ruling |
+| --- | --- | --- |
+| 3f1adbeab2 | 行为 | snapshot capture after batch preparation; snapshotService row already partial (red), no new row. |
+| e174953107 | 行为 | operation log window gated on declared `RepoMutation`; Rust has `RepoMutation` + gating in `features/operationLog/operationService.rs:196`; tool rows remain equivalent. |
+| 3365ea5d16 | 行为 | serialize cross-process operation-log captures; repositoryViewService row already partial (red). |
+| 011c8cd3e3 | 行为 | clarified Read parameter docs + `valid parameters:` in validation errors; already ported (`agent/tool_executor/tool_executor_service.rs:1119`, `agent/tools/os/read/read.rs:45`). |
+| 144cc917d4 | 行为 | mid-compact injections are kept and counted (`appendedInjectionCount`); only `history_safe_to_compact` is ported — five contextMemory rows downgraded to partial. |
+| 15f7b778eb | 测试 | fork parity test only. |
+| e6d935e06a | 行为 | Gemini context across turns (`rawId`, text `thought_signature_b64`, modern function responses); projection/message guards are ported, provider/replay/loop rawId is not — rows below downgraded. |
+| 7fb66e179d | 行为 | plugin agent profile refresh hooks; ported (`invalidate_profile_descriptions`, `wait_for_plugin_agent_profiles`). |
+| f6a5ebe62c | 行为 | Kimi media upload status validation; not ported — `human/llm-kimi/files.ts` downgraded to partial. |
+| c13c86f900 | 宿主 | forward swarm member task events in kap-server; no engine change. |
+| 889e21970b | 文档·台账 | playbook only. |
+| 9197ab81e9 | 发布元数据 | 2.6.2 release metadata. |
+| 0406c614a0 | 行为 | usage-anchored compaction token counting (`HistoryTokenProfile`); not ported — three fullCompaction rows downgraded. |
+| b8f4d7a5c4 | 文档·台账 | playbook only. |
+| 2c6264660e | 行为 | conversation turns/items model, `turn.not_found`, block/startedAt/durationMs metadata; engine part partly ported (tool-call block only) — loop rows downgraded, seven kap-server conversation rows registered. |
+| 540df945a6 | 宿主 | conversation feed folds the full wire journal. |
+| e6e291325e | 文档·台账 | ledger note only. |
+| 414825dc94 | 文档·台账 | ledger note only. |
+| e1f0d5c5c8 | 宿主 | conversation turns streamed over the v1 socket; adds the turns route. |
+| 9569816d6c | 文档·台账 | ledger note only. |
+| ce73b5d2ed | 宿主 | global search answered from the index only. |
+| 3e1f9f1d33 | 文档·台账 | ledger note only. |
+| f6888a4b27 | 宿主 | conversation feeds driven from live context memory. |
+| 1af6eaac02 | 重构·清理 | removed a debug log; no behavior. |
+| 48171d214d | 文档·台账 | ledger note only. |
+| 4306e8396b | 重构·清理 | notification label constants + export surface; rendering unchanged, `notificationXml.ts` stays equivalent. |
+| 654eaed9da | 测试 | zero-timeout task wait determinism. |
+| b3e4eac6f0 | 文档·台账 | i18n for `turn.not_found`; the code itself is the 2c6264660e gap. |
+| 632c27af77 | 行为 | feedback moves into the engine + provider `search_url`/`feedback_url`; nine feedback rows registered, three provider/feedback-resolution rows downgraded. |
+| 2bfcb522be | 行为 | feedback drops text-only attachments, previews session files; feedback rows stay unported, sessionExport rows already unported. |
+| 2ed1052ca3 | TUI | withholds the codebase attachment for remote sessions; ui only. |
+| a580e44ae1 | 文档·台账 | playbook only. |
+| 8e798f3dac | 重构·清理 | session preview type alignment; no new behavior. |
+| 45906dd15c | 重构·清理 | removed dead attachment copy and orphan helpers; the old `feedback-attachments.ts` successor is `feedbackService.ts`. |
+| 33a97b088d | 文档·台账 | changeset wording. |
+| 2fc489c3c4 | 宿主 | conversation items / file-history query alignment. |
+| ed33095668 | 行为 | persist user + project permission rules; user-rule merge/project persistence missing — two rows registered missing, four rows downgraded. |
+| 05587e90e8 | 宿主 | auth/Tower errors mapped to codes; no stack traces. |
+| 24a45315c5 | 宿主 + 行为 | session create applies `agent_config`/metadata; touched engine session rows were already partial/unported (red). |
+| 636232d6ce | TUI | fullscreen transcript groups, pi-tui animation frames, `readonly-bash`; ui rows + one apps/kimi-code/src row. |
+| 63432ee738 | TUI | steady transcript groups and live progress; ui only. |
+| 5c68060b7a | TUI | fullscreen clipboard (tmux/Linux); ui only. |
+| 8f75177b5e | 行为 | failed-attempt retry metadata + one subagent retry row; not ported — seven llm/loop rows downgraded. |
+| 580b5b52e1 | 工具 | ledger probe working directory. |
+| 4d88e05397 | 测试 | TUI startup suite isolation. |
+| 73c81a64fa | 工具 | ledger verify holds partial/blocked. |
+| 4b50550a09 | TUI | selector translations on the render path; ui only. |
+| d71a56ce2f | 测试 | terminal environment pin in TUI tests. |
+
+### Uncovered files (31) — final verdicts
+
+Every row below now exists in `scripts/v2-parity-manifest.json`. `ui` is the
+existing UI verdict for ui units; `unported` is the v2-wide red verdict for
+"verified absent"; the two `missing` rows are the explicit user ruling.
+
+| unit | v2 path | verdict | v2 evidence / Rust location |
+| --- | --- | --- | --- |
+| agent-core-v2 | agent/permissionRules/projectPermissionRules.ts | missing | `IProjectPermissionRulesService` introduced by `ed33095668`; Rust `agent/permission_rules/` has no project-level service, and `app/project_local_config/project_local_config.rs` has no permission read/append. |
+| agent-core-v2 | agent/permissionRules/projectPermissionRulesService.ts | missing | Session-scoped service at `projectPermissionRulesService.ts:14-65`: local-env only, workspace-trust gated, serialized append into project local config, `CONFIG_INVALID` on bad rules; no Rust counterpart. |
+| agent-core-v2 | app/auth/feedback.ts | unported | `IFeedbackService`/availability/submit/attachment-level types (`feedback.ts:6-51`, `632c27af77`); Rust has only locale strings. |
+| agent-core-v2 | app/auth/feedback/archive.ts | unported | `createFeedbackArchivePath` temp-dir helper; no Rust counterpart (`app/session_export/zip.rs` only serves session export). |
+| agent-core-v2 | app/auth/feedback/codebase/filter.ts | unported | Codebase filter caps (50,000 files / 50 MiB) and ignore rules; no Rust scanner. |
+| agent-core-v2 | app/auth/feedback/codebase/index.ts | unported | Barrel re-export; no Rust module. |
+| agent-core-v2 | app/auth/feedback/codebase/packager.ts | unported | `packageCodebase` zip packer; no Rust counterpart. |
+| agent-core-v2 | app/auth/feedback/codebase/scanner.ts | unported | `scanCodebase` git-based scanner; no Rust counterpart. |
+| agent-core-v2 | app/auth/feedback/codebase/types.ts | unported | Scan/limit types; no Rust counterpart. |
+| agent-core-v2 | app/auth/feedback/upload.ts | unported | Multipart feedback upload (`MAX_ARCHIVE_SIZE`, create/complete URL); `llm/files_upload.rs` is model-file upload only. |
+| agent-core-v2 | app/auth/feedbackService.ts | unported | `FeedbackService` orchestration (absorbs the old `apps/kimi-code/src/feedback/feedback-attachments.ts`); Rust session export exists but feedback submit/attachment packaging does not. |
+| kap-server | protocol/conversation.ts | unported | Turn/item/delta zod protocol (`2c6264660e`); Rust `server/transcript/model.rs` is the older turn/step/frame shape. |
+| kap-server | routes/conversation.ts | unported | `GET /sessions/{session_id}/agents/{agent_id}/turns`; Rust only has `/sessions/{sid}/transcript` pagination. |
+| kap-server | services/conversation/conversationFeed.ts | unported | Live per-agent feed over the wire journal; Rust WS exposes turn/step events, not conversation feeds. |
+| kap-server | services/conversation/conversationFold.ts | unported | Folds wire records into turn/item (retry, compaction, fork boundary); Rust `transcript.rs::build_items` folds turn/step/frame only. |
+| kap-server | services/conversation/conversationItems.ts | unported | Item projection (media/agent_refs/answer); no Rust item layer. |
+| kap-server | services/conversation/conversationService.ts | unported | Per-session/agent feed lifecycle; no Rust service. |
+| kap-server | services/conversation/taskNotifications.ts | unported | Task notification conversation items; Rust has `notification_xml.rs` parsing only. |
+| packages/pi-tui | animation-frame.ts | ui | TUI animation clock (`636232d6ce`); ui unit, no engine counterpart. |
+| apps/kimi-code/src/tui | components/dialogs/transcript-preview.ts | ui | Transcript preview dialog; ui unit. |
+| apps/kimi-code/src/tui | components/messages/running-title.ts | ui | Live running title; ui unit. |
+| apps/kimi-code/src/tui | components/messages/transcript-container.ts | ui | Fullscreen transcript container; ui unit. |
+| apps/kimi-code/src/tui | components/messages/transcript-group.ts | ui | Transcript group rendering; ui unit. |
+| apps/kimi-code/src/tui | theme/color-mix.ts | ui | Theme color mixing; ui unit. |
+| apps/kimi-code/src/tui | utils/activity-label.ts | ui | Activity labels; ui unit. |
+| apps/kimi-code/src/tui | utils/group-view.ts | ui | Group layout; ui unit. |
+| apps/kimi-code/src/tui | utils/transcript-items.ts | ui | Transcript item components; ui unit. |
+| apps/kimi-code/src/tui | utils/transcript-projection.ts | ui | Transcript projection; ui unit. |
+| apps/kimi-code/src/tui | utils/transcript-turns.ts | ui | Turn grouping; ui unit. |
+| apps/kimi-code/src/tui | utils/turn-timeline.ts | ui | Turn timeline; ui unit. |
+| apps/kimi-code/src | utils/readonly-bash.ts | unported | TUI-only read-only Bash classifier (`isReadonlyBash`, tree-sitter); no engine counterpart; the unit's TS-host rows are all unported. |
+
+### Zombie rows (8) — migration correction
+
+The `apps/kimi-code/src/feedback/**` rows were not deleted. Seven moved with
+`632c27af77`; the eighth was absorbed by `feedbackService.ts`.
+
+| old path | new path | disposition |
+| --- | --- | --- |
+| feedback/archive.ts | app/auth/feedback/archive.ts (agent-core-v2) | moved (R071) |
+| feedback/codebase/filter.ts | app/auth/feedback/codebase/filter.ts | moved (R071) |
+| feedback/codebase/index.ts | app/auth/feedback/codebase/index.ts | moved (R100) |
+| feedback/codebase/packager.ts | app/auth/feedback/codebase/packager.ts | moved (R083) |
+| feedback/codebase/scanner.ts | app/auth/feedback/codebase/scanner.ts | moved (R094) |
+| feedback/codebase/types.ts | app/auth/feedback/codebase/types.ts | moved (R100) |
+| feedback/upload.ts | app/auth/feedback/upload.ts | moved (R089) |
+| feedback/feedback-attachments.ts | app/auth/feedbackService.ts | deleted; attachment orchestration absorbed by the engine service (`2bfcb522be`, `45906dd15c`) |
+
+### Missing registration (2)
+
+`projectPermissionRules.ts` and `projectPermissionRulesService.ts` are recorded
+as `missing` in the agent ledger (and inherited by the v2 ledger), with sha
+`ed33095668` as evidence. They are not implemented in this batch by explicit
+user instruction. The agent baseline grew from 0 to 19 entries because these two
+rows plus seventeen behavior deltas that the old `equivalent` verdicts no longer
+described honestly are now red.
+
+### Verdict changes on existing rows (28)
+
+Seventeen agent rows and eleven local v2 rows were downgraded from `equivalent`
+to `partial`; each row carries the exact v2 sha, the missing behavior and the
+Rust location in its evidence. Summary:
+
+- compaction mid-injection count (5 rows, `144cc917d4`);
+- compaction usage anchoring (3 rows, `0406c614a0`);
+- failed-attempt retry metadata and block/timing fields (7 rows, `8f75177b5e` and `2c6264660e`);
+- `turn.not_found` (2 rows, `2c6264660e`);
+- Gemini rawId / text signature / modern responses (5 rows, `e6d935e06a`);
+- media upload status (1 row, `f6a5ebe62c`);
+- provider `search_url`/`feedback_url` and `resolveActiveModelProvider` (3 rows, `632c27af77`);
+- permission-rule persistence (4 rows, `ed33095668`).
+
+### Gate evidence
+
+Run directly with real exit codes after the edits:
+
+- `bun run check:agent-parity` → 0: 290 files / 290 rows, equivalent 239, partial 17, na 32, missing 2; red 19 = baseline 19, structural 0.
+- `bun run check:v2-parity` → 0: 2592 files / 2592 rows (local 2302, inherited 290); red 1352 = baseline 1352, structural 0; zero uncovered and zero zombies.
+- `bun run check:architecture` → 0: 21 modules, one pre-existing soft-dependency warning.
+
 ## Upstream delta rulings (2026-11)
 
 All five previously `tracked` deltas were resolved on 2026-11-08 against the

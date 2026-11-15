@@ -2526,6 +2526,162 @@
     {
       "tsPath": "workspace/workspaceTrust/workspaceTrustStore.ts",
       "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/contextMemory/compactionHandoff.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/contextMemory/contextEvents.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/contextMemory/contextMemory.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/contextMemory/contextMemoryService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/contextMemory/contextTranscript.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/contextMemory/loopEventFold.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/fullCompaction/compactionGeneration.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/fullCompaction/compactionUtils.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/fullCompaction/fullCompactionService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/llmRequester/llmRequester.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/llmRequester/llmRequesterService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/loop/machine/requester.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/loop/machine/engine.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/loop/loopService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/loop/turnEvents.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/loop/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/replayBuilder/fold.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "agent/permissionRules/projectPermissionRules.ts",
+      "verdict": "missing"
+    },
+    {
+      "tsPath": "agent/permissionRules/projectPermissionRulesService.ts",
+      "verdict": "missing"
+    },
+    {
+      "tsPath": "app/auth/feedback.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/feedback/archive.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/feedback/codebase/filter.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/feedback/codebase/index.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/feedback/codebase/packager.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/feedback/codebase/scanner.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/feedback/codebase/types.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/feedback/upload.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "app/auth/feedbackService.ts",
+      "verdict": "unported"
+    },
+    {
+      "tsPath": "_base/errors/errorCode.generated.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/auth/webSearch/webSearchService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/kosongConfig/configSection.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "app/projectLocalConfig/projectLocalConfig.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm-kimi/files.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm/requester/bases/anthropic/lower.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm/requester/bases/google-genai/contract.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm/requester/bases/google-genai/format.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm/requester/bases/google-genai/lower.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "human/llm/requester/bases/google-genai/requester.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llm-adapter/model/model-auth.ts",
+      "verdict": "partial"
     }
   ]
 }

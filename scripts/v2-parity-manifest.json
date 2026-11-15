@@ -1,11 +1,11 @@
 {
   "note": "v2-wide file-level parity ledger. Scope: all v2 src .ts/.tsx (tests and declarations excluded). agent-core-v2/src/agent rows are inherited verbatim from scripts/agent-parity-manifest.json and keep their human-reviewed verdicts. Every other row is an initial, unverified machine row: unported means no verified Rust counterpart; candidateRustPaths are path/name/protocol matches only, not equivalence; evidence is intentionally empty. Baselines are unverified snapshots, not proof of parity. Regenerate machine rows with bun run generate:v2-parity; rows with reviewed:true, a non-unported verdict, or non-empty evidence are preserved; do not hand-edit unreviewed rows.",
   "v2Root": "D:/kimi/kimi-code",
-  "pinnedCommit": "b07b21319733349c63e5284f2b2df91d77231cc8",
-  "generatedAt": "2026-11-11T17:18:10.121Z",
-  "rowCount": 2569,
-  "localRowCount": 2281,
-  "inheritedRowCount": 288,
+  "pinnedCommit": "d71a56ce2f6a55589fd500c176f93cae6a39d425",
+  "generatedAt": "2026-11-15T07:06:26.596Z",
+  "rowCount": 2592,
+  "localRowCount": 2302,
+  "inheritedRowCount": 290,
   "defaults": {
     "include": [
       "**/*.ts",
@@ -1061,15 +1061,16 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "_base/errors/errorCode.generated.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-core/src/primitives/errors/domains.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 机械比对：v2 ERROR_CODE_UNION 的 172 个码与 domains.rs 中 BUILTIN_DOMAINS 的 172 个 pub const 码值集合完全相同（v2-only=[]，engine-only=[]）。"
+        "2026-11-13 机械比对：v2 ERROR_CODE_UNION 的 172 个码与 domains.rs 中 BUILTIN_DOMAINS 的 172 个 pub const 码值集合完全相同（v2-only=[]，engine-only=[]）。",
+        "2026-11-15 重 pin 分诊：v2 2c6264660e/b3e4eac6f0 的 ERROR_CODE_UNION 现有 177 个码（含 turn.not_found）；Rust `packages/kimi-core/src/primitives/errors/domains.rs` 只有 176 个，缺 turn.not_found，故降为 partial。"
       ],
-      "note": "生成码表由 domains.rs 承担，集合一致。",
+      "note": "生成码表主集合一致；turn.not_found 缺失。",
       "naReason": "",
       "lines": 178,
       "exports": 1,
@@ -3528,15 +3529,16 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "app/auth/webSearch/webSearchService.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/tools/web_search.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：v2 的 provider 装配与选择（按配置在 moonshot/local 之间决定、引擎与 key 解析）在 `tools/web_search.rs::configured_engine()` 与 `WebSearchConfig` 中落地。"
+        "2026-11-13 核对：v2 的 provider 装配与选择（按配置在 moonshot/local 之间决定、引擎与 key 解析）在 `tools/web_search.rs::configured_engine()` 与 `WebSearchConfig` 中落地。",
+        "2026-11-15 重 pin 分诊：v2 632c27af77 让 `getWebSearchProvider(modelAlias)` 从当前模型 provider 的 `searchUrl` 解析凭据（apiKey/apiKeyEnv/oauth），再回退 services/managed/local；Rust `tools/web_search.rs` 无模型 provider search_url 解析链，故降为 partial。"
       ],
-      "note": "webSearch 服务选择逻辑已对齐。",
+      "note": "搜索服务主路径一致；模型 provider search_url 解析未移植。",
       "naReason": "",
       "lines": 148,
       "exports": 2,
@@ -4763,16 +4765,17 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "app/kosongConfig/configSection.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/config/mod.rs",
         "packages/kimi-agent/src/server/models_dev.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：`[providers]`/`[models]`/`[model_catalog]`/`[default_model]`/`[default_provider]` 的配置 schema 在 `config/mod.rs`（serde 结构 + alias）中落地，models.dev 条目由 `server/models_dev.rs` 提供。"
+        "2026-11-13 核对：`[providers]`/`[models]`/`[model_catalog]`/`[default_model]`/`[default_provider]` 的配置 schema 在 `config/mod.rs`（serde 结构 + alias）中落地，models.dev 条目由 `server/models_dev.rs` 提供。",
+        "2026-11-15 重 pin 分诊：v2 632c27af77 给 ProviderConfig 增加 `searchUrl`/`feedbackUrl` 并纳入凭据字段；Rust `config/mod.rs` 的 provider schema 无这两个字段，故降为 partial。"
       ],
-      "note": "`[providers]`/`[models]`/`[model_catalog]`/`[default_model]`/`[default_provider]` 的配置 schema 在 `config/mod.rs`",
+      "note": "provider 配置主字段一致；searchUrl/feedbackUrl 缺失。",
       "naReason": "",
       "lines": 380,
       "exports": 28,
@@ -5764,7 +5767,7 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "app/projectLocalConfig/projectLocalConfig.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/project_local_config.rs"
       ],
@@ -5772,9 +5775,10 @@
         "packages/kimi-agent/src/project_local_config.rs"
       ],
       "evidence": [
-        "2026-11-13 核对：ProjectAdditionalDirsLoadResult 的形状由 ProjectAdditionalDirsLocation 承担；readAdditionalDirs/resolveAdditionalDirs/appendAdditionalDir 对应 read_additional_dirs/resolve_additional_dirs 与追加逻辑（project_local_config.rs:41-113）。"
+        "2026-11-13 核对：ProjectAdditionalDirsLoadResult 的形状由 ProjectAdditionalDirsLocation 承担；readAdditionalDirs/resolveAdditionalDirs/appendAdditionalDir 对应 read_additional_dirs/resolve_additional_dirs 与追加逻辑（project_local_config.rs:41-113）。",
+        "2026-11-15 重 pin 分诊：v2 ed33095668 给 project local config 增加 `readPermissionRules`/`appendPermissionRules`（每路径队列、symlink 拒绝、原子替换）；Rust `app/project_local_config/project_local_config.rs` 无 permission 段读写，故降为 partial。"
       ],
-      "note": "附加目录配置一致。",
+      "note": "本地配置主路径一致；权限规则读写缺失。",
       "naReason": "",
       "lines": 22,
       "exports": 2,
@@ -14900,15 +14904,16 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm-kimi/files.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/llm/files_upload.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：Kimi 文件上传（multipart 构造、文件名/类型、上传端点）在 `llm/files_upload.rs`（`multipart_body`/`upload_filename`/`upload_media`）中落地；候选的 server/files.rs 等为同名误配，已排除。"
+        "2026-11-13 核对：Kimi 文件上传（multipart 构造、文件名/类型、上传端点）在 `llm/files_upload.rs`（`multipart_body`/`upload_filename`/`upload_media`）中落地；候选的 server/files.rs 等为同名误配，已排除。",
+        "2026-11-15 重 pin 分诊：v2 f6a5ebe62c 校验 Kimi 文件上传响应（extract_status/status 必须 ready，error 细节取 status_details/extract_error/error.message）；Rust `llm/files_upload.rs` 只按 HTTP 状态分类，未解析上传体状态，故降为 partial。"
       ],
-      "note": "文件上传已对齐。",
+      "note": "上传主路径一致；上传体状态校验未移植。",
       "naReason": "",
       "lines": 123,
       "exports": 5,
@@ -15735,15 +15740,16 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/anthropic/lower.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/llm/anthropic.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：Anthropic 响应降级（stop_reason 映射、usage 提取、错误体解析）在 `llm/anthropic.rs::parse_response` 中落地。"
+        "2026-11-13 核对：Anthropic 响应降级（stop_reason 映射、usage 提取、错误体解析）在 `llm/anthropic.rs::parse_response` 中落地。",
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 对 Anthropic 文本块跳过纯空白文本（`text.trim().length > 0`）；Rust `llm/anthropic.rs` 只过滤空字符串（`text.is_empty()`），纯空白仍下发，故降为 partial。"
       ],
-      "note": "Anthropic 响应解析已对齐。",
+      "note": "文本块转换主路径一致；纯空白过滤口径不同。",
       "naReason": "",
       "lines": 185,
       "exports": 3,
@@ -15942,15 +15948,16 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/google-genai/contract.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/llm/google_genai.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：Google GenAI 线协议契约在 `llm/google_genai.rs` 中落地。"
+        "2026-11-13 核对：Google GenAI 线协议契约在 `llm/google_genai.rs` 中落地。",
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 给 GooglePart 的 functionCall 增加 `id`、functionResponse 增加 `id` 且 parts 变可选；Rust `llm/google_genai.rs` 的请求/响应构造无这些 id 字段，故降为 partial。"
       ],
-      "note": "Google GenAI 契约已对齐。",
+      "note": "Google GenAI 契约主字段一致；functionCall/functionResponse id 缺失。",
       "naReason": "",
       "lines": 18,
       "exports": 2,
@@ -15982,15 +15989,16 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/google-genai/format.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/llm/google_genai.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：Google GenAI 请求格式化（contents/parts/tools/systemInstruction 的 wire 形状）在 `llm/google_genai.rs` 中落地。"
+        "2026-11-13 核对：Google GenAI 请求格式化（contents/parts/tools/systemInstruction 的 wire 形状）在 `llm/google_genai.rs` 中落地。",
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 引入 `modernFunctionResponses`（gemini-3+ 的嵌套 media parts）、文本 thoughtSignature 透传与 rawId；Rust `llm/google_genai.rs` 无 model-name 门控、无文本签名透传，故降为 partial。"
       ],
-      "note": "Google GenAI 请求格式化已对齐。",
+      "note": "Google GenAI 格式化主路径一致；modern function response 与文本签名未移植。",
       "naReason": "",
       "lines": 420,
       "exports": 11,
@@ -16007,15 +16015,16 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/google-genai/lower.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/llm/google_genai.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：Google GenAI 响应降级（candidates/usageMetadata/finishReason）在 `llm/google_genai.rs` 的解析中落地。"
+        "2026-11-13 核对：Google GenAI 响应降级（candidates/usageMetadata/finishReason）在 `llm/google_genai.rs` 的解析中落地。",
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 增加 `buildRawIdById`/`rawIdById`，functionResponse 按 rawId 对应并在 modern 模型下嵌套 media；Rust 无 raw_id 映射，functionResponse 总是携带 parts，故降为 partial。"
       ],
-      "note": "Google GenAI 响应解析已对齐。",
+      "note": "消息降级主路径一致；rawId 与 modern 嵌套规则未移植。",
       "naReason": "",
       "lines": 182,
       "exports": 3,
@@ -16051,16 +16060,17 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/google-genai/requester.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/llm/http.rs",
         "packages/kimi-agent/src/llm/google_genai.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：Google GenAI 请求器（流式/非流式、错误归类）在 `llm/http.rs` + `llm/google_genai.rs` 中落地。"
+        "2026-11-13 核对：Google GenAI 请求器（流式/非流式、错误归类）在 `llm/http.rs` + `llm/google_genai.rs` 中落地。",
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 把 modelName 传入 `lowerGoogleGenAIMessages` 以启用 modern 分支；Rust 请求器未按模型名分支，故降为 partial。"
       ],
-      "note": "Google GenAI 请求器已对齐。",
+      "note": "请求器主路径一致；模型名门控未移植。",
       "naReason": "",
       "lines": 274,
       "exports": 6,
@@ -17850,7 +17860,7 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "llm-adapter/model/model-auth.ts",
-      "verdict": "equivalent",
+      "verdict": "partial",
       "rustPaths": [
         "packages/kimi-agent/src/config/mod.rs",
         "packages/kimi-agent/src/llm/http.rs",
@@ -17858,9 +17868,10 @@
       ],
       "candidateRustPaths": [],
       "evidence": [
-        "2026-11-13 核对：模型鉴权材料解析、provider 派生、协议判定与端点 base URL 解析在 `config/mod.rs::endpoint_declaration` + `llm/http.rs`（google_api_base/url_has_api_version）+ `llm/model_family.rs` 中落地。"
+        "2026-11-13 核对：模型鉴权材料解析、provider 派生、协议判定与端点 base URL 解析在 `config/mod.rs::endpoint_declaration` + `llm/http.rs`（google_api_base/url_has_api_version）+ `llm/model_family.rs` 中落地。",
+        "2026-11-15 重 pin 分诊：v2 632c27af77 新增 `resolveActiveModelProvider`（modelAlias → defaultModel → config，model → provider → defaultProvider）供 WebSearch/Feedback 解析当前 provider；Rust 无同名解析入口，故降为 partial。"
       ],
-      "note": "模型鉴权材料解析、provider 派生、协议判定与端点 base URL 解析在 `config/mod.rs::endpoint_declaration` + `llm/http.rs`（google_api_bas",
+      "note": "模型鉴权主路径一致；resolveActiveModelProvider 缺失。",
       "naReason": "",
       "lines": 242,
       "exports": 11,
@@ -44586,142 +44597,6 @@
     },
     {
       "unit": "apps/kimi-code/src",
-      "tsPath": "feedback/archive.ts",
-      "verdict": "unported",
-      "rustPaths": [],
-      "candidateRustPaths": [
-        "packages/kimi-agent/src/server/plugin_archive.rs"
-      ],
-      "evidence": [],
-      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价",
-      "naReason": "",
-      "lines": 72,
-      "exports": 3,
-      "match": {
-        "score": 6,
-        "reasons": [
-          "stem"
-        ]
-      }
-    },
-    {
-      "unit": "apps/kimi-code/src",
-      "tsPath": "feedback/codebase/filter.ts",
-      "verdict": "unported",
-      "rustPaths": [],
-      "candidateRustPaths": [],
-      "evidence": [],
-      "note": "未找到 Rust 候选落点；待核",
-      "naReason": "",
-      "lines": 106,
-      "exports": 5,
-      "match": {
-        "score": 0,
-        "reasons": []
-      }
-    },
-    {
-      "unit": "apps/kimi-code/src",
-      "tsPath": "feedback/codebase/index.ts",
-      "verdict": "unported",
-      "rustPaths": [],
-      "candidateRustPaths": [],
-      "evidence": [],
-      "note": "未找到 Rust 候选落点；待核",
-      "naReason": "",
-      "lines": 3,
-      "exports": 0,
-      "match": {
-        "score": 0,
-        "reasons": []
-      }
-    },
-    {
-      "unit": "apps/kimi-code/src",
-      "tsPath": "feedback/codebase/packager.ts",
-      "verdict": "unported",
-      "rustPaths": [],
-      "candidateRustPaths": [],
-      "evidence": [],
-      "note": "未找到 Rust 候选落点；待核",
-      "naReason": "",
-      "lines": 99,
-      "exports": 1,
-      "match": {
-        "score": 0,
-        "reasons": []
-      }
-    },
-    {
-      "unit": "apps/kimi-code/src",
-      "tsPath": "feedback/codebase/scanner.ts",
-      "verdict": "unported",
-      "rustPaths": [],
-      "candidateRustPaths": [],
-      "evidence": [],
-      "note": "未找到 Rust 候选落点；待核",
-      "naReason": "",
-      "lines": 221,
-      "exports": 3,
-      "match": {
-        "score": 0,
-        "reasons": []
-      }
-    },
-    {
-      "unit": "apps/kimi-code/src",
-      "tsPath": "feedback/codebase/types.ts",
-      "verdict": "unported",
-      "rustPaths": [],
-      "candidateRustPaths": [],
-      "evidence": [],
-      "note": "未找到 Rust 候选落点；待核",
-      "naReason": "",
-      "lines": 19,
-      "exports": 3,
-      "match": {
-        "score": 0,
-        "reasons": []
-      }
-    },
-    {
-      "unit": "apps/kimi-code/src",
-      "tsPath": "feedback/feedback-attachments.ts",
-      "verdict": "unported",
-      "rustPaths": [],
-      "candidateRustPaths": [],
-      "evidence": [],
-      "note": "未找到 Rust 候选落点；待核",
-      "naReason": "",
-      "lines": 226,
-      "exports": 5,
-      "match": {
-        "score": 0,
-        "reasons": []
-      }
-    },
-    {
-      "unit": "apps/kimi-code/src",
-      "tsPath": "feedback/upload.ts",
-      "verdict": "unported",
-      "rustPaths": [],
-      "candidateRustPaths": [
-        "packages/kimi-agent/src/llm/files_upload.rs"
-      ],
-      "evidence": [],
-      "note": "候选落点，待核；匹配仅基于路径/符号/协议名，未验证行为等价",
-      "naReason": "",
-      "lines": 216,
-      "exports": 9,
-      "match": {
-        "score": 6,
-        "reasons": [
-          "stem"
-        ]
-      }
-    },
-    {
-      "unit": "apps/kimi-code/src",
       "tsPath": "generated/vis-web-asset.ts",
       "verdict": "unported",
       "rustPaths": [],
@@ -45835,6 +45710,549 @@
       "naReason": "",
       "lines": 140,
       "exports": 10,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedback.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77 把反馈服务面移入引擎（FeedbackAttachmentLevel/FeedbackSessionPreview/FeedbackAvailability/FeedbackSubmitInput/Result + IFeedbackService，feedback.ts:6-51）。Rust 只有 `locales/*.json` 的反馈文案，无 IFeedbackService/路由/上传实现。"
+      ],
+      "note": "缺失：引擎侧反馈服务契约未移植（sha 632c27af77）。",
+      "naReason": "",
+      "lines": 52,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedback/archive.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77 的 `createFeedbackArchivePath` 在 cache/tmp 下建临时目录并返回清理句柄；Rust 无反馈临时归档路径创建，`app/session_export/zip.rs` 只服务会话导出。"
+      ],
+      "note": "缺失：反馈临时归档未移植。",
+      "naReason": "",
+      "lines": 57,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedback/codebase/filter.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77 的代码库过滤规则（DEFAULT_MAX_FILES=50000、DEFAULT_MAX_FILE_SIZE=50MiB、忽略目录/二进制规则）；Rust 无对应代码库扫描/过滤实现。"
+      ],
+      "note": "缺失：反馈代码库过滤未移植。",
+      "naReason": "",
+      "lines": 91,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedback/codebase/index.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77 的桶文件 re-export packager/scanner/types；Rust 无对应模块。"
+      ],
+      "note": "缺失：反馈代码库桶文件无落点。",
+      "naReason": "",
+      "lines": 4,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedback/codebase/packager.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77 的 `packageCodebase` 把扫描结果打成 repo.zip（受大小/文件数上限）；Rust 无代码库打包实现。"
+      ],
+      "note": "缺失：反馈代码库打包未移植。",
+      "naReason": "",
+      "lines": 91,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedback/codebase/scanner.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77 的 `scanCodebase` 用 git 列举 + 忽略规则 + 上限扫描工作区（3s abort 由 feedbackService 控制）；Rust 无对应扫描器。"
+      ],
+      "note": "缺失：反馈代码库扫描未移植。",
+      "naReason": "",
+      "lines": 219,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedback/codebase/types.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77 的 FeedbackCodebaseFile/ScanResult/LimitExceeded 类型；Rust 无对应类型。"
+      ],
+      "note": "缺失：反馈代码库类型未移植。",
+      "naReason": "",
+      "lines": 20,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedback/upload.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77/2bfcb522be 的分片上传（MAX_ARCHIVE_SIZE、create/complete upload URL、逐片 PUT）；Rust `llm/files_upload.rs` 只处理模型文件上传，不是反馈附件上传。"
+      ],
+      "note": "缺失：反馈附件上传未移植。",
+      "naReason": "",
+      "lines": 208,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/agent-core-v2",
+      "tsPath": "app/auth/feedbackService.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/app/session_export/session_export_service.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 632c27af77/2bfcb522be 的 `FeedbackService` 承接旧 `apps/kimi-code/src/feedback/feedback-attachments.ts` 的附件编排，并新增 availability/submit、session.zip + repo.zip 并行上传、3s 代码库扫描、feedback-upload.log；Rust 只有会话导出服务（且台账仍记为 unported），无反馈提交/附件编排。"
+      ],
+      "note": "缺失：反馈编排未移植（承接旧 feedback-attachments.ts）。",
+      "naReason": "",
+      "lines": 459,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/kap-server",
+      "tsPath": "protocol/conversation.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/transcript/model.rs",
+        "packages/kimi-agent/src/rpc/types.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 2c6264660e 引入 conversation turn/item zod 协议（turn 状态/outcome/end_reason/retry/usage/steps + 7 类 item + turns/item 增量消息，conversation.ts:1-409）。Rust 的 transcript 模型是 turn/step/frame 旧形状（server/transcript/model.rs），无 item 级状态与增量消息。"
+      ],
+      "note": "缺失：conversation turns/items 协议未移植。",
+      "naReason": "",
+      "lines": 409,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/kap-server",
+      "tsPath": "routes/conversation.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/route_sessions.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 e1f0d5c5c8 新增 GET /sessions/{session_id}/agents/{agent_id}/turns（before_ordinal/page_size，1MiB 页上限）；Rust 只有 /sessions/{sid}/transcript 分页，无 per-agent turns 路由。"
+      ],
+      "note": "缺失：conversation turns 路由未移植。",
+      "naReason": "",
+      "lines": 68,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/kap-server",
+      "tsPath": "services/conversation/conversationFeed.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/ws.rs",
+        "packages/kimi-agent/src/server/transcript.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 540df945a6/f6888a4b27 的 ConversationFeed 从完整 wire journal 折叠并订阅实时事件，输出 turns/item.delta 等消息；Rust WS 事件面是 turn/step 事件，无 conversation feed。"
+      ],
+      "note": "缺失：conversation feed 未移植。",
+      "naReason": "",
+      "lines": 620,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/kap-server",
+      "tsPath": "services/conversation/conversationFold.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/transcript.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 2c6264660e/f6888a4b27 的 conversationFold 把 wire 记录折成 turn/item（含 retry、compaction、fork boundary、task notification）；Rust transcript.rs 的 build_items 只折 turn/step/frame，形状不同。"
+      ],
+      "note": "缺失：conversation 折叠未移植。",
+      "naReason": "",
+      "lines": 882,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/kap-server",
+      "tsPath": "services/conversation/conversationItems.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/transcript/model.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 2fc489c3c4 的 conversationItems 负责 item 投影（user/assistant/reasoning/tool_call/notification/compaction/fork_boundary，含 media/agent_refs/answer）；Rust 无 item 投影层。"
+      ],
+      "note": "缺失：conversation item 投影未移植。",
+      "naReason": "",
+      "lines": 458,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/kap-server",
+      "tsPath": "services/conversation/conversationService.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/server/engine.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 2c6264660e/f6888a4b27 的 ConversationService 按会话/agent 维护 feed 生命周期（session resume、main agent、fork 信息、dispose）；Rust 无 per-agent feed 服务。"
+      ],
+      "note": "缺失：conversation 服务未移植。",
+      "naReason": "",
+      "lines": 159,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/kap-server",
+      "tsPath": "services/conversation/taskNotifications.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/agent/task/notification_xml.rs",
+        "packages/kimi-agent/src/server/transcript.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 4306e8396b 的 taskNotifications 复用 NOTIFICATION_TITLE_LABEL/NOTIFICATION_SEVERITY_LABEL 渲染任务通知 item；Rust 有 notification_xml 解析常量但无 conversation task notification item。"
+      ],
+      "note": "缺失：conversation 任务通知未移植。",
+      "naReason": "",
+      "lines": 181,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "packages/pi-tui",
+      "tsPath": "animation-frame.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce 新增 TUI 动画帧时钟（105 行，动画帧对齐时钟）；pi-tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 105,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "components/dialogs/transcript-preview.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 91,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "components/messages/running-title.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 91,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "components/messages/transcript-container.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 517,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "components/messages/transcript-group.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 569,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "theme/color-mix.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 46,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "utils/activity-label.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 27,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "utils/group-view.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 412,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "utils/transcript-items.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 581,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "utils/transcript-projection.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 107,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "utils/transcript-turns.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 31,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src/tui",
+      "tsPath": "utils/turn-timeline.ts",
+      "verdict": "ui",
+      "rustPaths": [],
+      "candidateRustPaths": [],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce/63432ee738 的 TUI transcript 分组/预览/时间线展示文件；tui 是 ui 单元，无引擎对应物。"
+      ],
+      "note": "前端/UI，迁移形态待定。",
+      "naReason": "",
+      "lines": 390,
+      "exports": 0,
+      "match": {
+        "score": 0,
+        "reasons": []
+      }
+    },
+    {
+      "unit": "apps/kimi-code/src",
+      "tsPath": "utils/readonly-bash.ts",
+      "verdict": "unported",
+      "rustPaths": [],
+      "candidateRustPaths": [
+        "packages/kimi-agent/src/tools/bash_exec.rs"
+      ],
+      "evidence": [
+        "2026-11-15 重 pin 分诊：v2 636232d6ce 新增只读 bash 判定（tree-sitter-bash 解析 + 命令白名单，用于把只读调用折叠进 transcript 的 explore 分组，readonly-bash.ts:180）。Rust 引擎无此展示辅助判定；该单元按 TS 宿主整体记 unported。"
+      ],
+      "note": "缺失：TUI 展示用只读命令判定未移植（非引擎行为）。",
+      "naReason": "",
+      "lines": 194,
+      "exports": 0,
       "match": {
         "score": 0,
         "reasons": []

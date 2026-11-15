@@ -1,6 +1,81 @@
 {
   "note": "Red verdict baseline for check-agent-parity. The current red count must not exceed this baseline and every current red path must already be listed here. Other gate failures are never baselined. Update only with bun run check:agent-parity:update after review.",
   "redEntries": [
-
+    {
+      "tsPath": "contextMemory/compactionHandoff.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contextMemory/contextEvents.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contextMemory/contextMemory.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contextMemory/contextMemoryService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contextMemory/contextTranscript.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "contextMemory/loopEventFold.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "fullCompaction/compactionGeneration.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "fullCompaction/compactionUtils.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "fullCompaction/fullCompactionService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llmRequester/llmRequester.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "llmRequester/llmRequesterService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "loop/errors.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "loop/loopService.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "loop/machine/engine.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "loop/machine/requester.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "loop/turnEvents.ts",
+      "verdict": "partial"
+    },
+    {
+      "tsPath": "permissionRules/projectPermissionRules.ts",
+      "verdict": "missing"
+    },
+    {
+      "tsPath": "permissionRules/projectPermissionRulesService.ts",
+      "verdict": "missing"
+    },
+    {
+      "tsPath": "replayBuilder/fold.ts",
+      "verdict": "partial"
+    }
   ]
 }
