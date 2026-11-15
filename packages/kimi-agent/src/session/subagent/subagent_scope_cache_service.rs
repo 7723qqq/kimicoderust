@@ -1,3 +1,7 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::agent::r#loop::r#loop::I_AGENT_LOOP_SERVICE;
+use crate::agent::task::task::I_AGENT_TASK_SERVICE;
+use crate::state::event_dispatcher::I_EVENT_DISPATCHER;
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -8,7 +12,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::json;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{IAgentScopeHandle, ScopeActivation, register_scoped_service};
 use crate::_base::errors::unexpected_error::on_unexpected_error;
 use crate::_base::log::log::ILogService;
@@ -50,7 +54,7 @@ pub struct SessionSubagentScopeCacheService {
     closing: Arc<Mutex<HashSet<String>>>,
     evictions: Arc<Mutex<Shared<BoxFuture<'static, ()>>>>,
     weak: Mutex<Weak<Self>>,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl SessionSubagentScopeCacheService {
@@ -235,7 +239,7 @@ impl SessionSubagentScopeCacheService {
         if self.busy(&handle) {
             return EvictOutcome::Deferred;
         }
-        if let Err(error) = handle.accessor().get::<IEventDispatcher>().flush().await {
+        if let Err(error) = handle.accessor().get(&I_EVENT_DISPATCHER).flush().await {
             self.log.warn(
                 "subagent scope eviction skipped; wire flush failed",
                 Some(json!({ "agentId": agent_id, "error": error.to_string() })),
@@ -296,11 +300,11 @@ impl SessionSubagentScopeCacheService {
     }
 
     fn busy(&self, handle: &Arc<IAgentScopeHandle>) -> bool {
-        let snapshot = handle.accessor().get::<IAgentLoopService>().snapshot();
+        let snapshot = handle.accessor().get(&I_AGENT_LOOP_SERVICE).snapshot();
         if snapshot.state == "running" || snapshot.has_pending_requests {
             return true;
         }
-        !handle.accessor().get::<IAgentTaskService>().list(true).is_empty()
+        !handle.accessor().get(&I_AGENT_TASK_SERVICE).list(true).is_empty()
     }
 }
 

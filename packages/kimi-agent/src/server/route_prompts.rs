@@ -216,7 +216,7 @@ impl HttpServer {
                 {
                     let prompt_id = item["prompt_id"].as_str().map(str::to_string);
                     let message = crate::turn_loop::types::LLMMessage {
-                        role: "user".to_string(),
+                        role: kimi_core::types::Role::User,
                         content: prompt.clone(),
                         blocks: blocks.clone(),
                         tool_calls: Vec::new(),
@@ -329,7 +329,7 @@ impl HttpServer {
                     .take_queued(session_id, std::slice::from_ref(&prompt_id))
                 {
                     let message = crate::turn_loop::types::LLMMessage {
-                        role: "user".to_string(),
+                        role: kimi_core::types::Role::User,
                         content: prompt.clone(),
                         blocks: blocks.clone(),
                         tool_calls: Vec::new(),

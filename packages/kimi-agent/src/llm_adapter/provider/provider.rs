@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::wire::record::WireAsyncError;
 
 pub use crate::app::kosong_config::config_section::{ModelSource, OAuthRef, OAuthStorage};
@@ -58,11 +58,11 @@ pub trait IProviderService: Send + Sync {
     fn on_did_change_providers(
         &self,
         listener: Arc<dyn Fn(ProvidersChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_change_default_provider(
         &self,
         listener: Arc<dyn Fn(DefaultProviderChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn get(&self, name: &str) -> Option<ProviderConfig>;
     fn list(&self) -> ProvidersSection;
     fn get_default_provider(&self) -> Option<String>;

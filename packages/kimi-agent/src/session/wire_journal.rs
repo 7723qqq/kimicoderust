@@ -14,8 +14,8 @@ use crate::native::event_store::{
     WIRE_MIN_READER_VERSION, WIRE_PROTOCOL_VERSION, compare_wire_versions,
 };
 use crate::session::sqlite_store::{SqliteSessionStore, encode_workdir_key};
-use crate::turn_loop::types::{ContentBlock, LLMMessage};
-use kimi_core::types::{MediaKind, ToolCall};
+use crate::turn_loop::types::{ContentPart, LLMMessage};
+use kimi_core::types::ToolCall;
 
 pub const WIRE_FILE_NAME: &str = "wire.jsonl";
 
@@ -1385,7 +1385,7 @@ fn fold_loop_event(history: &mut Vec<LLMMessage>, open: &mut Option<usize>, even
     match event.get("type").and_then(Value::as_str) {
         Some("step.begin") => {
             history.push(LLMMessage {
-                role: "assistant".to_string(),
+                role: kimi_core::types::Role::Assistant,
                 ..Default::default()
             });
             *open = Some(history.len() - 1);
@@ -1407,11 +1407,13 @@ fn fold_loop_event(history: &mut Vec<LLMMessage>, open: &mut Option<usize>, even
                 name: read_wire_string(event, "name").unwrap_or_default(),
                 arguments: tool_arguments(event.get("args")),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             };
-            if let Some(extras) = event.get("extras").filter(|value| !value.is_null()) {
+            if let Some(extras) = event.get("extras").and_then(Value::as_object) {
                 call.extras = Some(extras.clone());
             }
+            call.raw_id = read_wire_string(event, "rawId");
             history[index].tool_calls.push(call);
         }
         Some("tool.result") => {
@@ -1422,7 +1424,7 @@ fn fold_loop_event(history: &mut Vec<LLMMessage>, open: &mut Option<usize>, even
                 .map(output_text)
                 .unwrap_or_default();
             history.push(LLMMessage {
-                role: "tool".to_string(),
+                role: kimi_core::types::Role::Tool,
                 content,
                 tool_call_id: Some(tool_call_id),
                 ..Default::default()
@@ -1446,9 +1448,15 @@ fn fold_loop_event(history: &mut Vec<LLMMessage>, open: &mut Option<usize>, even
 }
 
 fn history_message(message: &Value) -> Option<LLMMessage> {
-    let role = message.get("role").and_then(Value::as_str)?;
+    let role = match message.get("role").and_then(Value::as_str)? {
+        "system" => kimi_core::types::Role::System,
+        "user" => kimi_core::types::Role::User,
+        "assistant" => kimi_core::types::Role::Assistant,
+        "tool" => kimi_core::types::Role::Tool,
+        _ => return None,
+    };
     let mut out = LLMMessage {
-        role: role.to_string(),
+        role,
         ..Default::default()
     };
     match message.get("content") {
@@ -1465,7 +1473,7 @@ fn history_message(message: &Value) -> Option<LLMMessage> {
             let Some(id) = call.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            let mut tool_call = ToolCall {
+            let tool_call = ToolCall {
                 id: id.to_string(),
                 name: call
                     .get("name")
@@ -1473,12 +1481,12 @@ fn history_message(message: &Value) -> Option<LLMMessage> {
                     .unwrap_or_default()
                     .to_string(),
                 arguments: tool_arguments(call.get("arguments")),
-                extras: call.get("extras").filter(|value| !value.is_null()).cloned(),
-                args_parse_error: None,
-            };
-            tool_call.arguments = match tool_call.arguments {
-                Value::Null => json!({}),
-                other => other,
+                extras: call.get("extras").and_then(Value::as_object).cloned(),
+                raw_id: call
+                    .get("rawId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                _stream_index: None,
             };
             out.tool_calls.push(tool_call);
         }
@@ -1494,6 +1502,16 @@ fn history_message(message: &Value) -> Option<LLMMessage> {
             let Some(name) = tool.get("name").and_then(Value::as_str) else {
                 continue;
             };
+            let parameters = match tool.get("parameters") {
+                None => serde_json::Map::new(),
+                Some(Value::Object(parameters)) => parameters.clone(),
+                Some(_) => return None,
+            };
+            let deferred = match tool.get("deferred") {
+                None => None,
+                Some(Value::Bool(true)) => Some(kimi_core::types::Deferred),
+                Some(_) => return None,
+            };
             out.tools.push(kimi_core::types::ToolDescription {
                 name: name.to_string(),
                 description: tool
@@ -1501,8 +1519,8 @@ fn history_message(message: &Value) -> Option<LLMMessage> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                parameters: tool.get("parameters").cloned().unwrap_or(Value::Null),
-                deferred: tool.get("deferred").and_then(Value::as_bool),
+                parameters,
+                deferred,
             });
         }
     }
@@ -1510,91 +1528,20 @@ fn history_message(message: &Value) -> Option<LLMMessage> {
 }
 
 fn apply_content_part(message: &mut LLMMessage, part: &Value) {
-    match part.get("type").and_then(Value::as_str) {
-        Some("text") => {
-            if let Some(text) = part.get("text").and_then(Value::as_str) {
-                message.content.push_str(text);
-            }
-        }
-        Some("think") => {
-            let Some(think) = part.get("think").and_then(Value::as_str) else {
-                return;
-            };
-            message.blocks.push(ContentBlock::Think {
-                think: think.to_string(),
-                encrypted: read_wire_string(part, "encrypted"),
-                details_index: part
-                    .get("detailsIndex")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u32),
-                reasoning_key: read_wire_string(part, "reasoningKey"),
-                details_summary: read_wire_string(part, "detailsSummary"),
-            });
-        }
-        Some("image_url") => {
-            if let Some((url, id, name)) = media_part(part, "imageUrl") {
-                message
-                    .blocks
-                    .push(ContentBlock::ImageUrl { url, id, name });
-            }
-        }
-        Some("audio_url") => {
-            if let Some((url, id, name)) = media_part(part, "audioUrl") {
-                message
-                    .blocks
-                    .push(ContentBlock::AudioUrl { url, id, name });
-            }
-        }
-        Some("video_url") => {
-            if let Some((url, id, name)) = media_part(part, "videoUrl") {
-                message
-                    .blocks
-                    .push(ContentBlock::VideoUrl { url, id, name });
-            }
-        }
-        Some("media_ref") => {
-            let Some(file_id) = read_wire_string(part, "file_id") else {
-                return;
-            };
-            let Some(kind) = part.get("kind").and_then(Value::as_str) else {
-                return;
-            };
-            let kind = match kind {
-                "image" => MediaKind::Image,
-                "video" => MediaKind::Video,
-                "audio" => MediaKind::Audio,
-                _ => return,
-            };
-            message
-                .blocks
-                .push(ContentBlock::MediaRef { file_id, kind });
-        }
-        _ => {}
+    let Ok(block) = serde_json::from_value::<crate::rpc::types::ContentBlock>(part.clone()) else {
+        return;
+    };
+    match crate::llm::wire::provider_block_to_content_part(&block) {
+        ContentPart::Text { text, .. } => message.content.push_str(&text),
+        part => message.blocks.push(part),
     }
 }
 
-fn media_part(part: &Value, key: &str) -> Option<(String, Option<String>, Option<String>)> {
-    let media = match part.get(key) {
-        Some(Value::Object(_)) => part.get(key)?,
-        Some(Value::String(_)) => part,
-        _ => return None,
-    };
-    let url = media.get("url").and_then(Value::as_str)?.to_string();
-    Some((
-        url,
-        media.get("id").and_then(Value::as_str).map(str::to_string),
-        media
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    ))
-}
-
-fn tool_arguments(arguments: Option<&Value>) -> Value {
+fn tool_arguments(arguments: Option<&Value>) -> Option<String> {
     match arguments {
-        None | Some(Value::Null) => json!({}),
-        Some(Value::String(text)) => serde_json::from_str(text).unwrap_or_else(|_| json!(text)),
-        Some(value) => value.clone(),
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(value) => Some(value.to_string()),
     }
 }
 
@@ -1675,7 +1622,7 @@ fn apply_compaction_history(history: &mut Vec<LLMMessage>, record: &Value) {
 
 fn compaction_summary_message(summary: &str) -> LLMMessage {
     LLMMessage {
-        role: "user".to_string(),
+        role: kimi_core::types::Role::User,
         content: crate::compaction::build_compaction_summary_text(summary),
         origin: Some(json!({ "kind": "compaction_summary" })),
         ..Default::default()
@@ -1870,7 +1817,10 @@ mod tests {
         assert_eq!(history[1].role, "assistant");
         assert_eq!(history[1].content, "Hello");
         assert_eq!(history[1].tool_calls[0].id, "call-1");
-        assert_eq!(history[1].tool_calls[0].arguments, json!({ "path": "a" }));
+        assert_eq!(
+            history[1].tool_calls[0].arguments.as_deref(),
+            Some("{\"path\":\"a\"}")
+        );
         assert_eq!(history[2].role, "tool");
         assert_eq!(history[2].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(history[2].content, "body");
@@ -1994,7 +1944,7 @@ mod tests {
         assert_eq!(history[0].content, "look");
         assert!(matches!(
             history[0].blocks.first(),
-            Some(ContentBlock::ImageUrl { url, .. }) if url.starts_with("data:image/png;base64,")
+            Some(ContentPart::ImageUrl { image_url, .. }) if image_url.url.starts_with("data:image/png;base64,")
         ));
     }
 
@@ -2368,12 +2318,12 @@ mod tests {
         assert_eq!(history[0].content, "one");
         assert!(matches!(
             history[0].blocks.first(),
-            Some(ContentBlock::MediaRef { file_id, .. }) if file_id == "file-1"
+            Some(ContentPart::ImageUrl { image_url, .. }) if image_url.url == "kimi-file://file-1"
         ));
         assert_eq!(history[1].content, "answer");
         assert_eq!(history[1].blocks.len(), 1);
         assert!(
-            matches!(&history[1].blocks[0], ContentBlock::Think { think, .. } if think == "why")
+            matches!(&history[1].blocks[0], ContentPart::Think { think, .. } if think == "why")
         );
     }
 
@@ -2936,6 +2886,9 @@ mod tests {
         assert_eq!(
             history[0].tools[0].parameters,
             json!({"type": "object", "properties": {}})
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
         );
     }
 

@@ -14,7 +14,7 @@ use super::snapshot::{
     SNAPSHOT_PRUNE_MIN_OBJECT_AGE_MS,
 };
 use crate::rpc::types::BoxFuture;
-use crate::tool_input_display::ToolInputDisplay;
+use crate::tool_input_display::{FileIoOperation, ToolInputDisplay};
 
 const MAX_PENDING: usize = 512;
 static NEXT_PRUNE_AT: AtomicI64 = AtomicI64::new(0);
@@ -384,7 +384,7 @@ mod tests {
         std::fs::write(workspace.join("src/lib.rs"), "one").unwrap();
         let service = service(&workspace);
         let display = ToolInputDisplay::FileIo {
-            operation: "write".into(),
+            operation: FileIoOperation::Write,
             path: "src/lib.rs".into(),
             detail: None,
             content: Some("two".into()),
@@ -427,7 +427,7 @@ mod tests {
         std::fs::write(workspace.join("src/lib.rs"), "one").unwrap();
         let service = service(&workspace);
         let display = ToolInputDisplay::FileIo {
-            operation: "edit".into(),
+            operation: FileIoOperation::Edit,
             path: "src/lib.rs".into(),
             detail: None,
             content: None,
@@ -450,7 +450,7 @@ mod tests {
         std::fs::write(workspace.join("src/lib.rs"), "one").unwrap();
         let service = service(&workspace);
         let display = ToolInputDisplay::FileIo {
-            operation: "write".into(),
+            operation: FileIoOperation::Write,
             path: "src/lib.rs".into(),
             detail: None,
             content: None,
@@ -472,7 +472,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let service = service(&workspace);
         let display = ToolInputDisplay::FileIo {
-            operation: "write".into(),
+            operation: FileIoOperation::Write,
             path: "src/absent.rs".into(),
             detail: None,
             content: None,

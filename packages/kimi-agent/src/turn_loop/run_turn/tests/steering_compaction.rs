@@ -37,10 +37,9 @@ async fn test_goal_steering_injected_into_system_prompt() {
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 5,
-                        output_tokens: 3,
-                        total_tokens: 8,
-                        ..Default::default()
+                        input_other: 5,
+                        output: 3,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -77,7 +76,7 @@ async fn test_goal_steering_injected_into_system_prompt() {
         turn_id: "test-steering".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -128,9 +127,10 @@ async fn test_max_steps_enforcement() {
         tool_responses: vec![ToolCall {
             id: "loop".into(),
             name: "read".into(),
-            arguments: serde_json::json!({"path": "/x"}),
+            arguments: Some(serde_json::json!({"path": "/x"}).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -156,7 +156,7 @@ async fn test_max_steps_enforcement() {
         turn_id: "test-max-steps".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "loop".into(),
             ..Default::default()
         }],
@@ -338,10 +338,9 @@ async fn test_context_compaction_before_llm_call() {
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        total_tokens: 2,
-                        ..Default::default()
+                        input_other: 1,
+                        output: 1,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -364,17 +363,17 @@ async fn test_context_compaction_before_llm_call() {
         llm: &llm,
         messages: vec![
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: big.clone(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: big.clone(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: big.clone(),
                 ..Default::default()
             },
@@ -502,10 +501,9 @@ async fn test_auto_compaction_summary_carries_the_todo_list() {
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        total_tokens: 2,
-                        ..Default::default()
+                        input_other: 1,
+                        output: 1,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -542,17 +540,17 @@ async fn test_auto_compaction_summary_carries_the_todo_list() {
         llm: &llm,
         messages: vec![
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: big.clone(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: big.clone(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: big.clone(),
                 ..Default::default()
             },

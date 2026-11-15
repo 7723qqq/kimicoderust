@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::callbacks::HostCallbacks;
 use crate::rpc::types::{
-    AskQuestionRequest, AskQuestionResponse, BoxFuture, CheckpointRequest, ContentBlock,
+    AskQuestionRequest, AskQuestionResponse, BoxFuture, CheckpointRequest,
     ListToolsResponse, LlmChatRequest, LlmChatResponse, PermissionCheckRequest, PermissionDecision,
     StateReadRequest, StateReadResponse, StateWriteRequest, StateWriteResponse, ToolExecuteRequest,
     ToolExecuteResponse,
@@ -164,7 +164,7 @@ fn render_tool_images(response: &ToolExecuteResponse) {
         return;
     };
     for block in &delivery.blocks {
-        let ContentBlock::Image {
+        let crate::rpc::types::ContentBlock::Image {
             data,
             media_type,
             name,

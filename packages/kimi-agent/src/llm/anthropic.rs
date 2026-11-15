@@ -1,8 +1,9 @@
 use serde_json::{Value, json};
 
 use crate::llm::wire::{StreamDelta, WireMessage};
-use crate::rpc::types::TokenUsage;
-use kimi_core::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
+use kimi_core::types::TokenUsage;
+use crate::rpc::types::ContentBlock;
+use kimi_core::types::{ContentPart, LLMChatResponse, ToolCall, ToolInfo};
 
 const CACHEABLE_TYPES: [&str; 8] = [
     "text",
@@ -128,7 +129,7 @@ pub fn build_request_for_provider(
                 let mut blocks: Vec<Value> = Vec::new();
                 for b in &m.blocks {
                     if matches!(b, ContentBlock::Think { .. }) {
-                        blocks.push(project_block(b));
+                        blocks.push(project_block(b)?);
                     }
                 }
                 if !m.content.is_empty() {
@@ -139,7 +140,7 @@ pub fn build_request_for_provider(
                         "type": "tool_use",
                         "id": tc.id,
                         "name": tc.name,
-                        "input": tc.arguments,
+                        "input": crate::llm::tool_args::parse_tool_arguments(tc.arguments.as_deref()).data,
                     }));
                 }
                 msgs.push(json!({ "role": "assistant", "content": blocks }));
@@ -149,7 +150,7 @@ pub fn build_request_for_provider(
                 let content = if m.blocks.is_empty() {
                     json!(m.content)
                 } else {
-                    json!(tool_result_content(&m.blocks))
+                    json!(tool_result_content(&m.blocks)?)
                 };
                 let block = json!({
                     "type": "tool_result",
@@ -170,7 +171,7 @@ pub fn build_request_for_provider(
                 let content: Vec<Value> = if m.blocks.is_empty() {
                     vec![json!({ "type": "text", "text": m.content })]
                 } else {
-                    m.blocks.iter().map(project_block).collect()
+                    m.blocks.iter().map(project_block).collect::<Result<_, _>>()?
                 };
                 if let Some(last_msg) = msgs.last_mut()
                     && last_msg.get("role").and_then(|r| r.as_str()) == Some("user")
@@ -489,8 +490,8 @@ fn parse_anthropic_model_version(model: &str) -> Option<(String, u32, Option<u32
     ))
 }
 
-fn project_block(b: &ContentBlock) -> Value {
-    match b {
+fn project_block(b: &ContentBlock) -> Result<Value, String> {
+    let value = match b {
         ContentBlock::Text { text, .. } => json!({ "type": "text", "text": text }),
         ContentBlock::Image {
             media_type, data, ..
@@ -521,6 +522,24 @@ fn project_block(b: &ContentBlock) -> Value {
                 })
             }
         }
+        ContentBlock::DocumentUrl {
+            url,
+            mime_type,
+            ..
+        } => {
+            if !url.starts_with("data:") {
+                json!({ "type": "document", "source": { "type": "url", "url": url } })
+            } else if let Some((declared, data)) = url[5..].split_once(";base64,") {
+                let declared = declared.trim();
+                let media_type = if declared.is_empty() { mime_type } else { declared };
+                json!({
+                    "type": "document",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                })
+            } else {
+                return Err(format!("Invalid data URL for document: {url}"));
+            }
+        }
         ContentBlock::Think {
             think, encrypted, ..
         } => {
@@ -534,10 +553,11 @@ fn project_block(b: &ContentBlock) -> Value {
             "type": "text",
             "text": crate::llm::media_resolver::unavailable_text(*kind),
         }),
-    }
+    };
+    Ok(value)
 }
 
-fn tool_result_content(blocks: &[ContentBlock]) -> Vec<Value> {
+fn tool_result_content(blocks: &[ContentBlock]) -> Result<Vec<Value>, String> {
     blocks
         .iter()
         .filter(|block| !matches!(block, ContentBlock::Think { .. }))
@@ -563,12 +583,12 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                     .get("signature")
                     .and_then(|x| x.as_str())
                     .map(|s| s.to_string());
-                thinking.push(ContentBlock::Think {
+                thinking.push(ContentPart::Think {
                     think: think.to_string(),
                     encrypted: signature,
                     details_index: None,
                     reasoning_key: None,
-                    details_summary: None,
+                    hidden: None,
                 });
             }
             Some("redacted_thinking") => {
@@ -576,12 +596,12 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                     .get("data")
                     .and_then(|x| x.as_str())
                     .map(|s| s.to_string());
-                thinking.push(ContentBlock::Think {
+                thinking.push(ContentPart::Think {
                     think: String::new(),
                     encrypted: data,
                     details_index: None,
                     reasoning_key: None,
-                    details_summary: None,
+                    hidden: None,
                 });
             }
             Some("text") => {
@@ -604,9 +624,10 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                 tool_calls.push(ToolCall {
                     id,
                     name,
-                    arguments,
+                    arguments: Some(arguments.to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 });
             }
             _ => {}
@@ -622,22 +643,22 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
         .get("usage")
         .and_then(|u| u.get("input_tokens"))
         .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
     let output_tokens = v
         .get("usage")
         .and_then(|u| u.get("output_tokens"))
         .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
     let input_cache_read = v
         .get("usage")
         .and_then(|u| u.get("cache_read_input_tokens"))
         .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
     let input_cache_creation = v
         .get("usage")
         .and_then(|u| u.get("cache_creation_input_tokens"))
         .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
     let input_tokens = raw_input;
 
     Ok(LLMChatResponse {
@@ -646,14 +667,11 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
         tool_calls,
         finish_reason,
         usage: TokenUsage {
-            input_tokens,
-            output_tokens,
-            total_tokens: input_tokens
-                .saturating_add(input_cache_read)
-                .saturating_add(input_cache_creation)
-                .saturating_add(output_tokens),
+            input_other: input_tokens,
+            output: output_tokens,
             input_cache_read,
             input_cache_creation,
+            raw: v.get("usage").and_then(|usage| usage.as_object()).cloned(),
         },
         timing: None,
     })
@@ -712,19 +730,20 @@ impl StreamAccumulator {
         match event_type {
             "message_start" => {
                 if let Some(usage) = v.get("message").and_then(|m| m.get("usage")) {
+                    self.usage.raw = usage.as_object().cloned();
                     let raw_input = usage
                         .get("input_tokens")
                         .and_then(|x| x.as_u64())
-                        .unwrap_or(0) as u32;
+                        .unwrap_or(0);
                     self.usage.input_cache_read = usage
                         .get("cache_read_input_tokens")
                         .and_then(|x| x.as_u64())
-                        .unwrap_or(0) as u32;
+                        .unwrap_or(0);
                     self.usage.input_cache_creation = usage
                         .get("cache_creation_input_tokens")
                         .and_then(|x| x.as_u64())
-                        .unwrap_or(0) as u32;
-                    self.usage.input_tokens = raw_input;
+                        .unwrap_or(0);
+                    self.usage.input_other = raw_input;
                 }
                 None
             }
@@ -839,7 +858,7 @@ impl StreamAccumulator {
                     .and_then(|u| u.get("output_tokens"))
                     .and_then(|x| x.as_u64())
                 {
-                    self.usage.output_tokens = out as u32;
+                    self.usage.output = out;
                 }
                 None
             }
@@ -847,13 +866,7 @@ impl StreamAccumulator {
         }
     }
 
-    pub fn finish(mut self) -> LLMChatResponse {
-        self.usage.total_tokens = self
-            .usage
-            .input_tokens
-            .saturating_add(self.usage.input_cache_read)
-            .saturating_add(self.usage.input_cache_creation)
-            .saturating_add(self.usage.output_tokens);
+    pub fn finish(self) -> LLMChatResponse {
         let mut thinking = Vec::new();
         let mut tool_calls = Vec::new();
 
@@ -864,12 +877,12 @@ impl StreamAccumulator {
                     signature,
                 } => {
                     if !think.is_empty() || signature.is_some() {
-                        thinking.push(ContentBlock::Think {
+                        thinking.push(ContentPart::Think {
                             think,
                             encrypted: signature,
                             details_index: None,
+                            hidden: None,
                             reasoning_key: None,
-                            details_summary: None,
                         });
                     }
                 }
@@ -878,14 +891,13 @@ impl StreamAccumulator {
                     name,
                     input_json,
                 } if !name.is_empty() => {
-                    let (arguments, args_parse_error) =
-                        crate::llm::tool_args::parse_tool_arguments(Some(input_json.as_str()));
                     tool_calls.push(ToolCall {
                         id,
                         name,
-                        arguments,
+                        arguments: Some(input_json),
                         extras: None,
-                        args_parse_error,
+                        raw_id: None,
+                        _stream_index: None,
                     });
                 }
                 _ => {}
@@ -918,9 +930,10 @@ mod tests {
                 vec![ToolCall {
                     id: "tu_1".into(),
                     name: "Read".into(),
-                    arguments: json!({ "path": "a.txt" }),
+                    arguments: Some(json!({ "path": "a.txt" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
             ),
             WireMessage::tool_result("tu_1", "file body"),
@@ -974,16 +987,18 @@ mod tests {
                     ToolCall {
                         id: "call_1".into(),
                         name: "Read".into(),
-                        arguments: json!({ "path": "a.txt" }),
+                        arguments: Some(json!({ "path": "a.txt" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     },
                     ToolCall {
                         id: "call_2".into(),
                         name: "Read".into(),
-                        arguments: json!({ "path": "b.txt" }),
+                        arguments: Some(json!({ "path": "b.txt" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     },
                 ],
             ),
@@ -1025,9 +1040,10 @@ mod tests {
                 vec![ToolCall {
                     id: "tu_1".into(),
                     name: "readMedia".into(),
-                    arguments: json!({ "path": "a.png" }),
+                    arguments: Some(json!({ "path": "a.png" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
             ),
             WireMessage {
@@ -1135,10 +1151,10 @@ mod tests {
         assert_eq!(parsed.tool_calls.len(), 1);
         assert_eq!(parsed.tool_calls[0].id, "tu_9");
         assert_eq!(parsed.tool_calls[0].name, "Grep");
-        assert_eq!(parsed.tool_calls[0].arguments, json!({ "q": "foo" }));
-        assert_eq!(parsed.usage.input_tokens, 20);
-        assert_eq!(parsed.usage.output_tokens, 8);
-        assert_eq!(parsed.usage.total_tokens, 28);
+        assert_eq!(parsed.tool_calls[0].arguments.as_deref(), Some("{\"q\":\"foo\"}"));
+        assert_eq!(parsed.usage.input_other, 20);
+        assert_eq!(parsed.usage.output, 8);
+        assert_eq!(parsed.usage.measured_context_tokens(), 28);
     }
 
     #[test]
@@ -1156,8 +1172,8 @@ mod tests {
         let parsed = parse_response(&v).unwrap();
         assert_eq!(parsed.usage.input_cache_read, 40);
         assert_eq!(parsed.usage.input_cache_creation, 5);
-        assert_eq!(parsed.usage.input_tokens, 50);
-        assert_eq!(parsed.usage.total_tokens, 101);
+        assert_eq!(parsed.usage.input_other, 50);
+        assert_eq!(parsed.usage.measured_context_tokens(), 101);
     }
 
     #[test]
@@ -1200,7 +1216,7 @@ mod tests {
 
     #[test]
     fn build_request_projects_image_blocks() {
-        use kimi_core::types::ContentBlock;
+        use crate::rpc::types::ContentBlock;
         let msg = WireMessage::with_blocks(
             "user",
             vec![
@@ -1227,7 +1243,7 @@ mod tests {
 
     #[test]
     fn build_request_degrades_audio_and_sends_video_blocks() {
-        use kimi_core::types::ContentBlock;
+        use crate::rpc::types::ContentBlock;
         let msg = WireMessage::with_blocks(
             "user",
             vec![
@@ -1285,10 +1301,10 @@ mod tests {
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].id, "tu_1");
         assert_eq!(resp.tool_calls[0].name, "Read");
-        assert_eq!(resp.tool_calls[0].arguments, json!({ "path": "a.txt" }));
-        assert_eq!(resp.usage.input_tokens, 25);
-        assert_eq!(resp.usage.output_tokens, 9);
-        assert_eq!(resp.usage.total_tokens, 34);
+        assert_eq!(resp.tool_calls[0].arguments.as_deref(), Some("{\"path\": \"a.txt\"}"));
+        assert_eq!(resp.usage.input_other, 25);
+        assert_eq!(resp.usage.output, 9);
+        assert_eq!(resp.usage.measured_context_tokens(), 34);
     }
 
     #[test]
@@ -1307,8 +1323,8 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.usage.input_cache_read, 40);
         assert_eq!(resp.usage.input_cache_creation, 5);
-        assert_eq!(resp.usage.input_tokens, 50);
-        assert_eq!(resp.usage.total_tokens, 104);
+        assert_eq!(resp.usage.input_other, 50);
+        assert_eq!(resp.usage.measured_context_tokens(), 104);
     }
 
     #[test]
@@ -1352,12 +1368,12 @@ mod tests {
         assert_eq!(resp.thinking.len(), 1);
         assert_eq!(
             resp.thinking[0],
-            ContentBlock::Think {
+            ContentPart::Think {
                 think: "Let's calculate...".into(),
                 encrypted: Some("sig_abc123".into()),
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             }
         );
     }
@@ -1387,12 +1403,12 @@ mod tests {
         assert_eq!(parsed.thinking.len(), 1);
         assert_eq!(
             parsed.thinking[0],
-            ContentBlock::Think {
+            ContentPart::Think {
                 think: "Step-by-step reasoning".into(),
                 encrypted: Some("sig_xyz".into()),
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             }
         );
     }
@@ -1416,19 +1432,19 @@ mod tests {
         assert_eq!(
             parsed.thinking,
             vec![
-                ContentBlock::Think {
+                ContentPart::Think {
                     think: String::new(),
                     encrypted: Some("encrypted_blob".into()),
                     details_index: None,
                     reasoning_key: None,
-                    details_summary: None,
+                    hidden: None,
                 },
-                ContentBlock::Think {
+                ContentPart::Think {
                     think: "visible".into(),
                     encrypted: Some("sig_1".into()),
                     details_index: None,
                     reasoning_key: None,
-                    details_summary: None,
+                    hidden: None,
                 },
             ],
             "the redacted block must survive, in wire order, beside the signed one"
@@ -1467,12 +1483,12 @@ mod tests {
         assert_eq!(delta, None, "a redacted block has no text to stream");
         assert_eq!(
             acc.finish().thinking,
-            vec![ContentBlock::Think {
+            vec![ContentPart::Think {
                 think: String::new(),
                 encrypted: Some("encrypted_blob".into()),
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             }]
         );
     }
@@ -1508,11 +1524,11 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.content, "hello");
         assert!(resp.finish_reason.is_none());
-        assert_eq!(resp.usage.total_tokens, 0);
+        assert_eq!(resp.usage.measured_context_tokens(), 0);
     }
 
     #[test]
-    fn truncated_tool_use_input_keeps_the_call_and_its_reason() {
+    fn truncated_tool_use_input_keeps_the_raw_call_for_the_executor() {
         let mut acc = StreamAccumulator::default();
         acc.feed(&json!({
             "type": "content_block_start",
@@ -1530,10 +1546,10 @@ mod tests {
             1,
             "the call survives its own parse failure"
         );
-        assert_eq!(resp.tool_calls[0].arguments, json!({}));
-        assert!(
-            resp.tool_calls[0].args_parse_error.is_some(),
-            "the reason must travel with the call so the loop can report it"
+        assert_eq!(
+            resp.tool_calls[0].arguments.as_deref(),
+            Some("{\"command\": \"ech"),
+            "the executor receives the original malformed text"
         );
     }
 
@@ -1555,7 +1571,7 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "Read");
-        assert_eq!(resp.tool_calls[0].arguments["path"], "a.txt");
+        assert_eq!(resp.tool_calls[0].arguments.as_deref(), Some("{\"path\": \"a.txt\"}"));
     }
 
     #[test]
@@ -1849,9 +1865,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "call_ls".into(),
                     name: "glob".into(),
-                    arguments: json!({ "pattern": "*.rs" }),
+                    arguments: Some(json!({ "pattern": "*.rs" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 tool_call_id: None,
                 tools: Vec::new(),
@@ -1894,8 +1911,8 @@ mod tests {
                     think: "still reasoning".into(),
                     encrypted: Some("sig-abc".into()),
                     details_index: None,
+                    hidden: None,
                     reasoning_key: None,
-                    details_summary: None,
                 }],
             ),
         ];
@@ -1920,9 +1937,10 @@ mod tests {
                     vec![ToolCall {
                         id: "call_1".into(),
                         name: "glob".into(),
-                        arguments: json!({ "pattern": "*.rs" }),
+                        arguments: Some(json!({ "pattern": "*.rs" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                 )],
             ),
@@ -1965,8 +1983,8 @@ mod tests {
                     think: why.into(),
                     encrypted: Some("sig-abc".into()),
                     details_index: None,
+                    hidden: None,
                     reasoning_key: None,
-                    details_summary: None,
                 }],
             )
         };
@@ -2037,14 +2055,15 @@ mod tests {
                 encrypted: Some("sig-abc".into()),
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             }],
             tool_calls: vec![ToolCall {
                 id: "call_ls".into(),
                 name: "glob".into(),
-                arguments: json!({ "pattern": "*.rs" }),
+                arguments: Some(json!({ "pattern": "*.rs" }).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             tool_call_id: None,
             tools: Vec::new(),

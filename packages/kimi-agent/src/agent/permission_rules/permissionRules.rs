@@ -1,6 +1,11 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::interaction::approval::ApprovalResponse;
+use crate::wire::record::WireAsyncError;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,9 +48,14 @@ pub struct PermissionRule {
     pub reason: Option<String>,
 }
 
+#[async_trait]
 pub trait IAgentPermissionRulesService: Send + Sync {
     fn rules(&self) -> Vec<PermissionRule>;
     fn session_approval_rule_patterns(&self) -> Vec<String>;
-    fn add_rules(&self, rules: &[PermissionRule]);
+    async fn add_rules(&self, rules: &[PermissionRule]) -> Result<(), WireAsyncError>;
     fn record_approval_result(&self, record: PermissionApprovalResultRecord);
 }
+
+
+pub static I_AGENT_PERMISSION_RULES_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentPermissionRulesService>>> =
+    LazyLock::new(|| create_decorator("agentPermissionRulesService"));

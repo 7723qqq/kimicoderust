@@ -11,7 +11,9 @@ use serde_json::json;
 
 use crate::_base::log::log::ILogService;
 use crate::persistence::interface::atomic_document_store::IAtomicDocumentStore;
-use crate::persistence::interface::query_store::{Checkpoint, IQueryStore, IndexDef, WriteOp};
+use crate::persistence::interface::query_store::{
+    Checkpoint, IQueryStore, IQueryStoreExt, IndexDef, WriteOp,
+};
 use crate::persistence::interface::storage::IFileSystemStorageService;
 use crate::wire::record::WireAsyncError;
 

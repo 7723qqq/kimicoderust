@@ -1,3 +1,4 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -11,7 +12,7 @@ use futures_util::FutureExt;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::safely_call_listener;
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::paths::subtree_watch_filter;
@@ -78,7 +79,7 @@ struct DirsState {
     change_batch_depth: usize,
     change_pending: bool,
     ephemeral_refs: IndexMap<String, usize>,
-    local_config_watcher: Option<Box<dyn IDisposable>>,
+    local_config_watcher: Option<DisposableRef>,
     listeners: IndexMap<u64, Arc<dyn Fn() + Send + Sync>>,
     next_listener_id: u64,
     watch_generation: u64,
@@ -95,7 +96,7 @@ struct WorkspaceDirsServiceInner {
     follows_primary: bool,
     state: Arc<Mutex<DirsState>>,
     ready: Mutex<Option<ReadyFuture>>,
-    _store_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    _store_subscription: Mutex<Option<DisposableRef>>,
 }
 
 #[derive(Clone)]
@@ -241,11 +242,11 @@ impl WorkspaceDirsService {
         self.enqueue_with(move |service| async move { service.apply_add_dir(input).await })
     }
 
-    pub fn merge_additional_dirs(&self, base_dir: &str, dirs: &[String]) -> BoxFuture<'static, Result<Box<dyn IDisposable>, WireAsyncError>> {
+    pub fn merge_additional_dirs(&self, base_dir: &str, dirs: &[String]) -> BoxFuture<'static, Result<DisposableRef, WireAsyncError>> {
         let base_dir = base_dir.to_string();
         let dirs = dirs.to_vec();
         if dirs.is_empty() {
-            return async { Ok(to_disposable(|| {})) }.boxed();
+            return async { Ok(Arc::from(to_disposable(|| {}))) }.boxed();
         }
         self.enqueue_with(move |service| async move {
             let resolved = service
@@ -259,7 +260,7 @@ impl WorkspaceDirsService {
             let released = Arc::new(AtomicBool::new(false));
             let released_sink = released.clone();
             let weak = Arc::downgrade(&service.inner);
-            Ok(to_disposable(move || {
+            Ok(Arc::from(to_disposable(move || {
                 if released_sink.swap(true, Ordering::Relaxed) {
                     return;
                 }
@@ -270,7 +271,7 @@ impl WorkspaceDirsService {
                     }
                 }
                 let _ = released;
-            }))
+            })))
         })
     }
 
@@ -590,7 +591,7 @@ impl WorkspaceDirsService {
         .boxed()
     }
 
-    pub fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             if state.is_disposed {
@@ -661,7 +662,7 @@ impl IWorkspaceDirs for WorkspaceDirsService {
         WorkspaceDirsService::primary_by_workspace(self)
     }
 
-    fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef {
         WorkspaceDirsService::on_did_change(self, listener)
     }
 
@@ -669,7 +670,7 @@ impl IWorkspaceDirs for WorkspaceDirsService {
         WorkspaceDirsService::add_dir(self, input)
     }
 
-    fn merge_additional_dirs(&self, base_dir: &str, dirs: &[String]) -> BoxFuture<'static, Result<Box<dyn IDisposable>, WireAsyncError>> {
+    fn merge_additional_dirs(&self, base_dir: &str, dirs: &[String]) -> BoxFuture<'static, Result<DisposableRef, WireAsyncError>> {
         WorkspaceDirsService::merge_additional_dirs(self, base_dir, dirs)
     }
 
@@ -692,7 +693,7 @@ impl ISessionWorkspaceInfo for WorkspaceSessionInfo {
         self.service.ready().await
     }
 
-    fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef {
         self.service.on_did_change(listener)
     }
 

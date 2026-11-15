@@ -72,10 +72,7 @@ fn parse_raw_usage(usage: Option<&AnthropicRawUsage>) -> Option<TokenUsagePatch>
         output: usage.output_tokens,
         input_cache_read: usage.cache_read_input_tokens,
         input_cache_creation: usage.cache_creation_input_tokens,
-    })
-    .map(|mut patch| {
-        patch.raw = Some(raw);
-        patch
+        raw: Some(raw),
     })
 }
 

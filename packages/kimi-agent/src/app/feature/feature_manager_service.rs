@@ -13,7 +13,7 @@ use crate::_base::di::fiber::{
     Fiber, FiberHandle, FiberProvideOptions, FiberState, ServiceClassRecipe, ServiceRecipe,
 };
 use crate::_base::di::instantiation::ServiceIdentifier;
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::wire::record::WireAsyncError;
@@ -144,7 +144,7 @@ impl FeatureManagerService {
     pub fn on_did_change_units(
         &self,
         listener: Arc<dyn Fn() + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().push((id, listener));
         let listeners = Arc::downgrade(&self.listeners);
@@ -203,7 +203,7 @@ impl IFeatureManager for FeatureManagerService {
         FeatureManagerService::contributed_services(self)
     }
 
-    fn on_did_change_units(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_change_units(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef {
         FeatureManagerService::on_did_change_units(self, listener)
     }
 }

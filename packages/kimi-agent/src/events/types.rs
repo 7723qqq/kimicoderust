@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use kimi_ui_core::{SeqSpan, StreamKind};
 
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -77,6 +77,8 @@ pub enum EngineEvent {
         name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         arguments_part: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<u32>,
     },
     #[serde(rename = "tool.call.started")]
     ToolCallStarted {
@@ -476,6 +478,7 @@ mod tests {
                 tool_call_id: "c".into(),
                 name: None,
                 arguments_part: None,
+                block: None,
             },
             EngineEvent::ToolCallStarted {
                 agent_id: "main".into(),

@@ -6,6 +6,7 @@ pub use crate::prompt::skills_renderer::{
 use serde_json::Map;
 use serde_json::Value;
 
+use crate::_base::utils::xml_escape::escape_xml;
 use crate::human::agent::origin::prompt_display_text_from_content_parts;
 use crate::human::llm::message::ContentPart;
 
@@ -136,12 +137,4 @@ fn is_js_whitespace(character: char) -> bool {
             | '\u{3000}'
             | '\u{feff}'
     )
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }

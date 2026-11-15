@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::types::TokenUsage;
+pub use kimi_core::types::TokenUsage;
 use crate::tool_input_display::ToolInputDisplay;
 
 pub use crate::rpc::types::{
-    ContentBlock, GoalContext, GoalStatus, TelemetryContext, ToolDelivery, ToolInfo,
+    ContentPart, GoalContext, GoalStatus, Role, TelemetryContext, ToolInfo,
 };
+pub use kimi_core::types::ToolDelivery;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnResult {
@@ -102,9 +103,7 @@ pub enum LoopTurnStopReason {
     MaxSteps,
 }
 
-pub use kimi_core::types::{
-    ArgsParseError, LLM, LLMChatParams, LLMChatResponse, LLMMessage, ToolCall,
-};
+pub use kimi_core::types::{LLM, LLMChatParams, LLMChatResponse, LLMMessage, ToolCall};
 
 pub enum ToolExecution {
     Runnable(RunnableToolExecution),
@@ -149,7 +148,7 @@ pub struct ExecutableToolResult {
 
     pub delivery: Option<ToolDelivery>,
 
-    pub parts: Vec<ContentBlock>,
+    pub parts: Vec<ContentPart>,
 
     pub display: Option<Box<ToolInputDisplay>>,
 
@@ -714,7 +713,7 @@ pub struct StepResult {
 
     pub content: String,
 
-    pub thinking: Vec<ContentBlock>,
+    pub thinking: Vec<ContentPart>,
 
     pub attempts: u32,
 

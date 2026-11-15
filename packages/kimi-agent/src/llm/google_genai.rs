@@ -1,8 +1,9 @@
 use serde_json::{Value, json};
 
 use crate::llm::wire::{StreamDelta, WireMessage};
-use crate::rpc::types::TokenUsage;
-use kimi_core::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
+use kimi_core::types::TokenUsage;
+use crate::rpc::types::ContentBlock;
+use kimi_core::types::{ContentPart, LLMChatResponse, ToolCall, ToolInfo};
 
 pub fn build_request(
     messages: &[WireMessage],
@@ -128,10 +129,11 @@ pub fn build_request_for_model(
                 }
                 for tc in &m.tool_calls {
                     tool_name_by_id.insert(tc.id.clone(), tc.name.clone());
+                    let args = crate::llm::tool_args::parse_tool_arguments(tc.arguments.as_deref()).data;
                     let mut fc = json!({
                         "functionCall": {
                             "name": tc.name,
-                            "args": tc.arguments,
+                            "args": args,
                         }
                     });
                     if let Some(extras) = &tc.extras
@@ -208,6 +210,13 @@ pub fn build_request_for_model(
                         }
                         ContentBlock::VideoUrl { url, .. } => {
                             parts.push(convert_media_url(url, "video/mp4"));
+                        }
+                        ContentBlock::DocumentUrl {
+                            url,
+                            mime_type,
+                            ..
+                        } => {
+                            parts.push(convert_media_url(url, mime_type));
                         }
                         ContentBlock::Think { .. } => {}
                         ContentBlock::MediaRef { kind, .. } => parts.push(json!({
@@ -339,6 +348,11 @@ fn tool_media_part(block: &ContentBlock) -> Option<Value> {
         ContentBlock::ImageUrl { url, .. } => Some(convert_media_url(url, "image/jpeg")),
         ContentBlock::AudioUrl { url, .. } => Some(convert_media_url(url, "audio/mpeg")),
         ContentBlock::VideoUrl { url, .. } => Some(convert_media_url(url, "video/mp4")),
+        ContentBlock::DocumentUrl {
+            url,
+            mime_type,
+            ..
+        } => Some(convert_media_url(url, mime_type)),
         ContentBlock::MediaRef { kind, .. } => Some(json!({
             "text": crate::llm::media_resolver::unavailable_text(*kind),
         })),
@@ -404,12 +418,12 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
 
             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                 if is_thought {
-                    thinking.push(ContentBlock::Think {
+                    thinking.push(ContentPart::Think {
                         think: text.to_string(),
                         encrypted: None,
                         details_index: None,
                         reasoning_key: None,
-                        details_summary: None,
+                        hidden: None,
                     });
                 } else {
                     content.push_str(text);
@@ -429,13 +443,20 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                     .get("thoughtSignature")
                     .or_else(|| part.get("thought_signature"))
                     .and_then(|s| s.as_str())
-                    .map(|sig| json!({ "thought_signature_b64": sig }));
+                    .map(|sig| {
+                        serde_json::Map::from_iter([(
+                            "thought_signature_b64".to_string(),
+                            Value::String(sig.to_string()),
+                        )])
+                    });
+                let raw_id = fc.get("id").and_then(Value::as_str).map(str::to_string);
                 tool_calls.push(ToolCall {
                     id,
                     name: name.to_string(),
-                    arguments,
+                    arguments: Some(arguments.to_string()),
                     extras,
-                    args_parse_error: None,
+                    raw_id,
+                    _stream_index: None,
                 });
             }
         }
@@ -457,32 +478,23 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
     let prompt_tokens = usage
         .and_then(|u| u.get("promptTokenCount"))
         .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
     let output_tokens = usage
         .and_then(|u| u.get("candidatesTokenCount"))
         .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
     let input_cache_read = usage
         .and_then(|u| u.get("cachedContentTokenCount"))
         .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
     let input_tokens = prompt_tokens.saturating_sub(input_cache_read);
-    let total_tokens = usage
-        .and_then(|u| u.get("totalTokenCount"))
-        .and_then(|x| x.as_u64())
-        .map(|t| t as u32)
-        .unwrap_or_else(|| {
-            input_tokens
-                .saturating_add(input_cache_read)
-                .saturating_add(output_tokens)
-        });
 
     TokenUsage {
-        input_tokens,
-        output_tokens,
-        total_tokens,
+        input_other: input_tokens,
+        output: output_tokens,
         input_cache_read,
         input_cache_creation: 0,
+        raw: usage.and_then(|usage| usage.as_object()).cloned(),
     }
 }
 
@@ -564,13 +576,20 @@ impl StreamAccumulator {
                     .get("thoughtSignature")
                     .or_else(|| part.get("thought_signature"))
                     .and_then(|s| s.as_str())
-                    .map(|sig| json!({ "thought_signature_b64": sig }));
+                    .map(|sig| {
+                        serde_json::Map::from_iter([(
+                            "thought_signature_b64".to_string(),
+                            Value::String(sig.to_string()),
+                        )])
+                    });
+                let raw_id = fc.get("id").and_then(Value::as_str).map(str::to_string);
                 self.tool_calls.push(ToolCall {
                     id,
                     name: name.to_string(),
-                    arguments,
+                    arguments: Some(arguments.to_string()),
                     extras,
-                    args_parse_error: None,
+                    raw_id,
+                    _stream_index: None,
                 });
             }
         }
@@ -581,12 +600,12 @@ impl StreamAccumulator {
     pub fn finish(self) -> LLMChatResponse {
         let mut thinking = Vec::new();
         if !self.thinking.is_empty() {
-            thinking.push(ContentBlock::Think {
+            thinking.push(ContentPart::Think {
                 think: self.thinking,
                 encrypted: None,
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             });
         }
 
@@ -806,9 +825,10 @@ mod tests {
                 vec![ToolCall {
                     id: "call_1".into(),
                     name: "Grep".into(),
-                    arguments: json!({ "query": "abc" }),
+                    arguments: Some(json!({ "query": "abc" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
             ),
             WireMessage::tool_result("Grep", "results: none"),
@@ -880,8 +900,8 @@ mod tests {
         assert_eq!(resp.content, "Final answer");
         assert_eq!(resp.thinking.len(), 1);
         assert_eq!(resp.finish_reason.as_deref(), Some("stop"));
-        assert_eq!(resp.usage.input_tokens, 15);
-        assert_eq!(resp.usage.output_tokens, 8);
+        assert_eq!(resp.usage.input_other, 15);
+        assert_eq!(resp.usage.output, 8);
     }
 
     #[test]
@@ -931,9 +951,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "call_abc_123".into(),
                     name: "read_file".into(),
-                    arguments: json!({ "path": "test.txt" }),
+                    arguments: Some(json!({ "path": "test.txt" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 tool_call_id: None,
                 tools: Vec::new(),
@@ -990,9 +1011,10 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: "call_abc_123".into(),
                     name: "readMedia".into(),
-                    arguments: json!({ "path": "a.png" }),
+                    arguments: Some(json!({ "path": "a.png" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 tool_call_id: None,
                 tools: Vec::new(),
@@ -1037,6 +1059,8 @@ mod tests {
                     url: "https://example.com/photo.png".into(),
                     id: None,
                     name: None,
+                    dimensions: None,
+                    detail: None,
                 },
                 ContentBlock::AudioUrl {
                     url: "https://example.com/sound.mp3".into(),
@@ -1052,6 +1076,8 @@ mod tests {
                     url: "https://example.com/unknown.bin".into(),
                     id: None,
                     name: None,
+                    dimensions: None,
+                    detail: None,
                 },
             ],
         )];
@@ -1100,9 +1126,12 @@ mod tests {
             vec![ToolCall {
                 id: "fc_1".into(),
                 name: "Grep".into(),
-                arguments: json!({ "query": "x" }),
-                extras: Some(json!({ "thought_signature_b64": "sig-b64" })),
-                args_parse_error: None,
+                arguments: Some(json!({ "query": "x" }).to_string()),
+                extras: json!({ "thought_signature_b64": "sig-b64" })
+                    .as_object()
+                    .cloned(),
+                raw_id: None,
+                _stream_index: None,
             }],
         )];
         let req = build_request_full(&messages, &[], None, false);

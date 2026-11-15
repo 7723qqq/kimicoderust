@@ -1,3 +1,6 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use crate::_base::di::scope::IAgentScopeHandle;
@@ -66,12 +69,16 @@ pub fn agent_context_of_scope(scope: &Arc<dyn IAgentScopeContext>) -> Arc<AgentC
 }
 
 pub fn agent_context_of(handle: &Arc<IAgentScopeHandle>) -> Arc<AgentContext> {
-    agent_context_of_scope(&handle.accessor().get::<IAgentScopeContext>())
+    agent_context_of_scope(&handle.accessor().get(&I_AGENT_SCOPE_CONTEXT))
 }
 
 pub fn try_agent_context_of(handle: &Arc<IAgentScopeHandle>) -> Option<Arc<AgentContext>> {
     handle
         .accessor()
-        .try_get::<IAgentScopeContext>()
+        .try_get(&I_AGENT_SCOPE_CONTEXT)
         .map(|scope| scope.agent_context())
 }
+
+
+pub static I_AGENT_SCOPE_CONTEXT: LazyLock<ServiceIdentifier<Arc<dyn IAgentScopeContext>>> =
+    LazyLock::new(|| create_decorator("agentScopeContext"));

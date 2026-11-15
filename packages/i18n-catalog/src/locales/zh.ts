@@ -779,6 +779,9 @@ export const zh = {
       truncated: '压缩响应在生成完整摘要前被截断。',
       overflowFailed: '压缩在 {{max_attempts}} 次尝试后仍未能将上下文降至模型窗口以下。',
     },
+    execution: {
+      invalidArgs: '工具 "{{toolName}}" 的参数无效: {{error}}',
+    },
     permission: {
     compactionAuthorizationRequired: '压缩需要授权。',
       autoModeCannotAsk: '自动模式无法提出交互式问题',
@@ -1100,9 +1103,7 @@ export const zh = {
       argMustBeArray: '{{tool}} 参数无效：`{{field}}` 必须是数组。',
       argMustNotBeEmpty: '{{tool}} 参数无效：`{{field}}` 不能为空。',
       argRequired: '{{tool}} 参数无效：缺少 `{{field}}`。',
-      argsNotJson: '{{tool}} 参数无效：参数不是合法的 JSON（{{detail}}）。',
       argsNotObject: '{{tool}} 参数无效：参数必须是 JSON 对象。',
-      argsInvalidSchema: '{{tool}} 参数无效：{{detail}}。',
     },
     tui: {
       turnStoppedFiltered: '本轮已停止：供应商安全策略拦截了响应。',

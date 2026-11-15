@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::*;
 use crate::callbacks::RpcHostCallbacks;
 use crate::rpc::server::RpcServer;
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 use crate::turn_loop::types::{LLMChatParams, LLMChatResponse};
 
 struct ScriptedLlm {
@@ -144,7 +144,13 @@ fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
 
 fn msg(role: &str, content: &str) -> LLMMessage {
     LLMMessage {
-        role: role.into(),
+        role: match role {
+            "system" => kimi_core::types::Role::System,
+            "user" => kimi_core::types::Role::User,
+            "assistant" => kimi_core::types::Role::Assistant,
+            "tool" => kimi_core::types::Role::Tool,
+            _ => panic!("unknown test role: {role}"),
+        },
         content: content.into(),
         ..Default::default()
     }
@@ -795,7 +801,7 @@ async fn a_steer_and_a_queued_prompt_report_distinct_submission_states() {
 async fn draining_a_steer_reports_it_read_with_its_prompt_id() {
     let (inner, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
     let queue = Arc::new(Mutex::new(vec![LLMMessage {
-        role: "user".to_string(),
+        role: kimi_core::types::Role::User,
         content: "steer me".to_string(),
         prompt_id: Some("prompt-4-abc".to_string()),
         origin: Some(serde_json::json!({"kind": "user"})),
@@ -818,37 +824,38 @@ async fn draining_a_steer_reports_it_read_with_its_prompt_id() {
 
 #[tokio::test]
 async fn draining_a_steer_batch_merges_content_and_user_origin() {
-    use crate::rpc::types::ContentBlock;
+    use crate::rpc::types::ContentPart;
 
     let (inner, events) = TurnRecordingCallbacks::new(serde_json::json!({}));
     let first = LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         prompt_id: Some("prompt-first".into()),
         blocks: vec![
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: "bundled skill".into(),
                 meta: Some(serde_json::Map::from_iter([(
                     "contentType".into(),
                     serde_json::json!("text/plain"),
                 )])),
             },
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: "first body".into(),
                 meta: None,
             },
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: "<image path=\"/tmp/original.png\"></image>".into(),
                 meta: None,
             },
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: "visible <system>Image compressed to fit model limits: details</system>"
                     .into(),
                 meta: None,
             },
-            ContentBlock::AudioUrl {
-                url: "kimi-file://audio-1".into(),
-                id: Some("audio-1".into()),
-                name: None,
+            ContentPart::AudioUrl {
+                audio_url: kimi_core::types::AudioUrl {
+                    url: "kimi-file://audio-1".into(),
+                    id: Some("audio-1".into()),
+                },
             },
         ],
         origin: Some(serde_json::json!({
@@ -859,10 +866,10 @@ async fn draining_a_steer_batch_merges_content_and_user_origin() {
         ..LLMMessage::default()
     };
     let second = LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         prompt_id: Some("prompt-second".into()),
         blocks: vec![
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: "already annotated".into(),
                 meta: Some(serde_json::Map::from_iter([
                     ("source".into(), serde_json::json!("skill activation")),
@@ -872,7 +879,7 @@ async fn draining_a_steer_batch_merges_content_and_user_origin() {
                     ),
                 ])),
             },
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: "second body".into(),
                 meta: None,
             },
@@ -902,7 +909,7 @@ async fn draining_a_steer_batch_merges_content_and_user_origin() {
         .blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text, meta } => Some((
+            ContentPart::Text { text, meta } => Some((
                 text.as_str(),
                 meta.as_ref()
                     .and_then(|meta| meta.get("source"))
@@ -939,9 +946,9 @@ async fn draining_a_steer_batch_merges_content_and_user_origin() {
     );
     assert!(matches!(
         merged.blocks.get(5),
-        Some(ContentBlock::AudioUrl { .. })
+        Some(ContentPart::AudioUrl { .. })
     ));
-    let ContentBlock::Text {
+    let ContentPart::Text {
         meta: Some(skill_meta),
         ..
     } = &merged.blocks[0]
@@ -990,7 +997,7 @@ async fn draining_plain_steer_batch_omits_empty_origin_arrays() {
         .blocks
         .iter()
         .filter_map(|block| match block {
-            crate::rpc::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
+            crate::rpc::types::ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -2197,11 +2204,11 @@ async fn usage_is_folded_per_model_and_reported_by_status() {
         tool_calls: Vec::new(),
         finish_reason: Some("stop".into()),
         usage: TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-            total_tokens: 15,
+            input_other: 10,
+            output: 5,
             input_cache_read: 3,
             input_cache_creation: 2,
+            raw: None,
         },
         timing: None,
     }]));

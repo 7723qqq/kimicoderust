@@ -7,17 +7,19 @@ use parking_lot::Mutex;
 
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
 use crate::_base::di::instantiation::{
-    ScopeActivation, ServiceIdentifier, ServicesAccessor, create_decorator,
+    ScopeActivation, ServiceIdentifier, ServicesAccessor, refine_service_decorator,
 };
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::register_scoped_service;
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::_base::event::Emitter;
 use crate::app::scopes::LifecycleScope;
 use crate::app::session_manager::session_manager::ISessionManager;
-use crate::session::session_context::session_context::ISessionContext;
+use crate::session::session_context::session_context::{ISessionContext, I_SESSION_CONTEXT};
 use crate::wire::record::WireAsyncError;
-use crate::workspace::session_lifecycle::session_lifecycle::ISessionLifecycleService;
+use crate::workspace::session_lifecycle::session_lifecycle::{
+    ISessionLifecycleService, I_SESSION_LIFECYCLE_SERVICE,
+};
 use crate::workspace::session_lifecycle::session_lifecycle_service::SessionLifecycleService;
 use crate::workspace::workspace_instance::workspace_instance::WorkspaceInstance;
 use crate::workspace::workspace_instance::workspace_instance_manager::{
@@ -29,11 +31,6 @@ use super::workspace_lifecycle::{
     WorkspaceHandlerRegistry, WorkspaceRef, WorkspaceSessionRegistry,
 };
 
-static SESSION_LIFECYCLE_SERVICE_ID: Lazy<ServiceIdentifier<DynamicValue>> =
-    Lazy::new(|| create_decorator("sessionLifecycleService"));
-static SESSION_CONTEXT_ID: Lazy<ServiceIdentifier<DynamicValue>> =
-    Lazy::new(|| create_decorator("sessionContext"));
-
 struct WorkspaceLifecycleInner {
     manager: Arc<dyn IWorkspaceInstanceManager>,
     session_manager: Arc<dyn ISessionManager>,
@@ -41,7 +38,7 @@ struct WorkspaceLifecycleInner {
     handles: Mutex<HashMap<String, Arc<WorkspaceScopeHandle>>>,
     leases: Mutex<HashMap<String, WorkspaceInstanceLease>>,
     on_did_materialize_handler: Emitter<Arc<dyn IWorkspaceScopeHandle>>,
-    manager_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    manager_subscription: Mutex<Option<DisposableRef>>,
 }
 
 impl WorkspaceLifecycleInner {
@@ -100,7 +97,7 @@ struct WorkspaceScopeAccessor {
 
 impl ServicesAccessor for WorkspaceScopeAccessor {
     fn get_dynamic(&self, id: &ServiceIdentifier<DynamicValue>) -> DynamicValue {
-        if id == &*SESSION_LIFECYCLE_SERVICE_ID {
+        if id == &refine_service_decorator(&I_SESSION_LIFECYCLE_SERVICE) {
             let inner = self
                 .inner
                 .upgrade()
@@ -172,7 +169,9 @@ impl WorkspaceSessionRegistry for WorkspaceSessionRegistryImpl {
             .list()
             .into_iter()
             .filter(|handle| {
-                let value = handle.accessor().get_dynamic(&SESSION_CONTEXT_ID);
+                let value = handle
+                    .accessor()
+                    .get_dynamic(&refine_service_decorator(&I_SESSION_CONTEXT));
                 let context = Arc::downcast::<Arc<dyn ISessionContext>>(value)
                     .expect("service type does not match its identifier");
                 context.workspace_id() == workspace_id
@@ -229,8 +228,8 @@ impl WorkspaceLifecycleService {
     pub fn on_did_materialize_handler(
         &self,
         listener: Arc<dyn Fn(Arc<dyn IWorkspaceScopeHandle>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
-        Box::new(
+    ) -> DisposableRef {
+        Arc::new(
             self.inner
                 .on_did_materialize_handler
                 .event()
@@ -275,7 +274,7 @@ impl IWorkspaceLifecycleService for WorkspaceLifecycleService {
     fn on_did_materialize_handler(
         &self,
         listener: Arc<dyn Fn(Arc<dyn IWorkspaceScopeHandle>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         WorkspaceLifecycleService::on_did_materialize_handler(self, listener)
     }
 
@@ -323,7 +322,7 @@ static WORKSPACE_LIFECYCLE_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy
     });
     register_scoped_service(
         LifecycleScope::App.as_str().to_string(),
-        I_WORKSPACE_LIFECYCLE_SERVICE.clone(),
+        refine_service_decorator(&I_WORKSPACE_LIFECYCLE_SERVICE),
         SyncDescriptor::new(ctor, Vec::new()),
         ScopeActivation::OnScopeCreated,
         "workspaceLifecycle",

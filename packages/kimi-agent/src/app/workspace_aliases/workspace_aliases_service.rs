@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::utils::workdir_slug::{encode_work_dir_key, workspace_root_key};
 use crate::app::scopes::LifecycleScope;
@@ -26,14 +26,14 @@ pub trait IWorkspaceAliasesCatalog: Send + Sync {
     async fn prime(&self) -> Result<(), WireAsyncError>;
     async fn stamp(&self) -> Result<Option<String>, WireAsyncError>;
     async fn load(&self) -> Result<Vec<Workspace>, WireAsyncError>;
-    fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable>;
+    fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef;
 }
 
 #[async_trait]
 pub trait IWorkspaceAliasesSessionIndex: Send + Sync {
     async fn size(&self) -> Result<Option<u64>, WireAsyncError>;
     async fn entries(&self) -> Result<Vec<WorkspaceAliasIndexEntry>, WireAsyncError>;
-    fn on_did_write(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable>;
+    fn on_did_write(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef;
 }
 
 #[derive(Clone)]
@@ -62,7 +62,7 @@ pub struct WorkspaceAliasesService {
     session_index_load: tokio::sync::Mutex<()>,
     invalidation_generation: Arc<AtomicU64>,
     catalog_merge_primed: AtomicBool,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl WorkspaceAliasesService {

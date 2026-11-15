@@ -9,7 +9,7 @@ use futures_util::future::{BoxFuture, Shared};
 use futures_util::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::safely_call_listener;
 use crate::_base::utils::paths::canonical_workspace_root;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
@@ -229,7 +229,7 @@ impl WorkspaceTrustEntry {
         self.mutate(false).await
     }
 
-    pub fn on_did_change(&self, listener: TrustListener) -> Box<dyn IDisposable> {
+    pub fn on_did_change(&self, listener: TrustListener) -> DisposableRef {
         add_listener(&self.inner.state, listener)
     }
 
@@ -307,7 +307,7 @@ impl IWorkspaceTrust for WorkspaceTrustEntry {
         WorkspaceTrustEntry::untrust(self).await
     }
 
-    fn on_did_change(&self, listener: TrustListener) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: TrustListener) -> DisposableRef {
         WorkspaceTrustEntry::on_did_change(self, listener)
     }
 }
@@ -336,7 +336,7 @@ pub struct WorkspaceTrustGroup {
     primary: Arc<dyn IWorkspaceTrustEntry>,
     entries: Arc<Vec<Arc<dyn IWorkspaceTrustEntry>>>,
     state: Arc<parking_lot::Mutex<GroupState>>,
-    _subscriptions: Arc<Vec<Box<dyn IDisposable>>>,
+    _subscriptions: Arc<Vec<DisposableRef>>,
 }
 
 impl WorkspaceTrustGroup {
@@ -471,7 +471,7 @@ impl WorkspaceTrustGroup {
         Ok(())
     }
 
-    pub fn on_did_change(&self, listener: TrustListener) -> Box<dyn IDisposable> {
+    pub fn on_did_change(&self, listener: TrustListener) -> DisposableRef {
         add_listener(&self.state, listener)
     }
 
@@ -505,7 +505,7 @@ impl IWorkspaceTrust for WorkspaceTrustGroup {
         WorkspaceTrustGroup::untrust(self).await
     }
 
-    fn on_did_change(&self, listener: TrustListener) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: TrustListener) -> DisposableRef {
         WorkspaceTrustGroup::on_did_change(self, listener)
     }
 }
@@ -528,7 +528,7 @@ struct StoreInner {
     config: Arc<dyn IConfigService>,
     entries: Arc<parking_lot::Mutex<IndexMap<String, WorkspaceTrustEntry>>>,
     groups: parking_lot::Mutex<IndexMap<String, WorkspaceTrustGroup>>,
-    _config_subscription: Box<dyn IDisposable>,
+    _config_subscription: DisposableRef,
     is_disposed: AtomicBool,
 }
 
@@ -685,7 +685,7 @@ impl ListenerState for GroupState {
 fn add_listener<S: ListenerState + Send + 'static>(
     state: &Arc<parking_lot::Mutex<S>>,
     listener: TrustListener,
-) -> Box<dyn IDisposable> {
+) -> DisposableRef {
     let id = {
         let mut state = state.lock();
         if state.is_disposed() {

@@ -498,7 +498,7 @@ pub(super) fn enqueue_task_notification_turn(
         core,
         wakeup,
         LLMMessage {
-            role: "user".to_string(),
+            role: kimi_core::types::Role::User,
             content: text,
             ..LLMMessage::default()
         },
@@ -575,7 +575,7 @@ mod tests {
 
     fn message(text: &str) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: text.into(),
             ..LLMMessage::default()
         }

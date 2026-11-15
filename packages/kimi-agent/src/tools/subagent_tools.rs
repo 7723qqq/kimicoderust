@@ -390,12 +390,12 @@ mod tests {
                     thinking: Vec::new(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),
-                    usage: crate::rpc::types::TokenUsage {
-                        input_tokens: 10,
-                        output_tokens: 15,
-                        total_tokens: 25,
+                    usage: kimi_core::types::TokenUsage {
+                        input_other: 10,
+                        output: 15,
                         input_cache_read: 0,
                         input_cache_creation: 0,
+                        raw: None,
                     },
                     timing: None,
                 })

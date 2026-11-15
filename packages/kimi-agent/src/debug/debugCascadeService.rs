@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use crate::_base::di::cascade_engine::CascadeEngine;
 use crate::_base::di::instantiation::{IInstantiationService, ServiceIdentifier};
 use crate::_base::di::instantiation_service::InstantiationService;
-use crate::_base::di::lifecycle::{DisposableStore, IDisposable};
+use crate::_base::di::lifecycle::{DisposableRef, DisposableStore, IDisposable};
 use crate::app::event::event::IEventService;
 use crate::wire::record::WireAsyncError;
 use kimi_core::primitives::errors::Error2;
@@ -23,7 +23,7 @@ pub struct DebugCascadeService {
     root: Arc<InstantiationService>,
     events: Arc<dyn IEventService>,
     store: Mutex<DisposableStore>,
-    engine_subscriptions: Arc<Mutex<HashMap<usize, Box<dyn IDisposable>>>>,
+    engine_subscriptions: Arc<Mutex<HashMap<usize, DisposableRef>>>,
     torn_down: std::sync::atomic::AtomicBool,
 }
 
@@ -140,9 +140,13 @@ impl DebugCascadeService {
         let (container, id) = self.resolve(scope_path, token)?;
         container
             .cascade
-            .submit(crate::_base::di::cascade_engine::CascadeSubmit {
+            .submit(crate::_base::di::cascade_engine::CascadeChange {
                 action: crate::_base::di::cascade_engine::CascadeAction::Unprovide,
                 token: id,
+                descriptor: None,
+                instance: None,
+                activation: None,
+                config: None,
                 reason: format!("debug dispose {token}"),
             })
             .await
@@ -195,7 +199,7 @@ impl IDebugCascadeService for DebugCascadeService {
 fn watch_engine(
     root: &Arc<InstantiationService>,
     events: &Arc<dyn IEventService>,
-    subscriptions: &Arc<Mutex<HashMap<usize, Box<dyn IDisposable>>>>,
+    subscriptions: &Arc<Mutex<HashMap<usize, DisposableRef>>>,
     engine: Arc<CascadeEngine>,
 ) {
     let address = Arc::as_ptr(&engine) as usize;
@@ -216,6 +220,6 @@ fn watch_engine(
     subscriptions.lock().insert(address, subscription);
 }
 
-fn unwatch_engine(subscriptions: &Arc<Mutex<HashMap<usize, Box<dyn IDisposable>>>>, engine: &Arc<CascadeEngine>) {
+fn unwatch_engine(subscriptions: &Arc<Mutex<HashMap<usize, DisposableRef>>>, engine: &Arc<CascadeEngine>) {
     subscriptions.lock().remove(&(Arc::as_ptr(engine) as usize));
 }

@@ -37,8 +37,9 @@ use crate::llm_adapter::contract::message::{
 };
 use crate::llm_adapter::model::catalog::Model;
 use crate::llm_adapter::model::model_requester::{
-    ImageUploadInput, MediaUploadOptions, ModelRequestEvent, ModelRequestInput, ModelRequestParams,
-    ModelRequestStream, ModelRequestTiming, ModelRequester, SamplingOptions, VideoUploadSource,
+    ImageUploadInput, MediaUploadOptions, ModelRequestAttemptFailure, ModelRequestEvent,
+    ModelRequestInput, ModelRequestParams, ModelRequestStream, ModelRequestTiming, ModelRequester,
+    SamplingOptions, VideoUploadSource,
 };
 use crate::llm_adapter::protocol::errors::translate_provider_error;
 use crate::llm_adapter::protocol::protocol::{IProtocolAdapterRegistry, Protocol};
@@ -320,6 +321,37 @@ impl ModelRequesterImpl {
             .await?;
 
         if let Some(failed) = state.lock().failed.clone() {
+            let (usage, message_id, timing) = {
+                let snapshot = state.lock();
+                let timing = snapshot.first_chunk_at.map(|first_chunk_at| {
+                    build_stream_timing(
+                        snapshot.request_started_at,
+                        snapshot.request_sent_at,
+                        first_chunk_at,
+                        snapshot.stream_ended_at,
+                        Some(StreamDecodeStats {
+                            server_decode_ms: snapshot.server_decode_ms,
+                            client_consume_ms: snapshot.client_consume_ms,
+                            client_blocked_ms: None,
+                        }),
+                        OutputPartTimes {
+                            first_token_at: snapshot.first_token_at,
+                            last_token_at: snapshot.last_token_at,
+                        },
+                    )
+                });
+                (snapshot.usage.clone(), snapshot.message_id.clone(), timing)
+            };
+            if let Some(on_attempt_failure) = params
+                .as_ref()
+                .and_then(|params| params.on_attempt_failure.clone())
+            {
+                on_attempt_failure(ModelRequestAttemptFailure {
+                    usage,
+                    message_id,
+                    timing,
+                });
+            }
             return Err(error_from_llm_message(&failed));
         }
         let final_message = state.lock().accumulator.finish();
@@ -532,12 +564,12 @@ pub fn carries_output_tokens(part: &StreamedMessagePart) -> bool {
 }
 
 fn wire_tools(tools: Vec<Tool>) -> Vec<Tool> {
-    if !tools.iter().any(|tool| tool.deferred == Some(true)) {
+    if !tools.iter().any(|tool| tool.deferred.is_some()) {
         return tools;
     }
     tools
         .into_iter()
-        .filter(|tool| tool.deferred != Some(true))
+        .filter(|tool| tool.deferred.is_none())
         .collect()
 }
 

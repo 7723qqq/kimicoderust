@@ -284,7 +284,7 @@ mod tests {
             }
         }
         assert_eq!(super::BUILTIN_DOMAINS.len(), 37);
-        assert_eq!(codes.len(), 176);
+        assert_eq!(codes.len(), 177);
 
         for code in [
             "os.fs.not_found",

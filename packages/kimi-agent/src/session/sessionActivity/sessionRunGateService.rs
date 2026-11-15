@@ -1,3 +1,5 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::wire::wire::I_WIRE_SERVICE;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -6,7 +8,7 @@ use kimi_core::primitives::errors::{Error2, Error2Options};
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::persistence::interface::append_log_store::IAppendLogStore;
@@ -31,7 +33,7 @@ pub struct SessionRunGateService {
     timer: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     releasing: Arc<AtomicBool>,
     weak: Mutex<Weak<Self>>,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl SessionRunGateService {
@@ -83,7 +85,7 @@ impl SessionRunGateService {
             self.agents
                 .handle_of(&agent.agent_id)
                 .is_some_and(|handle| {
-                    handle.accessor().get::<IWireService>().externally_modified()
+                    handle.accessor().get(&I_WIRE_SERVICE).externally_modified()
                 })
         });
         if !stale {
@@ -157,6 +159,6 @@ pub fn register_session_run_gate_service() {
     register_scoped_service(
         LifecycleScope::Session,
         ScopeActivation::OnScopeCreated,
-        "sessionActivity",
+        "sessionRunGate",
     );
 }

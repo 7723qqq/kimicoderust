@@ -24,7 +24,7 @@ pub async fn create_agent_awaiting_close(
         if let Some(signal) = signal {
             signal.throw_if_aborted()?;
         }
-        match lifecycle.create(Some(opts.clone())).await {
+        match lifecycle.clone().create(Some(opts.clone())).await {
             Ok(context) => return Ok(context),
             Err(error) => {
                 let closing = error

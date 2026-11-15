@@ -93,13 +93,13 @@ async fn ping_model(engine: &ServerEngine, model: &str) -> Value {
     }
 }
 
-fn usage_wire(usage: &crate::rpc::types::TokenUsage) -> Value {
+fn usage_wire(usage: &kimi_core::types::TokenUsage) -> Value {
     json!({
-        "input": usage.input_tokens + usage.input_cache_read + usage.input_cache_creation,
-        "output": usage.output_tokens,
+        "input": usage.input_other + usage.input_cache_read + usage.input_cache_creation,
+        "output": usage.output,
         "inputCacheRead": usage.input_cache_read,
         "inputCacheCreation": usage.input_cache_creation,
-        "inputOther": usage.input_tokens,
+        "inputOther": usage.input_other,
     })
 }
 

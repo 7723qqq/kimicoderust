@@ -2,10 +2,49 @@ use serde::{Deserialize, Serialize};
 
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileIoOperation {
+    Read,
+    Write,
+    Edit,
+    Glob,
+    Grep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandLanguage {
+    Bash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoItemKind {
+    Milestone,
+    Task,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GoalStartMode {
+    Manual,
+    Yolo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TodoListItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<TodoItemKind>,
     pub title: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,10 +69,10 @@ pub enum ToolInputDisplay {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        language: Option<String>,
+        language: Option<CommandLanguage>,
     },
     FileIo {
-        operation: String,
+        operation: FileIoOperation,
         path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
@@ -102,9 +141,9 @@ pub enum ToolInputDisplay {
     },
     GoalStart {
         objective: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "completionCriterion", default, skip_serializing_if = "Option::is_none")]
         completion_criterion: Option<String>,
-        mode: String,
+        mode: GoalStartMode,
     },
     Generic {
         summary: String,

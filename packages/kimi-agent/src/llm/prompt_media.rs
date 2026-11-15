@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
+use crate::agent::media::image_format_policy;
 use crate::native::image_compress::{CompressConfig, compress_image};
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 use crate::server::files::FileStore;
 
 pub const MAX_IMAGE_EDGE_PX: u32 = 2000;
@@ -23,7 +24,7 @@ pub fn prompt_compress_config() -> CompressConfig {
 pub fn prompt_compress_config_for(provider: Option<&str>) -> CompressConfig {
     CompressConfig {
         max_edge: MAX_IMAGE_EDGE_PX,
-        byte_budget: crate::llm::image_policy::provider_image_policy(provider).inline_byte_budget,
+        byte_budget: image_format_policy::provider_image_policy(provider).inline_byte_budget,
         fallback_edges: FALLBACK_EDGES_PX.to_vec(),
         jpeg_quality_steps: JPEG_QUALITY_STEPS.to_vec(),
     }
@@ -103,11 +104,13 @@ pub fn prepare_inline_image(
     media_type: &str,
     data_base64: &str,
     name: Option<&str>,
-) -> (Option<String>, ContentBlock) {
-    let passthrough = || ContentBlock::Image {
-        media_type: media_type.to_string(),
-        data: data_base64.to_string(),
-        name: name.map(str::to_string),
+) -> (Option<String>, ContentPart) {
+    let passthrough = || {
+        crate::llm::media_resolver::inline_image_part(
+            media_type.to_string(),
+            data_base64.to_string(),
+            name.map(str::to_string),
+        )
     };
     let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data_base64) else {
         return (None, passthrough());
@@ -139,11 +142,11 @@ pub fn prepare_inline_image(
         },
         original_path.as_deref(),
     );
-    let block = ContentBlock::Image {
-        media_type: result.mime_type,
-        data: base64::engine::general_purpose::STANDARD.encode(&result.data),
-        name: name.map(str::to_string),
-    };
+    let block = crate::llm::media_resolver::inline_image_part(
+        result.mime_type,
+        base64::engine::general_purpose::STANDARD.encode(&result.data),
+        name.map(str::to_string),
+    );
     (Some(caption), block)
 }
 
@@ -153,23 +156,23 @@ fn inline_image_blocks(
     media_type: &str,
     data: &str,
     name: Option<&str>,
-) -> Vec<ContentBlock> {
+) -> Vec<ContentPart> {
     let url = format!("data:{media_type};base64,{data}");
-    let Some((parsed_mime, parsed_data)) = crate::llm::image_policy::parse_image_data_url(&url)
+    let Some((parsed_mime, parsed_data)) = image_format_policy::parse_image_data_url(&url)
     else {
-        return vec![ContentBlock::Text {
-            text: crate::llm::image_policy::build_malformed_image_notice(&url),
+        return vec![ContentPart::Text {
+            text: image_format_policy::build_malformed_image_notice(&url),
             meta: None,
         }];
     };
-    let effective = crate::llm::image_policy::resolve_effective_image_mime(
+    let effective = image_format_policy::resolve_effective_image_mime(
         &parsed_mime,
-        &crate::llm::image_policy::decode_base64_prefix(&parsed_data),
+        &image_format_policy::decode_base64_prefix(&parsed_data),
     );
-    let normalized = crate::llm::image_policy::normalize_image_mime(&effective);
-    if !crate::llm::image_policy::is_model_accepted_image_mime(&normalized, provider) {
-        return vec![ContentBlock::Text {
-            text: crate::llm::image_policy::build_unsupported_image_notice(
+    let normalized = image_format_policy::normalize_image_mime(&effective);
+    if !image_format_policy::is_model_accepted_image_mime(&normalized, provider) {
+        return vec![ContentPart::Text {
+            text: image_format_policy::build_unsupported_image_notice(
                 &normalized,
                 None,
                 provider,
@@ -180,7 +183,7 @@ fn inline_image_blocks(
     let (caption, block) = prepare_inline_image(store, provider, &normalized, &parsed_data, name);
     let mut blocks = Vec::new();
     if let Some(caption) = caption {
-        blocks.push(ContentBlock::Text {
+        blocks.push(ContentPart::Text {
             text: caption,
             meta: None,
         });
@@ -195,7 +198,7 @@ pub fn image_blocks_from_base64(
     media_type: &str,
     data: &str,
     name: Option<&str>,
-) -> Vec<ContentBlock> {
+) -> Vec<ContentPart> {
     inline_image_blocks(store, provider, media_type, data, name)
 }
 
@@ -204,21 +207,21 @@ pub fn image_blocks_from_url(
     provider: Option<&str>,
     url: &str,
     name: Option<&str>,
-) -> Vec<ContentBlock> {
-    if let Some((mime_type, data)) = crate::llm::image_policy::parse_image_data_url(url) {
+) -> Vec<ContentPart> {
+    if let Some((mime_type, data)) = image_format_policy::parse_image_data_url(url) {
         return inline_image_blocks(store, provider, &mime_type, &data, name);
     }
-    if crate::llm::image_policy::is_data_url(url) {
-        return vec![ContentBlock::Text {
-            text: crate::llm::image_policy::build_malformed_image_notice(url),
+    if image_format_policy::is_data_url(url) {
+        return vec![ContentPart::Text {
+            text: image_format_policy::build_malformed_image_notice(url),
             meta: None,
         }];
     }
     if let Some(mime_type) =
-        crate::llm::image_policy::unsupported_image_mime_from_url(url, provider)
+        image_format_policy::unsupported_image_mime_from_url(url, provider)
     {
-        return vec![ContentBlock::Text {
-            text: crate::llm::image_policy::build_unsupported_image_notice(
+        return vec![ContentPart::Text {
+            text: image_format_policy::build_unsupported_image_notice(
                 &mime_type,
                 Some(url),
                 provider,
@@ -226,11 +229,12 @@ pub fn image_blocks_from_url(
             meta: None,
         }];
     }
-    vec![ContentBlock::ImageUrl {
-        url: url.to_string(),
-        id: None,
-        name: name.map(str::to_string),
-    }]
+    vec![crate::llm::media_resolver::media_url_part(
+        crate::rpc::types::MediaKind::Image,
+        url.to_string(),
+        None,
+        name.map(str::to_string),
+    )]
 }
 
 #[cfg(test)]
@@ -259,6 +263,19 @@ mod tests {
 
     fn store_in(dir: &tempfile::TempDir) -> FileStore {
         FileStore::with_root(dir.path().to_path_buf())
+    }
+
+    fn inline_image(block: &ContentPart) -> (String, String, Option<String>) {
+        let ContentPart::ImageUrl { image_url } = block else {
+            panic!("expected an image block");
+        };
+        let rest = image_url.url.strip_prefix("data:").expect("a data URL");
+        let (media_type, data) = rest.split_once(";base64,").expect("base64 data");
+        (
+            media_type.to_string(),
+            data.to_string(),
+            image_url.name.clone(),
+        )
     }
 
     #[test]
@@ -356,14 +373,7 @@ mod tests {
             .expect("the caption names the original's path");
         assert!(std::path::Path::new(path).exists(), "{path}");
 
-        let ContentBlock::Image {
-            media_type,
-            data: sent,
-            name,
-        } = block
-        else {
-            panic!("expected an image block");
-        };
+        let (media_type, sent, name) = inline_image(&block);
         assert_eq!(name.as_deref(), Some("shot.png"));
         assert!(media_type.starts_with("image/"));
         let sent_bytes = base64::engine::general_purpose::STANDARD
@@ -381,14 +391,7 @@ mod tests {
         let (caption, block) = prepare_inline_image(&store, None, "image/png", &data, None);
 
         assert!(caption.is_none(), "an in-budget image is not captioned");
-        let ContentBlock::Image {
-            media_type,
-            data: sent,
-            ..
-        } = block
-        else {
-            panic!("expected an image block");
-        };
+        let (media_type, sent, _) = inline_image(&block);
         assert_eq!(media_type, "image/png");
         assert_eq!(sent, data, "the original bytes pass through untouched");
     }
@@ -402,7 +405,7 @@ mod tests {
         let blocks =
             image_blocks_from_base64(&store, Some("openai"), "image/bmp", &bmp, Some("a.bmp"));
         assert_eq!(blocks.len(), 1);
-        let ContentBlock::Text { text, .. } = &blocks[0] else {
+        let ContentPart::Text { text, .. } = &blocks[0] else {
             panic!("expected a notice, got {:?}", blocks[0]);
         };
         assert!(
@@ -414,9 +417,7 @@ mod tests {
         let blocks =
             image_blocks_from_base64(&store, Some("kimi"), "image/bmp", &bmp, Some("a.bmp"));
         assert_eq!(blocks.len(), 1);
-        let ContentBlock::Image { media_type, .. } = &blocks[0] else {
-            panic!("expected an image block, got {:?}", blocks[0]);
-        };
+        let (media_type, _, _) = inline_image(&blocks[0]);
         assert_eq!(media_type, "image/bmp");
     }
 
@@ -426,7 +427,7 @@ mod tests {
         let store = store_in(&dir);
         let blocks = image_blocks_from_url(&store, None, "data:image/png,AAAA", Some("a.png"));
         assert_eq!(blocks.len(), 1);
-        let ContentBlock::Text { text, .. } = &blocks[0] else {
+        let ContentPart::Text { text, .. } = &blocks[0] else {
             panic!("expected a notice, got {:?}", blocks[0]);
         };
         assert!(text.contains("is not a valid data URL"), "{text}");
@@ -439,7 +440,7 @@ mod tests {
 
         let blocks =
             image_blocks_from_url(&store, Some("openai"), "https://x/a.heic", Some("a.heic"));
-        let ContentBlock::Text { text, .. } = &blocks[0] else {
+        let ContentPart::Text { text, .. } = &blocks[0] else {
             panic!("expected a notice, got {:?}", blocks[0]);
         };
         assert!(
@@ -450,11 +451,12 @@ mod tests {
         let blocks = image_blocks_from_url(&store, Some("openai"), "https://x/a.png", None);
         assert_eq!(
             blocks[0],
-            ContentBlock::ImageUrl {
-                url: "https://x/a.png".into(),
-                id: None,
-                name: None,
-            }
+            crate::llm::media_resolver::media_url_part(
+                crate::rpc::types::MediaKind::Image,
+                "https://x/a.png".into(),
+                None,
+                None,
+            )
         );
     }
 
@@ -468,14 +470,7 @@ mod tests {
         let blocks = image_blocks_from_url(&store, None, &url, None);
 
         assert_eq!(blocks.len(), 1);
-        let ContentBlock::Image {
-            media_type,
-            data: sent,
-            ..
-        } = &blocks[0]
-        else {
-            panic!("expected an image block, got {:?}", blocks[0]);
-        };
+        let (media_type, sent, _) = inline_image(&blocks[0]);
         assert_eq!(media_type, "image/png");
         assert_eq!(sent, &data);
     }
@@ -487,7 +482,7 @@ mod tests {
         let data = base64::engine::general_purpose::STANDARD.encode(b"\x00\x00\x00\x18ftypheic");
         let blocks = image_blocks_from_base64(&store, None, "image/heic", &data, Some("a.heic"));
         assert!(
-            matches!(&blocks[0], ContentBlock::Text { text, .. } if text.contains("image/heic"))
+            matches!(&blocks[0], ContentPart::Text { text, .. } if text.contains("image/heic"))
         );
     }
 }

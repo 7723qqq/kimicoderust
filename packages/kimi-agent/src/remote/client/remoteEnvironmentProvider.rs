@@ -9,7 +9,7 @@ use futures_util::{FutureExt, Stream, StreamExt};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::exec_env::shell_path_bridge::REMOTE_SHELL_PATH_BRIDGE;
 use crate::_base::log::log::ILogService;
 use crate::app::environment_declaration::environment_declaration::IEnvironmentDeclarationService;
@@ -20,6 +20,7 @@ use crate::environment::environment::{
 use crate::environment::environment_defaults::{ENVIRONMENT_PATHS, ENVIRONMENT_WORKSPACES};
 use crate::environment::environment_provider::{
     EnvironmentProviderAttachment, EnvironmentProviderFactory, EnvironmentProviderHost,
+    EnvironmentProviderHostExt,
 };
 use crate::environment::environment_registry::{
     EnvironmentError, EnvironmentRegistrationHandle,
@@ -358,7 +359,7 @@ impl DeclaredRemoteEnvironment {
         }
     }
 
-    fn on_did_change_status(&self, listener: StatusListener) -> Box<dyn IDisposable> {
+    fn on_did_change_status(&self, listener: StatusListener) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             let id = state.next_listener_id;
@@ -438,7 +439,7 @@ impl Environment for DeclaredRemoteEnvironment {
         async move { this.dispose().await }.boxed()
     }
 
-    fn on_did_change_status(&self, listener: StatusListener) -> Box<dyn IDisposable> {
+    fn on_did_change_status(&self, listener: StatusListener) -> DisposableRef {
         DeclaredRemoteEnvironment::on_did_change_status(self, listener)
     }
 }
@@ -569,6 +570,7 @@ struct DeclaredEnvironmentRecord {
     fingerprint: String,
 }
 
+#[derive(Clone)]
 pub struct RemoteEnvironmentProviderFactory {
     options: RemoteEnvironmentProviderFactoryOptions,
     ssh_passwords: Arc<Mutex<HashMap<String, (LauncherSpec, String)>>>,
@@ -587,8 +589,8 @@ impl RemoteEnvironmentProviderFactory {
     }
 
     pub async fn attach(&self, host: &dyn EnvironmentProviderHost) -> Result<EnvironmentProviderAttachment, WireAsyncError> {
-        let log = host.get::<ILogService>();
-        let declarations = host.get::<IEnvironmentDeclarationService>();
+        let log = host.get::<dyn ILogService>();
+        let declarations = host.get::<dyn IEnvironmentDeclarationService>();
         let initial = match declarations.declarations().await {
             Ok(initial) => Some(initial),
             Err(error) => {
@@ -727,14 +729,7 @@ impl RemoteEnvironmentProviderFactory {
     }
 
     fn clone_factory(&self) -> Self {
-        Self {
-            options: RemoteEnvironmentProviderFactoryOptions {
-                client_version: self.options.client_version.clone(),
-                connect: self.options.connect.clone(),
-                ssh_password: self.options.ssh_password.clone(),
-            },
-            ssh_passwords: self.ssh_passwords.clone(),
-        }
+        self.clone()
     }
 
     fn register_declared_environment(
@@ -754,7 +749,7 @@ impl RemoteEnvironmentProviderFactory {
             launcher,
             fingerprint.clone(),
             open,
-            host.get::<ITelemetryService>(),
+            host.get::<dyn ITelemetryService>(),
         );
         match host.register_environment(environment.clone()) {
             Ok(handle) => Ok(DeclaredEnvironmentRecord {

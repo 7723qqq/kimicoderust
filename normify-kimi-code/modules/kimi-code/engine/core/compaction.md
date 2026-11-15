@@ -10,9 +10,9 @@ description:
   en: >
       Context compaction: window accounting, micro-compaction and the compaction instruction prompt.
       
-revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
-updated_at: "2026-11-12T10:20:22.277Z"
-fingerprint: 04b1ad58b8cb26ec4edcce104a5868044018e51558845e889e7df0a19c230599
+revision: 2c47ec0cfa7f2a2418c6b44ec10ec14d29f5f7cf
+updated_at: "2026-11-15T18:51:51.049Z"
+fingerprint: 1de1e2c0b6e669a5c48086cbdff29113fe3188233c98529cecf1af5cfc6abcd2
 source:
   - path: "packages/kimi-agent/src/compaction/mod.rs"
   - path: "packages/kimi-agent/src/agent/micro_compaction/micro_compaction.rs"

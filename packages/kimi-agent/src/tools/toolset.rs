@@ -447,7 +447,7 @@ impl NativeToolset {
                             kimi_core::types::ToolDescription {
                                 name: tool_name.clone(),
                                 description: description.clone(),
-                                parameters: parameters.clone(),
+                                parameters: parameters.as_object().cloned().unwrap_or_default(),
                                 deferred: None,
                             }
                         })
@@ -1306,7 +1306,7 @@ impl NativeToolset {
             .map(|tool| crate::turn_loop::types::ToolInfo {
                 name: tool.name,
                 description: tool.description,
-                input_schema: tool.parameters,
+                input_schema: serde_json::Value::Object(tool.parameters),
             })
             .collect()
     }

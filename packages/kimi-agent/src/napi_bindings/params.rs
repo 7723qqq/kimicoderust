@@ -443,7 +443,7 @@ pub struct JsWebServiceConfig {
 pub struct JsMessage {
     pub role: String,
     pub content: String,
-    /// JSON-serialized `ContentBlock[]` for multimodal messages
+    /// JSON-serialized `ContentPart[]` for multimodal messages
     /// (`[{"type":"text",...},{"type":"image_url",...}]`). Optional.
     pub blocks_json: Option<String>,
     /// JSON-serialized tool calls (`[{id,name,arguments}]`) for an

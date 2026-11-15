@@ -1,3 +1,14 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::features::fileHistory::fileHistory::I_AGENT_FILE_HISTORY_SERVICE;
+use crate::session::agent_lifecycle::agent_lifecycle::I_AGENT_LIFECYCLE_SERVICE;
+use crate::agent::r#loop::r#loop::I_AGENT_LOOP_SERVICE;
+use crate::features::plan::plan::I_AGENT_PLAN_SERVICE;
+use crate::state::event_dispatcher::I_EVENT_DISPATCHER;
+use crate::agent::permission_rules::project_permission_rules::I_PROJECT_PERMISSION_RULES_SERVICE;
+use crate::session::session_context::session_context::I_SESSION_CONTEXT;
+use crate::session::session_metadata::session_metadata::I_SESSION_METADATA;
+use crate::features::notify::session_notify::I_SESSION_NOTIFY;
+use crate::session::session_tool_policy::session_tool_policy::I_SESSION_TOOL_POLICY;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -10,17 +21,21 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 
 use crate::_base::di::instantiation::IInstantiationService;
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
-use crate::_base::di::scope::{ISessionScopeHandle, LifecycleScope, create_scoped_child_handle};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
+use crate::_base::di::scope::{ISessionScopeHandle, LifecycleScope, ScopeSeed, create_scoped_child_handle};
 use crate::_base::log::log::ILogService;
 use crate::_base::log::log_service::drain_log_closes;
 use crate::_base::utils::paths::join;
+use crate::agent::permission_rules::config_section::read_user_permission_rules;
+use crate::agent::permission_rules::project_permission_rules::IProjectPermissionRulesService;
+use crate::agent::permission_rules::project_permission_rules_service::ProjectPermissionRulesService;
 use crate::agent::r#loop::r#loop::IAgentLoopService;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::config::config::IConfigService;
 use crate::app::environment::environment::IEnvironmentService;
 use crate::app::event::event::IEventService;
 use crate::app::flag::flag::IFlagService;
+use crate::app::project_local_config::project_local_config::IProjectLocalConfigService;
 use crate::app::session_index::session_index::{
     CHILD_SESSION_KIND, CHILD_SESSION_KIND_KEY, ISessionIndex, ISessionIndexMirror,
     PARENT_SESSION_ID_KEY,
@@ -28,7 +43,7 @@ use crate::app::session_index::session_index::{
 use crate::app::session_index::session_index_source::{
     SessionSummaryInput, build_session_summary,
 };
-use crate::app::telemetry::telemetry::ITelemetryService;
+use crate::app::telemetry::telemetry::{ITelemetryService, I_TELEMETRY_SERVICE};
 use crate::app::telemetry::telemetry_service::bind_telemetry_scope;
 use crate::environment::environment::{EnvironmentBinding, EnvironmentLease, LOCAL_ENVIRONMENT_ID};
 use crate::environment::environment_registry::EnvironmentError;
@@ -86,6 +101,7 @@ use crate::workspace::workspace_agent_profile_loader::plugin_agent_profile_loade
 use crate::workspace::workspace_agent_profile_loader::user_agent_profile_loader::IUserAgentProfileLoader;
 use crate::workspace::workspace_context::workspace_context::IWorkspaceContext;
 use crate::workspace::workspace_mcp::workspace_mcp::IWorkspaceMcpService;
+use crate::workspace::workspace_trust::workspace_trust::IWorkspaceTrust;
 use kimi_core::primitives::errors::{Error2, Error2Options};
 
 use super::internal::addressing::{agent_scope_of, session_dir_of, session_scope_of};
@@ -144,6 +160,7 @@ pub struct SessionLifecycleServices {
     pub user_agent_profile_loader: Arc<dyn IUserAgentProfileLoader>,
     pub plugin_agent_profile_loader: Arc<dyn IPluginAgentProfileLoader>,
     pub workspace_mcp: Arc<dyn IWorkspaceMcpService>,
+    pub trust: Arc<dyn IWorkspaceTrust>,
     pub models: Arc<dyn IModelService>,
     pub providers: Arc<dyn IProviderService>,
     pub environments: Arc<dyn IEnvironmentService>,
@@ -231,16 +248,16 @@ impl SessionLifecycleService {
         let handle = self.materialize_session(&opts, &session_id, environment.clone(), workdir).await?;
         let result = async {
             if let Some(environment) = &environment {
-                let metadata = handle.accessor().get::<ISessionMetadata>();
+                let metadata = handle.accessor().get(&I_SESSION_METADATA);
                 if environment.environment_id == LOCAL_ENVIRONMENT_ID {
                     metadata.update_environment_cwd(&environment.cwd, false).await?;
                 } else {
                     metadata.update_environment(&environment.environment_id, &environment.cwd, &work_dir, false).await?;
                 }
             }
-            let agents = handle.accessor().get::<IAgentLifecycleService>();
+            let agents = handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
             let main = if opts.main_agent_binding.is_some() || opts.ensure_main_agent || environment.is_some() {
-                Some(agents.create(Some(crate::session::agent_lifecycle::agent_lifecycle::CreateAgentOptions {
+                Some(agents.clone().create(Some(crate::session::agent_lifecycle::agent_lifecycle::CreateAgentOptions {
                     agent_id: Some(MAIN_AGENT_ID.to_string()),
                     binding: opts.main_agent_binding.clone(),
                     environment_id: environment.as_ref().map(|environment| environment.environment_id.clone()),
@@ -258,13 +275,13 @@ impl SessionLifecycleService {
                 let plan_handle = agents.handle_of(&plan_agent.agent_id).ok_or_else(|| -> WireAsyncError {
                     Box::new(Error2::new("agent.not_found", "Main agent was not found"))
                 })?;
-                plan_handle.accessor().get::<IAgentPlanService>().enter().await?;
+                plan_handle.accessor().get(&I_AGENT_PLAN_SERVICE).enter().await?;
             }
             self.append_session_index_entry(&session_id, &work_dir).await
         }
         .await;
         if let Err(error) = result {
-            let session_dir = handle.accessor().get::<ISessionContext>().session_dir();
+            let session_dir = handle.accessor().get(&I_SESSION_CONTEXT).session_dir();
             self.state.lock().sessions.remove(&session_id);
             let _ = self.drain_agents(&handle).await;
             handle.dispose();
@@ -299,6 +316,7 @@ impl SessionLifecycleService {
             config?;
             models?;
             providers?;
+            read_user_permission_rules(self.services.config.as_ref()).await?;
             dirs.ready().await?;
             dirs.merge_additional_dirs(
                 environment.as_ref().map(|environment| environment.cwd.as_str()).unwrap_or(&opts.work_dir),
@@ -329,8 +347,30 @@ impl SessionLifecycleService {
         let scope_listeners = Arc::new(Mutex::new(LifecycleListeners::<Arc<ISessionScopeHandle>>::default()));
         let will_create_listeners = scope_listeners.clone();
         let container_scope = session_scope.clone();
-        let seeds = session_context_seed(ctx.clone());
-        let configure = move |container: &dyn crate::_base::di::scope::IScopeContainer| {
+        let permission_work_dir = self.session_work_dir(&opts.work_dir, environment.as_ref());
+        let environment_id = environment
+            .as_ref()
+            .map(|environment| environment.environment_id.as_str())
+            .unwrap_or(LOCAL_ENVIRONMENT_ID);
+        let project_permission_rules: Arc<dyn IProjectPermissionRulesService> =
+            Arc::new(ProjectPermissionRulesService::new(
+                &ctx.cwd,
+                Some(permission_work_dir.as_str()),
+                environment_id,
+                workdir.local_config.clone(),
+                self.services.trust.clone(),
+            ));
+        let mut seeds = session_context_seed(ctx.clone());
+        seeds.push(ScopeSeed::new::<dyn IProjectLocalConfigService>(
+            workdir.local_config.clone() as Arc<dyn IProjectLocalConfigService>,
+        ));
+        seeds.push(ScopeSeed::new::<dyn IWorkspaceTrust>(
+            self.services.trust.clone(),
+        ));
+        seeds.push(ScopeSeed::new::<dyn IProjectPermissionRulesService>(
+            project_permission_rules,
+        ));
+        let configure = move |container: Arc<crate::_base::di::instantiation_service::InstantiationService>| {
             container.anchor_kernel_entry(Box::new(|| telemetry_binding.dispose()), "telemetry:session-context");
             let workdir_dispose = workdir.clone();
             container.anchor_kernel_entry(Box::new(move || workdir_dispose.dispose()), "sessionLifecycle:workdir");
@@ -365,9 +405,10 @@ impl SessionLifecycleService {
         };
         fire_listeners(&scope_listeners, handle.clone());
         let ready_result = async {
-            handle.accessor().get::<ISessionMetadata>().ready().await?;
-            handle.accessor().get::<ISessionNotify>().ready().await?;
-            handle.accessor().get::<ISessionToolPolicy>().ready().await?;
+            handle.accessor().get(&I_SESSION_METADATA).ready().await?;
+            handle.accessor().get(&I_SESSION_NOTIFY).ready().await?;
+            handle.accessor().get(&I_SESSION_TOOL_POLICY).ready().await?;
+            handle.accessor().get(&I_PROJECT_PERMISSION_RULES_SERVICE).ready().await?;
             let (profiles, extra, explicit, user, plugin) = tokio::join!(
                 workdir.agent_profiles.ready(),
                 self.services.extra_agent_profile_loader.ready(),
@@ -464,7 +505,7 @@ impl SessionLifecycleService {
         let mut properties = Map::new();
         properties.insert("resumed".to_string(), resumed.into());
         properties.insert("experimental_flags".to_string(), flags.join(",").into());
-        event.handle.accessor().get::<ITelemetryService>().track2("session_started", Some(properties));
+        event.handle.accessor().get(&I_TELEMETRY_SERVICE).track2("session_started", Some(properties));
         Ok(())
     }
 
@@ -555,7 +596,7 @@ impl SessionLifecycleService {
         let workdir = self.open_workdir(environment.as_ref(), &work_dir).await?;
         let handle = self.materialize_session(&create_opts, session_id, environment, workdir).await?;
         let result = async {
-            let agents = handle.accessor().get::<IAgentLifecycleService>();
+            let agents = handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
             if agents.get(MAIN_AGENT_ID).is_none() {
                 agents.create(Some(crate::session::agent_lifecycle::agent_lifecycle::CreateAgentOptions {
                     agent_id: Some(MAIN_AGENT_ID.to_string()),
@@ -623,7 +664,7 @@ impl SessionLifecycleService {
         };
         let lease = self.services.session_locks.lease(session_id);
         let result = async {
-            let meta = handle.accessor().get::<ISessionMetadata>();
+            let meta = handle.accessor().get(&I_SESSION_METADATA);
             meta.set_archived(true).await?;
             self.drain_agents(&handle).await?;
             self.services.append_log_store.drain_retirements().await?;
@@ -660,7 +701,7 @@ impl SessionLifecycleService {
         let Some(handle) = handle else {
             return Ok(None);
         };
-        let metadata = handle.accessor().get::<ISessionMetadata>();
+        let metadata = handle.accessor().get(&I_SESSION_METADATA);
         let was_archived = metadata.read().await?.archived;
         metadata.set_archived(false).await?;
         if was_archived {
@@ -709,7 +750,7 @@ impl SessionLifecycleService {
     }
 
     async fn drain_agents(&self, handle: &Arc<ISessionScopeHandle>) -> Result<(), WireAsyncError> {
-        let lifecycle = handle.accessor().get::<IAgentLifecycleService>();
+        let lifecycle = handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
         for agent in lifecycle.list() {
             lifecycle.remove(&agent).await?;
         }
@@ -750,10 +791,10 @@ impl SessionLifecycleService {
         let mut active_turn_ids = HashMap::new();
         let mut queued_prompt_ids = HashMap::new();
         if let Some(source_handle) = &source_handle {
-            let agents = source_handle.accessor().get::<IAgentLifecycleService>();
+            let agents = source_handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
             let agent_handles = agents.list().into_iter().filter_map(|agent| agents.handle_of(&agent.agent_id)).collect::<Vec<_>>();
             for agent_handle in agent_handles {
-                let loop_ = agent_handle.accessor().get::<IAgentLoopService>();
+                let loop_ = agent_handle.accessor().get(&I_AGENT_LOOP_SERVICE);
                 let snapshot = loop_.snapshot();
                 let active_turn_id = snapshot.active_turn_id.or_else(|| snapshot.turn.as_ref().map(|turn| turn.turn_id));
                 let requires_history_snapshot = active_turn_id.is_some() || snapshot.has_pending_requests;
@@ -784,21 +825,21 @@ impl SessionLifecycleService {
                 }
             }
             for agent_handle in agents.list().into_iter().filter_map(|agent| agents.handle_of(&agent.agent_id)) {
-                agent_handle.accessor().get::<IEventDispatcher>().flush().await?;
+                agent_handle.accessor().get(&I_EVENT_DISPATCHER).flush().await?;
             }
             self.services.append_log_store.flush().await?;
         }
         drain_session_metadata_writes().await?;
         if let Some(source_handle) = &source_handle {
-            let agents = source_handle.accessor().get::<IAgentLifecycleService>();
+            let agents = source_handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
             for agent in agents.list() {
                 if let Some(handle) = agents.handle_of(&agent.agent_id) {
-                    handle.accessor().get::<IAgentFileHistoryService>().settled().await;
+                    handle.accessor().get(&I_AGENT_FILE_HISTORY_SERVICE).settled().await;
                 }
             }
         }
         let source_meta = match &source_handle {
-            Some(handle) => Some(handle.accessor().get::<ISessionMetadata>().read().await?),
+            Some(handle) => Some(handle.accessor().get(&I_SESSION_METADATA).read().await?),
             None => self.read_meta_from_disk(&source_id).await?,
         };
         let target_id = opts.new_session_id.clone().unwrap_or_else(create_session_id);
@@ -903,7 +944,7 @@ impl SessionLifecycleService {
                 ..source_agent.clone()
             });
         }
-        let host_cwd = source_handle.as_ref().map(|handle| handle.accessor().get::<ISessionContext>().cwd())
+        let host_cwd = source_handle.as_ref().map(|handle| handle.accessor().get(&I_SESSION_CONTEXT).cwd())
             .or_else(|| source_meta.as_ref().and_then(|meta| meta.cwd.clone()))
             .unwrap_or_else(|| self.services.workspace_context.cwd());
         let meta = SessionMeta {
@@ -969,7 +1010,7 @@ impl SessionLifecycleService {
 
     async fn resolve_source_title(&self, source_id: &str) -> Result<Option<String>, WireAsyncError> {
         if let Some(live) = self.state.lock().sessions.get(source_id).cloned() {
-            return Ok(live.accessor().get::<ISessionMetadata>().read().await?.title);
+            return Ok(live.accessor().get(&I_SESSION_METADATA).read().await?.title);
         }
         Ok(self.services.index.get(source_id).await?.and_then(|summary| summary.title))
     }
@@ -1023,8 +1064,8 @@ impl SessionLifecycleService {
 
     async fn read_source_wire_records(&self, source_handle: Option<&Arc<ISessionScopeHandle>>, source_session_id: &str, agent_id: &str) -> Result<Vec<WireRecord>, WireAsyncError> {
         if let Some(source_handle) = source_handle {
-            if let Some(agent_handle) = source_handle.accessor().get::<IAgentLifecycleService>().handle_of(agent_id) {
-                agent_handle.accessor().get::<IEventDispatcher>().flush().await?;
+            if let Some(agent_handle) = source_handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE).handle_of(agent_id) {
+                agent_handle.accessor().get(&I_EVENT_DISPATCHER).flush().await?;
             }
         }
         let scope = agent_scope_of(&session_scope_of(&self.handler_scope(), source_session_id), agent_id);
@@ -1134,27 +1175,27 @@ impl SessionLifecycleService {
         fire_listeners(&self.events.will_create, event);
     }
 
-    pub fn on_will_create_session(&self, listener: Arc<dyn Fn(SessionWillCreateEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_will_create_session(&self, listener: Arc<dyn Fn(SessionWillCreateEvent) + Send + Sync>) -> DisposableRef {
         add_listener(&self.events.will_create, listener)
     }
 
-    pub fn on_did_create_session(&self, listener: Arc<dyn Fn(LifecycleWaitEvent<SessionCreatedEvent>) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_did_create_session(&self, listener: Arc<dyn Fn(LifecycleWaitEvent<SessionCreatedEvent>) + Send + Sync>) -> DisposableRef {
         add_listener(&self.events.did_create, listener)
     }
 
-    pub fn on_will_close_session(&self, listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillCloseEvent>) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_will_close_session(&self, listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillCloseEvent>) + Send + Sync>) -> DisposableRef {
         add_listener(&self.events.will_close, listener)
     }
 
-    pub fn on_did_close_session(&self, listener: Arc<dyn Fn(SessionClosedEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_did_close_session(&self, listener: Arc<dyn Fn(SessionClosedEvent) + Send + Sync>) -> DisposableRef {
         add_listener(&self.events.did_close, listener)
     }
 
-    pub fn on_did_archive_session(&self, listener: Arc<dyn Fn(SessionArchivedEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_did_archive_session(&self, listener: Arc<dyn Fn(SessionArchivedEvent) + Send + Sync>) -> DisposableRef {
         add_listener(&self.events.did_archive, listener)
     }
 
-    pub fn on_did_fork_session(&self, listener: Arc<dyn Fn(SessionForkedEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_did_fork_session(&self, listener: Arc<dyn Fn(SessionForkedEvent) + Send + Sync>) -> DisposableRef {
         add_listener(&self.events.did_fork, listener)
     }
 }
@@ -1208,27 +1249,27 @@ struct CopyAgentWireInput {
 
 #[async_trait]
 impl ISessionLifecycleService for SessionLifecycleService {
-    fn on_will_create_session(&self, listener: Arc<dyn Fn(SessionWillCreateEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_will_create_session(&self, listener: Arc<dyn Fn(SessionWillCreateEvent) + Send + Sync>) -> DisposableRef {
         SessionLifecycleService::on_will_create_session(self, listener)
     }
 
-    fn on_did_create_session(&self, listener: Arc<dyn Fn(LifecycleWaitEvent<SessionCreatedEvent>) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_create_session(&self, listener: Arc<dyn Fn(LifecycleWaitEvent<SessionCreatedEvent>) + Send + Sync>) -> DisposableRef {
         SessionLifecycleService::on_did_create_session(self, listener)
     }
 
-    fn on_will_close_session(&self, listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillCloseEvent>) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_will_close_session(&self, listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillCloseEvent>) + Send + Sync>) -> DisposableRef {
         SessionLifecycleService::on_will_close_session(self, listener)
     }
 
-    fn on_did_close_session(&self, listener: Arc<dyn Fn(SessionClosedEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_close_session(&self, listener: Arc<dyn Fn(SessionClosedEvent) + Send + Sync>) -> DisposableRef {
         SessionLifecycleService::on_did_close_session(self, listener)
     }
 
-    fn on_did_archive_session(&self, listener: Arc<dyn Fn(SessionArchivedEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_archive_session(&self, listener: Arc<dyn Fn(SessionArchivedEvent) + Send + Sync>) -> DisposableRef {
         SessionLifecycleService::on_did_archive_session(self, listener)
     }
 
-    fn on_did_fork_session(&self, listener: Arc<dyn Fn(SessionForkedEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_fork_session(&self, listener: Arc<dyn Fn(SessionForkedEvent) + Send + Sync>) -> DisposableRef {
         SessionLifecycleService::on_did_fork_session(self, listener)
     }
 
@@ -1335,7 +1376,7 @@ fn error_code<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a str> {
 fn add_listener<T: 'static>(
     listeners: &Arc<Mutex<LifecycleListeners<T>>>,
     listener: Arc<dyn Fn(T) + Send + Sync>,
-) -> Box<dyn IDisposable> {
+) -> DisposableRef {
     let id = {
         let mut listeners = listeners.lock();
         let id = listeners.next_id;

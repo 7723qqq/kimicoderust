@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::environment::environment::{Environment, EnvironmentBinding, EnvironmentCapability, EnvironmentLease};
 use crate::environment::environment_provider::EnvironmentProviderFactory;
 use crate::environment::environment_registry::{
@@ -43,7 +43,7 @@ pub trait IEnvironmentService: EnvironmentResolver {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(EnvironmentRegistryChange) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
 
     fn snapshot(&self) -> EnvironmentRegistrySnapshot;
 

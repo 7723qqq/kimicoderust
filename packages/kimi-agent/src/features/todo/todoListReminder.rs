@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::agent::context_memory::types::ContextMessage;
+use crate::agent::context_memory::types::{ContextMessage, PromptOrigin};
 use crate::features::todo::todoItem::{TODO_LIST_TOOL_NAME, TodoItem, todo_progress};
 
 pub const TODO_LIST_REMINDER_VARIANT: &str = "todo_list_reminder";
@@ -112,12 +112,10 @@ fn has_todo_list_write(message: &ContextMessage) -> bool {
         if call.name != TODO_LIST_TOOL_NAME {
             return false;
         }
-        let Some(arguments) = call.arguments.as_str() else {
-            return false;
-        };
-        serde_json::from_str::<Value>(arguments)
-            .ok()
-            .is_some_and(|args| args.get("todos").is_some_and(Value::is_array))
+        crate::llm::tool_args::parse_tool_arguments(call.arguments.as_deref())
+            .data
+            .get("todos")
+            .is_some_and(Value::is_array)
     })
 }
 
@@ -125,15 +123,8 @@ fn is_todo_list_reminder(message: &ContextMessage) -> bool {
     message
         .origin
         .as_ref()
-        .and_then(|origin| origin.get("kind"))
-        .and_then(Value::as_str)
-        == Some("injection")
-        && message
-            .origin
-            .as_ref()
-            .and_then(|origin| origin.get("variant"))
-            .and_then(Value::as_str)
-            == Some(TODO_LIST_REMINDER_VARIANT)
+        .and_then(PromptOrigin::injection_variant)
+        == Some(TODO_LIST_REMINDER_VARIANT)
 }
 
 fn render_todo_list_reminder(todos: &[TodoItem], steps_since_last_write: usize) -> String {

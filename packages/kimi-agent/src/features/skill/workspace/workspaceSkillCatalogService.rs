@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
 use crate::features::skill::catalog::registry::InMemorySkillCatalog;
 use crate::features::skill::catalog::skillSource::{ISkillSource, SkillContribution};
@@ -35,7 +35,7 @@ pub struct WorkspaceSkillCatalogService {
     ready_cell: OnceCell<Result<(), String>>,
     on_did_change_emitter: Emitter<String>,
     self_weak: std::sync::Weak<Self>,
-    source_subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    source_subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl WorkspaceSkillCatalogService {
@@ -55,12 +55,12 @@ impl WorkspaceSkillCatalogService {
             self_weak: weak.clone(),
             source_subscriptions: Mutex::new(Vec::new()),
         });
-        let mut subscriptions: Vec<Box<dyn IDisposable>> = Vec::new();
+        let mut subscriptions: Vec<DisposableRef> = Vec::new();
         for source in &service.sources {
             let Some(event) = source.on_did_change() else { continue };
             let weak = Arc::downgrade(&service);
             let id = source.id().to_string();
-            subscriptions.push(Box::new(event.subscribe(move |_| {
+            subscriptions.push(Arc::new(event.subscribe(move |_| {
                 let Some(service) = weak.upgrade() else { return };
                 let id = id.clone();
                 spawn_reload(service, id);

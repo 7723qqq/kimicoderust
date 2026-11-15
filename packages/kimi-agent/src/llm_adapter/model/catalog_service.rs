@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::app::config::config::IConfigService;
 use crate::app::kosong_config::config_section::DEFAULT_MODEL_SECTION;
 use crate::human::credentials::credentials::{
@@ -73,7 +73,7 @@ pub struct ModelCatalog {
     host_request_headers: Arc<dyn IHostRequestHeaders>,
     config: Arc<dyn IConfigService>,
     cache: Mutex<HashMap<String, CatalogEntry>>,
-    runtime_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    runtime_subscription: Mutex<Option<DisposableRef>>,
 }
 
 impl ModelCatalog {

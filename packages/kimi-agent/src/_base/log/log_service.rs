@@ -13,7 +13,7 @@ use super::log::{
 };
 use super::log_config::LoggingConfig;
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
-use crate::_base::di::instantiation::ScopeActivation;
+use crate::_base::di::instantiation::{ScopeActivation, refine_service_decorator};
 use crate::_base::di::lifecycle::IDisposable;
 use crate::_base::di::scope::{LifecycleScope, register_scoped_service};
 
@@ -277,7 +277,7 @@ static LOG_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
     });
     register_scoped_service(
         LifecycleScope::App.as_str().to_string(),
-        super::log::I_LOG_SERVICE.clone(),
+        refine_service_decorator(&super::log::I_LOG_SERVICE),
         SyncDescriptor::new(ctor, Vec::new()),
         ScopeActivation::OnScopeCreated,
         "log",

@@ -1,3 +1,6 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::session::agent_lifecycle::agent_lifecycle::I_AGENT_LIFECYCLE_SERVICE;
+use crate::session::session_activity::session_activity::I_SESSION_ACTIVITY_VIEW;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -14,7 +17,7 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
-use crate::_base::di::instantiation::ScopeActivation;
+use crate::_base::di::instantiation::{ScopeActivation, refine_service_decorator};
 use crate::_base::di::lifecycle::{DisposableRef, DisposableStore, IDisposable, to_disposable};
 use crate::_base::di::scope::{ISessionScopeHandle, register_scoped_service};
 use crate::app::environment::environment::IEnvironmentService;
@@ -23,7 +26,7 @@ use crate::app::scopes::LifecycleScope;
 use crate::app::session_index::session_index::{ISessionIndex, SessionSummary};
 use crate::environment::environment::LOCAL_ENVIRONMENT_ID;
 use crate::environment::environment_defaults::normalize_remote_cwd;
-use crate::features::cron::cron_service::AgentCronService;
+use crate::features::cron::cron_service::{AgentCronService, I_AGENT_CRON_SERVICE};
 use crate::os::interface::host_file_system::IHostFileSystem;
 use crate::os::interface::host_fs_errors::{is_host_fs_not_directory, is_host_fs_not_found};
 use crate::persistence::interface::session_lock::{ISessionLockService, SessionLockLease};
@@ -229,14 +232,6 @@ impl Drop for ControllerOperationGuard {
     }
 }
 
-struct BoxedDisposable(DisposableRef);
-
-impl IDisposable for BoxedDisposable {
-    fn dispose(&self) {
-        self.0.dispose();
-    }
-}
-
 struct ManagedUnguardedLifecycle {
     manager: SessionManager,
     session_id: String,
@@ -282,49 +277,49 @@ impl SessionManager {
     pub fn on_will_create_session(
         &self,
         listener: Arc<dyn Fn(SessionWillCreateEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         add_listener(&self.inner.events.will_create, listener)
     }
 
     pub fn on_did_create_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionCreatedEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         add_listener(&self.inner.events.did_create, listener)
     }
 
     pub fn on_will_close_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillCloseEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         add_listener(&self.inner.events.will_close, listener)
     }
 
     pub fn on_did_close_session(
         &self,
         listener: Arc<dyn Fn(SessionClosedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         add_listener(&self.inner.events.did_close, listener)
     }
 
     pub fn on_will_delete_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillDeleteEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         add_listener(&self.inner.events.will_delete, listener)
     }
 
     pub fn on_did_archive_session(
         &self,
         listener: Arc<dyn Fn(SessionArchivedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         add_listener(&self.inner.events.did_archive, listener)
     }
 
     pub fn on_did_fork_session(
         &self,
         listener: Arc<dyn Fn(SessionForkedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         add_listener(&self.inner.events.did_fork, listener)
     }
 
@@ -729,7 +724,7 @@ impl SessionManager {
                 let entry = this.retain_controller(&entry);
                 this.run_controller_operation(entry, move |controller| {
                     async move {
-                        let last_active_at = handle.accessor().get::<ISessionActivityView>().last_active_at();
+                        let last_active_at = handle.accessor().get(&I_SESSION_ACTIVITY_VIEW).last_active_at();
                         if chrono::Utc::now().timestamp_millis() - last_active_at < idle_timeout_ms {
                             return Ok(false);
                         }
@@ -762,16 +757,16 @@ impl SessionManager {
     }
 
     async fn retained(&self, handle: &Arc<ISessionScopeHandle>) -> Result<bool, WireAsyncError> {
-        let agents = handle.accessor().get::<IAgentLifecycleService>();
+        let agents = handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
         for agent in agents.list() {
             let Some(agent_handle) = agents.handle_of(&agent.agent_id) else {
                 continue;
             };
-            if !agent_handle.accessor().get::<AgentCronService>().list().is_empty() {
+            if !agent_handle.accessor().get(&I_AGENT_CRON_SERVICE).list().is_empty() {
                 return Ok(true);
             }
         }
-        let activity = handle.accessor().get::<ISessionActivityView>().state();
+        let activity = handle.accessor().get(&I_SESSION_ACTIVITY_VIEW).state();
         Ok(activity.busy || activity.pending_interaction != SessionPendingInteraction::None)
     }
 
@@ -1156,14 +1151,14 @@ impl SessionLifecycleEvents for SessionManager {
     fn on_did_close_session(
         &self,
         listener: Arc<dyn Fn(SessionClosedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         SessionManager::on_did_close_session(self, listener)
     }
 
     fn on_did_archive_session(
         &self,
         listener: Arc<dyn Fn(SessionArchivedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         SessionManager::on_did_archive_session(self, listener)
     }
 }
@@ -1173,35 +1168,35 @@ impl ISessionManager for SessionManager {
     fn on_will_create_session(
         &self,
         listener: Arc<dyn Fn(SessionWillCreateEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         SessionManager::on_will_create_session(self, listener)
     }
 
     fn on_did_create_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionCreatedEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         SessionManager::on_did_create_session(self, listener)
     }
 
     fn on_will_close_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillCloseEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         SessionManager::on_will_close_session(self, listener)
     }
 
     fn on_will_delete_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillDeleteEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         SessionManager::on_will_delete_session(self, listener)
     }
 
     fn on_did_fork_session(
         &self,
         listener: Arc<dyn Fn(SessionForkedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         SessionManager::on_did_fork_session(self, listener)
     }
 
@@ -1306,11 +1301,11 @@ fn entry_id(entry: &Arc<SessionControllerEntry>) -> usize {
 fn add_listener<T: 'static>(
     listeners: &Arc<Mutex<LifecycleListeners<T>>>,
     listener: Arc<dyn Fn(T) + Send + Sync>,
-) -> Box<dyn IDisposable> {
+) -> DisposableRef {
     let id = {
         let mut listeners = listeners.lock();
         if listeners.disposed {
-            return Box::new(BoxedDisposable(to_disposable(|| {})));
+            return to_disposable(|| {});
         }
         let id = listeners.next_id;
         listeners.next_id += 1;
@@ -1318,9 +1313,9 @@ fn add_listener<T: 'static>(
         id
     };
     let listeners = listeners.clone();
-    Box::new(BoxedDisposable(to_disposable(move || {
+    to_disposable(move || {
         listeners.lock().listeners.remove(&id);
-    })))
+    })
 }
 
 fn fire_listeners<T: Clone>(listeners: &Arc<Mutex<LifecycleListeners<T>>>, event: T) {
@@ -1366,7 +1361,7 @@ static SESSION_MANAGER_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
     });
     register_scoped_service(
         LifecycleScope::App.as_str().to_string(),
-        I_SESSION_MANAGER.clone(),
+        refine_service_decorator(&I_SESSION_MANAGER),
         SyncDescriptor::new(ctor, Vec::new()),
         ScopeActivation::OnScopeCreated,
         "sessionManager",

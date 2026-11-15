@@ -95,7 +95,7 @@ pub trait ILogService: ILogger {
     fn flush(&self) -> BoxFuture<'static, ()>;
 }
 
-pub static I_LOG_SERVICE: Lazy<ServiceIdentifier<DynamicValue>> =
+pub static I_LOG_SERVICE: Lazy<ServiceIdentifier<Arc<dyn ILogService>>> =
     Lazy::new(|| create_decorator("logService"));
 
 pub fn level_enabled(level: LogLevel, configured: LogLevel) -> bool {

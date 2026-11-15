@@ -7,6 +7,8 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
+use futures_util::future::BoxFuture;
+
 use super::cascade_engine::{CascadeEngine, UnitActivation};
 use super::descriptors::{DynamicValue, SyncDescriptor, SyncDescriptor0};
 use super::lifecycle::{DisposableStore, IDisposable};
@@ -188,9 +190,19 @@ pub trait BrandedService {}
 pub type IConstructorSignature<T> = Arc<dyn Fn(Vec<DynamicValue>) -> T + Send + Sync>;
 pub type GetLeadingNonServiceArgs<TArgs> = TArgs;
 
+#[derive(Clone)]
 pub struct LiveRef<T> {
     pub current: Option<T>,
     pub on_did_change: Event<()>,
+}
+
+impl<T> LiveRef<T>
+where
+    T: Clone,
+{
+    pub fn current(&self) -> Option<T> {
+        self.current.clone()
+    }
 }
 
 pub fn ref_dependency<T>(
@@ -246,10 +258,12 @@ pub trait ProvideHandle: IDisposable {
     fn uid(&self) -> u64;
 }
 
-pub trait IInstantiationService {
+pub trait IInstantiationService: Send + Sync {
     fn cascade(&self) -> Arc<CascadeEngine>;
-    fn invoke_function<R>(&self, callback: impl FnOnce(&dyn ServicesAccessor) -> R) -> R;
-    fn create_instance<T>(&self, descriptor: &SyncDescriptor0<T>) -> T;
+    fn invoke_function_dyn(&self, callback: &mut dyn FnMut(&dyn ServicesAccessor));
+    fn create_instance<T>(&self, descriptor: &SyncDescriptor0<T>) -> T
+    where
+        Self: Sized;
     fn create_child(
         &self,
         services: ServiceCollection,
@@ -260,12 +274,31 @@ pub trait IInstantiationService {
         id: ServiceIdentifier<T>,
         instance_or_descriptor: DynamicValue,
         options: Option<ProvideOptions>,
-    ) -> Arc<dyn ProvideHandle>;
+    ) -> Arc<dyn ProvideHandle>
+    where
+        Self: Sized;
     fn provide_all(&self, entries: Vec<ProvideAllEntry>);
-    fn unprovide<T>(&self, id: &ServiceIdentifier<T>);
+    fn unprovide<T>(&self, id: &ServiceIdentifier<T>)
+    where
+        Self: Sized;
     fn dispose(&self);
-    fn dispose_async(&self) -> impl std::future::Future<Output = ()> + Send;
+    fn dispose_async(&self) -> BoxFuture<'static, ()>;
 }
+
+pub trait IInstantiationServiceExt: IInstantiationService {
+    fn invoke_function<R>(&self, callback: impl FnOnce(&dyn ServicesAccessor) -> R) -> R {
+        let mut callback = Some(callback);
+        let mut result = None;
+        self.invoke_function_dyn(&mut |accessor| {
+            if let Some(callback) = callback.take() {
+                result = Some(callback(accessor));
+            }
+        });
+        result.expect("invoke_function callback did not run")
+    }
+}
+
+impl<T> IInstantiationServiceExt for T where T: IInstantiationService + ?Sized {}
 
 pub static I_INSTANTIATION_SERVICE: Lazy<ServiceIdentifier<DynamicValue>> =
     Lazy::new(|| create_decorator("instantiationService"));

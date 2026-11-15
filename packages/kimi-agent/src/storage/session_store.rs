@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 use crate::turn_loop::types::LLMMessage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,9 +159,7 @@ impl SessionStore {
                         Ok(rec) => {
                             turns_count += 1;
                             last_updated_ms = rec.timestamp_ms;
-                            total_usage.input_tokens += rec.usage.input_tokens;
-                            total_usage.output_tokens += rec.usage.output_tokens;
-                            total_usage.total_tokens += rec.usage.total_tokens;
+                            total_usage.accumulate(&rec.usage);
                         }
                         Err(_) => skipped += 1,
                     }
@@ -210,21 +208,21 @@ mod tests {
         let store = SessionStore::for_dir(tmp.path().join("sessions")).unwrap();
 
         let u1 = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hello".into(),
             ..Default::default()
         };
         let a1 = LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "hi there".into(),
             ..Default::default()
         };
         let usage = TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-            total_tokens: 15,
+            input_other: 10,
+            output: 5,
             input_cache_read: 0,
             input_cache_creation: 0,
+            raw: None,
         };
 
         store
@@ -240,7 +238,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "sess-1");
         assert_eq!(sessions[0].turns_count, 1);
-        assert_eq!(sessions[0].total_usage.total_tokens, 15);
+        assert_eq!(sessions[0].total_usage.measured_context_tokens(), 15);
 
         assert!(store.delete_session("sess-1").unwrap());
         assert_eq!(store.load_history("sess-1").unwrap().len(), 0);

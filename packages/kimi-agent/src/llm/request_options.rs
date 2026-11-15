@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 
 use super::wire::WireMessage;
-use kimi_core::types::ContentBlock;
+use kimi_core::types::ContentPart;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponseFormat {
@@ -208,7 +208,7 @@ fn first_user_text(messages: &[WireMessage]) -> String {
             .blocks
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                ContentPart::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect();

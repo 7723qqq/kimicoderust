@@ -133,6 +133,7 @@ struct CallbackState {
     close_token: tokio_util::sync::CancellationToken,
 }
 
+#[derive(Clone)]
 pub struct CallbackServer {
     pub redirect_uri: String,
     state: Arc<Mutex<CallbackState>>,

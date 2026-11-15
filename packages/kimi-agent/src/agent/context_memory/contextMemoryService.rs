@@ -1,17 +1,27 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::Mutex;
 
+use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
+use crate::_base::di::instantiation::{
+    DependencyKind, ServiceDependency, refine_service_decorator,
+};
+use crate::_base::di::instantiation_service::register_descriptor_dependencies;
 use crate::_base::di::lifecycle::DisposableStore;
-use crate::agent::scope_context::scope_context::IAgentScopeContext;
-use crate::agent::state::agent_state::IAgentStateService;
+use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
+use crate::app::scopes::LifecycleScope;
+use crate::agent::scope_context::scope_context::{
+    I_AGENT_SCOPE_CONTEXT, IAgentScopeContext,
+};
+use crate::agent::state::agent_state::{I_AGENT_STATE_SERVICE, IAgentStateService};
 use crate::app::event::event2::Event2;
 use crate::session::session_token_counting::session_token_counting::{
-    ISessionTokenCountingService, TokenCountingRebaseInput,
+    I_SESSION_TOKEN_COUNTING_SERVICE, ISessionTokenCountingService, TokenCountingRebaseInput,
 };
-use crate::state::event_dispatcher::{IEventDispatcher, RestorePhase};
+use crate::state::event_dispatcher::{I_EVENT_DISPATCHER, IEventDispatcher, RestorePhase};
 
 use super::compaction_handoff::{TokenEstimate, build_context_compaction_shape};
 use super::context_events::{
@@ -21,7 +31,8 @@ use super::context_events::{
     ContextSplicedPayload,
 };
 use super::context_memory::{
-    ContextCompactionInput, ContextCompactionResult, IAgentContextMemoryService,
+    I_AGENT_CONTEXT_MEMORY_SERVICE, ContextCompactionInput, ContextCompactionResult,
+    IAgentContextMemoryService,
 };
 use super::context_ops::context_memory_key;
 use super::loop_event_fold::LoopRecordedEvent;
@@ -235,6 +246,7 @@ impl IAgentContextMemoryService for AgentContextMemoryService {
                 summary_output_tokens,
                 kept_user_message_count: Some(result.kept_user_message_count),
                 kept_head_user_message_count: result.kept_head_user_message_count,
+                appended_injection_count: Some(result.appended_injection_count),
                 dropped_count: result.dropped_count,
                 legacy_tail: None,
                 wire_lines: wire_lines.map(|range| {
@@ -267,7 +279,69 @@ impl IAgentContextMemoryService for AgentContextMemoryService {
             tokens_after: result.tokens_after,
             kept_user_message_count: result.kept_user_message_count,
             kept_head_user_message_count: result.kept_head_user_message_count,
+            appended_injection_count: result.appended_injection_count,
             dropped_count: result.dropped_count,
         }
     }
+}
+
+fn dependency<T>(args: &[DynamicValue], index: usize) -> Arc<T>
+where
+    T: Send + Sync + 'static + ?Sized,
+{
+    Arc::downcast::<Arc<T>>(args[index].clone())
+        .unwrap_or_else(|_| panic!("contextMemory dependency {index} has an incompatible type"))
+        .as_ref()
+        .clone()
+}
+
+static AGENT_CONTEXT_MEMORY_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
+    let ctor: Constructor<DynamicValue> = Arc::new(|args| {
+        let service: Arc<dyn IAgentContextMemoryService> =
+            Arc::new(AgentContextMemoryService::new(
+                dependency::<dyn IEventDispatcher>(&args, 0),
+                dependency::<dyn IAgentScopeContext>(&args, 1),
+                dependency::<dyn ISessionTokenCountingService>(&args, 2),
+                dependency::<dyn IAgentStateService>(&args, 3),
+            ));
+        Arc::new(service) as DynamicValue
+    });
+    let descriptor = SyncDescriptor::new(ctor, Vec::new());
+    register_descriptor_dependencies(
+        &descriptor,
+        vec![
+            ServiceDependency {
+                id: refine_service_decorator(&I_EVENT_DISPATCHER),
+                index: 0,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_SCOPE_CONTEXT),
+                index: 1,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_SESSION_TOKEN_COUNTING_SERVICE),
+                index: 2,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_STATE_SERVICE),
+                index: 3,
+                kind: DependencyKind::Instance,
+            },
+        ],
+    );
+    register_scoped_service(
+        LifecycleScope::Agent.as_str().to_string(),
+        refine_service_decorator(&I_AGENT_CONTEXT_MEMORY_SERVICE),
+        descriptor,
+        ScopeActivation::OnScopeCreated,
+        "contextMemory",
+    )
+    .map_err(|error| error.to_string())
+});
+
+pub fn ensure_agent_context_memory_service_registered() -> Result<(), String> {
+    Lazy::force(&AGENT_CONTEXT_MEMORY_SERVICE_REGISTRATION).clone()
 }

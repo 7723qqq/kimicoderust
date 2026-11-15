@@ -15,7 +15,8 @@ use crate::app::config::toml::{clone_record, plain_object_to_toml, transform_pla
 use kimi_core::primitives::errors::Error2;
 
 use super::matches_rule::parse_permission_pattern;
-use super::permission_rules::PermissionRule;
+use super::permission_rules::{PermissionRule, PermissionRuleScope};
+use crate::wire::record::WireAsyncError;
 
 pub const PERMISSION_SECTION: &str = "permission";
 pub const DANGEROUS_COMMAND_GUARD_ENV: &str = "KIMI_CODE_DANGEROUS_COMMAND_GUARD";
@@ -49,6 +50,23 @@ pub static PERMISSION_CONFIG_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         }
     })
 });
+pub static PERSISTED_PERMISSION_RULE_SCOPE_SCHEMA: LazyLock<Value> =
+    LazyLock::new(|| json!({"enum": ["project", "user"]}));
+pub static PERSISTED_PERMISSION_RULE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "type": "object",
+        "required": ["decision", "pattern"],
+        "properties": {
+            "decision": PERMISSION_RULE_DECISION_SCHEMA.clone(),
+            "scope": {
+                "allOf": [PERSISTED_PERMISSION_RULE_SCOPE_SCHEMA.clone()],
+                "default": "user"
+            },
+            "pattern": {"type": "string", "minLength": 1},
+            "reason": {"type": "string"}
+        }
+    })
+});
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +75,33 @@ pub struct PermissionConfig {
     pub rules: Option<Vec<PermissionRule>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dangerous_command_guard: Option<bool>,
+}
+
+pub async fn read_user_permission_rules(
+    config: &dyn IConfigService,
+) -> Result<Vec<PermissionRule>, WireAsyncError> {
+    config.assert_valid(PERMISSION_SECTION).await?;
+    Ok(user_permission_rules(config))
+}
+
+pub fn user_permission_rules(config: &dyn IConfigService) -> Vec<PermissionRule> {
+    let Some(section) = config.get(PERMISSION_SECTION) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_value::<PermissionConfig>(section) else {
+        return Vec::new();
+    };
+    parsed
+        .rules
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|rule| {
+            matches!(
+                rule.scope,
+                PermissionRuleScope::Project | PermissionRuleScope::User
+            )
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

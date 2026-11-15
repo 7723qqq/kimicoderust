@@ -22,12 +22,12 @@ async fn test_run_turn_no_tool_calls_with_messages() {
         llm: &llm,
         messages: vec![
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "First message".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "Second message".into(),
                 ..Default::default()
             },
@@ -79,10 +79,9 @@ impl LLM for FinishReasonLlm {
                 tool_calls: vec![],
                 finish_reason: Some(fr.into()),
                 usage: TokenUsage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    total_tokens: 2,
-                    ..Default::default()
+                    input_other: 1,
+                    output: 1,
+                                        ..Default::default()
                 },
                 timing: None,
             })
@@ -152,7 +151,7 @@ async fn test_finish_reason_length_maps_to_max_tokens() {
         turn_id: "test-finish-length".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -189,7 +188,7 @@ async fn test_finish_reason_max_tokens_maps_to_max_tokens() {
         turn_id: "test-finish-max-tokens".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -226,7 +225,7 @@ async fn test_finish_reason_content_filter_maps_to_filtered() {
         turn_id: "test-finish-filtered".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -274,16 +273,16 @@ async fn test_truncation_on_exhausted_steps_surfaces_max_tokens() {
                     tool_calls: vec![ToolCall {
                         id: "tc1".into(),
                         name: "read".into(),
-                        arguments: serde_json::json!({"path": "/a.txt"}),
+                        arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("length".into()),
                     usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        total_tokens: 2,
-                        ..Default::default()
+                        input_other: 1,
+                        output: 1,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -313,7 +312,7 @@ async fn test_truncation_on_exhausted_steps_surfaces_max_tokens() {
         turn_id: "test-exhausted-truncated".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -366,17 +365,18 @@ async fn test_cache_usage_accumulates_across_steps() {
                         tool_calls: vec![ToolCall {
                             id: "tc1".into(),
                             name: "read".into(),
-                            arguments: serde_json::json!({"path": "/a.txt"}),
+                            arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage {
-                            input_tokens: 10,
-                            output_tokens: 5,
-                            total_tokens: 15,
+                            input_other: 10,
+                            output: 5,
                             input_cache_read: 4,
                             input_cache_creation: 3,
+                            raw: None,
                         },
                         timing: None,
                     })
@@ -387,11 +387,11 @@ async fn test_cache_usage_accumulates_across_steps() {
                         tool_calls: vec![],
                         finish_reason: Some("stop".into()),
                         usage: TokenUsage {
-                            input_tokens: 8,
-                            output_tokens: 2,
-                            total_tokens: 10,
+                            input_other: 8,
+                            output: 2,
                             input_cache_read: 6,
                             input_cache_creation: 1,
+                            raw: None,
                         },
                         timing: None,
                     })
@@ -423,7 +423,7 @@ async fn test_cache_usage_accumulates_across_steps() {
         turn_id: "test-cache-usage".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -443,8 +443,8 @@ async fn test_cache_usage_accumulates_across_steps() {
         toolset: None,
     };
     let turn = run_turn(input, &callbacks).await.unwrap();
-    assert_eq!(turn.usage.input_tokens, 18);
-    assert_eq!(turn.usage.output_tokens, 7);
+    assert_eq!(turn.usage.input_other, 18);
+    assert_eq!(turn.usage.output, 7);
     assert_eq!(turn.usage.input_cache_read, 10);
     assert_eq!(turn.usage.input_cache_creation, 4);
 }
@@ -480,9 +480,10 @@ async fn test_history_accumulates_across_steps() {
                         tool_calls: vec![ToolCall {
                             id: "tc1".into(),
                             name: "read".into(),
-                            arguments: serde_json::json!({"path": "/a.txt"}),
+                            arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),
@@ -526,7 +527,7 @@ async fn test_history_accumulates_across_steps() {
         turn_id: "test-history-accumulation".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -595,9 +596,10 @@ async fn a_failed_tool_result_reaches_the_model_wrapped() {
                         tool_calls: vec![ToolCall {
                             id: "tc-err".into(),
                             name: "read".into(),
-                            arguments: serde_json::json!({"path": "/a.txt"}),
+                            arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),
@@ -643,7 +645,7 @@ async fn a_failed_tool_result_reaches_the_model_wrapped() {
         turn_id: "test-tool-error-wrapper".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "read it".into(),
             ..Default::default()
         }],
@@ -707,9 +709,10 @@ async fn a_tool_note_reaches_the_model_after_the_status() {
                         tool_calls: vec![ToolCall {
                             id: "tc-note".into(),
                             name: "read".into(),
-                            arguments: serde_json::json!({"path": "/a.txt"}),
+                            arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),
@@ -755,7 +758,7 @@ async fn a_tool_note_reaches_the_model_after_the_status() {
         turn_id: "test-tool-note".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "read it".into(),
             ..Default::default()
         }],
@@ -812,9 +815,10 @@ async fn test_tool_result_history_carries_wall_time_header_for_the_set() {
                     tool_calls: vec![ToolCall {
                         id: "tc1".into(),
                         name: "Bash".into(),
-                        arguments: serde_json::json!({"command": "echo hi"}),
+                        arguments: Some(serde_json::json!({"command": "echo hi"}).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage: TokenUsage::default(),
@@ -844,7 +848,7 @@ async fn test_tool_result_history_carries_wall_time_header_for_the_set() {
         turn_id: "test-wall-time-header".into(),
         llm: &OneShotToolLlm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -878,7 +882,7 @@ async fn test_tool_result_history_carries_wall_time_header_for_the_set() {
 
 #[tokio::test]
 async fn test_thinking_blocks_round_trip_into_assistant_history() {
-    use crate::rpc::types::ContentBlock;
+    use crate::rpc::types::ContentPart;
     struct ThinkingLlm {
         call: AtomicU32,
         requests: std::sync::Mutex<Vec<Vec<LLMMessage>>>,
@@ -904,19 +908,20 @@ async fn test_thinking_blocks_round_trip_into_assistant_history() {
                 if call == 0 {
                     Ok(LLMChatResponse {
                         content: "checking".into(),
-                        thinking: vec![ContentBlock::Think {
+                        thinking: vec![ContentPart::Think {
                             think: "need to list files".into(),
                             encrypted: Some("sig-abc".into()),
                             details_index: None,
                             reasoning_key: None,
-                            details_summary: None,
+                            hidden: None,
                         }],
                         tool_calls: vec![ToolCall {
                             id: "tc1".into(),
                             name: "read".into(),
-                            arguments: serde_json::json!({"path": "/a.txt"}),
+                            arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),
@@ -960,7 +965,7 @@ async fn test_thinking_blocks_round_trip_into_assistant_history() {
         turn_id: "test-thinking-round-trip".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -989,7 +994,7 @@ async fn test_thinking_blocks_round_trip_into_assistant_history() {
         .expect("step 2 history must contain the assistant tool_calls message");
     assert_eq!(assistant.blocks.len(), 1, "{assistant:?}");
     match &assistant.blocks[0] {
-        ContentBlock::Think {
+        ContentPart::Think {
             think, encrypted, ..
         } => {
             assert_eq!(think, "need to list files");

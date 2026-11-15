@@ -2,10 +2,83 @@ use serde::{Deserialize, Serialize};
 
 pub use kimi_core::types::BoxFuture;
 pub use kimi_core::types::{
-    AntigravityLimits, ContentBlock, GoalContext, GoalStatus, MediaKind, NativeDeterminism,
-    NativeExtraParams, NativeJsonSchema, NativeLlmConfig, NativeResponseFormat, NativeSampling,
-    TelemetryContext, TokenUsage, ToolDelivery, ToolInfo,
+    AntigravityLimits, AudioUrl, ContentPart, DocumentUrl, GoalContext, GoalStatus,
+    ImageDimensions, ImageUrl, MediaKind, NativeDeterminism, NativeExtraParams, NativeJsonSchema,
+    NativeLlmConfig, NativeResponseFormat, NativeSampling, Role, TelemetryContext, ToolInfo,
+    VideoUrl,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Map<String, serde_json::Value>>,
+    },
+    Image {
+        media_type: String,
+        data: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    MediaRef {
+        file_id: String,
+        kind: MediaKind,
+    },
+    ImageUrl {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dimensions: Option<ImageDimensions>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    AudioUrl {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    VideoUrl {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    Think {
+        think: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted: Option<String>,
+        #[serde(rename = "detailsIndex", default, skip_serializing_if = "Option::is_none")]
+        details_index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hidden: Option<bool>,
+        #[serde(rename = "reasoningKey", default, skip_serializing_if = "Option::is_none")]
+        reasoning_key: Option<String>,
+    },
+    DocumentUrl {
+        url: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDelivery {
+    pub blocks: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<serde_json::Value>,
+}
 
 // ── JSON-RPC 2.0 base types ────────────────────────────────────────────────
 
@@ -930,6 +1003,44 @@ pub struct SessionStatusResult {
     /// P56 (G-5): absent until the session has run a turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine: Option<EngineExecSummary>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub input_tokens: u32,
+    #[serde(default)]
+    pub output_tokens: u32,
+    #[serde(default)]
+    pub total_tokens: u32,
+    #[serde(default)]
+    pub input_cache_read: u32,
+    #[serde(default)]
+    pub input_cache_creation: u32,
+}
+
+impl TokenUsage {
+    pub fn from_engine(
+        usage: kimi_core::types::TokenUsage,
+    ) -> Result<Self, std::num::TryFromIntError> {
+        Ok(Self {
+            input_tokens: u32::try_from(usage.input_other)?,
+            output_tokens: u32::try_from(usage.output)?,
+            total_tokens: u32::try_from(usage.measured_context_tokens())?,
+            input_cache_read: u32::try_from(usage.input_cache_read)?,
+            input_cache_creation: u32::try_from(usage.input_cache_creation)?,
+        })
+    }
+
+    pub fn into_engine(self) -> kimi_core::types::TokenUsage {
+        kimi_core::types::TokenUsage {
+            input_other: u64::from(self.input_tokens),
+            output: u64::from(self.output_tokens),
+            input_cache_read: u64::from(self.input_cache_read),
+            input_cache_creation: u64::from(self.input_cache_creation),
+            raw: None,
+        }
+    }
 }
 
 /// Result of a run_turn RPC call.

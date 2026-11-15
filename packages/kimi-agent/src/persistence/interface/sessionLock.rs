@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use indexmap::IndexMap;
 use std::sync::Arc;
 
@@ -6,7 +8,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::session::errors::SESSION_OCCUPIED;
 use crate::wire::record::WireAsyncError;
 
@@ -45,7 +47,7 @@ pub trait ISessionLockService: Send + Sync {
     fn on_did_hold(
         &self,
         listener: Arc<dyn Fn(SessionLockHeldEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn hold(&self, session_id: &str) -> Result<(), WireAsyncError>;
     fn try_hold(&self, session_id: &str) -> Result<bool, WireAsyncError>;
     fn release(&self, session_id: &str);
@@ -172,7 +174,7 @@ impl ISessionLockService for SessionLockHolds {
     fn on_did_hold(
         &self,
         listener: Arc<dyn Fn(SessionLockHeldEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.listeners.lock().push((id, listener));
         let listeners = Arc::downgrade(&self.listeners);
@@ -275,3 +277,7 @@ impl Drop for SessionLockHolds {
         self.release_all();
     }
 }
+
+
+pub static I_SESSION_LOCK_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn ISessionLockService>>> =
+    LazyLock::new(|| create_decorator("sessionLockService"));

@@ -32,7 +32,7 @@ pub struct MessageCallbacks {
     pub turn_number: u32,
     pub prompt: String,
 
-    pub blocks: Vec<crate::rpc::types::ContentBlock>,
+    pub blocks: Vec<crate::rpc::types::ContentPart>,
 
     pub origin: Option<Value>,
     state: Mutex<MessageState>,
@@ -58,7 +58,7 @@ impl MessageCallbacks {
         hub: Arc<EventHub>,
         turn_number: u32,
         prompt: &str,
-        blocks: &[crate::rpc::types::ContentBlock],
+        blocks: &[crate::rpc::types::ContentPart],
         origin: Option<Value>,
         step_tracker: Option<Box<dyn Fn(u32) + Send + Sync>>,
     ) -> Self {
@@ -333,37 +333,46 @@ impl HostCallbacks for MessageCallbacks {
     }
 }
 
-fn media_content_part(block: &crate::rpc::types::ContentBlock) -> Option<Value> {
-    use crate::rpc::types::{ContentBlock, MediaKind};
+fn media_content_part(block: &crate::rpc::types::ContentPart) -> Option<Value> {
+    use crate::rpc::types::ContentPart;
     let (part_type, source) = match block {
-        ContentBlock::MediaRef { file_id, kind } => (
-            match kind {
-                MediaKind::Image => "image",
-                MediaKind::Video => "video",
-                MediaKind::Audio => "audio",
-            },
-            json!({ "kind": "session_media", "file_id": file_id }),
-        ),
-        ContentBlock::ImageUrl { url, id, .. } => ("image", url_source(url, id.as_deref())),
-        ContentBlock::VideoUrl { url, id, .. } => ("video", url_source(url, id.as_deref())),
-        ContentBlock::AudioUrl { url, id, .. } => ("audio", url_source(url, id.as_deref())),
-        ContentBlock::Image {
-            media_type, data, ..
-        } => (
+        ContentPart::ImageUrl { image_url } => (
             "image",
-            json!({ "kind": "base64", "media_type": media_type, "data": data }),
+            image_source(&image_url.url, image_url.id.as_deref()),
         ),
-        ContentBlock::Text { .. } | ContentBlock::Think { .. } => return None,
+        ContentPart::VideoUrl { video_url } => (
+            "video",
+            url_source(&video_url.url, video_url.id.as_deref()),
+        ),
+        ContentPart::AudioUrl { audio_url } => (
+            "audio",
+            url_source(&audio_url.url, audio_url.id.as_deref()),
+        ),
+        ContentPart::Text { .. }
+        | ContentPart::Think { .. }
+        | ContentPart::DocumentUrl { .. } => return None,
     };
     Some(json!({ "type": part_type, "source": source }))
 }
 
 fn url_source(url: &str, id: Option<&str>) -> Value {
+    if let Some(file_id) = crate::llm::media_resolver::parse_daemon_file_url(url) {
+        return json!({ "kind": "session_media", "file_id": file_id });
+    }
     let mut source = json!({ "kind": "url", "url": url });
     if let Some(id) = id {
         source["id"] = json!(id);
     }
     source
+}
+
+fn image_source(url: &str, id: Option<&str>) -> Value {
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some((media_type, data)) = rest.split_once(";base64,")
+    {
+        return json!({ "kind": "base64", "media_type": media_type, "data": data });
+    }
+    url_source(url, id)
 }
 
 #[cfg(test)]
@@ -438,20 +447,22 @@ mod tests {
         let hub = Arc::new(EventHub::new());
         let mut sub = hub.attach();
         let blocks = vec![
-            crate::rpc::types::ContentBlock::MediaRef {
-                file_id: "f_att1".into(),
-                kind: crate::rpc::types::MediaKind::Image,
-            },
-            crate::rpc::types::ContentBlock::ImageUrl {
-                url: "https://example.test/remote.png".into(),
-                id: Some("ms-9".into()),
-                name: None,
-            },
-            crate::rpc::types::ContentBlock::ImageUrl {
-                url: "https://example.test/idless.png".into(),
-                id: None,
-                name: None,
-            },
+            crate::llm::media_resolver::file_media_part(
+                "f_att1".into(),
+                crate::rpc::types::MediaKind::Image,
+            ),
+            crate::llm::media_resolver::media_url_part(
+                crate::rpc::types::MediaKind::Image,
+                "https://example.test/remote.png".into(),
+                Some("ms-9".into()),
+                None,
+            ),
+            crate::llm::media_resolver::media_url_part(
+                crate::rpc::types::MediaKind::Image,
+                "https://example.test/idless.png".into(),
+                None,
+                None,
+            ),
         ];
         let callbacks = MessageCallbacks::with_step_tracker(
             inner(),

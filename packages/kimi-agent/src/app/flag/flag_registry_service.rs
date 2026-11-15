@@ -3,7 +3,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::errors::BugIndicatingError;
@@ -30,7 +30,7 @@ impl FlagRegistryService {
     pub fn register(
         &self,
         definition: FlagDefinitionInput,
-    ) -> Result<Box<dyn IDisposable>, BugIndicatingError> {
+    ) -> Result<DisposableRef, BugIndicatingError> {
         let id = definition.id.clone();
         self.add(definition)?;
         let by_id = Arc::downgrade(&self.by_id);
@@ -66,7 +66,7 @@ impl IFlagRegistry for FlagRegistryService {
     fn register(
         &self,
         definition: FlagDefinitionInput,
-    ) -> Result<Box<dyn IDisposable>, BugIndicatingError> {
+    ) -> Result<DisposableRef, BugIndicatingError> {
         FlagRegistryService::register(self, definition)
     }
 

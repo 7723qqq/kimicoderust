@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::human::utils::watch::WatchChange;
 use crate::session::session_instructions::instructions_provider::ISessionInstructionsProvider;
 use crate::wire::record::WireAsyncError;
@@ -22,7 +22,7 @@ pub trait IWorkspaceInstructionsService: Send + Sync {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(Vec<WatchChange>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn reload(&self) -> BoxFuture<'static, Result<(), WireAsyncError>>;
     fn session_provider(&self) -> Arc<dyn ISessionInstructionsProvider>;
 }

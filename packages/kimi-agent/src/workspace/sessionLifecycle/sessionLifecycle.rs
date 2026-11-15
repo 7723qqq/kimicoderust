@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -6,7 +8,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::ISessionScopeHandle;
 use crate::agent::profile::profile::BindAgentInput;
 use crate::mcp_core::config_schema::McpServerConfig;
@@ -109,7 +111,7 @@ pub struct LifecycleWaitEvent<T> {
 pub struct SessionWillCreateEvent {
     pub session_id: String,
     pub on_did_create_scope: Arc<
-        dyn Fn(Arc<dyn Fn(Arc<ISessionScopeHandle>) + Send + Sync>) -> Box<dyn IDisposable>
+        dyn Fn(Arc<dyn Fn(Arc<ISessionScopeHandle>) + Send + Sync>) -> DisposableRef
             + Send
             + Sync,
     >,
@@ -123,27 +125,27 @@ pub trait ISessionLifecycleService: Send + Sync {
     fn on_will_create_session(
         &self,
         listener: Arc<dyn Fn(SessionWillCreateEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_create_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionCreatedEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_will_close_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillCloseEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_close_session(
         &self,
         listener: Arc<dyn Fn(SessionClosedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_archive_session(
         &self,
         listener: Arc<dyn Fn(SessionArchivedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_fork_session(
         &self,
         listener: Arc<dyn Fn(SessionForkedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     async fn create(
         &self,
         opts: CreateSessionOptions,
@@ -166,3 +168,7 @@ pub trait ISessionLifecycleService: Send + Sync {
     async fn fork(&self, opts: ForkSessionOptions) -> Result<SessionMeta, WireAsyncError>;
     async fn create_child(&self, opts: CreateChildSessionOptions) -> Result<SessionMeta, WireAsyncError>;
 }
+
+
+pub static I_SESSION_LIFECYCLE_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn ISessionLifecycleService>>> =
+    LazyLock::new(|| create_decorator("sessionLifecycleService"));

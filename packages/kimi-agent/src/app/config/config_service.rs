@@ -11,9 +11,12 @@ use serde_json::{Map, Value, json};
 
 use crate::_base::di::collection::CollectionViewImpl;
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
-use crate::_base::di::instantiation::{DependencyKind, ScopeActivation, ServiceDependency, create_decorator};
+use crate::_base::di::instantiation::{
+    DependencyKind, ScopeActivation, ServiceDependency, create_decorator,
+    refine_service_decorator,
+};
 use crate::_base::di::instantiation_service::register_descriptor_dependencies;
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::register_scoped_service;
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::_base::errors::unexpected_error::on_unexpected_error;
@@ -53,7 +56,7 @@ pub struct ConfigRegistry {
     on_register_section: Emitter<ConfigSectionRegisteredEvent>,
     on_unregister_section: Emitter<ConfigSectionRegisteredEvent>,
     on_register_overlay: Emitter<ConfigOverlayRegisteredEvent>,
-    view_subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    view_subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl ConfigRegistry {
@@ -96,7 +99,7 @@ impl ConfigRegistry {
                 registry.add_contribution(contribution);
             }
         });
-        registry.view_subscriptions.lock().push(Box::new(subscription));
+        registry.view_subscriptions.lock().push(Arc::new(subscription));
         registry
     }
 
@@ -145,32 +148,32 @@ impl IDisposable for ConfigRegistry {
     }
 }
 
-fn subscribe<T>(emitter: &Emitter<T>, listener: Box<dyn Fn(T) + Send + Sync>) -> Box<dyn IDisposable>
+fn subscribe<T>(emitter: &Emitter<T>, listener: Box<dyn Fn(T) + Send + Sync>) -> DisposableRef
 where
     T: Clone + Send + Sync + 'static,
 {
-    Box::new(emitter.event().subscribe_arc(Arc::from(listener)))
+    Arc::new(emitter.event().subscribe_arc(Arc::from(listener)))
 }
 
 impl IConfigRegistry for ConfigRegistry {
     fn on_did_register_section(
         &self,
         listener: ConfigSectionRegisteredListener,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         subscribe(&self.on_register_section, listener)
     }
 
     fn on_did_unregister_section(
         &self,
         listener: ConfigSectionRegisteredListener,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         subscribe(&self.on_unregister_section, listener)
     }
 
     fn on_did_register_overlay(
         &self,
         listener: ConfigOverlayRegisteredListener,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         subscribe(&self.on_register_overlay, listener)
     }
 
@@ -358,7 +361,7 @@ pub struct ConfigService {
     on_change_configuration: Emitter<ConfigChangedEvent>,
     on_section_change: Emitter<ConfigSectionChangedEvent>,
     on_change_diagnostics: Emitter<Vec<ConfigDiagnostic>>,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
     watch_handle: Mutex<Option<Box<WatchHandle>>>,
     watch_subscription: Mutex<Option<Box<WatchSubscription>>>,
     watch_debounce: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -566,21 +569,21 @@ impl ConfigService {
     pub fn on_did_change_configuration(
         &self,
         listener: impl Fn(ConfigChangedEvent) + Send + Sync + 'static,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         subscribe(&self.on_change_configuration, Box::new(listener))
     }
 
     pub fn on_did_section_change(
         &self,
         listener: impl Fn(ConfigSectionChangedEvent) + Send + Sync + 'static,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         subscribe(&self.on_section_change, Box::new(listener))
     }
 
     pub fn on_did_change_diagnostics(
         &self,
         listener: impl Fn(Vec<ConfigDiagnostic>) + Send + Sync + 'static,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         subscribe(&self.on_change_diagnostics, Box::new(listener))
     }
 
@@ -1321,15 +1324,15 @@ impl IConfigService for ConfigService {
         ConfigService::ready(self).await
     }
 
-    fn on_did_change_configuration(&self, listener: ConfigChangeListener) -> Box<dyn IDisposable> {
+    fn on_did_change_configuration(&self, listener: ConfigChangeListener) -> DisposableRef {
         subscribe(&self.on_change_configuration, listener)
     }
 
-    fn on_did_section_change(&self, listener: ConfigSectionChangeListener) -> Box<dyn IDisposable> {
+    fn on_did_section_change(&self, listener: ConfigSectionChangeListener) -> DisposableRef {
         subscribe(&self.on_section_change, listener)
     }
 
-    fn on_did_change_diagnostics(&self, listener: ConfigDiagnosticsListener) -> Box<dyn IDisposable> {
+    fn on_did_change_diagnostics(&self, listener: ConfigDiagnosticsListener) -> DisposableRef {
         subscribe(&self.on_change_diagnostics, listener)
     }
 
@@ -1804,12 +1807,12 @@ static CONFIG_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
                 kind: DependencyKind::Instance,
             },
             ServiceDependency {
-                id: I_BOOTSTRAP_SERVICE.clone(),
+                id: refine_service_decorator(&I_BOOTSTRAP_SERVICE),
                 index: 1,
                 kind: DependencyKind::Instance,
             },
             ServiceDependency {
-                id: I_LOG_SERVICE.clone(),
+                id: refine_service_decorator(&I_LOG_SERVICE),
                 index: 2,
                 kind: DependencyKind::Instance,
             },

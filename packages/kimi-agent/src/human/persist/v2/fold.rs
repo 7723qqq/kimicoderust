@@ -108,6 +108,7 @@ struct V2LoopEvent {
     turn_id: Option<String>,
     part: Option<ContentPart>,
     tool_call_id: Option<String>,
+    raw_id: Option<String>,
     name: Option<String>,
     args: Option<Value>,
     extras: Option<Map<String, Value>>,
@@ -168,8 +169,11 @@ fn is_vacuous_content_part(part: &ContentPart) -> bool {
     match part {
         ContentPart::Text { text, .. } => js_trim(text).is_empty(),
         ContentPart::Think {
-            think, encrypted, ..
-        } => encrypted.is_none() && js_trim(think).is_empty(),
+            think,
+            encrypted,
+            hidden,
+            ..
+        } => encrypted.is_none() && *hidden != Some(true) && js_trim(think).is_empty(),
         _ => false,
     }
 }
@@ -712,7 +716,7 @@ impl FoldState {
                     name: event.name.unwrap_or_default(),
                     arguments,
                     extras: event.extras,
-                    raw_id: None,
+                    raw_id: event.raw_id,
                     _stream_index: None,
                 };
                 if let Some(calls) = self.messages[open_index].tool_calls.as_mut() {
@@ -759,6 +763,7 @@ fn loop_event(value: Option<&Value>) -> Option<V2LoopEvent> {
         turn_id: string_field(object, "turnId"),
         part: object.get("part").cloned().and_then(|part| serde_json::from_value(part).ok()),
         tool_call_id: string_field(object, "toolCallId"),
+        raw_id: string_field(object, "rawId"),
         name: string_field(object, "name"),
         args: object.get("args").cloned(),
         extras: object.get("extras").and_then(Value::as_object).cloned(),

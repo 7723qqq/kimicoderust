@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use futures_util::future::BoxFuture;
 
 use crate::agent::permission_policy::types::{
@@ -29,3 +32,7 @@ pub trait IAgentToolApprovalService: Send + Sync {
         result: &ApprovalResponse,
     ) -> String;
 }
+
+
+pub static I_AGENT_TOOL_APPROVAL_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentToolApprovalService>>> =
+    LazyLock::new(|| create_decorator("agentToolApprovalService"));

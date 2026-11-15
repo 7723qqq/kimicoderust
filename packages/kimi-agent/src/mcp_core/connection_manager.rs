@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::abort::{AbortError, AbortSignal, abort_error};
 use crate::app::environment::environment::EnvironmentResolver;
@@ -115,7 +115,7 @@ pub trait McpConnectionView: Send + Sync {
     async fn reconnect_and_join(&self, name: &str) -> Result<(), WireAsyncError>;
     async fn wait_for_initial_load(&self, signal: Option<AbortSignal>) -> Result<(), WireAsyncError>;
     fn initial_load_duration_ms(&self) -> u64;
-    fn on_status_change(&self, listener: McpStatusListener) -> Box<dyn IDisposable>;
+    fn on_status_change(&self, listener: McpStatusListener) -> DisposableRef;
 }
 
 pub struct McpConnectionManagerOptions {
@@ -407,7 +407,7 @@ impl McpConnectionManager {
         self.get_remote_server_url(name)
     }
 
-    pub fn on_status_change(&self, listener: McpStatusListener) -> Box<dyn IDisposable> {
+    pub fn on_status_change(&self, listener: McpStatusListener) -> DisposableRef {
         let id = {
             let mut state = self.state.lock();
             let id = state.next_listener_id;
@@ -1485,6 +1485,7 @@ impl McpConnectionManager {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: super::types::assert_mcp_input_schema(&tool.name, &tool.input_schema)?,
+                    deferred: None,
                 })
             })
             .collect::<Result<Vec<_>, WireAsyncError>>()
@@ -1647,7 +1648,7 @@ impl McpConnectionView for McpConnectionManager {
         McpConnectionManager::initial_load_duration_ms(self)
     }
 
-    fn on_status_change(&self, listener: McpStatusListener) -> Box<dyn IDisposable> {
+    fn on_status_change(&self, listener: McpStatusListener) -> DisposableRef {
         McpConnectionManager::on_status_change(self, listener)
     }
 }
@@ -1826,7 +1827,7 @@ fn is_unauthorized_like_error(error: &(dyn Error + 'static)) -> bool {
 }
 
 fn needs_auth_hint(name: &str) -> String {
-    format!("{name} requires OAuth — run /mcp-config login {name}")
+    format!("{name} requires OAuth �� run /mcp-config login {name}")
 }
 
 fn format_startup_error(error: &(dyn Error + 'static), client: Option<&RuntimeMcpClient>) -> String {

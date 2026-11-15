@@ -212,12 +212,11 @@ fn render_swarm_results(results: &[AgentRunResult<SwarmTaskSpec>]) -> String {
             None => String::new(),
         };
 
-        let body =
-            crate::tools::skill::escape_xml_tags(if res.status == AgentRunStatus::Completed {
-                res.result.as_deref().unwrap_or("")
-            } else {
-                res.error.as_deref().unwrap_or("unknown error")
-            });
+        let body = if res.status == AgentRunStatus::Completed {
+            res.result.as_deref().unwrap_or("")
+        } else {
+            res.error.as_deref().unwrap_or("unknown error")
+        };
 
         lines.push(format!(
             "<subagent{mode_attr}{agent_id_attr}{item_attr}{state_attr}{stop_reason_attr} outcome=\"{outcome}\">{body}</subagent>"
@@ -837,9 +836,10 @@ mod tests {
     use crate::callbacks::HostCallbacks;
     use crate::rpc::types::{
         AskQuestionRequest, AskQuestionResponse, ListToolsResponse, LlmChatRequest,
-        LlmChatResponse, PermissionCheckRequest, PermissionDecision, TokenUsage,
-        ToolExecuteRequest, ToolExecuteResponse,
+        LlmChatResponse, PermissionCheckRequest, PermissionDecision, ToolExecuteRequest,
+        ToolExecuteResponse,
     };
+    use kimi_core::types::TokenUsage;
     use crate::turn_loop::types::{LLM, LLMChatParams, LLMChatResponse as TurnChatResponse};
 
     struct TestSummaryLlm;
@@ -1048,9 +1048,10 @@ mod tests {
                             vec![crate::turn_loop::types::ToolCall {
                                 id: "worker_call_1".into(),
                                 name: "probe_tool".into(),
-                                arguments: serde_json::json!({}),
+                                arguments: Some(serde_json::json!({}).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             }]
                         } else {
                             vec![]

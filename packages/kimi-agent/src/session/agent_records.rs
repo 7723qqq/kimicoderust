@@ -39,7 +39,7 @@ pub fn llm_request_record(
     let leading_system = params
         .messages
         .first()
-        .filter(|message| message.role == "system");
+        .filter(|message| message.role == kimi_core::types::Role::System);
     let system_prompt =
         leading_system.map_or_else(|| llm.system_prompt(), |message| &message.content);
     let message_count = params.messages.len() - usize::from(leading_system.is_some());
@@ -137,99 +137,20 @@ pub fn content_parts(message: &LLMMessage) -> Vec<Value> {
     parts
 }
 
-fn content_part(block: &kimi_core::types::ContentBlock) -> Option<Value> {
-    use kimi_core::types::ContentBlock;
-    match block {
-        ContentBlock::Text { text, meta } => {
-            let mut part = json!({ "type": "text", "text": text });
-            if let Some(meta) = meta {
-                part["meta"] = Value::Object(meta.clone());
-            }
-            Some(part)
-        }
-        ContentBlock::Think {
-            think,
-            encrypted,
-            details_index,
-            reasoning_key,
-            details_summary: _,
-        } => {
-            let mut part = json!({ "type": "think", "think": think });
-            if let Some(encrypted) = encrypted {
-                part["encrypted"] = json!(encrypted);
-            }
-            if let Some(index) = details_index {
-                part["detailsIndex"] = json!(index);
-            }
-            if let Some(key) = reasoning_key {
-                part["reasoningKey"] = json!(key);
-            }
-            Some(part)
-        }
-        ContentBlock::ImageUrl { url, id, name } => Some(json!({
-            "type": "image_url",
-            "imageUrl": media_url(url, id.as_deref(), name.as_deref()),
-        })),
-        ContentBlock::AudioUrl { url, id, name } => Some(json!({
-            "type": "audio_url",
-            "audioUrl": media_url(url, id.as_deref(), name.as_deref()),
-        })),
-        ContentBlock::VideoUrl { url, id, name } => Some(json!({
-            "type": "video_url",
-            "videoUrl": media_url(url, id.as_deref(), name.as_deref()),
-        })),
-        ContentBlock::Image {
-            media_type,
-            data,
-            name,
-        } => {
-            let url = format!("data:{media_type};base64,{data}");
-            Some(json!({
-                "type": "image_url",
-                "imageUrl": media_url(&url, None, name.as_deref()),
-            }))
-        }
-        ContentBlock::MediaRef { file_id, kind } => Some(json!({
-            "type": "media_ref",
-            "file_id": file_id,
-            "kind": kind.as_str(),
-        })),
-    }
-}
-
-fn media_url(url: &str, id: Option<&str>, name: Option<&str>) -> Value {
-    let mut media = Map::new();
-    media.insert("url".to_string(), json!(url));
-    if let Some(id) = id {
-        media.insert("id".to_string(), json!(id));
-    }
-    if let Some(name) = name {
-        media.insert("name".to_string(), json!(name));
-    }
-    Value::Object(media)
+fn content_part(block: &kimi_core::types::ContentPart) -> Option<Value> {
+    serde_json::to_value(block).ok()
 }
 
 fn tool_calls(message: &LLMMessage) -> Vec<Value> {
     message
         .tool_calls
         .iter()
-        .map(|call| {
-            let arguments = match &call.arguments {
-                Value::String(text) => text.clone(),
-                other => serde_json::to_string(other).unwrap_or_else(|_| "null".to_string()),
-            };
-            json!({
-                "type": "function",
-                "id": call.id,
-                "name": call.name,
-                "arguments": arguments,
-            })
-        })
+        .map(|call| json!(call))
         .collect()
 }
 
 pub fn context_message(message: &LLMMessage) -> Option<Value> {
-    if message.role == "system" && !message.tools.is_empty() {
+    if message.role == kimi_core::types::Role::System && !message.tools.is_empty() {
         let mut value = json!({
             "role": "system",
             "content": content_parts(message),
@@ -241,7 +162,7 @@ pub fn context_message(message: &LLMMessage) -> Option<Value> {
         }
         return Some(value);
     }
-    if message.role != "user" {
+    if message.role != kimi_core::types::Role::User {
         return None;
     }
     let parts = content_parts(message);
@@ -277,14 +198,14 @@ pub fn history_entry(message: &LLMMessage) -> Option<Value> {
         _ => return None,
     };
     let mut entry = json!({ "message": body });
-    if message.role == "user"
+    if message.role == kimi_core::types::Role::User
         && let Some(origin) = message.origin.as_ref().filter(|origin| origin.is_object())
     {
         entry["meta"] = json!({
             "source": origin_source(origin),
             "origin": origin.clone(),
         });
-    } else if message.role == "assistant"
+    } else if message.role == kimi_core::types::Role::Assistant
         && let Some(source) = message
             .origin
             .as_ref()
@@ -299,7 +220,7 @@ pub fn history_entry(message: &LLMMessage) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kimi_core::types::{ContentBlock, ToolCall};
+    use kimi_core::types::{ContentPart, ToolCall};
 
     #[test]
     fn a_text_user_message_becomes_a_v2_history_entry() {
@@ -318,9 +239,10 @@ mod tests {
         message.tool_calls = vec![ToolCall {
             id: "call-1".into(),
             name: "Read".into(),
-            arguments: json!({ "path": "a" }),
+            arguments: Some(json!({ "path": "a" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }];
         let entry = history_entry(&message).unwrap();
         assert_eq!(entry["message"]["toolCalls"][0]["type"], json!("function"));
@@ -342,7 +264,7 @@ mod tests {
 
     #[test]
     fn a_tool_message_keeps_its_call_id() {
-        let mut message = LLMMessage::new("tool", "body");
+        let mut message = LLMMessage::new(kimi_core::types::Role::Tool, "body");
         message.tool_call_id = Some("call-1".into());
         let entry = history_entry(&message).unwrap();
         assert_eq!(entry["message"]["role"], json!("tool"));
@@ -350,26 +272,27 @@ mod tests {
     }
 
     #[test]
-    fn blocks_are_mapped_to_v2_content_parts_including_media_refs() {
+    fn blocks_are_mapped_to_v2_content_parts_including_file_media_urls() {
         let mut message = LLMMessage::assistant("");
         message.blocks = vec![
-            ContentBlock::Think {
+            ContentPart::Think {
                 think: "why".into(),
                 encrypted: None,
                 details_index: Some(2),
+                hidden: None,
                 reasoning_key: None,
-                details_summary: Some("dropped".into()),
             },
-            ContentBlock::ImageUrl {
-                url: "kimi-file://img-1".into(),
-                id: Some("img-1".into()),
-                name: None,
-            },
-            ContentBlock::MediaRef {
-                file_id: "file-1".into(),
-                kind: kimi_core::types::MediaKind::Image,
-            },
-            ContentBlock::Text {
+            crate::llm::media_resolver::media_url_part(
+                kimi_core::types::MediaKind::Image,
+                "kimi-file://img-1".into(),
+                Some("img-1".into()),
+                None,
+            ),
+            crate::llm::media_resolver::file_media_part(
+                "file-1".into(),
+                kimi_core::types::MediaKind::Image,
+            ),
+            ContentPart::Text {
                 text: "answer".into(),
                 meta: None,
             },
@@ -381,9 +304,8 @@ mod tests {
         assert_eq!(parts[0]["detailsIndex"], json!(2));
         assert!(parts[0].get("detailsSummary").is_none());
         assert_eq!(parts[1]["imageUrl"]["url"], json!("kimi-file://img-1"));
-        assert_eq!(parts[2]["type"], json!("media_ref"));
-        assert_eq!(parts[2]["file_id"], json!("file-1"));
-        assert_eq!(parts[2]["kind"], json!("image"));
+        assert_eq!(parts[2]["type"], json!("image_url"));
+        assert_eq!(parts[2]["imageUrl"]["url"], json!("kimi-file://file-1"));
         assert_eq!(parts[3]["text"], json!("answer"));
     }
 

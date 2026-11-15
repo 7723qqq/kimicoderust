@@ -9,7 +9,7 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 
 use crate::_base::di::instantiation::LiveRef;
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::log::log::ILogService;
 use crate::app::agent_identity::agent_identity::IAgentIdentity;
 use crate::app::environment::environment::{EnvironmentResolver, IEnvironmentService};
@@ -87,7 +87,7 @@ impl ISessionMcpHandle for SessionMcpHandleImpl {
 struct SessionMcpOverlayImpl {
     handle: Arc<dyn ISessionMcpHandle>,
     manager: Arc<McpConnectionManager>,
-    _oauth_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    _oauth_subscription: Mutex<Option<DisposableRef>>,
 }
 
 #[async_trait]
@@ -121,10 +121,10 @@ struct WorkspaceMcpServiceInner {
     log: Arc<dyn ILogService>,
     telemetry: Arc<dyn ITelemetryService>,
     identity: Arc<dyn IAgentIdentity>,
-    session_lifecycle: LiveRef<ISessionManager>,
+    session_lifecycle: LiveRef<Arc<dyn ISessionManager>>,
     state: Arc<Mutex<WorkspaceMcpState>>,
     ready: UnitFuture,
-    _subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    _subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 #[derive(Clone)]
@@ -142,7 +142,7 @@ impl WorkspaceMcpService {
         log: Arc<dyn ILogService>,
         telemetry: Arc<dyn ITelemetryService>,
         identity: Arc<dyn IAgentIdentity>,
-        session_lifecycle: LiveRef<ISessionManager>,
+        session_lifecycle: LiveRef<Arc<dyn ISessionManager>>,
     ) -> Self {
         let manager_dirs = dirs.clone();
         let manager_config = mcp_config.clone();
@@ -437,9 +437,9 @@ impl WorkspaceMcpService {
     fn oauth_event_subscription(
         &self,
         manager: Arc<McpConnectionManager>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let weak = Arc::downgrade(&self.inner);
-        self.inner.oauth_service.on_event(move |event| {
+        let unsubscribe = self.inner.oauth_service.on_event(move |event| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
@@ -453,7 +453,8 @@ impl WorkspaceMcpService {
                     );
                 }
             });
-        })
+        });
+        to_disposable(move || unsubscribe())
     }
 
     async fn handle_mcp_oauth_event(
@@ -505,7 +506,7 @@ impl WorkspaceMcpService {
     ) -> Result<(), McpConfigAsyncError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let sender = Arc::new(Mutex::new(Some(sender)));
-        let subscription = Arc::new(Mutex::new(None::<Box<dyn IDisposable>>));
+        let subscription = Arc::new(Mutex::new(None::<DisposableRef>));
         let sender_sink = sender.clone();
         let subscription_sink = subscription.clone();
         let manager_sink = manager.clone();

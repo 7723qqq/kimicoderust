@@ -896,9 +896,9 @@ fn read_crops_an_image_region() {
     assert!(matches!(
         result.parts.as_slice(),
         [
-            crate::rpc::types::ContentBlock::Text { .. },
-            crate::rpc::types::ContentBlock::Image { .. },
-            crate::rpc::types::ContentBlock::Text { .. }
+            crate::rpc::types::ContentPart::Text { .. },
+            crate::rpc::types::ContentPart::ImageUrl { .. },
+            crate::rpc::types::ContentPart::Text { .. }
         ]
     ));
 }
@@ -935,12 +935,13 @@ fn read_full_resolution_sends_the_original_bytes() {
     let media = result
         .parts
         .iter()
-        .find(|part| matches!(part, crate::rpc::types::ContentBlock::Image { .. }))
+        .find(|part| matches!(part, crate::rpc::types::ContentPart::ImageUrl { .. }))
         .expect("an image block");
     match media {
-        crate::rpc::types::ContentBlock::Image { data, .. } => {
+        crate::rpc::types::ContentPart::ImageUrl { image_url } => {
             use base64::prelude::*;
-            assert_eq!(*data, BASE64_STANDARD.encode(&bytes));
+            let (_, data) = image_url.url.split_once(";base64,").expect("base64 image");
+            assert_eq!(data, BASE64_STANDARD.encode(&bytes));
         }
         other => panic!("expected an image block, got {other:?}"),
     }

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::features::goal::types::{GoalActor, GoalBudgetLimits, GoalChange, GoalSnapshot};
@@ -29,6 +30,16 @@ pub struct GoalUpdated;
 
 impl GoalUpdated {
     pub const EVENT_TYPE: &'static str = GOAL_UPDATED_EVENT;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalUpdatedEvent {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub snapshot: Option<GoalSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<GoalChange>,
 }
 
 pub fn goal_create_event(

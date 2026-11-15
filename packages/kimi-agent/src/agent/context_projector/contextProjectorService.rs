@@ -1,20 +1,29 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
+use once_cell::sync::Lazy;
 use serde_json::{Value, json};
 
+use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
+use crate::_base::di::instantiation::{
+    DependencyKind, ServiceDependency, refine_service_decorator,
+};
+use crate::_base::di::instantiation_service::register_descriptor_dependencies;
 use crate::_base::di::lifecycle::DisposableRef;
-use crate::_base::log::log::ILogService;
+use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
+use crate::app::scopes::LifecycleScope;
+use crate::_base::log::log::{I_LOG_SERVICE, ILogService};
 use crate::agent::context_memory::types::ContextMessage;
-use crate::agent::state::agent_state::IAgentStateService;
-use crate::app::telemetry::telemetry::ITelemetryService;
+use crate::agent::state::agent_state::{I_AGENT_STATE_SERVICE, IAgentStateService};
+use crate::app::telemetry::telemetry::{I_TELEMETRY_SERVICE, ITelemetryService};
 use crate::llm_adapter::contract::message::Message;
 use crate::state::state::{ReplayableOptions, ReplayableStateKey};
 use crate::wire::record::WireAsyncError;
 
 use super::context_projector::{
-    IAgentContextProjectorService, MEDIA_DEGRADE_KEEP_RECENT, MediaEvictionPlan, MediaProjection,
-    MediaStripSnapshot, ProjectionPolicy, ProjectionStructure,
+    I_AGENT_CONTEXT_PROJECTOR_SERVICE, IAgentContextProjectorService,
+    MEDIA_DEGRADE_KEEP_RECENT, MediaEvictionPlan, MediaProjection, MediaStripSnapshot,
+    ProjectionPolicy, ProjectionStructure,
 };
 use super::media_projection::{
     capture_media_strip_snapshot, count_media_parts, degrade_leading_media_parts,
@@ -244,4 +253,59 @@ impl IAgentContextProjectorService for AgentContextProjectorService {
             evicted_media_count: original_media_count - count_media_parts(stripped.as_ref()),
         })
     }
+}
+
+fn dependency<T>(args: &[DynamicValue], index: usize) -> Arc<T>
+where
+    T: Send + Sync + 'static + ?Sized,
+{
+    Arc::downcast::<Arc<T>>(args[index].clone())
+        .unwrap_or_else(|_| panic!("contextProjector dependency {index} has an incompatible type"))
+        .as_ref()
+        .clone()
+}
+
+static AGENT_CONTEXT_PROJECTOR_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
+    let ctor: Constructor<DynamicValue> = Arc::new(|args| {
+        let service: Arc<dyn IAgentContextProjectorService> =
+            Arc::new(AgentContextProjectorService::new(
+                dependency::<dyn ILogService>(&args, 0),
+                dependency::<dyn ITelemetryService>(&args, 1),
+                dependency::<dyn IAgentStateService>(&args, 2),
+            ));
+        Arc::new(service) as DynamicValue
+    });
+    let descriptor = SyncDescriptor::new(ctor, Vec::new());
+    register_descriptor_dependencies(
+        &descriptor,
+        vec![
+            ServiceDependency {
+                id: refine_service_decorator(&I_LOG_SERVICE),
+                index: 0,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_TELEMETRY_SERVICE),
+                index: 1,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_STATE_SERVICE),
+                index: 2,
+                kind: DependencyKind::Instance,
+            },
+        ],
+    );
+    register_scoped_service(
+        LifecycleScope::Agent.as_str().to_string(),
+        refine_service_decorator(&I_AGENT_CONTEXT_PROJECTOR_SERVICE),
+        descriptor,
+        ScopeActivation::OnScopeCreated,
+        "contextProjector",
+    )
+    .map_err(|error| error.to_string())
+});
+
+pub fn ensure_agent_context_projector_service_registered() -> Result<(), String> {
+    Lazy::force(&AGENT_CONTEXT_PROJECTOR_SERVICE_REGISTRATION).clone()
 }

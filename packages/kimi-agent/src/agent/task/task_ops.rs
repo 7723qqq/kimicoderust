@@ -91,6 +91,11 @@ macro_rules! task_event {
             pub fn as_event(&self) -> &Event2 {
                 &self.event
             }
+
+            pub fn from_event(event: Event2) -> Option<Self> {
+                let payload = serde_json::from_value(event.payload.clone()).ok()?;
+                Some(Self { event, payload })
+            }
         }
 
         impl Deref for $name {

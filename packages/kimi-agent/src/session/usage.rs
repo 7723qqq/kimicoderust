@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 use crate::session::sqlite_store::SqliteSessionStore;
 
 const USAGE_DOMAIN: &str = "usage";
@@ -35,22 +35,22 @@ impl std::error::Error for UsageShapeError {
 #[serde(rename_all = "camelCase")]
 pub struct UsageCounters {
     #[serde(default)]
-    pub input_other: i64,
+    pub input_other: u64,
     #[serde(default)]
-    pub output: i64,
+    pub output: u64,
     #[serde(default)]
-    pub input_cache_read: i64,
+    pub input_cache_read: u64,
     #[serde(default)]
-    pub input_cache_creation: i64,
+    pub input_cache_creation: u64,
 }
 
 impl UsageCounters {
     fn from_token_usage(usage: &TokenUsage) -> Self {
         Self {
-            input_other: i64::from(usage.input_tokens),
-            output: i64::from(usage.output_tokens),
-            input_cache_read: i64::from(usage.input_cache_read),
-            input_cache_creation: i64::from(usage.input_cache_creation),
+            input_other: usage.input_other,
+            output: usage.output,
+            input_cache_read: usage.input_cache_read,
+            input_cache_creation: usage.input_cache_creation,
         }
     }
 
@@ -307,11 +307,10 @@ mod tests {
     use super::*;
     use crate::turn_loop::types::LLMMessage;
 
-    fn usage(input: u32, output: u32) -> TokenUsage {
+    fn usage(input: u64, output: u64) -> TokenUsage {
         TokenUsage {
-            input_tokens: input,
-            output_tokens: output,
-            total_tokens: input + output,
+            input_other: input,
+            output,
             ..Default::default()
         }
     }

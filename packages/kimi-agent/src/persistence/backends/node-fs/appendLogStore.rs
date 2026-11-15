@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::log::log::ILogService;
 use crate::persistence::interface::append_log_store::{
     AppendLogCorruptedError, AppendLogOptions, AppendLogReadOptions, AppendLogRewriteOptions,
@@ -498,7 +498,7 @@ impl IAppendLogStore for AppendLogStore {
     fn on_did_write(
         &self,
         listener: Arc<dyn Fn(AppendLogWrite) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.inner.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.inner.write_listeners.lock().insert(id, listener);
         let inner = Arc::downgrade(&self.inner);
@@ -671,7 +671,7 @@ impl IAppendLogStore for AppendLogStore {
         self.flush().await
     }
 
-    fn acquire(&self, scope: &str, key: &str) -> Box<dyn IDisposable> {
+    fn acquire(&self, scope: &str, key: &str) -> DisposableRef {
         let state = self.state(scope, key);
         state.lock().ref_count += 1;
         let this = self.clone();
@@ -752,7 +752,7 @@ impl IAppendLogStore for AppendLogStore {
         scope: &str,
         key: &str,
         guard: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = log_id(scope, key);
         self.inner.write_guards.lock().insert(id.clone(), guard.clone());
         let inner = Arc::downgrade(&self.inner);
@@ -825,7 +825,7 @@ async fn next_record(
                         on_truncate(AppendLogTruncation {
                             line_number: context.line_number,
                             reason: AppendLogTruncationReason::Corrupted,
-                            cause: Some(error),
+                            cause: Some(error.into()),
                         });
                         context.finished = true;
                         return Ok(None);

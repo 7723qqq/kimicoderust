@@ -10,8 +10,11 @@ pub fn is_vacuous_content_part(part: &ContentPart) -> bool {
             !has_thought_signature && text.trim().is_empty()
         }
         ContentPart::Think {
-            think, encrypted, ..
-        } => encrypted.is_none() && think.trim().is_empty(),
+            think,
+            encrypted,
+            hidden,
+            ..
+        } => encrypted.is_none() && *hidden != Some(true) && think.trim().is_empty(),
         _ => false,
     }
 }

@@ -941,7 +941,7 @@ async fn history_before_the_prompt_is_carried_into_the_turn() {
     engine.store().create_session("sess-2", None).unwrap();
 
     let history = vec![LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: "earlier question".into(),
         ..Default::default()
     }];
@@ -1121,7 +1121,7 @@ fn work_turn_reason_maps_the_loop_vocabulary() {
 fn the_rebase_substitutes_the_measured_summary_output() {
     use crate::turn_loop::types::LLMMessage;
     let summary = LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: format!(
             "{} the summary body",
             crate::compaction::COMPACTION_SUMMARY_PREFIX
@@ -1130,13 +1130,13 @@ fn the_rebase_substitutes_the_measured_summary_output() {
     };
     let messages = vec![
         LLMMessage {
-            role: "system".into(),
+            role: kimi_core::types::Role::System,
             content: "system prompt".into(),
             ..Default::default()
         },
         summary,
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "kept reply".into(),
             ..Default::default()
         },
@@ -1330,11 +1330,11 @@ impl LLM for UsageLlm {
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".into()),
                 usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
+                    input_other: 10,
+                    output: 5,
                     input_cache_read: 3,
                     input_cache_creation: 2,
+                    raw: None,
                 },
                 timing: None,
             })
@@ -1575,12 +1575,12 @@ fn a_spliced_request_measurement_falls_back_to_an_estimate() {
     engine.store().create_session("sess-splice", None).unwrap();
     let messages = vec![
         crate::turn_loop::types::LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hello".into(),
             ..Default::default()
         },
         crate::turn_loop::types::LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "done".into(),
             ..Default::default()
         },
@@ -1590,9 +1590,9 @@ fn a_spliced_request_measurement_falls_back_to_an_estimate() {
         .save_turn("sess-splice", "turn-1", 1, &messages, None, None)
         .unwrap();
 
-    let usage = crate::rpc::types::TokenUsage {
-        input_tokens: 10,
-        output_tokens: 5,
+    let usage = kimi_core::types::TokenUsage {
+        input_other: 10,
+        output: 5,
         ..Default::default()
     };
     let stale = crate::turn_loop::types::RequestMeasurement {
@@ -2028,13 +2028,13 @@ impl LLM for ScriptedUsageLlm {
     }
 }
 
-fn cache_usage(input_other: u32, cache_read: u32, cache_creation: u32, output: u32) -> TokenUsage {
+fn cache_usage(input_other: u64, cache_read: u64, cache_creation: u64, output: u64) -> TokenUsage {
     TokenUsage {
-        input_tokens: input_other,
-        output_tokens: output,
-        total_tokens: input_other + cache_read + cache_creation + output,
+        input_other,
+        output,
         input_cache_read: cache_read,
         input_cache_creation: cache_creation,
+        raw: None,
     }
 }
 
@@ -2122,7 +2122,7 @@ fn an_unmeasured_cache_observation_does_not_move_the_baseline() {
         &[],
         None,
     );
-    let empty = crate::rpc::types::TokenUsage::default();
+    let empty = kimi_core::types::TokenUsage::default();
     let unmeasured = crate::session::cache_observation::build_cache_observation(
         crate::session::cache_observation::CacheObservationInput {
             model_alias: "cache-model",
@@ -2279,12 +2279,12 @@ fn the_context_gauge_honours_the_configured_token_counting_strategy() {
         .unwrap();
     let messages = vec![
         crate::turn_loop::types::LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hello".into(),
             ..Default::default()
         },
         crate::turn_loop::types::LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "hi".into(),
             ..Default::default()
         },

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::app::agent_profile_catalog::agent_profile_catalog::AgentProfile;
 use crate::wire::record::WireAsyncError;
 
@@ -34,7 +34,7 @@ pub trait ISessionAgentProfileCatalog: Send + Sync {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn get(&self, name: &str) -> Option<Arc<AgentProfile>>;
     fn get_default(&self) -> Arc<AgentProfile>;
     fn list(&self) -> Vec<Arc<AgentProfile>>;

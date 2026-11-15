@@ -5,7 +5,7 @@ use indexmap::{IndexMap, IndexSet};
 use parking_lot::Mutex;
 
 use crate::_base::di::collection::{CollectionChange, CollectionViewImpl};
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 
@@ -47,8 +47,8 @@ impl Drop for CallbackDisposable {
 
 fn callback_disposable(
     callback: impl FnOnce() + Send + 'static,
-) -> Box<dyn IDisposable> {
-    Box::new(CallbackDisposable::new(callback))
+) -> DisposableRef {
+    Arc::new(CallbackDisposable::new(callback))
 }
 
 struct DirectRegistration {
@@ -69,7 +69,7 @@ pub struct AgentProfileRegistryService {
     listeners: Arc<Mutex<IndexMap<u64, Arc<dyn Fn(AgentProfileRegistryChange) + Send + Sync>>>>,
     next_listener_id: AtomicU64,
     weak: Mutex<Weak<Self>>,
-    _subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    _subscription: Mutex<Option<DisposableRef>>,
 }
 
 impl AgentProfileRegistryService {
@@ -122,7 +122,7 @@ impl AgentProfileRegistryService {
         entries.into_values().collect()
     }
 
-    pub fn register(&self, registration: AgentProfileRegistration) -> Box<dyn IDisposable> {
+    pub fn register(&self, registration: AgentProfileRegistration) -> DisposableRef {
         let key = encode_key(
             &registration.source_id,
             registration.workspace_key.as_deref(),
@@ -171,7 +171,7 @@ impl AgentProfileRegistryService {
     pub fn on_did_change(
         &self,
         listener: Arc<dyn Fn(AgentProfileRegistryChange) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().insert(id, listener);
         let listeners = Arc::downgrade(&self.listeners);
@@ -218,7 +218,7 @@ impl IAgentProfileRegistry for AgentProfileRegistryService {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(AgentProfileRegistryChange) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         AgentProfileRegistryService::on_did_change(self, listener)
     }
 
@@ -226,7 +226,7 @@ impl IAgentProfileRegistry for AgentProfileRegistryService {
         AgentProfileRegistryService::entries(self)
     }
 
-    fn register(&self, registration: AgentProfileRegistration) -> Box<dyn IDisposable> {
+    fn register(&self, registration: AgentProfileRegistration) -> DisposableRef {
         AgentProfileRegistryService::register(self, registration)
     }
 }

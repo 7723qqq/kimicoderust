@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::llm_adapter::model::model::{
     DefaultModelChangedEvent, IModelService, ModelRecord, ModelsChangedEvent, ModelsSection,
 };
@@ -28,10 +28,10 @@ impl<T> Default for ChangeListeners<T> {
 }
 
 impl<T> ChangeListeners<T> {
-    fn add(self: &Arc<Self>, listener: Arc<dyn Fn(T) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn add(self: &Arc<Self>, listener: Arc<dyn Fn(T) + Send + Sync>) -> DisposableRef {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().insert(id, listener);
-        Box::new(ChangeSubscription {
+        Arc::new(ChangeSubscription {
             owner: self.clone(),
             id,
         })
@@ -125,14 +125,14 @@ impl IModelService for ModelService {
     fn on_did_change_models(
         &self,
         listener: Arc<dyn Fn(ModelsChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.on_models.add(listener)
     }
 
     fn on_did_change_default_model(
         &self,
         listener: Arc<dyn Fn(DefaultModelChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.on_default.add(listener)
     }
 

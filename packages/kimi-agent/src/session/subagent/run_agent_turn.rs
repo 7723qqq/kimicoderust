@@ -1,3 +1,8 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::agent::context_memory::context_memory::I_AGENT_CONTEXT_MEMORY_SERVICE;
+use crate::agent::r#loop::r#loop::I_AGENT_LOOP_SERVICE;
+use crate::app::event::event_bus::I_EVENT_BUS;
+use crate::session::session_usage::session_usage::I_SESSION_USAGE_SERVICE;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -13,13 +18,13 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::IAgentScopeHandle;
 use crate::_base::utils::abort::{
     AbortController, AbortSignal, link_abort_signal, user_cancellation_reason,
 };
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
-use crate::agent::context_memory::types::{ContextMessage, PromptOrigin};
+use crate::agent::context_memory::types::ContextMessage;
 use crate::agent::r#loop::r#loop::{
     CompletedTurnResult, IAgentLoopService, Turn, TurnResult, is_max_steps_exceeded_error,
 };
@@ -27,6 +32,7 @@ use crate::agent::r#loop::turn_events::{AssistantDelta, TurnStepRetrying, TurnSt
 use crate::agent::scope_context::scope_context::agent_context_of;
 use crate::app::event::event_bus::IEventBus;
 use crate::errors::{KimiErrorPayload, to_kimi_error_payload};
+use crate::human::agent::origin::PromptOrigin;
 use crate::human::agent::turn::{UserMeta, create_user_entry};
 use crate::human::llm::message::{ContentPart, UserMessage};
 use crate::agent::r#loop::r#loop::TextPart;
@@ -45,22 +51,35 @@ pub const PARTIAL_OUTPUT_TRUNCATED_MARKER: &str = "[earlier text truncated]";
 pub const SUBAGENT_MAX_TOKENS_ERROR: &str =
     "Subagent turn failed before completing its final summary: reason=max_tokens";
 
-pub static AGENT_RUN_PROMPT_ORIGIN: LazyLock<PromptOrigin> = LazyLock::new(|| {
-    PromptOrigin::SystemTrigger {
-        name: "subagent".to_string(),
-        background_helper: None,
-    }
+pub static AGENT_RUN_PROMPT_ORIGIN: LazyLock<PromptOrigin> = LazyLock::new(|| PromptOrigin {
+    kind: "system_trigger".to_string(),
+    extra: Map::from_iter([(
+        "name".to_string(),
+        Value::String("subagent".to_string()),
+    )]),
+    ..Default::default()
 });
-pub static PROMPT_OPTIMIZER_AGENT_ORIGIN: LazyLock<PromptOrigin> = LazyLock::new(|| {
-    PromptOrigin::SystemTrigger {
-        name: "subagent".to_string(),
-        background_helper: Some("prompt_optimizer".to_string()),
-    }
+pub static PROMPT_OPTIMIZER_AGENT_ORIGIN: LazyLock<PromptOrigin> = LazyLock::new(|| PromptOrigin {
+    kind: "system_trigger".to_string(),
+    extra: Map::from_iter([
+        (
+            "name".to_string(),
+            Value::String("subagent".to_string()),
+        ),
+        (
+            "backgroundHelper".to_string(),
+            Value::String("prompt_optimizer".to_string()),
+        ),
+    ]),
+    ..Default::default()
 });
 
 fn origin_for_request(request: &AgentRunRequest) -> PromptOrigin {
     match request {
-        AgentRunRequest::Retry { .. } => PromptOrigin::Retry { trigger: None },
+        AgentRunRequest::Retry { .. } => PromptOrigin {
+            kind: "retry".to_string(),
+            ..Default::default()
+        },
         AgentRunRequest::Prompt { helper: None, .. } => AGENT_RUN_PROMPT_ORIGIN.clone(),
         AgentRunRequest::Prompt { helper: Some(_), .. } => PROMPT_OPTIMIZER_AGENT_ORIGIN.clone(),
     }
@@ -78,15 +97,15 @@ pub async fn run_agent_turn(
     options: RunAgentTurnOptions,
 ) -> Result<AgentRunHandle, WireAsyncError> {
     options.signal.throw_if_aborted()?;
-    let loop_ = target.accessor().get::<IAgentLoopService>();
+    let loop_ = target.accessor().get(&I_AGENT_LOOP_SERVICE);
     let entry = match &request {
         AgentRunRequest::Prompt { prompt, .. } => create_user_entry(
             UserMessage {
-                role: "user".to_string(),
-                content: vec![ContentPart::Text(TextPart {
-                    type_: "text".to_string(),
+                role: crate::human::llm::message::Role::User,
+                content: vec![ContentPart::Text {
                     text: prompt.clone(),
-                })],
+                    meta: None,
+                }],
             },
             UserMeta {
                 origin: Some(origin_for_request(&request)),
@@ -96,17 +115,17 @@ pub async fn run_agent_turn(
         ),
         AgentRunRequest::Retry { .. } => create_user_entry(
             UserMessage {
-                role: "user".to_string(),
+                role: crate::human::llm::message::Role::User,
                 content: Vec::new(),
             },
             UserMeta {
-                origin: Some(PromptOrigin::Retry { trigger: None }),
+                origin: Some(origin_for_request(&request)),
                 ..Default::default()
             },
         ),
     };
     let id = loop_.submit(entry, None).id;
-    let output = collect_run_output(&target.accessor().get::<IEventBus>());
+    let output = collect_run_output(&target.accessor().get(&I_EVENT_BUS));
     let turn = match loop_.prompt_handle(&id) {
         Some(handle) => handle.launched.clone().await,
         None => None,
@@ -168,7 +187,7 @@ async fn await_run(
         let summary = latest_assistant_text(
             &target
                 .accessor()
-                .get::<IAgentContextMemoryService>()
+                .get(&I_AGENT_CONTEXT_MEMORY_SERVICE)
                 .get(),
         );
         let stop_reason = result.stop_reason.clone();
@@ -190,7 +209,7 @@ async fn await_run(
         }
         let usage = target
             .accessor()
-            .get::<ISessionUsageService>()
+            .get(&I_SESSION_USAGE_SERVICE)
             .status(&agent_context_of(&target))
             .total;
         Ok(AgentRunCompletion {
@@ -341,7 +360,7 @@ struct RunOutputState {
 
 pub struct RunOutputCollector {
     state: Arc<Mutex<RunOutputState>>,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl RunOutputCollector {

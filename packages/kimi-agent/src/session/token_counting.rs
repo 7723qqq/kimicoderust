@@ -171,7 +171,13 @@ pub(crate) mod tests {
 
     fn message(role: &str, content: &str) -> LLMMessage {
         LLMMessage {
-            role: role.into(),
+            role: match role {
+                "system" => kimi_core::types::Role::System,
+                "user" => kimi_core::types::Role::User,
+                "assistant" => kimi_core::types::Role::Assistant,
+                "tool" => kimi_core::types::Role::Tool,
+                _ => panic!("unknown test role: {role}"),
+            },
             content: content.into(),
             ..Default::default()
         }
@@ -355,16 +361,17 @@ pub(crate) mod tests {
     fn the_tail_estimate_counts_role_blocks_and_tool_calls() {
         let mut msg = message("assistant", "hello");
         msg.blocks
-            .push(crate::turn_loop::types::ContentBlock::Text {
+            .push(crate::turn_loop::types::ContentPart::Text {
                 text: "1234".into(),
                 meta: None,
             });
         msg.tool_calls.push(crate::turn_loop::types::ToolCall {
             id: "call-1".into(),
             name: "read".into(),
-            arguments: serde_json::json!({ "a": 1 }),
+            arguments: Some(serde_json::json!({ "a": 1 }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         });
         assert_eq!(estimate_message(&msg), 3 + 2 + 1 + 1 + 2);
 

@@ -473,10 +473,9 @@ mod tests {
                         thinking: vec![],
                         tool_calls: vec![],
                         finish_reason: Some(name),
-                        usage: TokenUsage {
-                            input_tokens: 10,
-                            output_tokens: 5,
-                            total_tokens: 15,
+                        usage: kimi_core::types::TokenUsage {
+                            input_other: 10,
+                            output: 5,
                             ..Default::default()
                         },
                         timing: None,
@@ -519,10 +518,9 @@ mod tests {
             thinking: vec![],
             tool_calls: vec![],
             finish_reason: Some(tag.to_string()),
-            usage: TokenUsage {
-                input_tokens: 1,
-                output_tokens: 1,
-                total_tokens: 2,
+            usage: kimi_core::types::TokenUsage {
+                input_other: 1,
+                output: 1,
                 ..Default::default()
             },
             timing: None,

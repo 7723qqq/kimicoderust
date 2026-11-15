@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 
@@ -13,7 +13,7 @@ impl ISessionToolPolicyGate for NoopSessionToolPolicyGate {
         Vec::new()
     }
 
-    fn on_did_change(&self, _listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, _listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef {
         to_disposable(|| {})
     }
 }

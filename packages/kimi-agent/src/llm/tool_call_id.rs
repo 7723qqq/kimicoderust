@@ -143,16 +143,17 @@ mod tests {
 
     fn assistant_with_ids(ids: &[&str]) -> LLMMessage {
         LLMMessage {
-            role: "assistant".to_string(),
+            role: kimi_core::types::Role::Assistant,
             content: String::new(),
             tool_calls: ids
                 .iter()
                 .map(|id| ToolCall {
                     id: (*id).to_string(),
                     name: "f".to_string(),
-                    arguments: serde_json::json!({}),
+                    arguments: Some(serde_json::json!({}).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 })
                 .collect(),
             ..LLMMessage::default()
@@ -161,7 +162,7 @@ mod tests {
 
     fn tool_message(id: &str) -> LLMMessage {
         LLMMessage {
-            role: "tool".to_string(),
+            role: kimi_core::types::Role::Tool,
             content: "ok".to_string(),
             tool_call_id: Some(id.to_string()),
             ..LLMMessage::default()

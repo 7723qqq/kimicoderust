@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -20,3 +23,7 @@ pub trait ToolActivationSource {
 
     fn workspace_disabled_tools(&self) -> Option<Vec<String>>;
 }
+
+
+pub static I_AGENT_TOOL_ACTIVATION_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentToolActivationService>>> =
+    LazyLock::new(|| create_decorator("agentToolActivationService"));

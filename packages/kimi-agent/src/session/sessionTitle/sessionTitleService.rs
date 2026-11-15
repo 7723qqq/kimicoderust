@@ -1,3 +1,6 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::agent::llm_requester::llm_requester::I_AGENT_LLM_REQUESTER_SERVICE;
+use crate::session::session_title::agent_title_prompt_source::I_AGENT_TITLE_PROMPT_SOURCE;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -187,7 +190,7 @@ impl SessionTitleService {
         let Some(main) = main else {
             return Some(TitleGenerationResult::Failure { reason: "no_agent" });
         };
-        let prompt_source = main.accessor().get::<IAgentTitlePromptSource>();
+        let prompt_source = main.accessor().get(&I_AGENT_TITLE_PROMPT_SOURCE);
         let input = compose_title_input(prompt_source.as_ref(), source).await?;
         Some(self.generate_and_apply(&input, force).await)
     }
@@ -334,32 +337,42 @@ impl SessionTitleService {
         let Some(agent) = self.agent_lifecycle.handle_of(MAIN_AGENT_ID) else {
             return TitleGenerationResult::Failure { reason: "no_agent" };
         };
-        let requester = agent.accessor().get::<crate::agent::llm_requester::llm_requester::IAgentLLMRequesterService>();
+        let requester = agent.accessor().get(&I_AGENT_LLM_REQUESTER_SERVICE);
         let prompt = [
             "Write a short title for this conversation, at most 40 characters. Reply with the title only: no quotes, no preamble, no trailing period.",
             "",
             chat_content,
         ]
         .join("\n");
-        let mut parts = Vec::new();
+        let parts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let collected = parts.clone();
         let result = requester
             .request(
-                crate::agent::llm_requester::llm_requester::LlmRequest {
-                    messages: vec![crate::agent::llm_requester::llm_requester::LlmMessage {
-                        role: "user".to_string(),
-                        content: vec![json!({"type": "text", "text": prompt})],
-                        tool_calls: Vec::new(),
-                    }],
-                    source: crate::agent::llm_requester::llm_requester::LlmRequestSource {
-                        type_: "operation".to_string(),
-                        request_kind: "session_title".to_string(),
+                Some(
+                    crate::agent::llm_requester::llm_requester::AgentLLMRequestOverrides {
+                        messages: Some(vec![
+                            crate::llm_adapter::contract::message::create_user_message(&prompt),
+                        ]),
+                        source: Some(
+                            crate::agent::llm_requester::llm_requester::AgentLLMRequestSource::Operation {
+                                turn_id: None,
+                                request_kind: Some("session_title".to_string()),
+                                log_fields: None,
+                            },
+                        ),
+                        ..Default::default()
                     },
-                },
-                Arc::new(move |part| {
-                    if part.type_ == "text" {
-                        parts.push(part.text.clone());
+                ),
+                Some(Arc::new(move |part| {
+                    if let crate::human::llm::message::StreamedMessagePart::Content(
+                        crate::human::llm::message::ContentPart::Text { text, .. },
+                    ) = part
+                    {
+                        collected.lock().push(text);
                     }
-                }),
+                    futures_util::future::ready(Ok(())).boxed()
+                })),
+                None,
             )
             .await;
         if let Err(error) = result {
@@ -369,7 +382,12 @@ impl SessionTitleService {
             );
             return TitleGenerationResult::Failure { reason: "request_failed" };
         }
-        let title = parts.join("").trim().trim_matches(|ch| matches!(ch, '\'' | '"' | '“' | '”')).to_string();
+        let title = parts
+            .lock()
+            .join("")
+            .trim()
+            .trim_matches(|ch| matches!(ch, '\'' | '"' | '“' | '”'))
+            .to_string();
         if title.is_empty() {
             return TitleGenerationResult::Failure { reason: "request_failed" };
         }

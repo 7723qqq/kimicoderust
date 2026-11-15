@@ -63,7 +63,11 @@ use super::tools::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MachineEngineDelta {
-    Assistant { delta: String },
+    Assistant {
+        delta: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<u32>,
+    },
     #[serde(rename_all = "camelCase")]
     Thinking {
         delta: String,
@@ -75,6 +79,8 @@ pub enum MachineEngineDelta {
         hidden: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<u32>,
     },
     #[serde(rename_all = "camelCase")]
     ToolCall {
@@ -84,6 +90,8 @@ pub enum MachineEngineDelta {
         arguments_part: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<u32>,
     },
 }
 
@@ -125,6 +133,9 @@ pub enum MachineEngineEvent {
         step: u64,
         error: LlmErrorMessage,
         raw_error: Option<Value>,
+        usage: Option<TokenUsage>,
+        message_id: Option<String>,
+        timing: Option<ModelRequestTiming>,
     },
     Delta {
         delta: MachineEngineDelta,
@@ -139,6 +150,9 @@ pub enum MachineEngineEvent {
         error_message: String,
         status_code: Option<u16>,
         raw_error: Option<Value>,
+        usage: Option<TokenUsage>,
+        message_id: Option<String>,
+        timing: Option<ModelRequestTiming>,
     },
     Recovering {
         step: u64,
@@ -303,13 +317,29 @@ pub struct MachineEngineAttachBundle {
 #[derive(Default)]
 struct DeltaSplitter {
     calls_by_index: HashMap<Option<StreamIndex>, (String, String)>,
+    next_block: u32,
+    active_block: i32,
+    active_identity: Option<String>,
 }
 
 impl DeltaSplitter {
+    fn block_of(&mut self, identity: String) -> u32 {
+        if self.active_identity.as_deref() != Some(identity.as_str()) {
+            self.active_identity = Some(identity);
+            self.active_block = self.next_block as i32;
+            self.next_block += 1;
+        }
+        u32::try_from(self.active_block).unwrap_or_default()
+    }
+
     fn split(&mut self, part: StreamedMessagePart) -> Option<MachineEngineDelta> {
         match part {
             StreamedMessagePart::Content(ContentPart::Text { text, .. }) => {
-                Some(MachineEngineDelta::Assistant { delta: text })
+                let block = self.block_of("text".to_string());
+                Some(MachineEngineDelta::Assistant {
+                    delta: text,
+                    block: Some(block),
+                })
             }
             StreamedMessagePart::Content(ContentPart::Think {
                 think,
@@ -317,34 +347,48 @@ impl DeltaSplitter {
                 details_index,
                 hidden,
                 reasoning_key,
-            }) => Some(MachineEngineDelta::Thinking {
-                delta: think,
-                encrypted,
-                details_index,
-                hidden,
-                reasoning_key,
-            }),
+            }) => {
+                let identity = format!(
+                    "think:{}:{}:{}",
+                    details_index.map_or_else(|| "-".to_string(), |index| index.to_string()),
+                    reasoning_key.clone().unwrap_or_default(),
+                    if encrypted.is_none() { "u" } else { "s" },
+                );
+                let block = self.block_of(identity);
+                Some(MachineEngineDelta::Thinking {
+                    delta: think,
+                    encrypted,
+                    details_index,
+                    hidden,
+                    reasoning_key,
+                    block: Some(block),
+                })
+            }
             StreamedMessagePart::Content(_) => None,
             StreamedMessagePart::ToolCall(call) => {
                 self.calls_by_index.insert(
                     call._stream_index.clone(),
                     (call.id.clone(), call.name.clone()),
                 );
+                let block = self.block_of(format!("call:{}", call.id));
                 Some(MachineEngineDelta::ToolCall {
                     tool_call_id: call.id,
                     name: call.name,
                     arguments_part: call.arguments,
                     started: Some(true),
+                    block: Some(block),
                 })
             }
             StreamedMessagePart::ToolCallPart(part) => {
                 let arguments = part.arguments_part?;
                 let (id, name) = self.calls_by_index.get(&part.index)?.clone();
+                let block = self.block_of(format!("call:{id}"));
                 Some(MachineEngineDelta::ToolCall {
                     tool_call_id: id,
                     name,
                     arguments_part: Some(arguments),
                     started: None,
+                    block: Some(block),
                 })
             }
         }
@@ -785,6 +829,9 @@ impl MachineEngine {
                     entry,
                 });
             }
+            AgentEmitted::TurnStarted { .. } => {
+                self.state.lock().splitter = DeltaSplitter::default();
+            }
             AgentEmitted::StepStarted { step } => {
                 self.state.lock().current_step = step;
             }
@@ -816,6 +863,7 @@ impl MachineEngine {
                 error_message,
                 status_code,
             })) => {
+                let failure = self.bundle.requester.last_attempt_failure();
                 let step = {
                     let mut state = self.state.lock();
                     state.pending_failure = None;
@@ -840,6 +888,11 @@ impl MachineEngine {
                     error_message,
                     status_code,
                     raw_error: self.bundle.requester.last_error(),
+                    usage: failure.as_ref().and_then(|failure| failure.usage.clone()),
+                    message_id: failure
+                        .as_ref()
+                        .and_then(|failure| failure.message_id.clone()),
+                    timing: failure.and_then(|failure| failure.timing),
                 });
             }
             AgentEmitted::Llm(TurnLlmEvent::Event(LlmEvent::Recovering {
@@ -889,7 +942,7 @@ impl MachineEngine {
                     usage: finish
                         .as_ref()
                         .map(|finish| finish.usage.clone())
-                        .or_else(|| meta.as_ref().and_then(|meta| meta.usage.clone()))
+                        .or_else(|| meta.as_ref().map(|meta| meta.usage.clone()))
                         .unwrap_or_else(empty_usage),
                     finish: finish.as_ref().map(|finish| FinishInfo {
                         finish_reason: finish.provider_finish_reason,
@@ -995,10 +1048,18 @@ impl MachineEngine {
             } => {
                 let failure = self.state.lock().pending_failure.clone();
                 if let Some((step, failure_error)) = failure {
+                    let attempt_failure = self.bundle.requester.last_attempt_failure();
                     self.publish(MachineEngineEvent::StepFailed {
                         step,
                         error: failure_error,
                         raw_error: self.bundle.requester.last_error(),
+                        usage: attempt_failure
+                            .as_ref()
+                            .and_then(|failure| failure.usage.clone()),
+                        message_id: attempt_failure
+                            .as_ref()
+                            .and_then(|failure| failure.message_id.clone()),
+                        timing: attempt_failure.and_then(|failure| failure.timing),
                     });
                 }
                 self.state.lock().turn_active = false;

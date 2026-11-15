@@ -1,3 +1,16 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::agent::context_memory::context_memory::I_AGENT_CONTEXT_MEMORY_SERVICE;
+use crate::agent::environment_binding::environment_binding::I_AGENT_ENVIRONMENT_BINDING_SERVICE;
+use crate::agent::full_compaction::full_compaction::I_AGENT_FULL_COMPACTION_SERVICE;
+use crate::agent::r#loop::r#loop::I_AGENT_LOOP_SERVICE;
+use crate::agent::mcp::mcp::I_AGENT_MCP_SERVICE;
+use crate::agent::permission_mode::permission_mode::I_AGENT_PERMISSION_MODE_SERVICE;
+use crate::agent::permission_rules::permission_rules::I_AGENT_PERMISSION_RULES_SERVICE;
+use crate::agent::profile::profile::I_AGENT_PROFILE_SERVICE;
+use crate::agent::task::task::I_AGENT_TASK_SERVICE;
+use crate::agent::tool_activation::tool_activation::I_AGENT_TOOL_ACTIVATION_SERVICE;
+use crate::state::event_dispatcher::I_EVENT_DISPATCHER;
+use crate::wire::wire::I_WIRE_SERVICE;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -13,7 +26,7 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 
 use crate::_base::di::instantiation::IInstantiationService;
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::di::scope::{
     IAgentScopeHandle, LifecycleScope, ScopeActivation, ScopeSeed, create_scoped_child_handle,
     register_scoped_service,
@@ -36,6 +49,7 @@ use crate::agent::interaction::interaction_wiring::{
     attach_interaction_agent, cancel_interactions_for_turn, detach_interaction_agent,
 };
 use crate::agent::r#loop::r#loop::IAgentLoopService;
+use crate::agent::registrations::ensure_agent_services_registered;
 use crate::agent::r#loop::machine::engine::{MACHINE_LOOP_MODEL, MachineEngineAttachRef};
 use crate::agent::r#loop::turn_ops::TurnEnded;
 use crate::agent::mcp::mcp::IAgentMcpService;
@@ -43,7 +57,6 @@ use crate::agent::permission_mode::config_section::DEFAULT_PERMISSION_MODE_SECTI
 use crate::agent::permission_mode::permission_mode::IAgentPermissionModeService;
 use crate::agent::permission_mode::permission_mode_ops::permission_mode_configured_key;
 use crate::agent::permission_policy::types::PermissionMode;
-use crate::agent::permission_rules::config_section::{PERMISSION_SECTION, PermissionConfig};
 use crate::agent::permission_rules::permission_rules::IAgentPermissionRulesService;
 use crate::agent::profile::profile::IAgentProfileService;
 use crate::agent::profile::profile_ops::{ProfileModelState, profile_replayable_key};
@@ -87,7 +100,7 @@ use crate::wire::wire_service::WireService;
 
 use super::agent_lifecycle::{
     AgentListFilter, AgentScopeCreatedEvent, CreateAgentOptions, ForkAgentOptions,
-    IAgentLifecycleService, MAIN_AGENT_ID,
+    I_AGENT_LIFECYCLE_SERVICE, IAgentLifecycleService, MAIN_AGENT_ID,
 };
 use super::errors::{AGENT_ALREADY_EXISTS, AGENT_NOT_FOUND};
 use super::managed_agent::ManagedAgent;
@@ -139,7 +152,7 @@ impl<T: Clone + 'static> ListenerRegistry<T> {
     fn subscribe_in(
         self: &Arc<Self>,
         listener: Arc<dyn Fn(T) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().push((id, listener));
         let this = Arc::downgrade(self);
@@ -180,7 +193,7 @@ pub struct AgentLifecycleService {
     did_create_scope: Arc<ListenerRegistry<AgentScopeCreatedEvent>>,
     will_close: Arc<ListenerRegistry<Arc<AgentContext>>>,
     did_close: Arc<ListenerRegistry<Arc<AgentContext>>>,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl AgentLifecycleService {
@@ -252,7 +265,7 @@ impl AgentLifecycleService {
         );
         this.subscriptions
             .lock()
-            .push(Box::new(SessionSubscription(session_subscription)));
+            .push(Arc::new(SessionSubscription(session_subscription)));
         let session_id = this.ctx.session_id();
         this.subscriptions.lock().push(this.bus.subscribe_turn_ended(
             Arc::new(move |event: TurnEnded| {
@@ -464,6 +477,7 @@ impl AgentLifecycleService {
                 ScopeSeed::new::<IAgentBlobService>(blob_view),
                 ScopeSeed::new::<IWireService>(wire.clone()),
             ];
+            ensure_agent_services_registered().map_err(|error| error)?;
             let handle = create_scoped_child_handle(
                 this.instantiation.clone(),
                 LifecycleScope::Agent,
@@ -578,7 +592,7 @@ impl AgentLifecycleService {
         agent_homedir: String,
         self_: AgentMachineSelf,
     ) -> Result<crate::agent::r#loop::machine::engine::MachineEngineAttachBundle, WireAsyncError> {
-        handle.accessor().get::<IWireService>().seal().await?;
+        handle.accessor().get(&I_WIRE_SERVICE).seal().await?;
         let labels = with_subagent_profile(
             opts.labels,
             (agent_id != MAIN_AGENT_ID)
@@ -610,7 +624,7 @@ impl AgentLifecycleService {
         {
             handle
                 .accessor()
-                .get::<IEventDispatcher>()
+                .get(&I_EVENT_DISPATCHER)
                 .dispatch(EnvironmentSetBinding {
                     agent_id: agent_id.clone(),
                     environment_id: environment_id.to_string(),
@@ -618,18 +632,19 @@ impl AgentLifecycleService {
                 })
                 .await?;
         }
-        handle.accessor().get::<IAgentProfileService>();
-        handle.accessor().get::<IAgentPermissionModeService>();
-        handle.accessor().get::<IAgentMcpService>();
-        handle.accessor().get::<IEventDispatcher>().restore().await?;
+        handle.accessor().get(&I_AGENT_PROFILE_SERVICE);
+        handle.accessor().get(&I_AGENT_PERMISSION_RULES_SERVICE);
+        handle.accessor().get(&I_AGENT_PERMISSION_MODE_SERVICE);
+        handle.accessor().get(&I_AGENT_MCP_SERVICE);
+        handle.accessor().get(&I_EVENT_DISPATCHER).restore().await?;
         attach_interaction_agent(
             &agent_id,
             &self.ctx.session_id(),
-            handle.accessor().get::<IEventDispatcher>(),
+            handle.accessor().get(&I_EVENT_DISPATCHER),
         );
         self.bind_bootstrap(&handle, &opts).await?;
-        handle.accessor().get::<IAgentToolActivationService>().activate().await;
-        let loop_ = handle.accessor().get::<IAgentLoopService>();
+        handle.accessor().get(&I_AGENT_TOOL_ACTIVATION_SERVICE).activate().await;
+        let loop_ = handle.accessor().get(&I_AGENT_LOOP_SERVICE);
         let bundle = loop_.build_attach_bundle();
         loop_.attach_engine(self_ as MachineEngineAttachRef, bundle.clone());
         Ok(bundle)
@@ -641,8 +656,8 @@ impl AgentLifecycleService {
         opts: &CreateAgentOptions,
     ) -> Result<(), WireAsyncError> {
         if let Some(binding) = opts.binding.clone() {
-            handle.accessor().get::<IAgentProfileService>().bind(binding).await?;
-            handle.accessor().get::<IAgentMcpService>().register();
+            handle.accessor().get(&I_AGENT_PROFILE_SERVICE).bind(binding).await?;
+            handle.accessor().get(&I_AGENT_MCP_SERVICE).register();
         }
         let permission_mode = self
             .config
@@ -658,19 +673,8 @@ impl AgentLifecycleService {
         {
             handle
                 .accessor()
-                .get::<IAgentPermissionModeService>()
+                .get(&I_AGENT_PERMISSION_MODE_SERVICE)
                 .set_mode(permission_mode);
-        }
-        let rules = self
-            .config
-            .get::<PermissionConfig>(PERMISSION_SECTION)
-            .map(|config| config.rules)
-            .unwrap_or_default();
-        if !rules.is_empty() {
-            handle
-                .accessor()
-                .get::<IAgentPermissionRulesService>()
-                .add_rules(rules);
         }
         Ok(())
     }
@@ -697,10 +701,10 @@ impl AgentLifecycleService {
             ));
         }
         let source = source_managed.handle.clone();
-        let source_data = source.accessor().get::<IAgentProfileService>().data();
+        let source_data = source.accessor().get(&I_AGENT_PROFILE_SERVICE).data();
         let source_binding = source
             .accessor()
-            .get::<IAgentEnvironmentBindingService>()
+            .get(&I_AGENT_ENVIRONMENT_BINDING_SERVICE)
             .current();
         let override_ = opts.as_ref().and_then(|opts| opts.binding.clone());
         let labels = with_subagent_profile(
@@ -721,7 +725,7 @@ impl AgentLifecycleService {
             }))
             .await?;
         let child = self.require_managed(&child_context)?.handle.clone();
-        let child_profile = child.accessor().get::<IAgentProfileService>();
+        let child_profile = child.accessor().get(&I_AGENT_PROFILE_SERVICE);
         if let Some(profile) = override_.as_ref().and_then(|binding| binding.profile.clone()) {
             child_profile
                 .bind(crate::agent::profile::profile::BindAgentInput {
@@ -746,11 +750,11 @@ impl AgentLifecycleService {
                 child_profile.set_thinking(thinking);
             }
         }
-        let source_messages = source.accessor().get::<IAgentContextMemoryService>().get();
+        let source_messages = source.accessor().get(&I_AGENT_CONTEXT_MEMORY_SERVICE).get();
         if !source_messages.is_empty() {
             child
                 .accessor()
-                .get::<IAgentContextMemoryService>()
+                .get(&I_AGENT_CONTEXT_MEMORY_SERVICE)
                 .append(close_trailing_open_tool_exchange(source_messages));
         }
         Ok(child_context)
@@ -798,7 +802,7 @@ impl AgentLifecycleService {
             }
             handle
                 .accessor()
-                .get::<IAgentPermissionModeService>()
+                .get(&I_AGENT_PERMISSION_MODE_SERVICE)
                 .set_mode(mode);
         }
     }
@@ -886,7 +890,7 @@ impl AgentLifecycleService {
                     }),
                     true,
                 );
-                let loop_ = handle.accessor().get::<IAgentLoopService>();
+                let loop_ = handle.accessor().get(&I_AGENT_LOOP_SERVICE);
                 let bundle = loop_.build_attach_bundle();
                 loop_.attach_engine(self_ as MachineEngineAttachRef, bundle.clone());
                 if let Some(managed) = managed {
@@ -901,7 +905,7 @@ impl AgentLifecycleService {
                 attach_interaction_agent(
                     &agent.agent_id,
                     &this.ctx.session_id(),
-                    handle.accessor().get::<IEventDispatcher>(),
+                    handle.accessor().get(&I_EVENT_DISPATCHER),
                 );
                 Ok(bundle)
             }
@@ -983,11 +987,11 @@ impl AgentLifecycleService {
         let handle = managed.handle.clone();
         handle
             .accessor()
-            .get::<IAgentTaskService>()
+            .get(&I_AGENT_TASK_SERVICE)
             .suppress_all_terminal_notifications()
             .await?;
-        let loop_ = handle.accessor().get::<IAgentLoopService>();
-        let compacting = handle.accessor().get::<IAgentFullCompactionService>().compacting();
+        let loop_ = handle.accessor().get(&I_AGENT_LOOP_SERVICE);
+        let compacting = handle.accessor().get(&I_AGENT_FULL_COMPACTION_SERVICE).compacting();
         let compaction_settled = async {
             if let Some(compacting) = compacting.clone() {
                 let _ = compacting.promise.clone().await;
@@ -1003,7 +1007,7 @@ impl AgentLifecycleService {
         }
         let prompt_idle_deadline = tokio::time::Instant::now()
             + Duration::from_millis(REMOVE_PROMPT_QUIESCE_TIMEOUT_MS);
-        let mut release_quiescence = None::<Box<dyn IDisposable>>;
+        let mut release_quiescence = None::<DisposableRef>;
         loop {
             let snapshot = loop_.snapshot();
             for prompt_id in snapshot
@@ -1044,12 +1048,12 @@ impl AgentLifecycleService {
         }
         let stop_error = handle
             .accessor()
-            .get::<IAgentTaskService>()
+            .get(&I_AGENT_TASK_SERVICE)
             .stop_all_on_exit("Session closed")
             .await
             .err();
         let cleanup = async {
-            if let Err(error) = handle.accessor().get::<IEventDispatcher>().flush().await {
+            if let Err(error) = handle.accessor().get(&I_EVENT_DISPATCHER).flush().await {
                 on_unexpected_error(error);
             }
             managed.kill_space();
@@ -1118,44 +1122,44 @@ impl IAgentLifecycleService for AgentLifecycleService {
     fn on_did_create(
         &self,
         listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.did_create.subscribe_in(listener)
     }
 
     fn on_did_create_scope(
         &self,
         listener: Arc<dyn Fn(AgentScopeCreatedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.did_create_scope.subscribe_in(listener)
     }
 
     fn on_will_close(
         &self,
         listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.will_close.subscribe_in(listener)
     }
 
     fn on_did_close(
         &self,
         listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.did_close.subscribe_in(listener)
     }
 
     async fn create(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         opts: Option<CreateAgentOptions>,
     ) -> Result<Arc<AgentContext>, WireAsyncError> {
-        AgentLifecycleService::create(self, opts).await
+        AgentLifecycleService::create(&self, opts).await
     }
 
     async fn fork(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         source: Arc<AgentContext>,
         opts: Option<ForkAgentOptions>,
     ) -> Result<Arc<AgentContext>, WireAsyncError> {
-        AgentLifecycleService::fork(self, source, opts).await
+        AgentLifecycleService::fork(&self, source, opts).await
     }
 
     fn get(&self, agent_id: &str) -> Option<Arc<AgentContext>> {
@@ -1179,10 +1183,10 @@ impl IAgentLifecycleService for AgentLifecycleService {
     }
 
     fn adopt(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         handle: Arc<IAgentScopeHandle>,
     ) -> Result<Arc<AgentContext>, WireAsyncError> {
-        AgentLifecycleService::adopt(self, handle)
+        AgentLifecycleService::adopt(&self, handle)
     }
 }
 

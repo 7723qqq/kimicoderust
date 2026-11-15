@@ -1,10 +1,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheSplit {
-    Split { cached: u32, miss: Option<u32> },
+    Split { cached: u64, miss: Option<u64> },
 
-    Contradiction { cached: u32, reported_miss: u32 },
+    Contradiction { cached: u64, reported_miss: u64 },
 
-    Absent { cached: u32 },
+    Absent { cached: u64 },
 }
 
 pub fn chargeable_tokens(usage: &serde_json::Value) -> i64 {
@@ -20,7 +20,7 @@ pub fn chargeable_tokens(usage: &serde_json::Value) -> i64 {
 }
 
 impl CacheSplit {
-    pub fn cached(self) -> u32 {
+    pub fn cached(self) -> u64 {
         match self {
             CacheSplit::Split { cached, .. }
             | CacheSplit::Contradiction { cached, .. }
@@ -28,7 +28,7 @@ impl CacheSplit {
         }
     }
 
-    pub fn input_other(self, prompt_tokens: u32) -> u32 {
+    pub fn input_other(self, prompt_tokens: u64) -> u64 {
         match self {
             CacheSplit::Split {
                 miss: Some(miss), ..
@@ -39,10 +39,10 @@ impl CacheSplit {
 }
 
 pub fn classify_deepseek_cache_split(
-    hit: Option<u32>,
-    miss: Option<u32>,
-    prompt_tokens: u32,
-    fallback_cached: u32,
+    hit: Option<u64>,
+    miss: Option<u64>,
+    prompt_tokens: u64,
+    fallback_cached: u64,
 ) -> CacheSplit {
     let Some(hit) = hit else {
         return CacheSplit::Absent {
@@ -61,12 +61,12 @@ pub fn classify_deepseek_cache_split(
 }
 
 pub fn read_openai_cache_fields(
-    cached_tokens: Option<u32>,
-    prompt_tokens_details_cached: Option<u32>,
-    input_tokens_details_cached: Option<u32>,
-    hit: Option<u32>,
-    miss: Option<u32>,
-    prompt_tokens: u32,
+    cached_tokens: Option<u64>,
+    prompt_tokens_details_cached: Option<u64>,
+    input_tokens_details_cached: Option<u64>,
+    hit: Option<u64>,
+    miss: Option<u64>,
+    prompt_tokens: u64,
 ) -> CacheSplit {
     let fallback_cached = cached_tokens
         .or(prompt_tokens_details_cached)

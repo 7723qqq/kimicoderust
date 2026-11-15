@@ -1,3 +1,11 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::persistence::interface::atomic_document_store::I_ATOMIC_DOCUMENT_STORE;
+use crate::app::bootstrap::bootstrap::I_BOOTSTRAP_SERVICE;
+use crate::app::event::event::I_EVENT_SERVICE;
+use crate::app::session_index::session_index::I_SESSION_INDEX;
+use crate::app::session_index::session_index::I_SESSION_INDEX_MIRROR;
+use crate::persistence::interface::session_lock::I_SESSION_LOCK_SERVICE;
+use crate::app::session_manager::session_manager::I_SESSION_MANAGER;
 use futures_util::{StreamExt, stream};
 
 use crate::_base::di::instantiation::ServicesAccessor;
@@ -40,16 +48,16 @@ pub async fn set_cold_session_archived(
     session_id: &str,
     archived: bool,
 ) -> Result<ColdSessionArchiveOutcome, WireAsyncError> {
-    let summary = accessor.get::<ISessionIndex>().get(session_id).await?;
+    let summary = accessor.get(&I_SESSION_INDEX).get(session_id).await?;
     let Some(summary) = summary else {
         return Ok(ColdSessionArchiveOutcome::NotFound);
     };
-    let lease = accessor.get::<ISessionLockService>().lease(session_id);
+    let lease = accessor.get(&I_SESSION_LOCK_SERVICE).lease(session_id);
     let result = async {
-        let docs = accessor.get::<IAtomicDocumentStore>();
+        let docs = accessor.get(&I_ATOMIC_DOCUMENT_STORE);
         let meta_scope = session_scope_of(
             &workspace_persistence_scope(
-                &accessor.get::<IBootstrapService>().scope("sessions"),
+                &accessor.get(&I_BOOTSTRAP_SERVICE).scope("sessions"),
                 &summary.workspace_id,
             ),
             session_id,
@@ -76,7 +84,7 @@ pub async fn set_cold_session_archived(
         if let Some(legacy_meta_scope) = legacy_meta_scope {
             docs.delete(&legacy_meta_scope, "state.json").await?;
         }
-        accessor.get::<ISessionIndexMirror>().record(build_session_summary(
+        accessor.get(&I_SESSION_INDEX_MIRROR).record(build_session_summary(
             crate::app::session_index::session_index_source::SessionSummaryInput {
                 id: session_id.to_string(),
                 workspace_id: summary.workspace_id.clone(),
@@ -94,14 +102,14 @@ pub async fn set_cold_session_archived(
             },
         ));
         if archived {
-            accessor.get::<IEventService>().publish(SessionArchived::new(
+            accessor.get(&I_EVENT_SERVICE).publish(SessionArchived::new(
                 super::session_lifecycle_events::SessionArchivedPayload {
                     session_id: session_id.to_string(),
                     workspace_id: summary.workspace_id.clone(),
                 },
             ));
         } else if persisted.archived {
-            accessor.get::<IEventService>().publish(SessionRestored::new(
+            accessor.get(&I_EVENT_SERVICE).publish(SessionRestored::new(
                 super::session_lifecycle_events::SessionRestoredPayload {
                     session_id: session_id.to_string(),
                     workspace_id: summary.workspace_id.clone(),
@@ -120,7 +128,7 @@ pub async fn set_session_archived(
     session_id: &str,
     archived: bool,
 ) -> Result<ColdSessionArchiveOutcome, WireAsyncError> {
-    let manager = accessor.get::<ISessionManager>();
+    let manager = accessor.get(&I_SESSION_MANAGER);
     let _ = manager.when_resume_settled(session_id).await;
     manager
         .with_lifecycle_serialization(session_id, move |unguarded| async move {

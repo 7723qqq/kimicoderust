@@ -1,7 +1,7 @@
 pub use super::micro_compaction::{
     DEFAULT_TRUNCATED_MARKER, MicroCompactionConfig, MicroCompactionState,
 };
-use crate::turn_loop::types::{ContentBlock, LLMMessage};
+use crate::turn_loop::types::{ContentPart, LLMMessage};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DetectOutcome {
@@ -136,11 +136,11 @@ fn message_content_tokens(msg: &LLMMessage) -> usize {
     }
 }
 
-fn block_tokens(block: &ContentBlock) -> usize {
+fn block_tokens(block: &ContentPart) -> usize {
     match block {
-        ContentBlock::Text { text, .. } => estimate_tokens(text),
+        ContentPart::Text { text, .. } => estimate_tokens(text),
 
-        ContentBlock::Think { think, .. } => estimate_tokens(think),
+        ContentPart::Think { think, .. } => estimate_tokens(think),
         _ => crate::human::llm::tokens::MEDIA_TOKEN_ESTIMATE as usize,
     }
 }
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn cjk_weight_also_applies_to_blocks() {
         let mut msg = LLMMessage::tool_result("f", "");
-        msg.blocks = vec![ContentBlock::Text {
+        msg.blocks = vec![ContentPart::Text {
             text: "本".repeat(100),
             meta: None,
         }];

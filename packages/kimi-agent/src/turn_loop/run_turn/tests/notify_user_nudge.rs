@@ -36,9 +36,10 @@ impl LLM for SilentRoundsLlm {
                     tool_calls: vec![ToolCall {
                         id: format!("tc{call}"),
                         name: "Read".into(),
-                        arguments: serde_json::json!({ "path": "/a.rs" }),
+                        arguments: Some(serde_json::json!({ "path": "/a.rs" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage: TokenUsage::default(),
@@ -83,7 +84,7 @@ fn input<'a>(llm: &'a SilentRoundsLlm, tool_defs: Vec<ToolInfo>) -> RunTurnInput
         turn_id: "test-notify-user-nudge".into(),
         llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "keep going".into(),
             origin: Some(serde_json::json!({ "kind": "user" })),
             ..Default::default()

@@ -30,10 +30,10 @@ use crate::agent::llm_requester::llm_request_ops::{
     LlmToolsSnapshot, LlmToolsSnapshotPayload, llm_request_trace_key,
 };
 use crate::agent::llm_requester::llm_requester::{
-    AgentLLMRequestFinish, AgentLLMRequestLogFields, AgentLLMRequestOverrides,
-    AgentLLMRequestPartHandler, AgentLLMRequestSource, AgentLLMRequestTask,
-    AgentLLMTurnRequestSnapshot, IAgentLLMRequesterService, PreparedTurnRequestConfig,
-    PromptCacheProbe,
+    AgentLLMRequestAttemptFailure, AgentLLMRequestFinish, AgentLLMRequestLogFields,
+    AgentLLMRequestOverrides, AgentLLMRequestPartHandler, AgentLLMRequestSource,
+    AgentLLMRequestTask, AgentLLMTurnRequestSnapshot, IAgentLLMRequesterService,
+    PreparedTurnRequestConfig, PromptCacheProbe,
 };
 use crate::agent::media::media_ref::{
     MediaPathTag, MediaPathTagKind, build_media_path_tag, match_media_path_tags,
@@ -76,8 +76,8 @@ use crate::llm_adapter::model::completion_budget::{
 };
 use crate::llm_adapter::model::model::IModelService;
 use crate::llm_adapter::model::model_requester::{
-    ModelRequestEvent, ModelRequestInput, ModelRequestParams, ModelRequestTiming, ModelRequester,
-    effective_max_completion_tokens,
+    ModelRequestAttemptFailure, ModelRequestEvent, ModelRequestInput, ModelRequestParams,
+    ModelRequestTiming, ModelRequester, effective_max_completion_tokens,
 };
 use crate::llm_adapter::model::model_types::ModelOverrides;
 use crate::llm_adapter::model::thinking::{ThinkingConfig, resolve_thinking_keep};
@@ -180,6 +180,7 @@ impl ModelRequestParamsSnapshot {
             used_context_tokens: self.used_context_tokens,
             max_context_tokens: self.max_context_tokens,
             on_trace_id: None,
+            on_attempt_failure: None,
         }
     }
 }
@@ -646,6 +647,15 @@ impl AgentLLMRequesterService {
                     source,
                     baseline: deps.last_turn_request(),
                 });
+        let attempt_failure = Arc::new(Mutex::new(None));
+        let attempt_failure_slot = attempt_failure.clone();
+        let on_attempt_failure = Arc::new(move |failure: ModelRequestAttemptFailure| {
+            *attempt_failure_slot.lock() = Some(AgentLLMRequestAttemptFailure {
+                usage: failure.usage,
+                message_id: failure.message_id,
+                timing: failure.timing,
+            });
+        });
         let result = Box::pin(request_with_trace(
             deps,
             trace,
@@ -653,10 +663,12 @@ impl AgentLLMRequesterService {
             on_part,
             signal,
             prompt_cache_probe,
+            Some(on_attempt_failure),
         ));
         AgentLLMRequestTask {
             trace: trace_snapshot,
             result,
+            attempt_failure: Arc::new(move || attempt_failure.lock().clone()),
         }
     }
 }
@@ -668,6 +680,7 @@ async fn request_with_trace(
     on_part: Option<AgentLLMRequestPartHandler>,
     signal: Option<AbortSignal>,
     prompt_cache_probe: Option<PromptCacheProbeState>,
+    on_attempt_failure: Option<Arc<dyn Fn(ModelRequestAttemptFailure) + Send + Sync>>,
 ) -> Result<AgentLLMRequestFinish, WireAsyncError> {
     throw_if_aborted(signal.as_ref())?;
     let started_at = now_ms();
@@ -709,6 +722,7 @@ async fn request_with_trace(
         set_trace.clone(),
         size_probe.clone(),
         overrides.on_attempt_retry.clone(),
+        on_attempt_failure,
     )
     .await
     {
@@ -880,6 +894,7 @@ async fn run_request(
     on_request_trace: RequestTraceCallback,
     size_probe: Arc<Mutex<Option<u64>>>,
     on_attempt_retry: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_attempt_failure: Option<Arc<dyn Fn(ModelRequestAttemptFailure) + Send + Sync>>,
 ) -> Result<AgentLLMRequestFinish, WireAsyncError> {
     {
         let mut normalizer = deps.tool_call_id_normalizer.lock();
@@ -937,6 +952,7 @@ async fn run_request(
             &on_request_trace,
             &size_probe,
             cache_probe_baseline.as_ref(),
+            on_attempt_failure.clone(),
             &mut state,
         )
         .await;
@@ -1049,6 +1065,7 @@ async fn run_once(
     on_request_trace: &RequestTraceCallback,
     size_probe: &Arc<Mutex<Option<u64>>>,
     cache_probe_baseline: Option<&AgentLLMTurnRequestSnapshot>,
+    on_attempt_failure: Option<Arc<dyn Fn(ModelRequestAttemptFailure) + Send + Sync>>,
     state: &mut RunState,
 ) -> Result<RunOutcome, WireAsyncError> {
     on_request_trace(None);
@@ -1162,6 +1179,7 @@ async fn run_once(
     let mut tool_call_ids = deps.tool_call_id_normalizer.lock().begin_response();
     let mut params = request.params.clone();
     params.on_trace_id = Some(on_request_trace.clone());
+    params.on_attempt_failure = on_attempt_failure;
     let bridge = signal.map(bridge_abort_signal);
     let mut stream = request.requester.request(
         input.clone(),
@@ -2177,12 +2195,12 @@ fn hide_read_media_file(messages: Vec<ContextMessage>) -> Vec<ContextMessage> {
 }
 
 fn provider_visible_tools(tools: &[Tool]) -> Vec<Tool> {
-    if !tools.iter().any(|tool| tool.deferred == Some(true)) {
+    if !tools.iter().any(|tool| tool.deferred.is_some()) {
         return tools.to_vec();
     }
     tools
         .iter()
-        .filter(|tool| tool.deferred != Some(true))
+        .filter(|tool| tool.deferred.is_none())
         .cloned()
         .collect()
 }

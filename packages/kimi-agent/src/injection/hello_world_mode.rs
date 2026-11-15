@@ -132,7 +132,7 @@ mod tests {
 
     fn injected(content: &str) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(content),
             origin: Some(serde_json::json!({
                 "kind": "injection",
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn content_outside_an_injection_is_not_a_disclosure() {
         let quoted = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "why does the prompt say \"## Hello-World Dev Run\"?".to_string(),
             ..Default::default()
         };

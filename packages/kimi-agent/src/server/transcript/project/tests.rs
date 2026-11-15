@@ -109,7 +109,7 @@ fn folds_a_full_turn_into_transcript_ops() {
 
 #[test]
 fn step_end_tool_delta_and_task_progress_ops() {
-    use crate::rpc::types::TokenUsage;
+    use kimi_core::types::TokenUsage;
 
     let mut projector = TranscriptProjector::new();
     projector.apply_event(&EngineEvent::TurnStarted {
@@ -136,6 +136,7 @@ fn step_end_tool_delta_and_task_progress_ops() {
         tool_call_id: "c1".into(),
         name: None,
         arguments_part: Some("{\"path\"".into()),
+        block: None,
     });
     match &ops[0] {
         TranscriptOperation::FrameUpsert {
@@ -150,11 +151,11 @@ fn step_end_tool_delta_and_task_progress_ops() {
         turn_id: "t0".into(),
         step: 1,
         usage: Some(TokenUsage {
-            input_tokens: 100,
-            output_tokens: 20,
-            total_tokens: 120,
+            input_other: 100,
+            output: 20,
             input_cache_read: 5,
             input_cache_creation: 1,
+            raw: None,
         }),
         timing: Some(crate::llm::LlmTiming::from_marks(
             0,
@@ -523,12 +524,12 @@ fn agent_meta_subagent_and_attachment_ops() {
     let ops = projector.apply_event(&EngineEvent::SubagentCompleted {
         subagent_id: "sub-1".into(),
         result_summary: Some("done".into()),
-        usage: Some(crate::rpc::types::TokenUsage {
-            input_tokens: 10,
-            output_tokens: 4,
-            total_tokens: 14,
+        usage: Some(kimi_core::types::TokenUsage {
+            input_other: 10,
+            output: 4,
             input_cache_read: 3,
             input_cache_creation: 2,
+            raw: None,
         }),
     });
     match &ops[0] {

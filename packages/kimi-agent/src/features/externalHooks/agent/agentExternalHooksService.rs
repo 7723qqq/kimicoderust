@@ -50,7 +50,7 @@ use crate::features::externalHooks::internal::userPrompt::{
 use crate::hooks::{HookNext, HookRegisterOptions};
 use crate::human::llm::finish_reason::FinishReason;
 use crate::human::llm::message::{ContentPart, Role};
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 use crate::session::agent_lifecycle::agent_lifecycle::MAIN_AGENT_ID;
 use crate::session::session_context::session_context::ISessionContext;
 use crate::session::sessionMetadata::session_metadata::{
@@ -810,7 +810,7 @@ impl AgentExternalHooksService {
 
         if let Some(append) = render_user_prompt_hook_result(&results) {
             for part in &append.parts {
-                if let ContentBlock::Text { text, meta } = part {
+                if let ContentPart::Text { text, meta } = part {
                     context.hook_parts.push(crate::agent::r#loop::r#loop::TextPart {
                         type_: "text".to_string(),
                         text: text.clone(),

@@ -183,10 +183,9 @@ async fn test_acp_builtin_commands_run_locally() {
         &store,
         &sid,
         "mock-model",
-        &crate::rpc::types::TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-            total_tokens: 15,
+        &kimi_core::types::TokenUsage {
+            input_other: 10,
+            output: 5,
             ..Default::default()
         },
     )

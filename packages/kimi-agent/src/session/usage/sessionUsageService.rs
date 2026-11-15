@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::agent::agent_context::agent_context::AgentContext;
 use crate::agent::agent_context::agent_space::agent_space_of;
 use crate::agent::llm_requester::llm_requester::AgentLLMRequestSource;
@@ -77,7 +77,7 @@ impl ISessionUsageService for SessionUsageService {
     fn on_did_record(
         &self,
         listener: Arc<dyn Fn(UsageRecordedContext) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.listeners.lock().push((id, listener));
         let listeners = Arc::downgrade(&self.listeners);

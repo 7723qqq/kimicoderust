@@ -244,19 +244,20 @@ async fn test_acp_load_replays_tool_results() {
     let messages = vec![
         crate::turn_loop::types::LLMMessage::user("run it"),
         crate::turn_loop::types::LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "on it".into(),
             tool_calls: vec![crate::turn_loop::types::ToolCall {
                 id: "call-1".into(),
                 name: "Read".into(),
-                arguments: json!({ "path": "a.txt" }),
+                arguments: Some(json!({ "path": "a.txt" }).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             ..Default::default()
         },
         crate::turn_loop::types::LLMMessage {
-            role: "tool".into(),
+            role: kimi_core::types::Role::Tool,
             content: "tool output".into(),
             tool_call_id: Some("call-1".into()),
             ..Default::default()

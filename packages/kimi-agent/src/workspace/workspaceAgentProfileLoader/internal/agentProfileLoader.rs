@@ -6,7 +6,7 @@ use futures_util::future::{BoxFuture, Shared};
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::log::log::ILogService;
 use crate::app::agent_profile_catalog::agent_profile_contribution::AgentProfileContribution;
 use crate::app::agent_profile_catalog::agent_profile_registry::{
@@ -42,7 +42,7 @@ pub type AgentProfileLoad = Arc<
         + Sync,
 >;
 pub type AgentProfileProvide = Arc<
-    dyn Fn(AgentProfileRegistration) -> Box<dyn IDisposable> + Send + Sync,
+    dyn Fn(AgentProfileRegistration) -> DisposableRef + Send + Sync,
 >;
 
 #[derive(Clone)]
@@ -58,7 +58,7 @@ pub struct AgentProfileLoaderHooks {
 struct AgentProfileLoaderState {
     ready: Option<LoaderFuture>,
     tail: Option<LoaderFuture>,
-    contribution_handle: Option<Box<dyn IDisposable>>,
+    contribution_handle: Option<DisposableRef>,
     is_disposed: bool,
 }
 

@@ -12,19 +12,19 @@ use tokio::sync::Notify;
 #[tokio::test]
 async fn test_caller_tokens_accumulates_all_dimensions() {
     let manager = SubagentManager::new();
-    let usage = crate::rpc::types::TokenUsage {
-        input_tokens: 10,
-        output_tokens: 5,
-        total_tokens: 15,
-        input_cache_read: 3,
+    let usage = kimi_core::types::TokenUsage {
+        input_other:10,
+        output: 5,
+                input_cache_read: 3,
         input_cache_creation: 2,
+        raw: None,
     };
     manager.record_instance_usage("subagent-1", &usage);
     manager.record_instance_usage("subagent-1", &usage);
 
     let cumulative = manager.cumulative_usage("subagent-1").await.unwrap();
-    assert_eq!(cumulative.input_tokens, 20);
-    assert_eq!(cumulative.output_tokens, 10);
+    assert_eq!(cumulative.input_other, 20);
+    assert_eq!(cumulative.output, 10);
     assert_eq!(cumulative.input_cache_read, 6);
     assert_eq!(cumulative.input_cache_creation, 4);
     // 20 + 6 + 4 + 10 — the cache dimensions count, unlike total_tokens.
@@ -568,7 +568,7 @@ fn test_partial_output_section_picks_the_last_assistant_text() {
         cache_observation_resets: Vec::new(),
     };
     let assistant = |content: &str| LLMMessage {
-        role: "assistant".into(),
+        role: kimi_core::types::Role::Assistant,
         content: content.into(),
         ..Default::default()
     };
@@ -646,12 +646,12 @@ impl crate::turn_loop::types::LLM for MockSubagentLlm {
                 thinking: Vec::new(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".into()),
-                usage: crate::rpc::types::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 15,
-                    total_tokens: 25,
-                    input_cache_read: 0,
+                usage: kimi_core::types::TokenUsage {
+                    input_other:10,
+                    output: 15,
+                                        input_cache_read: 0,
                     input_cache_creation: 0,
+            raw: None,
                 },
                 timing: None,
             })
@@ -751,12 +751,12 @@ async fn a_subagents_real_tool_event_is_attributed_to_it() {
                 Box<dyn std::error::Error + Send + Sync>,
             >,
         > {
-            let usage = crate::rpc::types::TokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                total_tokens: 15,
-                input_cache_read: 0,
+            let usage = kimi_core::types::TokenUsage {
+                input_other:10,
+                output: 5,
+                                input_cache_read: 0,
                 input_cache_creation: 0,
+            raw: None,
             };
             let response = if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
                 crate::turn_loop::types::LLMChatResponse {
@@ -765,9 +765,10 @@ async fn a_subagents_real_tool_event_is_attributed_to_it() {
                     tool_calls: vec![crate::turn_loop::types::ToolCall {
                         id: "sub_call_1".into(),
                         name: "probe_tool".into(),
-                        arguments: serde_json::json!({}),
+                        arguments: Some(serde_json::json!({}).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage,
@@ -1038,12 +1039,12 @@ impl crate::turn_loop::types::LLM for RecordingMockLlm {
                 thinking: Vec::new(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".into()),
-                usage: crate::rpc::types::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 15,
-                    total_tokens: 25,
-                    input_cache_read: 0,
+                usage: kimi_core::types::TokenUsage {
+                    input_other:10,
+                    output: 15,
+                                        input_cache_read: 0,
                     input_cache_creation: 0,
+            raw: None,
                 },
                 timing: None,
             })
@@ -1085,12 +1086,12 @@ impl crate::turn_loop::types::LLM for BlockingLlm {
                 thinking: Vec::new(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".into()),
-                usage: crate::rpc::types::TokenUsage {
-                    input_tokens: 5,
-                    output_tokens: 5,
-                    total_tokens: 10,
-                    input_cache_read: 0,
+                usage: kimi_core::types::TokenUsage {
+                    input_other:5,
+                    output: 5,
+                                        input_cache_read: 0,
                     input_cache_creation: 0,
+            raw: None,
                 },
                 timing: None,
             })
@@ -1135,17 +1136,18 @@ impl crate::turn_loop::types::LLM for ToolThenBlockLlm {
                     tool_calls: vec![crate::turn_loop::types::ToolCall {
                         id: "tc1".into(),
                         name: "read".into(),
-                        arguments: serde_json::json!({ "path": "/a.txt" }),
+                        arguments: Some(serde_json::json!({ "path": "/a.txt" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
-                    usage: crate::rpc::types::TokenUsage {
-                        input_tokens: 10,
-                        output_tokens: 5,
-                        total_tokens: 15,
-                        input_cache_read: 0,
+                    usage: kimi_core::types::TokenUsage {
+                        input_other:10,
+                        output: 5,
+                                                input_cache_read: 0,
                         input_cache_creation: 0,
+            raw: None,
                     },
                     timing: None,
                 })
@@ -1158,17 +1160,18 @@ impl crate::turn_loop::types::LLM for ToolThenBlockLlm {
                     tool_calls: vec![crate::turn_loop::types::ToolCall {
                         id: "tc2".into(),
                         name: "read".into(),
-                        arguments: serde_json::json!({ "path": "/b.txt" }),
+                        arguments: Some(serde_json::json!({ "path": "/b.txt" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
-                    usage: crate::rpc::types::TokenUsage {
-                        input_tokens: 5,
-                        output_tokens: 5,
-                        total_tokens: 10,
-                        input_cache_read: 0,
+                    usage: kimi_core::types::TokenUsage {
+                        input_other:5,
+                        output: 5,
+                                                input_cache_read: 0,
                         input_cache_creation: 0,
+            raw: None,
                     },
                     timing: None,
                 })
@@ -1240,19 +1243,19 @@ async fn test_persistent_spawn_multi_turn_and_usage() {
         .run_persistent_turn(&id, "First question", llm.clone(), callbacks.clone())
         .await
         .unwrap();
-    assert_eq!(turn1.usage.total_tokens, 25);
+    assert_eq!(turn1.usage.measured_context_tokens(), 25);
 
     let turn2 = manager
         .run_persistent_turn(&id, "Second question", llm.clone(), callbacks.clone())
         .await
         .unwrap();
-    assert_eq!(turn2.usage.total_tokens, 25);
+    assert_eq!(turn2.usage.measured_context_tokens(), 25);
 
     // Usage aggregates across turns.
     let usage = manager.get_persistent_usage(&id).await;
-    assert_eq!(usage.input_tokens, 20);
-    assert_eq!(usage.output_tokens, 30);
-    assert_eq!(usage.total_tokens, 50);
+    assert_eq!(usage.input_other, 20);
+    assert_eq!(usage.output, 30);
+    assert_eq!(usage.measured_context_tokens(), 50);
 
     // History reuse: turn 1 saw system+user+injection (3 messages), turn 2
     // saw system+user+assistant+user+injection (5 messages). The
@@ -1282,7 +1285,7 @@ async fn test_persistent_destroy() {
 
     assert!(manager.get_instance(&id).await.is_none());
     assert_eq!(manager.list().await.len(), 0);
-    assert_eq!(manager.get_persistent_usage(&id).await.total_tokens, 0);
+    assert_eq!(manager.get_persistent_usage(&id).await.measured_context_tokens(), 0);
 
     let err = manager
         .run_persistent_turn(&id, "hi", llm.clone(), callbacks.clone())
@@ -1351,7 +1354,7 @@ async fn test_persistent_kill_aborts_running_turn() {
     ));
 
     // Usage from the completed steps is still aggregated.
-    assert_eq!(manager.get_persistent_usage(&id).await.total_tokens, 25);
+    assert_eq!(manager.get_persistent_usage(&id).await.measured_context_tokens(), 25);
 
     // The kill's Terminated state is not overwritten by turn cleanup.
     let inst = manager.get_instance(&id).await.unwrap();
@@ -1465,8 +1468,8 @@ async fn test_cold_resume_from_sqlite_store() {
 
     let agent_id = "subagent-cold-1";
     let initial_msgs = vec![
-        crate::turn_loop::types::LLMMessage::new("user", "first question"),
-        crate::turn_loop::types::LLMMessage::new("assistant", "first answer"),
+        crate::turn_loop::types::LLMMessage::new(kimi_core::types::Role::User, "first question"),
+        crate::turn_loop::types::LLMMessage::new(kimi_core::types::Role::Assistant, "first answer"),
     ];
     manager1.set_foreground_history(agent_id, "research", "Researcher", initial_msgs.clone());
 
@@ -2292,12 +2295,12 @@ impl crate::turn_loop::types::LLM for CountingSubagentLlm {
                 thinking: Vec::new(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".into()),
-                usage: crate::rpc::types::TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 15,
-                    total_tokens: 25,
-                    input_cache_read: 0,
+                usage: kimi_core::types::TokenUsage {
+                    input_other:10,
+                    output: 15,
+                                        input_cache_read: 0,
                     input_cache_creation: 0,
+            raw: None,
                 },
                 timing: None,
             })
@@ -2604,12 +2607,12 @@ fn a_fork_probe_fires_once_and_stops_comparing_after_a_parent_compaction() {
         started_at: 250,
         finished_at: 300,
     };
-    let usage = crate::rpc::types::TokenUsage {
-        input_tokens: 10,
-        output_tokens: 5,
-        total_tokens: 815,
-        input_cache_read: 800,
+    let usage = kimi_core::types::TokenUsage {
+        input_other:10,
+        output: 5,
+                input_cache_read: 800,
         input_cache_creation: 0,
+            raw: None,
     };
     let observation = build_cache_observation(CacheObservationInput {
         model_alias: "kimi",

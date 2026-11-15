@@ -70,6 +70,12 @@ pub enum LoopRecordedEvent {
         step_uuid: String,
         part: crate::human::llm::message::ContentPart,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        block: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         uuid: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,

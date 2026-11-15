@@ -63,6 +63,14 @@ pub struct SubagentSuspendedPayload {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentSuspendedEvent {
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[serde(flatten)]
+    pub payload: SubagentSuspendedPayload,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubagentSuspended {
     event: Event2,
@@ -73,13 +81,7 @@ impl SubagentSuspended {
     pub const TYPE: &'static str = "subagent.suspended";
 
     pub fn new(payload: SubagentSuspendedPayload) -> Self {
-        let class = Event2Class {
-            type_: Self::TYPE.to_string(),
-            durable: false,
-            observable: true,
-            agent_domain: false,
-            schema: None,
-        };
+        let class = Self::class();
         let event = Event2::new(
             &class,
             serde_json::to_value(&payload).expect("subagent suspended payload is serializable"),
@@ -88,8 +90,23 @@ impl SubagentSuspended {
         Self { event, payload }
     }
 
+    pub fn class() -> Arc<Event2Class> {
+        Arc::new(Event2Class {
+            type_: Self::TYPE.to_string(),
+            durable: false,
+            observable: true,
+            agent_domain: false,
+            schema: None,
+        })
+    }
+
     pub fn as_event(&self) -> &Event2 {
         &self.event
+    }
+
+    pub fn from_event(event: Event2) -> Option<Self> {
+        let payload = serde_json::from_value(event.payload.clone()).ok()?;
+        Some(Self { event, payload })
     }
 }
 
@@ -321,7 +338,7 @@ impl SwarmLauncher {
         };
         self.require_idle_subagent(&agent_id, &child)?;
 
-        let profile = child.accessor().get::<IAgentProfileService>();
+        let profile = child.accessor().get::<Arc<dyn IAgentProfileService>>();
         let data = profile.data();
         let profile_name = data
             .base
@@ -433,7 +450,7 @@ impl SwarmLauncher {
         agent_id: &str,
         child: &Arc<IAgentScopeHandle>,
     ) -> Result<(), WireAsyncError> {
-        if child.accessor().get::<IAgentLoopService>().snapshot().state == LoopState::Running {
+        if child.accessor().get::<Arc<dyn IAgentLoopService>>().snapshot().state == LoopState::Running {
             return Err(coded_error(
                 AGENT_ALREADY_RUNNING,
                 format!("Agent instance \"{agent_id}\" is already running and cannot run concurrently"),
@@ -472,15 +489,15 @@ impl SwarmLauncher {
 
         let profile_name = rebuilt
             .accessor()
-            .get::<IAgentProfileService>()
+            .get::<Arc<dyn IAgentProfileService>>()
             .data()
             .base
             .profile_name;
         if !has_pinned_permission_mode(profile_name.as_deref()) {
-            let mode = caller.accessor().get::<IAgentPermissionModeService>().mode();
+            let mode = caller.accessor().get::<Arc<dyn IAgentPermissionModeService>>().mode();
             rebuilt
                 .accessor()
-                .get::<IAgentPermissionModeService>()
+                .get::<Arc<dyn IAgentPermissionModeService>>()
                 .set_mode(mode);
         }
 
@@ -587,7 +604,7 @@ fn dispatch_subagent_event(
     let Some(caller) = agent_lifecycle.handle_of(caller_agent_id) else {
         return;
     };
-    let dispatcher = caller.accessor().get::<IEventDispatcher>();
+    let dispatcher = caller.accessor().get::<Arc<dyn IEventDispatcher>>();
     tokio::spawn(async move {
         let _ = dispatcher.dispatch(event).await;
     });

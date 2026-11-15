@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::tools::registry::ToolDisclosure;
 
@@ -25,7 +25,7 @@ pub enum ToolSelectSource {
 pub struct ToolSelectTool {
     pub name: String,
     pub description: String,
-    pub parameters: Value,
+    pub parameters: Map<String, Value>,
     pub source: ToolSelectSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disclosure: Option<ToolDisclosure>,
@@ -114,8 +114,11 @@ pub fn tool_select_tool_from_info(
         description: info.description.clone(),
         parameters: if info.input_schema.is_null() {
             serde_json::json!({"type": "object", "properties": {}})
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
         } else {
-            info.input_schema.clone()
+            info.input_schema.as_object().cloned().unwrap_or_default()
         },
         source,
         disclosure,
@@ -131,8 +134,11 @@ pub fn tool_select_tool_from_definition(
         description: definition.description.clone(),
         parameters: if definition.input_schema.is_null() {
             serde_json::json!({"type": "object", "properties": {}})
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
         } else {
-            definition.input_schema.clone()
+            definition.input_schema.as_object().cloned().unwrap_or_default()
         },
         source: match definition.source {
             crate::tools::registry::ToolSource::Builtin => ToolSelectSource::Builtin,
@@ -146,29 +152,19 @@ pub fn tool_select_tool_from_definition(
 }
 
 pub fn tool_select_schema_signature(tool: &ToolSelectTool) -> String {
-    let parameters = if tool.parameters.is_null() {
-        serde_json::json!({"type": "object", "properties": {}})
-    } else {
-        tool.parameters.clone()
-    };
     serde_json::to_string(&serde_json::json!([
         tool.name.as_str(),
         tool.description.as_str(),
-        crate::tools::registry::canonical_value(&parameters),
+        crate::tools::registry::canonical_value(&Value::Object(tool.parameters.clone())),
     ]))
     .unwrap_or_default()
 }
 
 pub fn tool_description_schema_signature(tool: &kimi_core::types::ToolDescription) -> String {
-    let parameters = if tool.parameters.is_null() {
-        serde_json::json!({"type": "object", "properties": {}})
-    } else {
-        tool.parameters.clone()
-    };
     serde_json::to_string(&serde_json::json!([
         tool.name.as_str(),
         tool.description.as_str(),
-        crate::tools::registry::canonical_value(&parameters),
+        crate::tools::registry::canonical_value(&Value::Object(tool.parameters.clone())),
     ]))
     .unwrap_or_default()
 }
@@ -209,11 +205,7 @@ pub fn plan_tool_select_reconcile(
             .map(|tool| ToolSelectTool {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: if tool.parameters.is_null() {
-                    serde_json::json!({"type": "object", "properties": {}})
-                } else {
-                    tool.parameters.clone()
-                },
+                parameters: tool.parameters.clone(),
                 source: tool.source,
                 disclosure: tool.disclosure,
                 origin: ToolSelectOrigin::Initial,
@@ -364,7 +356,10 @@ mod tests {
         ToolSelectTool {
             name: name.to_string(),
             description: format!("{name} description"),
-            parameters: serde_json::json!({"type": "object"}),
+            parameters: serde_json::json!({"type": "object"})
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
             source: ToolSelectSource::Mcp,
             disclosure: Some(ToolDisclosure::Deferred),
             origin,
@@ -542,9 +537,15 @@ mod tests {
     #[test]
     fn version_signatures_ignore_schema_key_order_but_keep_disclosure_presence() {
         let mut left = tool("mcp__s__alpha", ToolSelectOrigin::Initial);
-        left.parameters = serde_json::json!({"a": 1, "b": {"x": 2, "y": 3}});
+        left.parameters = serde_json::json!({"a": 1, "b": {"x": 2, "y": 3}})
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
         let mut reordered = left.clone();
-        reordered.parameters = serde_json::json!({"b": {"y": 3, "x": 2}, "a": 1});
+        reordered.parameters = serde_json::json!({"b": {"y": 3, "x": 2}, "a": 1})
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
         assert_eq!(
             tool_select_schema_signature(&left),
             tool_select_schema_signature(&reordered)
@@ -688,6 +689,9 @@ mod tests {
         assert_eq!(
             host.parameters,
             serde_json::json!({"type": "object", "properties": {}})
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
         );
 
         let definition = crate::tools::registry::ToolDefinition {
@@ -724,7 +728,7 @@ mod tests {
         let runtime_info = crate::turn_loop::types::ToolInfo {
             name: runtime.name.clone(),
             description: runtime.description.clone(),
-            input_schema: runtime.parameters.clone(),
+            input_schema: serde_json::Value::Object(runtime.parameters.clone()),
         };
 
         let shaped = toolset.shape_tool_table_with_state(vec![current, runtime_info], &state);
@@ -758,7 +762,7 @@ mod tests {
         let read_info = crate::turn_loop::types::ToolInfo {
             name: read.name,
             description: read.description,
-            input_schema: read.parameters,
+            input_schema: serde_json::Value::Object(read.parameters),
         };
 
         let shaped = toolset.shape_tool_table_with_state(vec![read_info], &state);

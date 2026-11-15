@@ -35,7 +35,7 @@ async fn test_inactive_goal_runs_the_turn_as_ordinary_chat() {
             turn_id: turn_id.into(),
             llm: &llm,
             messages: vec![LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "hi".into(),
                 ..Default::default()
             }],
@@ -98,7 +98,7 @@ async fn test_goal_token_budget_exhausted() {
         turn_id: "test-budget-tokens".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -167,7 +167,7 @@ async fn test_goal_turn_budget_exhausted() {
         turn_id: "test-budget-turns".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -227,7 +227,7 @@ async fn test_goal_active_with_budget_completes() {
         turn_id: "test-active-goal".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -328,7 +328,7 @@ async fn test_goal_wall_clock_deadline_triggers_budget_limit() {
         turn_id: "test-deadline-turn".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -379,7 +379,7 @@ async fn test_cancellation_set_before_turn_aborts() {
         turn_id: "test-cancel-before".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -449,9 +449,10 @@ async fn test_cancellation_during_tool_execution_aborts() {
         tool_responses: vec![ToolCall {
             id: "tc-cancel".into(),
             name: "read".into(),
-            arguments: serde_json::json!({ "path": "/a.txt" }),
+            arguments: Some(serde_json::json!({ "path": "/a.txt" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -482,7 +483,7 @@ async fn test_cancellation_during_tool_execution_aborts() {
         turn_id: "test-cancel-during-tools".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -518,9 +519,10 @@ async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
         tool_responses: vec![ToolCall {
             id: "tc-grace".into(),
             name: "read".into(),
-            arguments: serde_json::json!({ "path": "/a.txt" }),
+            arguments: Some(serde_json::json!({ "path": "/a.txt" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -552,7 +554,7 @@ async fn a_tool_finishing_inside_the_abort_grace_keeps_its_result() {
         turn_id: "test-grace-keeps-result".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -609,9 +611,10 @@ async fn test_tool_result_stop_turn_ends_turn_completed() {
         tool_responses: vec![ToolCall {
             id: "tc-stop".into(),
             name: "read".into(),
-            arguments: serde_json::json!({ "path": "/a.txt" }),
+            arguments: Some(serde_json::json!({ "path": "/a.txt" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -638,7 +641,7 @@ async fn test_tool_result_stop_turn_ends_turn_completed() {
         turn_id: "test-stop-turn".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -685,7 +688,7 @@ async fn test_cancellation_cleared_runs_normally() {
         turn_id: "test-cancel-clear".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],

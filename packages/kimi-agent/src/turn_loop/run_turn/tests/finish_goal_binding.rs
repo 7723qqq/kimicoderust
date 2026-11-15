@@ -77,7 +77,7 @@ async fn test_turn_binds_start_goal_for_stale_check() {
         turn_id: "turn-goal".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -128,7 +128,7 @@ async fn test_turn_binds_no_goal_when_goalless() {
         turn_id: "turn-goal-free".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -195,10 +195,9 @@ impl LLM for EmptyThenAnswerLlm {
                 tool_calls: vec![],
                 finish_reason: Some("stop".into()),
                 usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
-                    ..Default::default()
+                    input_other: 10,
+                    output: 5,
+                                        ..Default::default()
                 },
                 timing: None,
             })
@@ -263,10 +262,9 @@ impl LLM for RejectsDuplicateToolCallsLlm {
                 tool_calls: vec![],
                 finish_reason: Some("stop".into()),
                 usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
-                    ..Default::default()
+                    input_other: 10,
+                    output: 5,
+                                        ..Default::default()
                 },
                 timing: None,
             })
@@ -288,37 +286,39 @@ async fn a_turn_resends_with_the_strict_projection_after_a_shape_rejection() {
         llm: &llm,
         messages: vec![
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "Run it twice.".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "Bash".into(),
-                    arguments: serde_json::json!({}),
+                    arguments: Some(serde_json::json!({}).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 ..Default::default()
             },
             LLMMessage {
-                role: "tool".into(),
+                role: kimi_core::types::Role::Tool,
                 content: "done".into(),
                 tool_call_id: Some("call_1".into()),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".into(),
                     name: "Bash".into(),
-                    arguments: serde_json::json!({}),
+                    arguments: Some(serde_json::json!({}).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 ..Default::default()
             },
@@ -387,7 +387,7 @@ async fn a_turn_retries_through_empty_provider_responses_and_answers() {
         turn_id: "turn-empty".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -450,7 +450,7 @@ async fn a_turn_fails_when_every_response_is_empty() {
         turn_id: "turn-empty-forever".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],

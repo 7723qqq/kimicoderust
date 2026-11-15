@@ -21,7 +21,7 @@ fn last_user_text(history: &[LLMMessage]) -> Option<String> {
             continue;
         }
         for block in &message.blocks {
-            if let crate::rpc::types::ContentBlock::Text { text, .. } = block
+            if let crate::rpc::types::ContentPart::Text { text, .. } = block
                 && !text.is_empty()
             {
                 return Some(text.clone());
@@ -61,7 +61,7 @@ mod tests {
     }
 
     fn history(text: &str) -> Vec<LLMMessage> {
-        vec![LLMMessage::new("user", text)]
+        vec![LLMMessage::new(kimi_core::types::Role::User, text)]
     }
 
     #[test]
@@ -111,7 +111,7 @@ mod tests {
         let mut provider = git_memory_signal_provider(service(workspace.path(), memory.path()));
         let access = StepAccess::default();
         let injected = Vec::new();
-        let history = vec![LLMMessage::new("user", "please fix src/a.ts")];
+        let history = vec![LLMMessage::new(kimi_core::types::Role::User, "please fix src/a.ts")];
         let ctx = InjectionContext {
             is_new_turn: false,
             rearmed: false,
@@ -121,7 +121,7 @@ mod tests {
         };
         assert!(provider(&ctx).is_none());
 
-        let pathless = vec![LLMMessage::new("user", "no file mentioned here")];
+        let pathless = vec![LLMMessage::new(kimi_core::types::Role::User, "no file mentioned here")];
         let ctx = InjectionContext {
             is_new_turn: true,
             rearmed: false,

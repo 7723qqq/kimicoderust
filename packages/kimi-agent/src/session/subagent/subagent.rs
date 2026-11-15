@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -6,7 +8,7 @@ use async_trait::async_trait;
 use futures_util::future::{BoxFuture, Shared};
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::utils::abort::AbortSignal;
 use crate::agent::agent_context::agent_context::AgentContext;
 use crate::agent::r#loop::r#loop::Turn;
@@ -104,7 +106,7 @@ pub trait ISessionSubagentService: Send + Sync {
     fn on_did_stop_agent_task(
         &self,
         listener: Arc<dyn Fn(AgentTaskStopHookContext) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     async fn run(
         &self,
         agent: Arc<AgentContext>,
@@ -121,3 +123,7 @@ pub trait ISessionSubagentService: Send + Sync {
     ) -> Result<SpawnedSubagent, WireAsyncError>;
     fn notify_agent_task_stopped(&self, context: AgentTaskStopHookContext);
 }
+
+
+pub static I_SESSION_SUBAGENT_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn ISessionSubagentService>>> =
+    LazyLock::new(|| create_decorator("sessionSubagentService"));

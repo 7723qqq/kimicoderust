@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
-use crate::_base::di::lifecycle::{IDisposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::env::parse_boolean_env;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
@@ -65,7 +65,7 @@ impl ISessionLockService for SessionLockService {
     fn on_did_hold(
         &self,
         listener: Arc<dyn Fn(SessionLockHeldEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.holds.on_did_hold(listener)
     }
 

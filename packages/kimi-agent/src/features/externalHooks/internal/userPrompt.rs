@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 
 use super::types::{HookAction, HookResult};
 
@@ -19,7 +19,7 @@ pub struct RenderedHookResult {
 pub struct RenderedUserPromptHookParts {
     pub event: String,
     pub messages: Vec<String>,
-    pub parts: Vec<ContentBlock>,
+    pub parts: Vec<ContentPart>,
 }
 
 pub fn render_user_prompt_hook_result(
@@ -124,14 +124,14 @@ fn is_js_whitespace(character: char) -> bool {
     )
 }
 
-fn user_prompt_submit_hook_part(text: String) -> ContentBlock {
+fn user_prompt_submit_hook_part(text: String) -> ContentPart {
     let mut meta = Map::new();
     meta.insert("contentType".to_string(), Value::String("text/xml".to_string()));
     meta.insert(
         "source".to_string(),
         Value::String("user prompt submit hook".to_string()),
     );
-    ContentBlock::Text {
+    ContentPart::Text {
         text,
         meta: Some(meta),
     }

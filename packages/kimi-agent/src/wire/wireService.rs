@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::on_unexpected_error;
 use crate::_base::log::log::ILogService;
 use crate::agent::blob::agent_blob_service::IAgentBlobService;
@@ -89,7 +89,7 @@ struct WireServiceInner {
     session_locks: Arc<dyn ISessionLockService>,
     session_context: Arc<dyn ISessionContext>,
     state: Mutex<WireServiceState>,
-    _registrations: Vec<Box<dyn IDisposable>>,
+    _registrations: Vec<DisposableRef>,
 }
 
 #[derive(Clone)]
@@ -248,7 +248,7 @@ impl WireService {
         self.append_record(record, dehydrate);
     }
 
-    pub fn on_did_append_record(&self, listener: AppendListener) -> Box<dyn IDisposable> {
+    pub fn on_did_append_record(&self, listener: AppendListener) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             let id = state.next_listener_id;
@@ -1147,7 +1147,7 @@ impl IWireService for WireService {
         WireService::append_record(self, record, dehydrate);
     }
 
-    fn on_did_append_record(&self, listener: AppendListener) -> Box<dyn IDisposable> {
+    fn on_did_append_record(&self, listener: AppendListener) -> DisposableRef {
         WireService::on_did_append_record(self, listener)
     }
 

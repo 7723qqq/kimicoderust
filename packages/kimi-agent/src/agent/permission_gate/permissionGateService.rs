@@ -1,24 +1,40 @@
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
 use futures_util::future::{BoxFuture, FutureExt};
 use serde_json::{Map, Value};
 
+use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
+use crate::_base::di::instantiation::{
+    DependencyKind, ServiceDependency, refine_service_decorator,
+};
+use crate::_base::di::instantiation_service::register_descriptor_dependencies;
 use crate::_base::di::lifecycle::DisposableStore;
-use crate::agent::permission_mode::permission_mode::IAgentPermissionModeService;
+use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
+use crate::app::scopes::LifecycleScope;
+use crate::agent::permission_mode::permission_mode::{
+    I_AGENT_PERMISSION_MODE_SERVICE, IAgentPermissionModeService,
+};
 use crate::agent::permission_policy::permission_policy::{
-    IAgentPermissionPolicyService, PermissionPolicyEvaluation,
+    I_AGENT_PERMISSION_POLICY_SERVICE, IAgentPermissionPolicyService, PermissionPolicyEvaluation,
 };
 use crate::agent::permission_policy::types::{
     PermissionData, PermissionDecisionReason, PermissionPolicyResult,
 };
-use crate::agent::permission_rules::permission_rules::IAgentPermissionRulesService;
-use crate::agent::tool_approval::tool_approval::IAgentToolApprovalService;
-use crate::agent::tool_executor::tool_executor::IAgentToolExecutorService;
+use crate::agent::permission_rules::permission_rules::{
+    I_AGENT_PERMISSION_RULES_SERVICE, IAgentPermissionRulesService,
+};
+use crate::agent::tool_approval::tool_approval::{
+    I_AGENT_TOOL_APPROVAL_SERVICE, IAgentToolApprovalService,
+};
+use crate::agent::tool_executor::tool_executor::{
+    I_AGENT_TOOL_EXECUTOR_SERVICE, IAgentToolExecutorService,
+};
 use crate::agent::tool_executor::tool_hooks::{BeforeExecuteDecision, ResolvedToolExecutionHookContext};
-use crate::app::telemetry::telemetry::ITelemetryService;
+use crate::app::telemetry::telemetry::{I_TELEMETRY_SERVICE, ITelemetryService};
 use crate::wire::record::WireAsyncError;
 
-use super::permission_gate::IAgentPermissionGate;
+use super::permission_gate::{I_AGENT_PERMISSION_GATE, IAgentPermissionGate};
 
 struct AgentPermissionGateInner {
     mode_service: Arc<dyn IAgentPermissionModeService>,
@@ -188,4 +204,76 @@ fn result_details(
         PermissionPolicyResult::Deny { reason, .. } => ("deny", reason.as_ref()),
         PermissionPolicyResult::Ask { reason, .. } => ("ask", reason.as_ref()),
     }
+}
+
+fn dependency<T>(args: &[DynamicValue], index: usize) -> Arc<T>
+where
+    T: Send + Sync + 'static + ?Sized,
+{
+    Arc::downcast::<Arc<T>>(args[index].clone())
+        .unwrap_or_else(|_| panic!("permissionGate dependency {index} has an incompatible type"))
+        .as_ref()
+        .clone()
+}
+
+static AGENT_PERMISSION_GATE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
+    let ctor: Constructor<DynamicValue> = Arc::new(|args| {
+        let service: Arc<dyn IAgentPermissionGate> = Arc::new(AgentPermissionGate::new(
+            dependency::<dyn IAgentPermissionModeService>(&args, 0),
+            dependency::<dyn IAgentPermissionRulesService>(&args, 1),
+            dependency::<dyn IAgentPermissionPolicyService>(&args, 2),
+            dependency::<dyn IAgentToolApprovalService>(&args, 3),
+            dependency::<dyn ITelemetryService>(&args, 4),
+            dependency::<dyn IAgentToolExecutorService>(&args, 5),
+        ));
+        Arc::new(service) as DynamicValue
+    });
+    let descriptor = SyncDescriptor::new(ctor, Vec::new());
+    register_descriptor_dependencies(
+        &descriptor,
+        vec![
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_PERMISSION_MODE_SERVICE),
+                index: 0,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_PERMISSION_RULES_SERVICE),
+                index: 1,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_PERMISSION_POLICY_SERVICE),
+                index: 2,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_TOOL_APPROVAL_SERVICE),
+                index: 3,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_TELEMETRY_SERVICE),
+                index: 4,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_TOOL_EXECUTOR_SERVICE),
+                index: 5,
+                kind: DependencyKind::Instance,
+            },
+        ],
+    );
+    register_scoped_service(
+        LifecycleScope::Agent.as_str().to_string(),
+        refine_service_decorator(&I_AGENT_PERMISSION_GATE),
+        descriptor,
+        ScopeActivation::OnScopeCreated,
+        "permissionGate",
+    )
+    .map_err(|error| error.to_string())
+});
+
+pub fn ensure_agent_permission_gate_registered() -> Result<(), String> {
+    Lazy::force(&AGENT_PERMISSION_GATE_REGISTRATION).clone()
 }

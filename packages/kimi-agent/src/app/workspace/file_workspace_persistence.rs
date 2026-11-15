@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::event::Emitter;
 use crate::_base::log::log::ILogService;
@@ -284,8 +284,8 @@ impl FileWorkspacePersistence {
 
 #[async_trait]
 impl IWorkspacePersistence for FileWorkspacePersistence {
-    fn on_did_change(&self, listener: WorkspaceChangeListener) -> Box<dyn IDisposable> {
-        Box::new(
+    fn on_did_change(&self, listener: WorkspaceChangeListener) -> DisposableRef {
+        Arc::new(
             self.change_emitter
                 .event()
                 .subscribe(move |_| listener()),

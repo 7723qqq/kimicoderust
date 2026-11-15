@@ -26,8 +26,9 @@ use crate::permission::PermissionEngine;
 use crate::rpc::types::{
     AskQuestionRequest, AskQuestionResponse, LlmChatRequest, LlmChatResponse,
     PermissionCheckRequest, PermissionDecision, StateReadRequest, StateReadResponse,
-    StateWriteRequest, StateWriteResponse, TokenUsage, ToolExecuteRequest, ToolExecuteResponse,
+    StateWriteRequest, StateWriteResponse, ToolExecuteRequest, ToolExecuteResponse,
 };
+use kimi_core::types::TokenUsage;
 use crate::storage::{SessionStore, StateStore};
 use crate::subagent::SubagentManager;
 use crate::tool_result_truncation::ToolResultTruncator;
@@ -708,7 +709,7 @@ pub async fn start_repl(
             if let Some(prompt) = cron_pending.lock().unwrap_or_else(|e| e.into_inner()).pop() {
                 println!("[cron] Queued: {prompt}");
                 engine_session.extend_history(vec![LLMMessage {
-                    role: "user".into(),
+                    role: kimi_core::types::Role::User,
                     content: prompt,
                     blocks: Vec::new(),
                     tool_calls: Vec::new(),
@@ -761,7 +762,7 @@ pub async fn start_repl(
                                 for s in list {
                                     println!(
                                         "  - {} (turns: {}, tokens: {})",
-                                        s.session_id, s.turns_count, s.total_usage.total_tokens
+                                        s.session_id, s.turns_count, s.total_usage.measured_context_tokens()
                                     );
                                 }
                             }
@@ -905,7 +906,7 @@ pub async fn start_repl(
         // Build the user message and enqueue it. The session takes
         // ownership of cross-turn history from here.
         let user_msg = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: line.clone(),
             blocks: Vec::new(),
             tool_calls: Vec::new(),

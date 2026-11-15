@@ -517,15 +517,16 @@ struct PendingCall {
     timer: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[derive(Clone)]
 pub struct RpcPending {
-    next_id: Mutex<i64>,
+    next_id: Arc<Mutex<i64>>,
     pending: Arc<Mutex<HashMap<i64, PendingCall>>>,
 }
 
 impl RpcPending {
     pub fn new() -> Self {
         Self {
-            next_id: Mutex::new(0),
+            next_id: Arc::new(Mutex::new(0)),
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }

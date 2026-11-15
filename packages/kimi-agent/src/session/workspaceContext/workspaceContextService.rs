@@ -1,6 +1,7 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
 use std::sync::{Arc, LazyLock};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::session::session_context::session_context::ISessionContext;
 use crate::session::session_metadata::session_metadata::ISessionMetadata;
 use crate::session::state::session_state::{ISessionStateService, StateDefinition};
@@ -26,7 +27,7 @@ pub struct SessionWorkspaceContextService {
     ctx: Arc<dyn ISessionContext>,
     workspace_info: Arc<dyn ISessionWorkspaceInfo>,
     workdir: Arc<dyn ISessionWorkdir>,
-    _subscription: Box<dyn IDisposable>,
+    _subscription: DisposableRef,
 }
 
 impl SessionWorkspaceContextService {

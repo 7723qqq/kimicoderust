@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::permission::HookDef;
-use crate::rpc::types::{ContentBlock, ToolExecuteRequest};
+use crate::rpc::types::{ContentPart, ToolExecuteRequest};
 
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 30;
 
@@ -166,7 +166,7 @@ impl CappedOutput {
 #[derive(Debug, Default)]
 pub struct UserPromptSubmitOutcome {
     pub block: Option<String>,
-    pub append: Vec<ContentBlock>,
+    pub append: Vec<ContentPart>,
 }
 
 enum Matcher {
@@ -1269,14 +1269,14 @@ fn render_hook_result(event: &str, message: &str) -> String {
     format!("<hook_result hook_event=\"{event}\">\n{message}\n</hook_result>")
 }
 
-fn user_prompt_submit_hook_part(message: &str) -> ContentBlock {
+fn user_prompt_submit_hook_part(message: &str) -> ContentPart {
     let mut meta = serde_json::Map::new();
     meta.insert("contentType".into(), Value::String("text/xml".into()));
     meta.insert(
         "source".into(),
         Value::String("user prompt submit hook".into()),
     );
-    ContentBlock::Text {
+    ContentPart::Text {
         text: render_hook_result("UserPromptSubmit", message),
         meta: Some(meta),
     }

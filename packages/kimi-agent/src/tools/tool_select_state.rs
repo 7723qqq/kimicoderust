@@ -398,7 +398,7 @@ mod tests {
 
     fn announcement(variant: &str, text: &str) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: crate::injection::wrap_system_reminder(text),
             origin: Some(serde_json::json!({ "kind": "injection", "variant": variant })),
             ..Default::default()
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn a_variant_keyed_retrieval_block_is_recognized_without_the_marker() {
         let message = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "anything".into(),
             origin: Some(
                 serde_json::json!({ "kind": "system_trigger", "name": RETRIEVED_TOOLS_VARIANT }),
@@ -492,16 +492,18 @@ mod tests {
         let select_call = crate::turn_loop::types::ToolCall {
             id: "select-1".to_string(),
             name: crate::tools::select_tools::SELECT_TOOLS_TOOL_NAME.to_string(),
-            arguments: serde_json::json!({"names": ["mcp__s__alpha"]}),
+            arguments: Some(serde_json::json!({"names": ["mcp__s__alpha"]}).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         };
         let read_call = crate::turn_loop::types::ToolCall {
             id: "read-1".to_string(),
             name: "Read".to_string(),
-            arguments: serde_json::json!({}),
+            arguments: Some(serde_json::json!({}).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         };
         let snapshot = LLMMessage {
             origin: Some(serde_json::json!({
@@ -522,12 +524,15 @@ mod tests {
             )
         };
         let schema = LLMMessage {
-            role: "system".into(),
+            role: kimi_core::types::Role::System,
             content: String::new(),
             tools: vec![kimi_core::types::ToolDescription {
                 name: "mcp__s__alpha".into(),
                 description: "alpha".into(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
+                parameters: serde_json::json!({"type": "object", "properties": {}})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
                 deferred: None,
             }],
             origin: Some(serde_json::json!({
@@ -541,7 +546,7 @@ mod tests {
             delta,
             schema,
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 tool_calls: vec![select_call, read_call],
                 ..Default::default()
             },
@@ -614,7 +619,7 @@ mod tests {
             LLMMessage::user("second"),
             LLMMessage::user("   "),
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "skill body".into(),
                 origin: Some(serde_json::json!({ "kind": "skill_activation" })),
                 ..Default::default()

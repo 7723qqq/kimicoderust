@@ -10,9 +10,9 @@ description:
   en: >
       Goal injects once per new turn; plan_mode injects on a full/sparse/exit cadence driven by the provider's own turns_since.
       
-revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
-updated_at: "2026-11-11T19:20:38.909Z"
-fingerprint: f70a96ef4778e73913fbd023226bcd549484a5d0dda21cf666af9f8b7c03e127
+revision: 2c47ec0cfa7f2a2418c6b44ec10ec14d29f5f7cf
+updated_at: "2026-11-15T18:51:51.050Z"
+fingerprint: 87432cc58c40c4dd0c2fcebd0ead64ae6ae09670387fd022dfce4c68d8226c75
 source:
   - path: "packages/kimi-agent/src/injection/goal_plan.rs"
 apis: []

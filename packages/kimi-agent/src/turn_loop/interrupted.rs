@@ -1,20 +1,14 @@
-use kimi_core::types::{ContentBlock, LLMChatResponse, LLMMessage};
+use kimi_core::types::{ContentPart, LLMChatResponse, LLMMessage};
 
-fn is_vacuous_content_part(part: &ContentBlock) -> bool {
+fn is_vacuous_content_part(part: &ContentPart) -> bool {
     match part {
-        ContentBlock::Text { text, .. } => text.trim().is_empty(),
-        ContentBlock::Think {
+        ContentPart::Text { text, .. } => text.trim().is_empty(),
+        ContentPart::Think {
             think,
             encrypted,
-            details_summary,
+            hidden,
             ..
-        } => {
-            encrypted.is_none()
-                && think.trim().is_empty()
-                && details_summary
-                    .as_deref()
-                    .is_none_or(|summary| summary.trim().is_empty())
-        }
+        } => encrypted.is_none() && *hidden != Some(true) && think.trim().is_empty(),
         _ => false,
     }
 }
@@ -25,7 +19,7 @@ pub(crate) fn salvage_interrupted_response(response: LLMChatResponse) -> Option<
     } else {
         response.content
     };
-    let blocks: Vec<ContentBlock> = response
+    let blocks: Vec<ContentPart> = response
         .thinking
         .into_iter()
         .filter(|part| !is_vacuous_content_part(part))
@@ -34,7 +28,7 @@ pub(crate) fn salvage_interrupted_response(response: LLMChatResponse) -> Option<
         return None;
     }
     Some(LLMMessage {
-        role: "assistant".into(),
+        role: kimi_core::types::Role::Assistant,
         content,
         blocks,
         tool_calls: Vec::new(),

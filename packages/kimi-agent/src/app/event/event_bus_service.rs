@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
 use crate::_base::di::instantiation::{
     DependencyKind, ScopeActivation, ServiceDependency, create_decorator,
+    refine_service_decorator,
 };
 use crate::_base::di::instantiation_service::register_descriptor_dependencies;
 use crate::_base::di::lifecycle::{DisposableRef, DisposableStore, IDisposable};
@@ -223,15 +224,15 @@ impl EventBusService {
         }
     }
 
-    fn subscribe_all(&self, handler: Event2Handler) -> Box<dyn IDisposable> {
-        Box::new(self.inner.all_emitter.event().subscribe_arc(handler))
+    fn subscribe_all(&self, handler: Event2Handler) -> DisposableRef {
+        Arc::new(self.inner.all_emitter.event().subscribe_arc(handler))
     }
 
     fn subscribe_type_inner(
         &self,
         type_: &str,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let emitter = {
             let mut per_type = self.inner.per_type.lock();
             if let Some(emitter) = per_type.get(type_) {
@@ -245,7 +246,7 @@ impl EventBusService {
                 emitter
             }
         };
-        Box::new(emitter.event().subscribe_arc(handler))
+        Arc::new(emitter.event().subscribe_arc(handler))
     }
 }
 
@@ -260,7 +261,7 @@ impl IEventBus for EventBusService {
         self.publish_event(event, agent);
     }
 
-    fn subscribe(&self, handler: Event2Handler) -> Box<dyn IDisposable> {
+    fn subscribe(&self, handler: Event2Handler) -> DisposableRef {
         self.subscribe_all(handler)
     }
 
@@ -268,12 +269,12 @@ impl IEventBus for EventBusService {
         &self,
         cls: Arc<Event2Class>,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         note_event_class(&cls);
         self.subscribe_type_inner(&cls.type_, handler)
     }
 
-    fn subscribe_type(&self, type_: &str, handler: Event2Handler) -> Box<dyn IDisposable> {
+    fn subscribe_type(&self, type_: &str, handler: Event2Handler) -> DisposableRef {
         self.subscribe_type_inner(type_, handler)
     }
 }
@@ -319,12 +320,12 @@ impl ISessionEventBus for EventBusService {
         &self,
         agent: Arc<AgentContext>,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         if self.inner.disposed_bus.load(Ordering::SeqCst) {
-            return Box::new(Subscription::none());
+            return Arc::new(Subscription::none());
         }
         self.assert_active(&agent);
-        Box::new(
+        Arc::new(
             self.channel_for(&agent.agent_id)
                 .all
                 .event()
@@ -337,9 +338,9 @@ impl ISessionEventBus for EventBusService {
         agent: Arc<AgentContext>,
         type_: &str,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         if self.inner.disposed_bus.load(Ordering::SeqCst) {
-            return Box::new(Subscription::none());
+            return Arc::new(Subscription::none());
         }
         self.assert_active(&agent);
         let this = self.clone();
@@ -358,7 +359,7 @@ impl ISessionEventBus for EventBusService {
         agent: Arc<AgentContext>,
         cls: Arc<Event2Class>,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         note_event_class(&cls);
         self.on_agent_type(agent, &cls.type_, handler)
     }
@@ -368,7 +369,7 @@ impl ISessionEventBus for EventBusService {
         agent: Arc<AgentContext>,
         type_: &str,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.assert_active(&agent);
         let this = self.clone();
         self.subscribe_type_inner(
@@ -414,7 +415,7 @@ impl AgentEventBusView {
         agent: Arc<AgentContext>,
         cls: Arc<Event2Class>,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.assert_own(&agent);
         self.bus().on_agent_class(agent, cls, handler)
     }
@@ -424,7 +425,7 @@ impl AgentEventBusView {
         agent: Arc<AgentContext>,
         type_: &str,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.assert_own(&agent);
         self.bus().on_agent_type(agent, type_, handler)
     }
@@ -457,9 +458,9 @@ impl IEventBus for AgentEventBusView {
         self.bus().publish(event, Some(self.agent.clone()));
     }
 
-    fn subscribe(&self, handler: Event2Handler) -> Box<dyn IDisposable> {
+    fn subscribe(&self, handler: Event2Handler) -> DisposableRef {
         let Some(bus) = &self.bus else {
-            return Box::new(Subscription::none());
+            return Arc::new(Subscription::none());
         };
         bus.subscribe_agent(self.agent.clone(), handler)
     }
@@ -468,9 +469,9 @@ impl IEventBus for AgentEventBusView {
         &self,
         cls: Arc<Event2Class>,
         handler: Event2Handler,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         if self.bus.is_none() {
-            return Box::new(Subscription::none());
+            return Arc::new(Subscription::none());
         }
         let this = self.clone();
         self.bus().subscribe_class(
@@ -483,9 +484,9 @@ impl IEventBus for AgentEventBusView {
         )
     }
 
-    fn subscribe_type(&self, type_: &str, handler: Event2Handler) -> Box<dyn IDisposable> {
+    fn subscribe_type(&self, type_: &str, handler: Event2Handler) -> DisposableRef {
         if self.bus.is_none() {
-            return Box::new(Subscription::none());
+            return Arc::new(Subscription::none());
         }
         let this = self.clone();
         self.bus().subscribe_type(
@@ -547,7 +548,7 @@ static EVENT_BUS_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
     );
     register_scoped_service(
         LifecycleScope::Agent.as_str().to_string(),
-        I_EVENT_BUS.clone(),
+        refine_service_decorator(&I_EVENT_BUS),
         view_descriptor,
         ScopeActivation::OnDemand,
         "eventView",

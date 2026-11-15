@@ -4,7 +4,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::errors::BugIndicatingError;
 
 use super::flag::IFlagService;
@@ -50,7 +50,7 @@ pub trait IFlagRegistry: Send + Sync {
     fn register(
         &self,
         definition: FlagDefinitionInput,
-    ) -> Result<Box<dyn IDisposable>, BugIndicatingError>;
+    ) -> Result<DisposableRef, BugIndicatingError>;
 
     fn get(&self, id: &str) -> Option<FlagDefinitionInput>;
 

@@ -1,8 +1,10 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::wire::record::WireAsyncError;
 
 use super::workspace_instance::{WorkspaceInstance, WorkspaceInstanceSnapshot};
@@ -45,7 +47,7 @@ pub trait IWorkspaceInstanceManager: Send + Sync {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(WorkspaceInstanceChange) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     async fn acquire(&self, reference: WorkspaceInstanceRef) -> Result<WorkspaceInstanceLease, WireAsyncError>;
     fn get(&self, workspace_id: &str) -> Option<Arc<WorkspaceInstance>>;
     fn find_by_root(&self, root: &str) -> Option<Arc<WorkspaceInstance>>;
@@ -53,3 +55,7 @@ pub trait IWorkspaceInstanceManager: Send + Sync {
     fn list(&self) -> Vec<Arc<WorkspaceInstance>>;
     fn snapshot(&self) -> WorkspaceInstancesSnapshot;
 }
+
+
+pub static I_WORKSPACE_INSTANCE_MANAGER: LazyLock<ServiceIdentifier<Arc<dyn IWorkspaceInstanceManager>>> =
+    LazyLock::new(|| create_decorator("workspaceInstanceManager"));

@@ -1,3 +1,8 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::features::reminder::reminder_service::I_AGENT_REMINDER_SERVICE;
+use crate::agent::scope_context::scope_context::I_AGENT_SCOPE_CONTEXT;
+use crate::agent::tool_approval::tool_approval::I_AGENT_TOOL_APPROVAL_SERVICE;
+use crate::agent::tool_executor::tool_executor::I_AGENT_TOOL_EXECUTOR_SERVICE;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -9,7 +14,7 @@ use super::btw::{
     BTW_AGENT_LABEL, BTW_READONLY_TOOLS, ISessionBtwService, SIDE_QUESTION_SYSTEM_REMINDER,
     TOOL_CALL_DISABLED_MESSAGE,
 };
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_approval::tool_approval::IAgentToolApprovalService;
 use crate::agent::tool_executor::before_tool_execute_event::deny_tool_execution;
@@ -24,13 +29,13 @@ use crate::wire::record::WireAsyncError;
 
 pub struct SessionBtwService {
     agent_lifecycle: Arc<dyn IAgentLifecycleService>,
-    agent_subscriptions: Arc<Mutex<HashMap<String, Vec<Box<dyn IDisposable>>>>>,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    agent_subscriptions: Arc<Mutex<HashMap<String, Vec<DisposableRef>>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl SessionBtwService {
     pub fn new(agent_lifecycle: Arc<dyn IAgentLifecycleService>) -> Self {
-        let agent_subscriptions: Arc<Mutex<HashMap<String, Vec<Box<dyn IDisposable>>>>> =
+        let agent_subscriptions: Arc<Mutex<HashMap<String, Vec<DisposableRef>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let service = Self {
             agent_lifecycle: agent_lifecycle.clone(),
@@ -51,9 +56,9 @@ impl SessionBtwService {
             let reason = event
                 .handle
                 .accessor()
-                .get::<IAgentToolApprovalService>()
+                .get(&I_AGENT_TOOL_APPROVAL_SERVICE)
                 .format_deny_message(TOOL_CALL_DISABLED_MESSAGE);
-            let tool_executor = event.handle.accessor().get::<IAgentToolExecutorService>();
+            let tool_executor = event.handle.accessor().get(&I_AGENT_TOOL_EXECUTOR_SERVICE);
             let subscription = tool_executor.on_before_execute_tool().subscribe(
                 move |event: Arc<crate::agent::tool_executor::before_tool_execute_event::BeforeToolExecuteEventImpl>| {
                     if !BTW_READONLY_TOOLS.contains(&event.context.base.tool_call.name.as_str()) {
@@ -86,10 +91,11 @@ impl SessionBtwService {
             })?;
         let source = main
             .accessor()
-            .get::<IAgentScopeContext>()
+            .get(&I_AGENT_SCOPE_CONTEXT)
             .agent_context();
         let child_context = self
             .agent_lifecycle
+            .clone()
             .fork(
                 source,
                 Some(ForkAgentOptions {
@@ -104,7 +110,7 @@ impl SessionBtwService {
         if let Some(child) = self.agent_lifecycle.handle_of(&child_context.agent_id) {
             child
                 .accessor()
-                .get::<ReminderService>()
+                .get(&I_AGENT_REMINDER_SERVICE)
                 .notify(
                     SIDE_QUESTION_SYSTEM_REMINDER,
                     &ReminderNotification {

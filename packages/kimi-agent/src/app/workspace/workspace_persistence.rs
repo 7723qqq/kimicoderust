@@ -5,7 +5,7 @@ use futures_util::future::BoxFuture;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::wire::record::WireAsyncError;
 
 use super::workspace::Workspace;
@@ -47,7 +47,7 @@ pub struct WorkspaceCatalog {
 
 #[async_trait]
 pub trait IWorkspacePersistence: Send + Sync {
-    fn on_did_change(&self, listener: WorkspaceChangeListener) -> Box<dyn IDisposable>;
+    fn on_did_change(&self, listener: WorkspaceChangeListener) -> DisposableRef;
     async fn load(&self) -> Result<Option<WorkspaceCatalog>, WireAsyncError>;
     async fn save(&self, catalog: WorkspaceCatalog) -> Result<(), WireAsyncError>;
     async fn update(
@@ -58,7 +58,7 @@ pub trait IWorkspacePersistence: Send + Sync {
 }
 
 impl dyn IWorkspacePersistence {
-    pub fn on_did_change<F>(&self, listener: F) -> Box<dyn IDisposable>
+    pub fn on_did_change<F>(&self, listener: F) -> DisposableRef
     where
         F: Fn() + Send + Sync + 'static,
     {

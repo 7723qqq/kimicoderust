@@ -63,6 +63,7 @@ impl StdioReadable for StdioInput {
     }
 }
 
+#[derive(Clone)]
 pub struct StdioOutput {
     inner: Arc<dyn StdioWritable>,
 }
@@ -166,14 +167,14 @@ impl StdioReadable for StdinReadable {
 }
 
 struct StdoutWritable {
-    output: tokio::sync::Mutex<tokio::io::Stdout>,
+    output: Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
     listeners: Arc<Mutex<Vec<Arc<dyn Fn(std::io::Error) + Send + Sync>>>>,
 }
 
 impl StdoutWritable {
     fn new() -> Self {
         Self {
-            output: tokio::sync::Mutex::new(tokio::io::stdout()),
+            output: Arc::new(tokio::sync::Mutex::new(tokio::io::stdout())),
             listeners: Arc::new(Mutex::new(Vec::new())),
         }
     }

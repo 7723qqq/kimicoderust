@@ -51,9 +51,10 @@ impl LLM for ToolForeverLlm {
                 tool_calls: vec![ToolCall {
                     id: format!("tc-{}", fastrand::u64(..)),
                     name: "echo".into(),
-                    arguments: serde_json::json!({}),
+                    arguments: Some(serde_json::json!({}).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 finish_reason: Some("tool_calls".into()),
                 usage: TokenUsage::default(),

@@ -16,7 +16,7 @@ use crate::features::skill::prompt::{
 use crate::features::skill::session::skillCatalog::ISessionSkillCatalog;
 use crate::features::skill::skillOps::SkillActivationTrigger;
 use crate::features::skill::skillService::{IAgentSkillService, ModelToolSkillContext, SkillActivationOrigin};
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 use crate::session::session_context::session_context::ISessionContext;
 use crate::tool::rule_match::matches_glob_rule_subject;
 use crate::tool::tool_input_display::ToolInputDisplay;
@@ -288,7 +288,7 @@ pub async fn execute_model_skill(
         )
         .into(),
         delivery: Some(crate::tool::tool_contract::ToolDelivery {
-            blocks: vec![ContentBlock::Text {
+            blocks: vec![ContentPart::Text {
                 text: prompt,
                 meta: None,
             }],

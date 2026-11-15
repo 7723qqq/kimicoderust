@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::log::log::ILogService;
 use crate::app::agent_profile_catalog::agent_profile_contribution::AGENT_PROFILE_SOURCE_PRIORITY;
 use crate::app::agent_profile_catalog::agent_profile_registry::IAgentProfileRegistry;
@@ -27,7 +27,7 @@ use super::user_agent_profile_loader::IUserAgentProfileLoader;
 
 pub struct ExtraAgentProfileLoaderService {
     base: Arc<AgentProfileLoaderBase>,
-    _subscriptions: Vec<Box<dyn IDisposable>>,
+    _subscriptions: Vec<DisposableRef>,
 }
 
 impl ExtraAgentProfileLoaderService {

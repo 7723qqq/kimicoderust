@@ -38,6 +38,15 @@ impl CronFired {
     pub const EVENT_TYPE: &'static str = "cron.fired";
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronFiredEvent {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub origin: crate::agent::context_memory::types::CronJobOrigin,
+    pub prompt: String,
+}
+
 pub fn cron_add_event(task: &CronTask) -> Value {
     json!({"type": CronAdd::EVENT_TYPE, "task": task})
 }

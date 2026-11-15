@@ -13,6 +13,7 @@ use crate::environment::{
     AgentEnvironment, AgentEnvironmentRequest, EnvironmentSnapshot, WorkspaceChange,
     WorkspaceContext, WorkspaceRoots,
 };
+use crate::i18n::{LocalizedText, i18n_params};
 use crate::session::sqlite_store::SqliteSessionStore;
 use crate::subagent::types::*;
 
@@ -60,6 +61,110 @@ impl Drop for ForegroundTurnClaim {
     }
 }
 
+pub const SUBAGENT_SCOPE_CACHE_SIZE_ENV: &str = "KIMI_CODE_SUBAGENT_SCOPE_CACHE_SIZE";
+pub const SUBAGENT_SCOPE_EVICT_TIMEOUT_ENV: &str = "KIMI_CODE_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS";
+pub const DEFAULT_SUBAGENT_SCOPE_CACHE_SIZE: usize = 32;
+pub const DEFAULT_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS: u64 = 15_000;
+const MAX_SCOPE_EVICT_ATTEMPTS: u32 = 3;
+const SCOPE_CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+pub fn resolve_subagent_scope_cache_size(env: &HashMap<String, String>) -> Result<usize, String> {
+    let Some(raw) = env.get(SUBAGENT_SCOPE_CACHE_SIZE_ENV) else {
+        return Ok(DEFAULT_SUBAGENT_SCOPE_CACHE_SIZE);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_SUBAGENT_SCOPE_CACHE_SIZE);
+    }
+    match trimmed.parse::<i64>() {
+        Ok(value) => Ok(value.max(0) as usize),
+        Err(_) => Err(format!(
+            "{SUBAGENT_SCOPE_CACHE_SIZE_ENV} must be an integer, got {raw:?}."
+        )),
+    }
+}
+
+pub fn resolve_subagent_scope_evict_timeout_ms(
+    env: &HashMap<String, String>,
+) -> Result<u64, String> {
+    let Some(raw) = env.get(SUBAGENT_SCOPE_EVICT_TIMEOUT_ENV) else {
+        return Ok(DEFAULT_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS);
+    }
+    match trimmed.parse::<u64>() {
+        Ok(value) if value > 0 => Ok(value),
+        _ => Err(format!(
+            "{SUBAGENT_SCOPE_EVICT_TIMEOUT_ENV} must be a positive integer, got {raw:?}."
+        )),
+    }
+}
+
+enum EvictOutcome {
+    Removed,
+    Missing,
+    Deferred,
+    Timeout,
+}
+
+struct ScopeCache {
+    capacity: usize,
+    evict_timeout: Duration,
+    retired: Vec<(String, u32)>,
+    error: Option<String>,
+}
+
+impl ScopeCache {
+    fn from_env() -> Self {
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let resolved = resolve_subagent_scope_cache_size(&env).and_then(|capacity| {
+            resolve_subagent_scope_evict_timeout_ms(&env).map(|timeout_ms| (capacity, timeout_ms))
+        });
+        match resolved {
+            Ok((capacity, timeout_ms)) => Self {
+                capacity,
+                evict_timeout: Duration::from_millis(timeout_ms),
+                retired: Vec::new(),
+                error: None,
+            },
+            Err(error) => Self {
+                capacity: DEFAULT_SUBAGENT_SCOPE_CACHE_SIZE,
+                evict_timeout: Duration::from_millis(DEFAULT_SUBAGENT_SCOPE_EVICT_TIMEOUT_MS),
+                retired: Vec::new(),
+                error: Some(error),
+            },
+        }
+    }
+
+    fn retire(&mut self, id: &str) {
+        self.retired.retain(|(entry, _)| entry != id);
+        self.retired.push((id.to_string(), 0));
+    }
+
+    fn revive(&mut self, id: &str) {
+        self.retired.retain(|(entry, _)| entry != id);
+    }
+
+    fn oldest_candidate(&self, skipped: &HashSet<String>) -> Option<(String, u32)> {
+        self.retired
+            .iter()
+            .find(|(id, attempts)| *attempts < MAX_SCOPE_EVICT_ATTEMPTS && !skipped.contains(id))
+            .cloned()
+    }
+
+    fn remove(&mut self, id: &str) {
+        self.retired.retain(|(entry, _)| entry != id);
+    }
+
+    fn reinsert(&mut self, id: &str, attempts: u32) {
+        if !self.retired.iter().any(|(entry, _)| entry == id) {
+            self.retired.push((id.to_string(), attempts));
+        }
+    }
+}
+
 /// How long `kill` waits for the running turn to observe the cancellation
 /// before shutting the rest of the scope down (v2
 /// `REMOVE_PROMPT_QUIESCE_TIMEOUT_MS`).
@@ -67,6 +172,17 @@ const REMOVE_PROMPT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The quiescence poll cadence (v2 `REMOVE_PROMPT_QUIESCE_POLL_MS`).
 const REMOVE_PROMPT_QUIESCE_POLL: Duration = Duration::from_millis(10);
+
+pub use crate::session::subagent::run_agent_turn::SUBAGENT_MAX_TOKENS_ERROR;
+
+pub(crate) fn final_assistant_summary(messages: &[crate::turn_loop::types::LLMMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant" && !message.content.is_empty())
+        .map(|message| message.content.clone())
+        .unwrap_or_default()
+}
 
 /// The partial-output section of a stopped subagent's report: the last
 /// assistant text an aborted turn produced, rendered as a `[partial output]`
@@ -78,6 +194,20 @@ pub(crate) fn partial_output_section(turn: &crate::turn_loop::types::TurnResult)
     let partial = final_assistant_summary(&turn.messages);
     let partial = partial.trim();
     (!partial.is_empty()).then(|| format!("\n\n[partial output]\n{partial}"))
+}
+
+pub const NO_FINAL_MESSAGE_PREFIX: &str = "Subagent turn ended without a final message";
+
+fn no_final_message_error(turn: &crate::turn_loop::types::TurnResult) -> Option<String> {
+    if !final_assistant_summary(&turn.messages).trim().is_empty() {
+        return None;
+    }
+    Some(match turn.stop_reason {
+        crate::turn_loop::types::LoopTurnStopReason::RepeatBreaker => {
+            format!("{NO_FINAL_MESSAGE_PREFIX} (stop reason: repeat_breaker).")
+        }
+        _ => format!("{NO_FINAL_MESSAGE_PREFIX}."),
+    })
 }
 
 /// A profile's tool policy (v2 `resolveActiveToolNames` subset semantics):
@@ -347,7 +477,7 @@ pub struct PersistentInstance {
     /// Conversation history accumulated across turns.
     pub messages: Vec<crate::turn_loop::types::LLMMessage>,
     /// Cumulative token usage across all turns.
-    pub usage: crate::rpc::types::TokenUsage,
+    pub usage: kimi_core::types::TokenUsage,
     /// True while a turn is running; concurrent turns are rejected.
     pub running: bool,
     /// Shared with the instance-map entry so `kill` aborts running turns.
@@ -423,11 +553,12 @@ pub struct SubagentManager {
     /// `None` keeps the previous behavior: the swarm follows the subagent
     /// timeout (or the 2h default).
     swarm_timeout_ms: Mutex<Option<u64>>,
+    scope_cache: Mutex<ScopeCache>,
     /// Cumulative token usage per instance id (v2 `ISessionUsageService`
     /// per-agent status), folded at every turn completion. Session-lifetime
     /// bookkeeping: an evicted scope's entry goes with it (the persisted
     /// resume record carries the conversation, not the counters).
-    usage_by_instance: Arc<Mutex<HashMap<String, crate::rpc::types::TokenUsage>>>,
+    usage_by_instance: Arc<Mutex<HashMap<String, kimi_core::types::TokenUsage>>>,
     /// Who spawned each subagent (v2 `subagentLabels`).
     ///
     /// Recorded at spawn time from the spawning agent's scope, and the gate
@@ -651,7 +782,7 @@ async fn distill_continuations(
         attempts += 1;
         let mut history = turn.messages.clone();
         history.push(crate::turn_loop::types::LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: policy.continuation_prompt.clone(),
             ..Default::default()
         });
@@ -669,6 +800,76 @@ async fn distill_continuations(
     }
     turn.usage = usage_total;
     Ok(turn)
+}
+
+async fn run_one(
+    runtime: &SubagentRuntime,
+    agent_id: &str,
+    callbacks: &Arc<dyn crate::callbacks::HostCallbacks>,
+    messages: Vec<crate::turn_loop::types::LLMMessage>,
+    tool_defs: Vec<crate::turn_loop::types::ToolInfo>,
+    cancel_flag: &Arc<AtomicBool>,
+    parent_cancel: Option<&crate::subagent::types::ParentCancel>,
+) -> Result<crate::turn_loop::types::TurnResult, RunExit> {
+    let hook_guard = callbacks.hook_guard();
+    let origin = crate::subagent::types::agent_run_prompt_origin();
+    let turn_seq = fastrand::u64(..);
+    if let Some(guard) = hook_guard.as_ref() {
+        let prompt = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        guard.notify_turn_started(turn_seq, &origin, &prompt).await;
+    }
+    let end_guard = hook_guard.clone();
+    let run_input = crate::turn_loop::types::RunTurnInput {
+        llm_request_byte_budget: crate::config::DEFAULT_LLM_REQUEST_BYTE_BUDGET,
+        agent_id: agent_id.to_string(),
+        previous_turn_aborted: false,
+        max_attempts: None,
+        turn_id: format!("subturn-{turn_seq}"),
+        llm: runtime.llm.as_ref(),
+        messages,
+        tools: &[],
+        tool_defs,
+        max_steps: u32::MAX,
+        max_context_tokens: None,
+        compaction_max_attempts: None,
+        permission_mode: None,
+        goal: None,
+        cancellation: Some(cancel_flag.clone()),
+        hook_guard,
+        media: Some(&runtime.media),
+        media_dropped: Some(runtime.media_dropped.clone()),
+        media_recovery: Some(runtime.media_recovery.clone()),
+        toolset: None,
+    };
+    let run_future = crate::turn_loop::run_turn::run_turn_continued(run_input, callbacks);
+    tokio::pin!(run_future);
+    let outcome = match parent_cancel {
+        Some(signal) => {
+            tokio::select! {
+                result = &mut run_future => {
+                    result.map_err(|err| RunExit::Failed(err.to_string()))
+                }
+                () = signal.wait() => Err(RunExit::ParentCancelled),
+            }
+        }
+        None => run_future
+            .await
+            .map_err(|err| RunExit::Failed(err.to_string())),
+    };
+    if let Some(guard) = end_guard.as_ref() {
+        let end = match &outcome {
+            Ok(turn) => crate::session::AgentTurnEnd::Ran(turn),
+            Err(RunExit::ParentCancelled) => crate::session::AgentTurnEnd::Cancelled,
+            Err(RunExit::Failed(message)) => crate::session::AgentTurnEnd::Failed(message),
+        };
+        crate::session::notify_agent_turn_end(guard, turn_seq, end).await;
+    }
+    outcome
 }
 
 impl SubagentManager {
@@ -740,6 +941,7 @@ impl SubagentManager {
             session_store: RwLock::new(None),
             task_runner: RwLock::new(None),
             swarm_timeout_ms: Mutex::new(None),
+            scope_cache: Mutex::new(ScopeCache::from_env()),
             usage_by_instance: Arc::new(Mutex::new(HashMap::new())),
             parents: Arc::new(RwLock::new(HashMap::new())),
             forked_from: Arc::new(RwLock::new(HashMap::new())),
@@ -927,6 +1129,79 @@ impl SubagentManager {
         *self.main_profile_name.write().await = name
             .filter(|name| !name.trim().is_empty())
             .map(str::to_string);
+    }
+
+    pub async fn caller_profile_name(&self, caller_id: &str) -> Option<String> {
+        if caller_id == crate::callbacks::MAIN_AGENT_ID {
+            return Some(
+                self.main_profile_name
+                    .read()
+                    .await
+                    .clone()
+                    .unwrap_or_else(|| "agent".to_string()),
+            );
+        }
+        self.instances
+            .read()
+            .await
+            .get(caller_id)
+            .map(|(instance, _)| instance.type_name.clone())
+    }
+
+    pub async fn spawn_allowlist(&self, caller_id: &str) -> Option<Vec<String>> {
+        use crate::subagent::allowlist as gate;
+        let caller_profile = self.caller_profile_name(caller_id).await?;
+        let is_main = caller_id == crate::callbacks::MAIN_AGENT_ID;
+        let definitions = self.definitions.read().await;
+        let own = definitions
+            .get(&caller_profile)
+            .and_then(|def| def.subagents.clone());
+        let extras = if is_main && !(caller_profile != "agent" && own.is_some()) {
+            Some(
+                self.discovered_types
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|name| name.as_str() != "agent" && name.as_str() != "tower-worker")
+                    .cloned()
+                    .collect::<Vec<String>>(),
+            )
+        } else {
+            None
+        };
+        let default_subagents = definitions
+            .get("agent")
+            .and_then(|def| def.subagents.clone());
+        let mut allowlist = gate::subagent_allowlist_for(
+            default_subagents.as_deref(),
+            own.as_deref(),
+            extras.as_deref(),
+        )?;
+        if own.is_none() {
+            allowlist = gate::without_delegating_targets(&definitions, &allowlist);
+        }
+        Some(allowlist)
+    }
+
+    pub async fn check_spawn_allowed(
+        &self,
+        caller_id: &str,
+        requested: &str,
+        is_fork: bool,
+    ) -> Result<(), String> {
+        if is_fork {
+            return Ok(());
+        }
+        if let Some(allowlist) = self.spawn_allowlist(caller_id).await
+            && !allowlist.iter().any(|name| name == requested)
+        {
+            return Err(
+                crate::subagent::allowlist::subagent_type_not_allowed_message(
+                    requested, &allowlist,
+                ),
+            );
+        }
+        Ok(())
     }
 
     /// The advertise-hop raw material for the `Agent` description (v2's
@@ -1220,6 +1495,52 @@ impl SubagentManager {
             .cloned()
     }
 
+    async fn builtin_explore_prompt_prefix(
+        &self,
+        agent_id: &str,
+        def: &SubagentDefinition,
+    ) -> Option<String> {
+        if !def.name.eq_ignore_ascii_case("explore") {
+            return None;
+        }
+        if self
+            .discovered_types
+            .read()
+            .await
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&def.name))
+        {
+            return None;
+        }
+        let agent_cwd = {
+            let environments = self
+                .agent_environments
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            environments
+                .get(agent_id)
+                .map(|environment| environment.cwd().to_path_buf())
+        };
+        let root = match agent_cwd {
+            Some(cwd) => cwd,
+            None => {
+                let session_id = self
+                    .runtime
+                    .read()
+                    .await
+                    .as_ref()
+                    .and_then(|runtime| runtime.session_id.clone())?;
+                self.workspace_roots
+                    .read()
+                    .await
+                    .get(&session_id)
+                    .cloned()?
+            }
+        };
+        let context = crate::prompt::collect_git_context(&root).await;
+        (!context.is_empty()).then_some(context)
+    }
+
     /// Get a registered definition by name.
     pub async fn get_definition(&self, name: &str) -> Option<SubagentDefinition> {
         let defs = self.definitions.read().await;
@@ -1293,6 +1614,56 @@ impl SubagentManager {
         }
     }
 
+    async fn agent_meta_value(&self, id: &str) -> Option<serde_json::Value> {
+        let (profile_name, depth) = {
+            let instances = self.instances.read().await;
+            let (instance, _) = instances.get(id)?;
+            (instance.type_name.clone(), instance.depth)
+        };
+        let parent = self.parent_of(id).await;
+        let parent_agent_id = parent
+            .as_ref()
+            .map(|p| p.agent_id.clone())
+            .unwrap_or_else(|| crate::callbacks::MAIN_AGENT_ID.to_string());
+        let forked_from = match self.forked_from.read().await.get(id).cloned() {
+            Some(source) => Some(source),
+            None => self.persisted_forked_from(id).await,
+        };
+        let homedir = self.agent_homedir(id).await;
+
+        let mut labels = serde_json::Map::new();
+        labels.insert(
+            "parentAgentId".into(),
+            serde_json::Value::String(parent_agent_id.clone()),
+        );
+        if let Some(item) = parent.as_ref().and_then(|p| p.swarm_item.clone()) {
+            labels.insert("swarmItem".into(), serde_json::Value::String(item));
+        }
+        labels.insert(
+            "subagentDepth".into(),
+            serde_json::Value::String(depth.to_string()),
+        );
+        labels.insert(
+            "profileName".into(),
+            serde_json::Value::String(profile_name),
+        );
+
+        let mut meta = serde_json::Map::new();
+        meta.insert("type".into(), serde_json::Value::String("sub".into()));
+        meta.insert(
+            "parentAgentId".into(),
+            serde_json::Value::String(parent_agent_id),
+        );
+        if let Some(source) = forked_from {
+            meta.insert("forkedFrom".into(), serde_json::Value::String(source));
+        }
+        if let Some(homedir) = homedir {
+            meta.insert("homedir".into(), serde_json::Value::String(homedir));
+        }
+        meta.insert("labels".into(), serde_json::Value::Object(labels));
+        Some(serde_json::Value::Object(meta))
+    }
+
     /// v2 `join(bootstrap.homeDir, scope('agents/${agentId}'))`: the per-agent
     /// home under the session's engine directory. Absent until the session's
     /// workspace root is known.
@@ -1356,6 +1727,120 @@ impl SubagentManager {
         {
             self.next_agent_number.fetch_max(number, Ordering::Relaxed);
         }
+    }
+
+    pub async fn spawn(&self, type_name: &str, role: &str) -> Result<String, String> {
+        let id = self.allocate_agent_id().await;
+        self.spawn_with_id(&id, type_name, role).await
+    }
+
+    pub async fn spawn_in_environment(
+        &self,
+        type_name: &str,
+        role: &str,
+        environment: AgentEnvironmentRequest,
+    ) -> Result<String, String> {
+        let id = self.allocate_agent_id().await;
+        let caller_id = crate::tools::CALLER_AGENT_ID
+            .try_with(|id| id.clone())
+            .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
+        self.spawn_with_id_from_in(&id, &caller_id, type_name, role, environment)
+            .await
+    }
+
+    pub async fn spawn_child(
+        &self,
+        caller_id: &str,
+        type_name: &str,
+        role: &str,
+    ) -> Result<String, String> {
+        let id = self.allocate_agent_id().await;
+        self.spawn_with_id_from(&id, caller_id, type_name, role)
+            .await
+    }
+
+    pub async fn spawn_with_id(
+        &self,
+        id: &str,
+        type_name: &str,
+        role: &str,
+    ) -> Result<String, String> {
+        let caller_id = crate::tools::CALLER_AGENT_ID
+            .try_with(|id| id.clone())
+            .unwrap_or_else(|_| crate::callbacks::MAIN_AGENT_ID.to_string());
+        self.spawn_with_id_from(id, &caller_id, type_name, role)
+            .await
+    }
+
+    pub async fn spawn_with_id_from(
+        &self,
+        id: &str,
+        caller_id: &str,
+        type_name: &str,
+        role: &str,
+    ) -> Result<String, String> {
+        self.spawn_with_id_from_in(
+            id,
+            caller_id,
+            type_name,
+            role,
+            AgentEnvironmentRequest::default(),
+        )
+        .await
+    }
+
+    pub async fn spawn_with_id_from_in(
+        &self,
+        id: &str,
+        caller_id: &str,
+        type_name: &str,
+        role: &str,
+        environment: AgentEnvironmentRequest,
+    ) -> Result<String, String> {
+        self.scope_cache_error()?;
+        {
+            let defs = self.definitions.read().await;
+            if !defs.contains_key(type_name) && type_name != "self" {
+                return Err(format!("Unknown subagent type: '{type_name}'"));
+            }
+        }
+        let depth = self.child_depth_for_spawn(caller_id).await?;
+        let environment = self
+            .resolve_agent_environment(id, caller_id, environment)
+            .await?;
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let instance = SubagentInstance {
+            id: id.to_string(),
+            type_name: type_name.to_string(),
+            role: role.to_string(),
+            state: SubagentState::Running,
+            created_at_ms: now_ms,
+            last_result: None,
+            depth,
+        };
+        let mut instances = self.instances.write().await;
+        if instances.contains_key(id) {
+            return Err(format!(
+                "agent.already_exists: a subagent with id \"{id}\" already exists — pass a different id"
+            ));
+        }
+        instances.insert(id.to_string(), (instance, cancellation));
+        drop(instances);
+        if let Some(environment) = environment {
+            self.agent_environments
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(id.to_string(), environment);
+        }
+        self.observe_agent_id(id);
+        self.revive_scope(id);
+        self.record_parent(id);
+        self.register_agent_metadata(id).await;
+        Ok(id.to_string())
     }
 
     /// Resolve a child's environment against its parent.
@@ -1454,6 +1939,108 @@ impl SubagentManager {
             cwd: Some(cwd),
             env,
         }
+    }
+
+    pub async fn depth_of(&self, agent_id: &str) -> u32 {
+        if let Some((instance, _)) = self.instances.read().await.get(agent_id) {
+            return instance.depth;
+        }
+        self.persisted_depth(agent_id).await
+    }
+
+    async fn persisted_depth(&self, agent_id: &str) -> u32 {
+        let store = self.session_store.read().await.as_ref().cloned();
+        let Some(store) = store else {
+            return 0;
+        };
+        store
+            .get_state("subagent_resume", agent_id)
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_value::<SubagentPersistedState>(value).ok())
+            .map_or(0, |state| state.depth)
+    }
+
+    async fn child_depth_for_spawn(&self, caller_id: &str) -> Result<u32, String> {
+        let caller_depth = self.depth_of(caller_id).await;
+        if caller_depth >= MAX_SUBAGENT_DEPTH {
+            return Err(LocalizedText::with_params(
+                "engine.subagent.depthExceeded",
+                i18n_params!["maxDepth" => MAX_SUBAGENT_DEPTH],
+            )
+            .render());
+        }
+        Ok(caller_depth + 1)
+    }
+
+    fn record_parent(&self, id: &str) {
+        let Ok(agent_id) = crate::tools::CALLER_AGENT_ID.try_with(|id| id.clone()) else {
+            return;
+        };
+        if let Ok(mut parents) = self.parents.try_write() {
+            parents.insert(
+                id.to_string(),
+                SubagentParent {
+                    agent_id,
+                    parent_tool_call_id: None,
+                    swarm_item: None,
+                    swarm_index: None,
+                },
+            );
+        }
+    }
+
+    pub async fn parent_of(&self, agent_id: &str) -> Option<SubagentParent> {
+        if let Some(parent) = self.parents.read().await.get(agent_id) {
+            return Some(parent.clone());
+        }
+        let store = self.session_store.read().await.as_ref()?.clone();
+        let stored = store.get_state("subagent_resume", agent_id).ok()??;
+        let state: SubagentPersistedState = serde_json::from_value(stored).ok()?;
+        let parent = SubagentParent {
+            agent_id: state.parent_agent_id?,
+            parent_tool_call_id: state.parent_tool_call_id,
+            swarm_item: state.swarm_item,
+            swarm_index: state.swarm_index,
+        };
+        self.parents
+            .write()
+            .await
+            .insert(agent_id.to_string(), parent.clone());
+        Some(parent)
+    }
+
+    pub async fn set_swarm_item(&self, agent_id: &str, item: Option<String>) {
+        {
+            let mut parents = self.parents.write().await;
+            if let Some(parent) = parents.get_mut(agent_id) {
+                parent.swarm_item = item;
+            }
+        }
+        self.register_agent_metadata(agent_id).await;
+    }
+
+    pub async fn set_parent(
+        &self,
+        agent_id: &str,
+        parent_agent_id: String,
+        parent_tool_call_id: Option<String>,
+        swarm_item: Option<String>,
+        swarm_index: Option<u32>,
+    ) {
+        {
+            let mut parents = self.parents.write().await;
+            parents.insert(
+                agent_id.to_string(),
+                SubagentParent {
+                    agent_id: parent_agent_id,
+                    parent_tool_call_id,
+                    swarm_item,
+                    swarm_index,
+                },
+            );
+        }
+        self.register_agent_metadata(agent_id).await;
     }
 
     /// Record the agent this one was forked from (v2 `AgentMeta.forkedFrom`,
@@ -1661,7 +2248,7 @@ impl SubagentManager {
             let llm =
                 crate::subagent::profile_prompt::ProfilePromptLlm::wrap(llm, &def.system_prompt);
             let messages = vec![crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: prompt_str,
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
@@ -1722,7 +2309,7 @@ impl SubagentManager {
                     );
                     let result_text = format!(
                         "Subagent '{}' finished in {} steps (Tokens: {}).",
-                        subagent_role, turn_res.steps, turn_res.usage.total_tokens
+                        subagent_role, turn_res.steps, turn_res.usage.measured_context_tokens()
                     );
                     // Upstream #3847: fold the turn into the instance's
                     // cumulative counter (the tower tools read it as `tokens`).
@@ -1926,7 +2513,7 @@ impl SubagentManager {
                 crate::injection::wrap_system_reminder(crate::subagent::fork::FORK_CONTEXT_NOTICE),
             ));
             msgs.push(crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: prompt.clone(),
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
@@ -1939,7 +2526,7 @@ impl SubagentManager {
             msgs
         } else {
             vec![crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: prompt,
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
@@ -2163,7 +2750,7 @@ impl SubagentManager {
         let messages = {
             let mut history = record.messages.clone();
             history.push(crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: prompt.to_string(),
                 origin: Some(crate::subagent::types::agent_run_prompt_origin()),
                 ..Default::default()
@@ -2487,7 +3074,7 @@ impl SubagentManager {
         };
         let mut messages = history;
         messages.push(crate::turn_loop::types::LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: user_content.clone(),
             origin: Some(crate::subagent::types::agent_run_prompt_origin()),
             ..Default::default()
@@ -2550,14 +3137,14 @@ impl SubagentManager {
                         entry.running = false;
                         entry.usage = add_usage(&entry.usage, &turn.usage);
                         entry.messages.push(crate::turn_loop::types::LLMMessage {
-                            role: "user".into(),
+                            role: kimi_core::types::Role::User,
                             content: user_content,
                             origin: Some(crate::subagent::types::agent_run_prompt_origin()),
                             ..Default::default()
                         });
                         if let Some(content) = assistant_content {
                             entry.messages.push(crate::turn_loop::types::LLMMessage {
-                                role: "assistant".into(),
+                                role: kimi_core::types::Role::Assistant,
                                 content,
                                 ..Default::default()
                             });
@@ -2571,7 +3158,7 @@ impl SubagentManager {
                 if !cancel_flag.load(Ordering::SeqCst) {
                     let summary = format!(
                         "Turn finished in {} steps (Tokens: {}).",
-                        turn.steps, turn.usage.total_tokens
+                        turn.steps, turn.usage.measured_context_tokens()
                     );
                     self.update_state(id, SubagentState::Idle, Some(summary))
                         .await;
@@ -2594,7 +3181,7 @@ impl SubagentManager {
 
     /// Cumulative token usage of a persistent instance across all turns.
     /// Unknown ids report zero usage.
-    pub async fn get_persistent_usage(&self, id: &str) -> crate::rpc::types::TokenUsage {
+    pub async fn get_persistent_usage(&self, id: &str) -> kimi_core::types::TokenUsage {
         let persistent = self.persistent.read().await;
         persistent
             .get(id)
@@ -2606,7 +3193,7 @@ impl SubagentManager {
     /// counter (v2 `ISessionUsageService` per-agent status). Called from
     /// every turn-completion path so a mid-turn tool call (the tower tools'
     /// `tokens` field, upstream #3847) sees the prior turns' total.
-    pub fn record_instance_usage(&self, id: &str, usage: &crate::rpc::types::TokenUsage) {
+    pub fn record_instance_usage(&self, id: &str, usage: &kimi_core::types::TokenUsage) {
         let mut map = self
             .usage_by_instance
             .lock()
@@ -2618,7 +3205,7 @@ impl SubagentManager {
     /// The instance's cumulative usage: the per-turn counter first, the
     /// persistent instance's own accumulator as the fallback (it predates
     /// the counter and is authoritative for persistent scopes).
-    pub async fn cumulative_usage(&self, id: &str) -> Option<crate::rpc::types::TokenUsage> {
+    pub async fn cumulative_usage(&self, id: &str) -> Option<kimi_core::types::TokenUsage> {
         let counted = self
             .usage_by_instance
             .lock()
@@ -2638,14 +3225,9 @@ impl SubagentManager {
     /// turns fold into the per-instance counter; the main agent's session
     /// total lives in the host's SQLite turn records, which the toolset
     /// cannot reach, so it reports `None` (recorded divergence).
-    pub async fn caller_tokens(&self, caller_agent_id: &str) -> Option<i64> {
+    pub async fn caller_tokens(&self, caller_agent_id: &str) -> Option<u64> {
         let usage = self.cumulative_usage(caller_agent_id).await?;
-        Some(
-            (u64::from(usage.input_tokens)
-                + u64::from(usage.input_cache_read)
-                + u64::from(usage.input_cache_creation)
-                + u64::from(usage.output_tokens)) as i64,
-        )
+        Some(usage.measured_context_tokens())
     }
 
     /// Terminate and remove a persistent instance: sets its cancellation
@@ -2834,6 +3416,118 @@ impl SubagentManager {
         }
     }
 
+    fn scope_cache_error(&self) -> Result<(), String> {
+        let cache = self.scope_cache.lock().unwrap_or_else(|e| e.into_inner());
+        match cache.error.as_ref() {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+
+    fn revive_scope(&self, id: &str) {
+        self.scope_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .revive(id);
+    }
+
+    async fn retire_completed_scope(&self, id: &str) {
+        if self.persistent.read().await.contains_key(id) {
+            return;
+        }
+        if self.session_store.read().await.is_none() {
+            return;
+        }
+        {
+            let mut cache = self.scope_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.capacity == 0 || cache.error.is_some() {
+                return;
+            }
+            cache.retire(id);
+        }
+        self.evict_completed_scopes().await;
+    }
+
+    async fn evict_completed_scopes(&self) {
+        let mut skipped: HashSet<String> = HashSet::new();
+        loop {
+            let (timeout, candidate) = {
+                let cache = self.scope_cache.lock().unwrap_or_else(|e| e.into_inner());
+                if cache.retired.len() <= cache.capacity {
+                    return;
+                }
+                let Some(candidate) = cache.oldest_candidate(&skipped) else {
+                    return;
+                };
+                (cache.evict_timeout, candidate)
+            };
+            let (id, attempts) = candidate;
+            self.scope_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+            match self.evict_scope(&id, timeout).await {
+                EvictOutcome::Removed | EvictOutcome::Missing => continue,
+                EvictOutcome::Deferred => {
+                    skipped.insert(id.clone());
+                    self.scope_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .reinsert(&id, attempts);
+                }
+                EvictOutcome::Timeout => {
+                    skipped.insert(id.clone());
+                    let next_attempt = attempts + 1;
+                    if next_attempt >= MAX_SCOPE_EVICT_ATTEMPTS {
+                        tracing::warn!(
+                            subagent = %id,
+                            attempts = next_attempt,
+                            "subagent scope eviction timed out; leaving it resident"
+                        );
+                    }
+                    self.scope_cache
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .reinsert(&id, next_attempt);
+                }
+            }
+        }
+    }
+
+    async fn evict_scope(&self, id: &str, timeout: Duration) -> EvictOutcome {
+        {
+            let instances = self.instances.read().await;
+            match instances.get(id) {
+                None => return EvictOutcome::Missing,
+                Some((instance, _)) if instance.state == SubagentState::Running => {
+                    return EvictOutcome::Deferred;
+                }
+                Some(_) => {}
+            }
+        }
+        let removal = async {
+            let mut instances = self.instances.write().await;
+            instances.remove(id);
+            self.foreground_histories
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(id);
+            self.usage_by_instance
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(id);
+            self.parents.write().await.remove(id);
+            self.agent_environments
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(id);
+        };
+        match tokio::time::timeout(timeout, removal).await {
+            Ok(()) => EvictOutcome::Removed,
+            Err(_) => EvictOutcome::Timeout,
+        }
+    }
+
     /// Recreate the resident instance of a scope that was evicted (v2
     /// `rebuildSubagent`): the persisted resume record carries the profile and
     /// role, so the rebuilt instance is indistinguishable from the original
@@ -2894,6 +3588,29 @@ impl SubagentManager {
         self.revive_scope(id);
         self.register_agent_metadata(id).await;
         Ok(())
+    }
+
+    async fn await_scope_close(&self, id: &str) -> bool {
+        let timeout = self
+            .scope_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .evict_timeout;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match self
+                .evict_scope(id, remaining.max(Duration::from_millis(1)))
+                .await
+            {
+                EvictOutcome::Removed | EvictOutcome::Missing => return true,
+                EvictOutcome::Deferred | EvictOutcome::Timeout => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(SCOPE_CLOSE_POLL_INTERVAL).await;
+        }
     }
 
     /// List summaries of all subagent instances.
@@ -2972,15 +3689,15 @@ impl crate::turn_loop::types::LLM for RecordingLlm {
 
 /// Sum two token usage records field by field.
 fn add_usage(
-    a: &crate::rpc::types::TokenUsage,
-    b: &crate::rpc::types::TokenUsage,
-) -> crate::rpc::types::TokenUsage {
-    crate::rpc::types::TokenUsage {
-        input_tokens: a.input_tokens + b.input_tokens,
-        output_tokens: a.output_tokens + b.output_tokens,
-        total_tokens: a.total_tokens + b.total_tokens,
+    a: &kimi_core::types::TokenUsage,
+    b: &kimi_core::types::TokenUsage,
+) -> kimi_core::types::TokenUsage {
+    kimi_core::types::TokenUsage {
+        input_other: a.input_other + b.input_other,
+        output: a.output + b.output,
         input_cache_read: a.input_cache_read + b.input_cache_read,
         input_cache_creation: a.input_cache_creation + b.input_cache_creation,
+        raw: None,
     }
 }
 

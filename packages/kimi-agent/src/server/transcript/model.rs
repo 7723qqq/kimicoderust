@@ -259,10 +259,10 @@ pub struct TranscriptUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepUsage {
-    pub input_other: i64,
-    pub output: i64,
-    pub input_cache_read: i64,
-    pub input_cache_creation: i64,
+    pub input_other: u64,
+    pub output: u64,
+    pub input_cache_read: u64,
+    pub input_cache_creation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

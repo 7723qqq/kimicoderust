@@ -5,7 +5,7 @@ use serde_json::{Map, Value, json};
 
 use crate::human::llm::media::image_compression_caption::extract_image_compression_captions;
 use crate::human::llm::media::path_tag::match_single_media_path_tag;
-use crate::human::llm::message::{ContentPart, ToolCall};
+use crate::human::llm::message::{ContentPart, Role, ToolCall};
 
 pub const SKILL_ACTIVATION_PART_SOURCE: &str = "skill activation";
 
@@ -78,6 +78,8 @@ pub struct PromptOrigin {
     pub skill_activations: Option<Vec<BundledSkillActivation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<PromptFileAttachment>>,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 pub type UserPromptOrigin = PromptOrigin;
@@ -146,7 +148,7 @@ pub fn strip_bundled_skill_blocks(message: &SteerMessage) -> Vec<ContentPart> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergedSteerMessage {
-    pub role: String,
+    pub role: Role,
     pub content: Vec<ContentPart>,
     pub tool_calls: Vec<ToolCall>,
     pub origin: UserPromptOrigin,
@@ -217,10 +219,11 @@ pub fn merge_steer_messages(messages: &[SteerMessage]) -> MergedSteerMessage {
             client_metadata: (!client_metadata.is_empty()).then_some(client_metadata),
             skill_activations: (!skill_activations.is_empty()).then_some(skill_activations),
             attachments: (!attachments.is_empty()).then_some(attachments),
+            ..Default::default()
         }
     };
     MergedSteerMessage {
-        role: "user".to_string(),
+        role: Role::User,
         content,
         tool_calls: Vec::new(),
         origin,

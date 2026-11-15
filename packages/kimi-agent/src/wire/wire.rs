@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::error::Error;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -5,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::Stream;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 
 use super::journal::IAgentJournal;
 use super::record::{RecordDehydrator, WireAsyncError, WireRecord};
@@ -26,7 +28,7 @@ pub trait IWireService: IAgentJournal {
     fn on_did_append_record(
         &self,
         listener: Arc<dyn Fn(&WireRecord) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn read_journal(
         &self,
     ) -> Pin<Box<dyn Stream<Item = Result<WireRecord, WireAsyncError>> + Send + '_>>;
@@ -42,3 +44,7 @@ pub trait IWireService: IAgentJournal {
     fn journal_path(&self) -> Option<String>;
     fn externally_modified(&self) -> bool;
 }
+
+
+pub static I_WIRE_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IWireService>>> =
+    LazyLock::new(|| create_decorator("wireService"));

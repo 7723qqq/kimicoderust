@@ -312,7 +312,7 @@ pub async fn drive_commands(
         match command {
             UiCommand::Prompt(text) => {
                 let message = LLMMessage {
-                    role: "user".into(),
+                    role: kimi_agent::rpc::types::Role::User,
                     content: text,
                     ..Default::default()
                 };
@@ -328,7 +328,7 @@ pub async fn drive_commands(
             }
             UiCommand::Steer(text) => {
                 let message = LLMMessage {
-                    role: "user".into(),
+                    role: kimi_agent::rpc::types::Role::User,
                     content: text.clone(),
                     ..Default::default()
                 };

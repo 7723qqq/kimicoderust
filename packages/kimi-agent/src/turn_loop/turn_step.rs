@@ -476,7 +476,7 @@ pub fn execute_loop_step_with_projection<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::types::TokenUsage;
+    use kimi_core::types::TokenUsage;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -528,10 +528,9 @@ mod tests {
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        total_tokens: 2,
-                        ..Default::default()
+                        input_other: 1,
+                        output: 1,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -858,20 +857,22 @@ mod tests {
                             ToolCall {
                                 id: String::new(),
                                 name: "read".into(),
-                                arguments: serde_json::json!({}),
+                                arguments: Some(serde_json::json!({}).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             },
                             ToolCall {
                                 id: "  ".into(),
                                 name: "glob".into(),
-                                arguments: serde_json::json!({}),
+                                arguments: Some(serde_json::json!({}).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             },
                         ],
                         finish_reason: Some("tool_calls".into()),
-                        usage: crate::rpc::types::TokenUsage::default(),
+                        usage: kimi_core::types::TokenUsage::default(),
                         timing: None,
                     })
                 })
@@ -933,19 +934,19 @@ mod tests {
                             vec![ToolCall {
                                 id: "c1".into(),
                                 name: "read".into(),
-                                arguments: serde_json::json!({}),
+                                arguments: Some(serde_json::json!({}).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             }]
                         } else {
                             vec![]
                         },
                         finish_reason: Some("stop".into()),
                         usage: TokenUsage {
-                            input_tokens: 1,
-                            output_tokens: 1,
-                            total_tokens: 2,
-                            ..Default::default()
+                            input_other: 1,
+                            output: 1,
+                                                        ..Default::default()
                         },
                         timing: None,
                     })
@@ -1170,7 +1171,7 @@ mod tests {
         LLMChatResponse {
             content: content.into(),
             thinking: if think {
-                vec![ContentBlock::Text {
+                vec![ContentPart::Text {
                     text: "reasoning".into(),
                     meta: None,
                 }]
@@ -1188,9 +1189,10 @@ mod tests {
         ToolCall {
             id: "call-1".into(),
             name: "Read".into(),
-            arguments: serde_json::json!({ "path": "a.txt" }),
+            arguments: Some(serde_json::json!({ "path": "a.txt" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }
     }
 

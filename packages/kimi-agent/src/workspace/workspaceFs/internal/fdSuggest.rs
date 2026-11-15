@@ -135,17 +135,20 @@ fn binary_name() -> &'static str {
     if cfg!(windows) { "fd.exe" } else { "fd" }
 }
 
-fn cached_binary_path(environment: Option<&Environment>) -> String {
+fn cached_binary_path(environment: Option<&Arc<dyn Environment>>) -> String {
     if is_remote_environment(environment) {
-        if let Some(home_dir) = environment.and_then(|environment| environment.host.as_ref()).and_then(|host| host.home_dir.as_deref()) {
+        if let Some(home_dir) = environment
+            .and_then(|environment| environment.host())
+            .map(|host| host.home_dir)
+        {
             let binary = environment
-                .and_then(|environment| environment.host.as_ref())
+                .and_then(|environment| environment.host())
                 .is_some_and(|host| host.path_class == "win32")
                 .then_some("fd.exe")
                 .unwrap_or("fd");
             return environment
-                .and_then(|environment| environment.path.as_ref())
-                .map(|path| path.join(home_dir, &[".kimi-code", "bin", binary]))
+                .and_then(|environment| environment.path())
+                .map(|path| path.join(&home_dir, &[".kimi-code", "bin", binary]))
                 .unwrap_or_else(|| format!("{home_dir}/.kimi-code/bin/{binary}"));
         }
     }
@@ -161,7 +164,7 @@ fn cached_binary_path(environment: Option<&Environment>) -> String {
 pub async fn ensure_fd_path(
     probe: FdProbe,
     signal: Option<AbortSignal>,
-    environment: Option<Environment>,
+    environment: Option<Arc<dyn Environment>>,
 ) -> Result<FdResolution, WireAsyncError> {
     if signal.as_ref().is_some_and(|signal| signal.aborted()) {
         return Err(Box::new(abort_error()));

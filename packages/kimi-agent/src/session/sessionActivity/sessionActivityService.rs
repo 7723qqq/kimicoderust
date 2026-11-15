@@ -1,3 +1,10 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::agent::full_compaction::full_compaction::I_AGENT_FULL_COMPACTION_SERVICE;
+use crate::agent::r#loop::r#loop::I_AGENT_LOOP_SERVICE;
+use crate::agent::task::task::I_AGENT_TASK_SERVICE;
+use crate::app::event::event_bus::I_EVENT_BUS;
+use crate::state::event_dispatcher::I_EVENT_DISPATCHER;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -5,7 +12,7 @@ use std::sync::{Arc, Weak};
 use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::di::scope::{IAgentScopeHandle, ScopeActivation, register_scoped_service};
 use crate::agent::full_compaction::compaction_ops::{
     CompactionCancelled, CompactionCompleted, CompactionStarted,
@@ -30,8 +37,8 @@ use crate::state::event_dispatcher::IEventDispatcher;
 use crate::state::state::{StateDefinition, define_state};
 
 use super::session_activity::{
-    ISessionActivityView, SessionActivityCause, SessionActivityChangedEvent, SessionActivityState,
-    SessionPendingInteraction, SessionTurnOutcome,
+    I_SESSION_ACTIVITY_VIEW, ISessionActivityView, SessionActivityCause,
+    SessionActivityChangedEvent, SessionActivityState, SessionPendingInteraction, SessionTurnOutcome,
 };
 
 #[derive(Debug, Clone)]
@@ -63,12 +70,12 @@ pub struct SessionActivityView {
     states: Arc<dyn ISessionStateService>,
     agents: Arc<dyn IAgentLifecycleService>,
     ctx: Arc<dyn ISessionContext>,
-    agent_subscriptions: Arc<Mutex<HashMap<String, Vec<Box<dyn IDisposable>>>>>,
+    agent_subscriptions: Arc<Mutex<HashMap<String, Vec<DisposableRef>>>>,
     active_at: AtomicI64,
     listeners: Arc<Mutex<Vec<(u64, Arc<dyn Fn(SessionActivityChangedEvent) + Send + Sync>)>>>,
     next_listener_id: AtomicU64,
     weak: Mutex<Weak<Self>>,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl SessionActivityView {
@@ -157,7 +164,7 @@ impl SessionActivityView {
         self.update_folds(|folds| {
             folds.insert(agent_id.clone(), seed);
         });
-        let bus = handle.accessor().get::<IEventBus>();
+        let bus = handle.accessor().get(&I_EVENT_BUS);
         let mut subscriptions = Vec::new();
         let weak = Arc::downgrade(self);
         let id = agent_id.clone();
@@ -230,7 +237,7 @@ impl SessionActivityView {
                 }
             }),
         ));
-        let dispatcher = handle.accessor().get::<IEventDispatcher>();
+        let dispatcher = handle.accessor().get(&I_EVENT_DISPATCHER);
         let weak = Arc::downgrade(self);
         let restore_handle = handle.clone();
         subscriptions.push(dispatcher.hooks.on_did_restore.register(
@@ -338,7 +345,7 @@ impl ISessionActivityView for SessionActivityView {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(SessionActivityChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().push((id, listener));
         let listeners = Arc::downgrade(&self.listeners);
@@ -351,9 +358,9 @@ impl ISessionActivityView for SessionActivityView {
 }
 
 fn seed_fold(handle: &Arc<IAgentScopeHandle>) -> AgentWorkFold {
-    let loop_ = handle.accessor().get::<IAgentLoopService>();
-    let tasks = handle.accessor().get::<IAgentTaskService>();
-    let compaction = handle.accessor().get::<IAgentFullCompactionService>();
+    let loop_ = handle.accessor().get(&I_AGENT_LOOP_SERVICE);
+    let tasks = handle.accessor().get(&I_AGENT_TASK_SERVICE);
+    let compaction = handle.accessor().get(&I_AGENT_FULL_COMPACTION_SERVICE);
     let states = handle.accessor().get(&I_AGENT_STATE_SERVICE);
     let running = loop_.snapshot().state == "running";
     let last_ended = (handle.id() == MAIN_AGENT_ID

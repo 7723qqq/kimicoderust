@@ -3,7 +3,7 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
-use crate::_base::di::instantiation::ScopeActivation;
+use crate::_base::di::instantiation::{ScopeActivation, refine_service_decorator};
 use crate::_base::di::lifecycle::{DisposableRef, DisposableStore, IDisposable};
 use crate::_base::di::scope::register_scoped_service;
 use crate::_base::event::{Emitter, Event};
@@ -52,8 +52,8 @@ impl IEventService for EventService {
         self.emitter.fire(event);
     }
 
-    fn subscribe(&self, handler: EventPublishListener) -> Box<dyn IDisposable> {
-        Box::new(self.emitter.event().subscribe_arc(handler))
+    fn subscribe(&self, handler: EventPublishListener) -> DisposableRef {
+        Arc::new(self.emitter.event().subscribe_arc(handler))
     }
 }
 
@@ -64,7 +64,7 @@ static EVENT_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
     });
     register_scoped_service(
         LifecycleScope::App.as_str().to_string(),
-        I_EVENT_SERVICE.clone(),
+        refine_service_decorator(&I_EVENT_SERVICE),
         SyncDescriptor::new(ctor, Vec::new()),
         ScopeActivation::OnScopeCreated,
         "event",

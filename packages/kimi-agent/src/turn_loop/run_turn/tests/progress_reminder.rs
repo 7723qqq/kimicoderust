@@ -33,9 +33,10 @@ async fn three_unverified_writes_arm_the_verification_reminder() {
                     let write = |id: &str, path: &str| ToolCall {
                         id: id.into(),
                         name: "write".into(),
-                        arguments: serde_json::json!({ "path": path, "content": "x" }),
+                        arguments: Some(serde_json::json!({ "path": path, "content": "x" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     };
                     Ok(LLMChatResponse {
                         content: String::new(),
@@ -89,7 +90,7 @@ async fn three_unverified_writes_arm_the_verification_reminder() {
         turn_id: "test-progress-reminder".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "change three files".into(),
             ..Default::default()
         }],
@@ -159,16 +160,18 @@ async fn a_verification_command_keeps_the_reminder_silent() {
                             ToolCall {
                                 id: "w1".into(),
                                 name: "write".into(),
-                                arguments: serde_json::json!({ "path": "/a.rs" }),
+                                arguments: Some(serde_json::json!({ "path": "/a.rs" }).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             },
                             ToolCall {
                                 id: "w2".into(),
                                 name: "write".into(),
-                                arguments: serde_json::json!({ "path": "/b.rs" }),
+                                arguments: Some(serde_json::json!({ "path": "/b.rs" }).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             },
                         ],
                         finish_reason: Some("tool_calls".into()),
@@ -182,9 +185,10 @@ async fn a_verification_command_keeps_the_reminder_silent() {
                         tool_calls: vec![ToolCall {
                             id: "v1".into(),
                             name: "bash".into(),
-                            arguments: serde_json::json!({ "command": "cargo test --lib" }),
+                            arguments: Some(serde_json::json!({ "command": "cargo test --lib" }).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),
@@ -196,9 +200,10 @@ async fn a_verification_command_keeps_the_reminder_silent() {
                         tool_calls: vec![ToolCall {
                             id: "w3".into(),
                             name: "write".into(),
-                            arguments: serde_json::json!({ "path": "/c.rs" }),
+                            arguments: Some(serde_json::json!({ "path": "/c.rs" }).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),
@@ -243,7 +248,7 @@ async fn a_verification_command_keeps_the_reminder_silent() {
         turn_id: "test-progress-verified".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "change and verify".into(),
             ..Default::default()
         }],
@@ -309,12 +314,13 @@ async fn the_verification_reminder_is_injected_once_per_turn() {
                         tool_calls: vec![ToolCall {
                             id: format!("tc{call}"),
                             name: "write".into(),
-                            arguments: serde_json::json!({
+                            arguments: Some(serde_json::json!({
                                 "path": format!("/f{call}.rs"),
                                 "content": "x",
-                            }),
+                            }).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),
@@ -360,7 +366,7 @@ async fn the_verification_reminder_is_injected_once_per_turn() {
         turn_id: "test-progress-reminder-once".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "change four files".into(),
             ..Default::default()
         }],

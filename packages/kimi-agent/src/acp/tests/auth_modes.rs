@@ -118,7 +118,7 @@ async fn test_acp_authenticate_succeeds_with_engine() {
     assert!(resp.error.is_none(), "logout is a no-op success");
 }
 
-/// ACP clients send `prompt` as `ContentBlock[]`; text, text resources and
+/// ACP clients send `prompt` as `ContentPart[]`; text, text resources and
 /// resource links survive, audio/image blocks are dropped
 /// (v2 `acpBlocksToContentParts`, convert.ts:26-78).
 #[tokio::test]
@@ -202,11 +202,8 @@ fn test_acp_blocks_to_media_extracts_images() {
     let media = acp_blocks_to_media(&blocks);
     assert_eq!(media.len(), 2);
     match &media[0] {
-        crate::rpc::types::ContentBlock::Image {
-            media_type, data, ..
-        } => {
-            assert_eq!(media_type, "image/jpeg");
-            assert_eq!(data, "AAAB");
+        crate::rpc::types::ContentPart::ImageUrl { image_url } => {
+            assert_eq!(image_url.url, "data:image/jpeg;base64,AAAB");
         }
         other => panic!("expected image, got {other:?}"),
     }

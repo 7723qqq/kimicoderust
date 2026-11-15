@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
 use crate::_base::di::instantiation::{
     DependencyKind, ServiceDependency, ServiceIdentifier, create_decorator,
+    refine_service_decorator,
 };
 use crate::_base::di::instantiation_service::register_descriptor_dependencies;
 use crate::_base::di::scope::{Scope, ScopeOptions, ScopeSeed, create_app_scope};
@@ -136,7 +137,7 @@ pub trait IBootstrapService: Send + Sync {
     fn config_key(&self) -> String;
 }
 
-pub static I_BOOTSTRAP_SERVICE: Lazy<ServiceIdentifier<DynamicValue>> =
+pub static I_BOOTSTRAP_SERVICE: Lazy<ServiceIdentifier<Arc<dyn IBootstrapService>>> =
     Lazy::new(|| create_decorator("bootstrapService"));
 
 #[derive(Debug, Clone)]
@@ -200,6 +201,7 @@ pub fn bootstrap(
     input: BootstrapInput,
     extra_seeds: Option<ScopeSeed>,
 ) -> Result<BootstrapResult, String> {
+    crate::app::scopes::register_scope_topology().map_err(|error| error.to_string())?;
     let options = resolve_bootstrap_options(input.clone());
     let mut seeds = bootstrap_seed(input);
     seeds.extend(storage_seed(&options));
@@ -244,7 +246,7 @@ fn skill_seed() -> ScopeSeed {
     register_descriptor_dependencies(
         &descriptor,
         vec![ServiceDependency {
-            id: I_LOG_SERVICE.clone(),
+            id: refine_service_decorator(&I_LOG_SERVICE),
             index: 0,
             kind: DependencyKind::Instance,
         }],

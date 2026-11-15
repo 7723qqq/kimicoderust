@@ -29,6 +29,7 @@ use crate::workspace::workspace_agent_profile_loader::plugin_agent_profile_loade
 use crate::workspace::workspace_agent_profile_loader::user_agent_profile_loader::IUserAgentProfileLoader;
 use crate::workspace::workspace_context::workspace_context::IWorkspaceContext;
 use crate::workspace::workspace_mcp::workspace_mcp::IWorkspaceMcpService;
+use crate::workspace::workspace_trust::workspace_trust::IWorkspaceTrust;
 use crate::workspace::workspace_trust::workspace_trust_store::IWorkspaceTrustStore;
 
 use super::program_workdirs::ProgramWorkdir;
@@ -40,6 +41,7 @@ pub struct ProgramSessionControllerInput {
     pub user_agent_profiles: Arc<dyn IUserAgentProfileLoader>,
     pub plugin_agent_profiles: Arc<dyn IPluginAgentProfileLoader>,
     pub mcp: Arc<dyn IWorkspaceMcpService>,
+    pub trust: Arc<dyn IWorkspaceTrust>,
     pub acquire_workdir: Arc<
         dyn Fn(String, String, bool) -> BoxFuture<'static, Result<ProgramWorkdir, WireAsyncError>>
             + Send
@@ -59,13 +61,13 @@ pub struct ProgramDependencies {
     pub workspace_store: Arc<dyn IWorkspacePersistence>,
     pub bootstrap: Arc<dyn IBootstrapService>,
     pub config: Arc<dyn IConfigService>,
-    pub git: LiveRef<IGitService>,
+    pub git: LiveRef<Arc<dyn IGitService>>,
     pub identity: Arc<dyn IAgentIdentity>,
     pub log: Arc<dyn ILogService>,
     pub oauth: Arc<McpOAuthService>,
     pub config_store: Arc<dyn IMcpConfigStore>,
     pub plugins: Arc<dyn IPluginService>,
-    pub session_manager: LiveRef<ISessionManager>,
+    pub session_manager: LiveRef<Arc<dyn ISessionManager>>,
     pub agent_profiles: Arc<dyn IAgentProfileRegistry>,
     pub builtin_agent_profiles: Arc<dyn IBuiltinAgentProfileLoader>,
     pub builtin_skills: Arc<dyn IBuiltinSkillSource>,

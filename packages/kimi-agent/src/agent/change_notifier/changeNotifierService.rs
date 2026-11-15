@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 
 use crate::_base::di::lifecycle::DisposableRef;
+use crate::_base::utils::workdir_slug::workspace_root_key;
 use crate::app::event::event2::Event2;
 use crate::agent::profile::context::split_agents_md_files;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
@@ -15,7 +16,6 @@ use crate::agent::state::agent_state::IAgentStateService;
 use crate::features::reminder::reminder_service::ReminderService;
 use crate::features::reminder::types::ReminderNotification;
 use crate::session::agent_lifecycle::agent_lifecycle::MAIN_AGENT_ID;
-use crate::session::sqlite_store::workspace_root_key;
 use crate::state::event_dispatcher::IEventDispatcher;
 use crate::wire::record::WireAsyncError;
 

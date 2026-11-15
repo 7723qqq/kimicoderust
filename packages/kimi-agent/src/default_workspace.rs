@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::_base::utils::workdir_slug::workspace_root_key;
 use crate::config::KimiConfig;
 
 /// `<home>/KimiCode/Default`, as path segments
@@ -226,8 +227,7 @@ pub fn is_default_root(root: &str, config: &KimiConfig, home: &Path) -> bool {
 /// The same comparison against an already-resolved root — the wire path uses
 /// this, so nine `format_wire_session` call sites never re-parse config.
 pub fn is_default_root_resolved(root: &str, default_root: &Path) -> bool {
-    crate::session::sqlite_store::workspace_root_key(root)
-        == crate::session::sqlite_store::workspace_root_key(&default_root.display().to_string())
+    workspace_root_key(root) == workspace_root_key(&default_root.display().to_string())
 }
 
 #[cfg(test)]

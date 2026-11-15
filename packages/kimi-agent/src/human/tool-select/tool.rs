@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
-use crate::human::llm::message::ContentPart;
+use crate::human::llm::message::{ContentPart, Deferred};
 use crate::human::tool::tool::{ToolDefinition, define_tool};
 use crate::human::tool_select::state::{SELECT_TOOLS_TOOL_NAME, ToolSelectState};
 use crate::wire::record::WireAsyncError;
@@ -103,7 +103,7 @@ pub fn defer_tool(
     state: Arc<ToolSelectState>,
 ) -> Result<ToolDefinition, WireAsyncError> {
     let mut deferred = tool.clone();
-    deferred.deferred = Some(true);
+    deferred.deferred = Some(Deferred);
     let original = tool.clone();
     let name = tool.name.clone();
     deferred.execute = Arc::new(move |input| {

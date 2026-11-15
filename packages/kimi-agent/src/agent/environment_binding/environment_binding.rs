@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use crate::_base::event::Event;
 use crate::environment::environment::EnvironmentBinding;
 use crate::wire::record::WireAsyncError;
@@ -26,3 +29,7 @@ impl IAgentEnvironmentBindingSeed for AgentEnvironmentBindingSeed {
         &self.binding
     }
 }
+
+
+pub static I_AGENT_ENVIRONMENT_BINDING_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentEnvironmentBindingService>>> =
+    LazyLock::new(|| create_decorator("agentEnvironmentBindingService"));

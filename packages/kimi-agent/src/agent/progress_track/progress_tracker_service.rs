@@ -27,7 +27,7 @@ pub struct ProgressTrackerService {
 
 impl ProgressTrackerService {
     pub fn new(
-        tool_executor: Arc<IAgentToolExecutorService>,
+        tool_executor: Arc<dyn IAgentToolExecutorService>,
         reminders: Arc<dyn ReminderService>,
         event_bus: Arc<dyn EventBusService>,
     ) -> Self {

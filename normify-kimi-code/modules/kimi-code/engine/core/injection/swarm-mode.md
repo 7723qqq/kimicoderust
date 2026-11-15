@@ -10,9 +10,9 @@ description:
   en: >
       Injected once on entering swarm mode and once on leaving it.
       
-revision: f22a80d7ce2cfd1a1e88dff32aa14f9120c909d2
-updated_at: "2026-11-11T19:20:38.910Z"
-fingerprint: 74eff7f3dae377a3645f1f8c41338255e72a06d82d2e18116fad78bc6595be6f
+revision: 2c47ec0cfa7f2a2418c6b44ec10ec14d29f5f7cf
+updated_at: "2026-11-15T18:51:51.050Z"
+fingerprint: 1b829749b0271ddad095f33917431a635937a97a7641c63af0da403993b6df88
 source:
   - path: "packages/kimi-agent/src/injection/swarm_mode.rs"
 apis: []

@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::fiber::{FiberHandler, FiberHost, set_fiber_event_resolver};
+use crate::_base::di::instantiation::refine_service_decorator;
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 
 use super::event2::Event2;
@@ -14,8 +15,9 @@ fn resolve(
     event: String,
     handler: FiberHandler,
 ) -> Result<DisposableRef, String> {
-    let bus_ref = host.live_ref(&I_EVENT_BUS);
-    let subscription = Arc::new(Mutex::new(None::<Box<dyn IDisposable>>));
+    let event_bus_id = refine_service_decorator(&I_EVENT_BUS);
+    let bus_ref = host.live_ref(&event_bus_id);
+    let subscription = Arc::new(Mutex::new(None::<DisposableRef>));
     let attach = {
         let host = host.clone();
         let subscription = subscription.clone();
@@ -23,7 +25,7 @@ fn resolve(
             if subscription.lock().is_some() {
                 return;
             }
-            let Some(bus) = host.live_ref(&I_EVENT_BUS).current else {
+            let Some(bus) = host.live_ref(&event_bus_id).current else {
                 return;
             };
             let bus = Arc::downcast::<Arc<dyn IEventBus>>(bus)

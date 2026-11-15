@@ -162,8 +162,8 @@ Seventeen agent rows and eleven local v2 rows were downgraded from `equivalent`
 to `partial`; each row carries the exact v2 sha, the missing behavior and the
 Rust location in its evidence. Summary:
 
-- compaction mid-injection count (5 rows, `144cc917d4`);
-- compaction usage anchoring (3 rows, `0406c614a0`);
+- compaction mid-injection count (5 rows, `144cc917d4`; resolved 2026-11-15, see below);
+- compaction usage anchoring (3 rows, `0406c614a0`; resolved 2026-11-15, see below);
 - failed-attempt retry metadata and block/timing fields (7 rows, `8f75177b5e` and `2c6264660e`);
 - `turn.not_found` (2 rows, `2c6264660e`);
 - Gemini rawId / text signature / modern responses (5 rows, `e6d935e06a`);
@@ -178,6 +178,255 @@ Run directly with real exit codes after the edits:
 - `bun run check:agent-parity` → 0: 290 files / 290 rows, equivalent 239, partial 17, na 32, missing 2; red 19 = baseline 19, structural 0.
 - `bun run check:v2-parity` → 0: 2592 files / 2592 rows (local 2302, inherited 290); red 1352 = baseline 1352, structural 0; zero uncovered and zero zombies.
 - `bun run check:architecture` → 0: 21 modules, one pre-existing soft-dependency warning.
+
+## 2026-11-15 compaction injection + usage anchoring batch
+
+Resolved the eight `partial` rows from `144cc917d4` and `0406c614a0`. Every
+change is a direct port of the cited v2 lines; no new field, default, limit or
+error code was introduced.
+
+| v2 sha | row | v2 source | Rust implementation |
+| --- | --- | --- | --- |
+| 144cc917d4 | `contextMemory/compactionHandoff.ts` | `compactionHandoff.ts:66` field, `:89` legacy 0, `:112-115` appended-injection filter, `:116-125` tokensAfter, `:139` count, `:141-147` message order | `agent/context_memory/compactionHandoff.rs:69-80,135-157,158-168,175-191` |
+| 144cc917d4 | `contextMemory/contextEvents.ts` | `contextEvents.ts:62` optional `appendedInjectionCount` | `agent/context_memory/contextEvents.rs:81-82` serde field, `:213` schema |
+| 144cc917d4 | `contextMemory/contextMemory.ts` | `contextMemory.ts:30` result field | `agent/context_memory/contextMemory.rs:29-33` |
+| 144cc917d4 | `contextMemory/contextMemoryService.ts` | `contextMemoryService.ts:107-125`, write at `:121` | `agent/context_memory/contextMemoryService.rs:225-247,262-272` |
+| 144cc917d4 | `contextMemory/contextTranscript.ts` | `contextTranscript.ts:198-204` folded length | `agent/context_memory/contextTranscript.rs:244-256` |
+| 0406c614a0 | `fullCompaction/compactionGeneration.ts` | `compactionGeneration.ts:38,80,87,141-145` | `agent/full_compaction/compactionGeneration.rs:31-48,64,68-80,150-155` |
+| 0406c614a0 | `fullCompaction/compactionUtils.ts` | `compactionUtils.ts:12-16,18-24,26-94,96-116`; injection allowance `:159-168` | `agent/full_compaction/compactionUtils.rs:27-153`; `history_safe_to_compact` at `:252-270` |
+| 0406c614a0 | `fullCompaction/fullCompactionService.ts` | `fullCompactionService.ts:260-278,382,620,641-645,649-668,742-767,782-786` | `agent/full_compaction/fullCompactionService.rs:496-524,686,1016,1037-1045,1057-1068,1078-1092,1201-1238,1253-1262` |
+
+Two JS-only mechanisms have an explicit Rust form rather than a literal copy:
+
+- `new Set<ContextMessage>(inFlightTurn)` / `Set.has` is object identity. The
+  Rust port excludes the in-flight suffix by index: `in_flight_start` is
+  `rposition(is_real_user_input) + 1` when the in-flight turn is non-empty,
+  which is the same boundary `inFlightTurnOf` uses
+  (`fullCompactionService.ts:769-780`). Messages after `compactedCount` are
+  appended only when they are injections and sit before that boundary.
+- `Map<Message, weight>` in `buildHistoryTokenProfile` is also identity-keyed.
+  The Rust profile resolves a weight by structural `Message` equality (first
+  match) and falls back to the base estimate otherwise. The only divergence is
+  a repeated, structurally identical message pair whose distributed weights
+  differ; no reachable path in this port produces that pair today.
+
+`llm_adapter::contract::Message` carries no `usage`, so the usage anchor reads
+`ContextMessage` and the pre-shrink helper receives the original context view
+in addition to the converted `Message` slice. The only caller passes the
+converted original history, so the computed total is the v2 expression.
+
+### Gate evidence
+
+- `cargo check` from `packages/kimi-agent` → exit 101, 59 errors before and 59
+  after (HEAD measured by stashing only this batch's files), identical error
+  sets, no error in any touched file. The failures are pre-existing in
+  `subagent/manager.rs`, `persistence/interface/storage.rs` and
+  `session/agentLifecycle/*`, and belong to the in-progress xstate migration
+  batch, not to this one.
+- `bun run check:agent-parity` → 0: 290 files / 290 rows, equivalent 247,
+  partial 9, na 32, missing 2; red 11 = baseline 11, new 0, structural 0.
+  The baseline was lowered explicitly from 19 to 11 with
+  `check:agent-parity:update` after the rows resolved; the gate was already
+  green before the update, so this is a tightening, not a green workaround.
+- `bun run check:v2-parity` → 0: red 1344 vs baseline 1352, new 0,
+  structural 0. The eight resolved rows are inherited, so the agent-core-v2
+  unit baseline now has eight slots of slack; it was not refreshed here because
+  `check:v2-parity:update` rewrites every unit baseline together.
+
+`packages/kimi-agent/src/human/llm-kimi/files.rs` and
+`packages/kimi-agent/src/llm/files_upload.rs` were modified by a parallel
+session at 15:19 and are not part of this batch.
+
+## 2026-11-15 LLM adapter retry / Gemini / media gap batch
+
+Resolved the eight agent rows and six local v2 rows carrying the `partial`
+verdicts from `e6d935e06a`, `f6a5ebe62c`, `8f75177b5e` and `2c6264660e`. Every
+change cites the v2 lines below; no new field, default, limit, error code or
+message text was invented. One row stays red on purpose: `loop/loopService.ts`.
+
+| commit | v2 source | Rust implementation |
+| --- | --- | --- |
+| `e6d935e06a` | `human/llm/requester/bases/google-genai/contract.ts:12-18` | `human/llm/requester/bases/google-genai/contract.rs:45-61` (functionCall/functionResponse `id`, optional `parts`; already present, re-verified) |
+| `e6d935e06a` | `human/llm/requester/bases/google-genai/format.ts:45-56,116-162` | `human/llm/requester/bases/google-genai/format.rs:46-57,166-231` (model-name gate, text signature meta, rawId/extras); text branch relaxed from truthy to `is_string` to accept empty strings (`format.ts:139`) |
+| `e6d935e06a` | `human/llm/requester/bases/google-genai/lower.ts:60-68,73-75,90,115-140,154-166,205-210` | `human/llm/requester/bases/google-genai/lower.rs:20-33,146-159,195-222,257-272,319-327` (rawId map, modern nested media, text/functionCall signature); the gate now follows the v2 regex exactly, including the `gemini-0x-` rejection |
+| `e6d935e06a` | `human/llm/requester/bases/google-genai/requester.ts:70` | `human/llm/requester/bases/google-genai/requester.rs:107` |
+| `e6d935e06a` | `human/llm/requester/bases/anthropic/lower.ts:159-162` | `human/llm/requester/bases/anthropic/lower.rs:202` (whitespace-only text already filtered; re-verified) |
+| `e6d935e06a` | `agent/replayBuilder/fold.ts:336` | `agent/replay_builder/fold.rs:700-712`; `human/persist/v2/fold.rs:104-112,699-716,756-764` (parse `rawId`, stop hard-coding `raw_id: None`) |
+| `f6a5ebe62c` | `human/llm-kimi/files.ts:31-104,166` | `human/llm-kimi/files.rs:83-209,371-372`; `llm/files_upload.rs:55-186,238` (both upload paths validate `id`/`extract_status`/`status`, same detail lookup and error wording) |
+| `8f75177b5e` | `llm-adapter/model/model-requester.ts:56-71`, `model-requester-impl.ts:296-315` | `llm_adapter/model/model_requester.rs:40-46,54-78` (moved `ModelRequestParams`/`SamplingOptions`/`ModelRequestTiming` here from the deleted `llm/model_requester.rs` so the callback can carry `TokenUsage`/timing without a new module edge), `model_requester_impl.rs:322-360` |
+| `8f75177b5e` | `agent/llmRequester/llmRequester.ts:53-62`, `llmRequesterService.ts:279-285,295,315,405,525` | `agent/llm_requester/llmRequester.rs:82-96`, `llmRequesterService.rs:650-674,676-684,723-727,889-898,953-958,1066-1070,1180-1182` |
+| `8f75177b5e` | `agent/loop/machine/requester.ts:32,58,81,118,129` | `agent/loop/machine/requester.rs:52-74,169-172,204-243` |
+| `8f75177b5e` | `agent/loop/machine/engine.ts:452-478` | `agent/loop/machine/engine.rs:132-156,861-894,1046-1061` (`Retrying`/`StepFailed` carry usage/messageId/timing) |
+| `2c6264660e` | `agent/loop/machine/engine.ts:54-70,264-313` | `agent/loop/machine/engine.rs:63-96,311-390` (block identity splitter, reset on `turn.started` and `llm.sent`) |
+| `2c6264660e` | `agent/loop/turnEvents.ts:214-260` | `agent/loop/turnEvents.rs:173-201,319-329,448`; live `events/types.rs:70-82` (`ToolCallDelta.block`) |
+| `2c6264660e` | `agent/loop/errors.ts:4-8`, `_base/errors/errorCode.generated.ts:167` | `kimi-core/src/primitives/errors/domains.rs:484-496`; `codes.rs:287` count 176 → 177 |
+| `2c6264660e` | `agent/contextMemory/loopEventFold.ts:47-52` | `agent/context_memory/loopEventFold.rs:68-84` (`block/started_at/duration_ms` on `content.part`) |
+
+### Verdict changes
+
+- `contextMemory/loopEventFold.ts`, `llmRequester/llmRequester.ts`,
+  `llmRequester/llmRequesterService.ts`, `loop/errors.ts`,
+  `loop/machine/engine.ts`, `loop/machine/requester.ts`, `loop/turnEvents.ts`,
+  `replayBuilder/fold.ts`: `partial` → `equivalent`.
+- Local v2 rows `_base/errors/errorCode.generated.ts`, `human/llm-kimi/files.ts`,
+  `human/llm/requester/bases/anthropic/lower.ts` and the four
+  `google-genai/{contract,format,lower,requester}.ts` rows: `partial` →
+  `equivalent`.
+- The Gemini and Anthropic rows were mapped to the legacy native-HTTP files
+  (`llm/google_genai.rs`, `llm/anthropic.rs`). The path twins under
+  `human/llm/requester/bases/**` are the v2 engine port and already carried the
+  behavior; the manifest now points there and the evidence says so. This
+  corrects a stale mapping, not the acceptance criterion.
+
+### New gap registration (kept red)
+
+`loop/loopService.ts` stays `partial`. The v2 producer side
+(`loopService.ts:1566-1635,1867-1944,1955-1970`) accumulates streamed blocks,
+writes `content.part`/`step.end` loop events with `block/startedAt/durationMs`
+and failed-attempt usage/messageId/timing, and dispatches the delta/turn events.
+The twin `agent/loop/loopService.rs` is still a state wrapper: it has no partial
+block list, no loop-event append and no turn-event dispatch, so the readers
+patched in this batch (fold, replay, turn events) currently receive no producer.
+The live `turn_loop` path writes `step.end` only on success; its failure path
+emits `llm.step.interrupted` without the failed-attempt metadata. Both are
+recorded here rather than papered over.
+
+The legacy native-HTTP surface (`llm/google_genai.rs`, `llm/anthropic.rs`,
+`llm/http.rs`) is fork-local and has no v2 file of its own: `kimi_core::types::ToolCall`
+has no `raw_id`, so rawId/Gemini text signatures are absent there. It is out of
+the v2 engine port and is not given a manifest row (a row would be a new red path
+without a v2 counterpart). This is a real behavioral difference for the native
+CLI/REPL path and is flagged for the user.
+
+### Gate evidence (real exit codes)
+
+- `cargo check -p kimi-agent` from `packages/kimi-agent` → 101, 59 errors before
+  and after; the error and warning headline sets are byte-identical. The
+  warnings that mention touched files (`llm/files_upload.rs:1`,
+  `agent/context_memory/loopEventFold.rs:6`, `agent/loop/turnEvents.rs:18`,
+  `llm_adapter/model/model_requester_impl.rs:19`) are pre-existing unused
+  imports, not new. The pre-existing breakage is the in-progress xstate
+  migration batch, not this one.
+- `bun run check:agent-parity` → 0: 290 files / 290 rows, equivalent 255,
+  partial 3, na 32, missing 0; red 3 = baseline 11, new 0, resolved 8,
+  structural 0. The baseline was not touched by this batch.
+- `bun run check:v2-parity` → 0: 2592 files / 2592 rows, red 1329 vs baseline
+  1352, new 0, structural 0; zero uncovered and zero zombies.
+- `bun run check:error-codes` → 0: 48 baseline entries, new drift 0, stale 0.
+- `bun run check:rust-module-deps` → 1 on pre-existing stale pairs
+  (`agent -> knowledge`, `agent -> turn_events`, `injection -> env`,
+  `injection -> knowledge`, `injection -> permission`, `llm -> injection`,
+  `permission -> i18n`, `permission -> native`, `subagent -> i18n`,
+  `tools -> knowledge`); none involves a module touched here, and no new
+  cross-module edge was introduced by moving `ModelRequestParams` into
+  `llm_adapter`.
+
+### Parallel-window state
+
+The working tree already carried two uncommitted batches when this one started:
+the compaction injection/usage batch (see above) and a permission-rules batch
+(`agent/permission_rules/projectPermissionRules*.rs`, `project_local_config`,
+`program/*`, lifecycle services). Neither was reverted or reformatted. This
+batch's manifest edits are line-scoped and preserve the permission rows; the
+permission batch's `partial` notes for both `projectPermissionRules` rows are
+intact.
+
+## 2026-11-16 type-vocabulary consolidation batch (push checkpoint)
+
+The working tree carried four uncommitted batches when this session started:
+the compaction injection / usage-anchoring batch, the LLM adapter retry /
+Gemini / media gap batch and the permission-rules batch (all three recorded
+above), plus the **type-vocabulary consolidation** planned in
+[`reports/v2-parity/type-vocabulary-plan.md`](../v2-parity/type-vocabulary-plan.md)
+§6.1–§6.15. The fourth one is the large one: it gives nine type families a
+single owner each (`ContentPart` / `ContentBlock`, `LLMMessage`, `TokenUsage`,
+`ToolCall`, `Message`, `ContextMessage`, `ToolDescription`, `ToolInputDisplay`,
+`PromptOrigin`) across 425 files under `packages/kimi-agent`, 5 under
+`packages/kimi-core` and 2 under `packages/kimi-tui-host`.
+
+This entry records the tree as it is pushed, the gate evidence with real exit
+codes, and the items this push does **not** close.
+
+### Ledger synchronization performed in this session
+
+Three baseline artifacts were refreshed because this diff moved the sources
+they fingerprint. The pre-refresh snapshots are kept under `.tmp/push-snapshot/`
+(gitignored) and the diffs are the committed change.
+
+| artifact | tool | before | after |
+| --- | --- | --- | --- |
+| `architecture.json` | `bun run check:architecture -- --update` | 3 stale fingerprints (`kimi-agent`, `i18n-catalog`, `kimi-tui-host`) plus 3 deleted files still listed in the fingerprint set | 3 fingerprints refreshed (`adff3187758f70bb → 06176c6af7d0dd68`, `51a68474ad1bea20 → 8bbaa265cf95c274`, `a0bc6f8ffbaa9c6a → cc48196289de41bb`) |
+| `normify-kimi-code/modules/**` | `bun packages/normify/src/cli.ts normify_module_refresh` (29 ids: every drifted module together with its parent and the moved ancestor) | 27 `evidence/fingerprint-drift` errors | fingerprint / revision / `updated_at` recomputed for the moved modules |
+| `scripts/rust-module-deps-baseline.json` | `bun run check:rust-module-deps -- --update` | 23 unrecorded pairs, 1 recorded pair that no longer exists | 626 edges recorded, 0 new, 0 stale |
+
+All three `--update` runs happened in this session, after the last write to the
+working tree (the newest touched source file is from 02:16), so no parallel
+window was writing while the ledgers were rewritten.
+
+### Gate evidence (real exit codes), HEAD baseline vs this tree
+
+| gate | HEAD `2c47ec0cf` | this tree | note |
+| --- | --- | --- | --- |
+| `check:architecture` | 0 | 0 | green again after the refresh above |
+| `check:normify` | 1 (16 errors) | 1 (1 error) | the remaining `evidence/source-missing` for `kimi-code.engine.tools.web` is pre-existing (open item 2) |
+| `check:rust-module-deps` | 1 (10 stale pairs) | 0 | 626 edges recorded |
+| `check:agent-parity` | 0 (red 19 = baseline 19) | 0 (red 3 vs baseline 11) | 290 rows; equivalent 255, partial 3, na 32, missing 0, new 0; the baseline was tightened from 19 to 11 by the batches above |
+| `check:v2-parity` | 1 (red 1352 = baseline 1352, structural 11) | 1 (red 1329, new 0, structural 11) | red count fell below the baseline; the baseline was **not** lowered (open item 3) |
+| `check:parity` | 1 | 1 | the same `v2Github` tool gap on both sides |
+| `check:engine-i18n` | 1 (8 issues) | 1 (7 issues) | the `engine.subagent.depthExceeded` orphan is now wired up |
+| `check:locale-orphans` | 1 | 1 | same debt; `engine.*` orphan count 1 → 0 |
+| `check:no-legacy-engine` | 1 | 1 | `app/telemetry/core_version.rs` on both sides |
+| `scan:hardcoded:rust` | 1 (4423 unrecorded) | 1 (4455 unrecorded) | the baseline was not re-recorded; the gap is pre-existing and the delta is 32 literals |
+| `check:upstream-v2-delta` | 1 | 1 | identical output on both sides; the allowlist predates the refreshed upstream ref |
+| `check:error-codes`, `check:config-registry`, `check:event-coverage`, `check:patch-budget`, `check:no-comments`, `check:t-call-coverage`, `check:locale-keys`, `check:locale-placeholders`, `check:bun-first`, `check:nix-workspace`, `scan:hardcoded` | 0 | 0 | unchanged |
+
+### Compile state — this is a checkpoint, not a closing statement
+
+`cargo check --no-default-features --features cli` in `packages/kimi-agent`:
+
+- HEAD `2c47ec0cf`, measured in a clean worktree of that commit → exit 101,
+  **59 errors**, 162 warnings.
+- this tree → exit 101, **1521 errors**, 551 warnings.
+
+The type-vocabulary plan measured 1571 errors on the dirty tree before this
+batch; the consolidation is mid-flight and the tree does **not** compile yet.
+The three smaller batches above were each verified against that baseline and
+added no errors; the 1521 errors come from the vocabulary migration itself.
+`cargo fmt`, `cargo clippy` and `cargo test` therefore cannot run on this
+tree — the Rust CI jobs stay red until the migration lands.
+
+### Open items this push does not close
+
+1. **The locale JSON is stale against the catalog.** The catalog renamed the
+   edit-tool keys to `engine.tools.edit.*` (`oldStringNotFound`,
+   `oldStringMatchedMultiple`, `edited`), while
+   `packages/kimi-agent/src/locales/{en,zh}.json` still carry the old
+   `engine.toolsV2.*` block, and the Rust call sites are half-migrated:
+   `tools/file_ops.rs:955` already uses `engine.tools.edit.cannotWrite`,
+   while `:921`, `:932`, `:941` and `:971` still use
+   `engine.toolsV2.oldStringNotFound`, `engine.toolsV2.oldStringNotUnique` and
+   `engine.toolsV2.editReplaced`. Running `bun run generate:locale-json` now
+   would drop the three keys the engine actually renders, so those Edit-tool
+   messages would fall back to the bare key at runtime; the JSON was therefore
+   left exactly as the earlier batch produced it. The fix is: rebind the call
+   sites (the new templates take `{{occurrence_count}}` and
+   `{{occurrence_word}}` instead of `{{count}}` and `{{occurrences}}`), then
+   regenerate the JSON and re-run `bun run check:engine-i18n`. The upstream
+   text for the new keys still has to be confirmed against the v2 reference
+   before that edit.
+2. **`kimi-code.engine.tools.web` points at files this port does not have**
+   (`tools/github.rs`, `tools/github/{execute,http,schema,specs}.rs`). That is
+   the same gap `check:parity` reports as `v2Github`; the module ledger keeps
+   the paths so the gap stays visible instead of being silently re-pointed.
+3. **The `check:v2-parity` baseline was not lowered** although the red count
+   fell to 1329 against a baseline of 1352: `check:v2-parity:update` rewrites
+   every unit baseline together and the `agent-core-v2` unit baseline is
+   inherited, which is the same reason the LLM adapter batch left it alone.
+
+### Push record
+
+Pushed to `origin/main` as one checkpoint commit that carries all four
+batches; the tree does not compile yet (see the compile state above).
 
 ## Upstream delta rulings (2026-11)
 

@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -137,3 +139,7 @@ pub trait IAgentTaskService: Send + Sync {
         task_id: &str,
     ) -> Result<Option<ForegroundTaskReleaseReason>, WireAsyncError>;
 }
+
+
+pub static I_AGENT_TASK_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentTaskService>>> =
+    LazyLock::new(|| create_decorator("agentTaskService"));

@@ -1,8 +1,10 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::app::event::event2::{Event2, Event2Class};
 use crate::hooks::Hooks;
 use crate::wire::record::WireAsyncError;
@@ -43,7 +45,7 @@ pub trait DurableAgentRuntimeParticipant: Send + Sync {
 
 #[async_trait]
 pub trait DurableRuntimeParticipantHost: Send + Sync {
-    fn attach(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Box<dyn IDisposable>;
+    fn attach(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> DisposableRef;
 }
 
 #[async_trait]
@@ -54,10 +56,14 @@ pub trait IEventDispatcher: DurableRuntimeParticipantHost {
     async fn attach_late(
         &self,
         participant: Arc<dyn DurableAgentRuntimeParticipant>,
-    ) -> Result<Box<dyn IDisposable>, WireAsyncError>;
+    ) -> Result<DisposableRef, WireAsyncError>;
     async fn restore(&self) -> Result<(), WireAsyncError>;
     async fn flush(&self) -> Result<(), WireAsyncError>;
 }
 
 #[allow(dead_code)]
 fn _context_marker(_: &dyn FoldContext) {}
+
+
+pub static I_EVENT_DISPATCHER: LazyLock<ServiceIdentifier<Arc<dyn IEventDispatcher>>> =
+    LazyLock::new(|| create_decorator("eventDispatcher"));

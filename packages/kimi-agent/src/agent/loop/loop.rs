@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -406,3 +408,7 @@ pub trait IAgentLoopService: Send + Sync {
     ) -> DisposableRef;
     fn hooks(&self) -> LoopHooks;
 }
+
+
+pub static I_AGENT_LOOP_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentLoopService>>> =
+    LazyLock::new(|| create_decorator("agentLoopService"));

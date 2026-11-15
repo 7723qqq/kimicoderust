@@ -19,7 +19,7 @@ use crate::app::config::config::IConfigService;
 use crate::app::scopes::LifecycleScope;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::persistence::config_section::database_base_enabled;
-use crate::persistence::interface::query_store::{IQueryStore, WriteOp};
+use crate::persistence::interface::query_store::{IQueryStore, IQueryStoreExt, WriteOp};
 use crate::persistence::interface::storage::IFileSystemStorageService;
 use crate::wire::record::WireAsyncError;
 

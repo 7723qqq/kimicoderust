@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
 use crate::app::config::config_service::ConfigService;
 
@@ -32,7 +32,7 @@ const BUILTIN_SKILL_ORDER: &[&str] = &[
 pub struct BuiltinSkillSource {
     config: Arc<ConfigService>,
     on_did_change_emitter: Arc<Emitter<()>>,
-    _config_subscription: Box<dyn IDisposable>,
+    _config_subscription: DisposableRef,
 }
 
 impl BuiltinSkillSource {

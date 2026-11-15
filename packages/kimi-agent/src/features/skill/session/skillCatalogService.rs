@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::OnceCell;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
 use crate::features::skill::catalog::registry::InMemorySkillCatalog;
 use crate::features::skill::catalog::skillSource::SkillContribution;
@@ -31,7 +31,7 @@ pub struct SessionSkillCatalogService {
     merged: RwLock<Arc<InMemorySkillCatalog>>,
     ready_cell: OnceCell<Result<(), String>>,
     on_did_change_emitter: Emitter<String>,
-    data_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    data_subscription: Mutex<Option<DisposableRef>>,
 }
 
 impl SessionSkillCatalogService {
@@ -50,7 +50,7 @@ impl SessionSkillCatalogService {
             service.remerge();
             service.on_did_change_emitter.fire(source_id);
         });
-        *service.data_subscription.lock() = Some(Box::new(subscription));
+        *service.data_subscription.lock() = Some(Arc::new(subscription));
         service.remerge();
         service
     }

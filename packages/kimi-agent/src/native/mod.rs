@@ -10,7 +10,6 @@ mod compaction;
 mod edit;
 mod encoding;
 pub mod environment_probe;
-pub(crate) mod escape;
 pub(crate) mod fetch_url;
 mod file_cache;
 pub mod file_type;

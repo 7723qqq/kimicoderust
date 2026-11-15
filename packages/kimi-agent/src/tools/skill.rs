@@ -5,8 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{arg_error, err_result};
+use crate::_base::utils::xml_escape::{escape_xml, escape_xml_attr, escape_xml_tags};
 use crate::callbacks::HostCallbacks;
-use crate::rpc::types::{ContentBlock, StateReadRequest, ToolDelivery};
+use crate::rpc::types::{ContentPart, StateReadRequest, ToolDelivery};
 use crate::turn_loop::types::ExecutableToolResult;
 
 const SKILL_NOT_FOUND_MESSAGE: &str = "not found in the current skill listing.";
@@ -99,22 +100,6 @@ fn tokenize_args(raw: &str) -> Vec<String> {
         out.push(current);
     }
     out
-}
-
-pub fn escape_xml_tags(input: &str) -> String {
-    input.replace('<', "&lt;").replace('>', "&gt;")
-}
-
-fn escape_xml_attr(input: &str) -> String {
-    input.replace('&', "&amp;").replace('"', "&quot;")
-}
-
-fn escape_xml(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn replace_named_placeholder(content: &str, name: &str, replacement: &str) -> String {
@@ -549,7 +534,7 @@ pub async fn execute_skill_with_depth(
             resolved.name
         ),
         delivery: Some(ToolDelivery {
-            blocks: vec![ContentBlock::Text {
+            blocks: vec![ContentPart::Text {
                 text: delivery_text,
                 meta: None,
             }],
@@ -901,7 +886,7 @@ mod tests {
         .await;
         assert!(!result.is_error, "{}", result.content);
         assert!(read_received.lock().unwrap().is_none(), "the scan answered");
-        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(
@@ -928,7 +913,7 @@ mod tests {
         );
 
         let delivery = result.delivery.expect("steer delivery");
-        let ContentBlock::Text { text, .. } = &delivery.blocks[0] else {
+        let ContentPart::Text { text, .. } = &delivery.blocks[0] else {
             panic!("expected a text block");
         };
         assert_eq!(
@@ -1083,7 +1068,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error);
-        let ContentBlock::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(
@@ -1260,7 +1245,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error);
-        let ContentBlock::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("<plugin-instructions plugin=\"superpowers\">\nUse AskUserQuestion for clarifying questions.\n</plugin-instructions>\n\nBrainstorm body."));
@@ -1319,7 +1304,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error);
-        let ContentBlock::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("session is session-xyz-123"));
@@ -1351,7 +1336,7 @@ mod tests {
             result.content,
             "Skill \"demo\" loaded inline. Follow its instructions."
         );
-        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("<skill-loaded name=\"demo\""));
@@ -1403,7 +1388,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
-        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("Review src/app.ts in strict."), "{text}");
@@ -1464,7 +1449,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
-        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("Brand body."), "{text}");
@@ -1537,7 +1522,7 @@ mod tests {
         .await;
         assert!(!result.is_error, "{}", result.content);
         let delivery = result.delivery.expect("delivery");
-        let ContentBlock::Text { text, .. } = &delivery.blocks[0] else {
+        let ContentPart::Text { text, .. } = &delivery.blocks[0] else {
             panic!("expected a text block");
         };
         assert!(
@@ -1580,7 +1565,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
-        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("name=\"q&quot;x\""), "{text}");
@@ -1692,7 +1677,7 @@ mod tests {
         )
         .await;
         assert!(!result.is_error, "{}", result.content);
-        let ContentBlock::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
+        let ContentPart::Text { text, .. } = &result.delivery.as_ref().unwrap().blocks[0] else {
             panic!("expected a text block");
         };
         assert!(text.contains("trigger=\"nested-skill\""), "{text}");

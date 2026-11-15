@@ -1,9 +1,10 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use crate::environment::environment::EnvironmentPath;
 use crate::os::interface::host_environment::PathClass;
 use crate::os::interface::host_file_system::IHostFileSystem;
@@ -47,3 +48,7 @@ pub trait IAgentPlanService: Send + Sync {
     ) -> Option<PlanFileTarget>;
     async fn status(&self) -> Result<Option<PlanData>, String>;
 }
+
+
+pub static I_AGENT_PLAN_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentPlanService>>> =
+    LazyLock::new(|| create_decorator("agentPlanService"));

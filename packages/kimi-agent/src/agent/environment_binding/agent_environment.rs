@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event, Subscription};
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
 use crate::app::environment::environment::IEnvironmentService;
@@ -47,7 +47,7 @@ pub trait IAgentEnvironmentService: Send + Sync {
     fn workspace_roots(&self) -> EnvironmentWorkspaceRoots;
 }
 
-pub static I_AGENT_ENVIRONMENT_SERVICE: LazyLock<ServiceIdentifier<DynamicValue>> =
+pub static I_AGENT_ENVIRONMENT_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentEnvironmentService>>> =
     LazyLock::new(|| create_decorator("agentEnvironmentService"));
 
 pub async fn acquire_or_when_ready(
@@ -137,7 +137,7 @@ struct AgentEnvironmentServiceInner {
     workspace_info: Arc<dyn ISessionWorkspaceInfo>,
     change_emitter: Emitter<()>,
     binding_subscription: Mutex<Option<Subscription>>,
-    registry_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    registry_subscription: Mutex<Option<DisposableRef>>,
 }
 
 impl AgentEnvironmentServiceInner {

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use serde_json::{Map, Value};
 
-use crate::human::llm::message::ToolDescription;
+use crate::human::llm::message::{Deferred, ToolDescription};
 use crate::human::tool::executor::{ToolExecuteInput, ToolExecutor, ToolResult};
 use crate::wire::record::WireAsyncError;
 
@@ -20,7 +20,7 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: Map<String, Value>,
-    pub deferred: Option<bool>,
+    pub deferred: Option<Deferred>,
     pub execute: ToolExecute,
 }
 

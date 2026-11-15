@@ -115,27 +115,27 @@ async fn test_context_overflow_triggers_emergency_compaction_and_recovers() {
         llm: &llm,
         messages: vec![
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "u1".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: "a1".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "u2".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: "a2".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "u3".into(),
                 ..Default::default()
             },
@@ -246,27 +246,27 @@ async fn test_compaction_attempt_cap_reaches_the_turn_loop_summarizer() {
         llm: &llm,
         messages: vec![
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "u1".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: "a1".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "u2".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: "a2".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "u3".into(),
                 ..Default::default()
             },
@@ -351,10 +351,9 @@ async fn context_overflow_recovery_retries_the_step() {
                         tool_calls: vec![],
                         finish_reason: Some("stop".into()),
                         usage: TokenUsage {
-                            input_tokens: 1,
-                            output_tokens: 1,
-                            total_tokens: 2,
-                            ..Default::default()
+                            input_other: 1,
+                            output: 1,
+                                                        ..Default::default()
                         },
                         timing: None,
                     })
@@ -378,7 +377,7 @@ async fn context_overflow_recovery_retries_the_step() {
     let callbacks = rpc_callbacks(server);
 
     let mut messages = vec![LLMMessage {
-        role: "system".into(),
+        role: kimi_core::types::Role::System,
         content: "sys".into(),
         ..Default::default()
     }];
@@ -479,10 +478,9 @@ async fn overflow_without_a_split_point_reports_cancelled_not_completed() {
                         tool_calls: vec![],
                         finish_reason: Some("stop".into()),
                         usage: TokenUsage {
-                            input_tokens: 1,
-                            output_tokens: 1,
-                            total_tokens: 2,
-                            ..Default::default()
+                            input_other: 1,
+                            output: 1,
+                                                        ..Default::default()
                         },
                         timing: None,
                     })
@@ -507,12 +505,12 @@ async fn overflow_without_a_split_point_reports_cancelled_not_completed() {
 
     let messages = vec![
         LLMMessage {
-            role: "system".into(),
+            role: kimi_core::types::Role::System,
             content: "sys".into(),
             ..Default::default()
         },
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "one oversized turn that cannot be split anywhere".into(),
             ..Default::default()
         },
@@ -628,7 +626,7 @@ async fn a_failing_summarizer_reports_compaction_failed() {
     let callbacks: Arc<dyn HostCallbacks> = Arc::new(capturing);
 
     let mut messages = vec![LLMMessage {
-        role: "system".into(),
+        role: kimi_core::types::Role::System,
         content: "sys".into(),
         ..Default::default()
     }];
@@ -737,7 +735,7 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
                 .messages
                 .iter()
                 .flat_map(|message| message.blocks.iter())
-                .filter(|block| !matches!(block, crate::rpc::types::ContentBlock::Text { .. }))
+                .filter(|block| !matches!(block, crate::rpc::types::ContentPart::Text { .. }))
                 .count();
             self.seen_media.lock().unwrap().push(media);
             let call = self.step_calls.fetch_add(1, Ordering::SeqCst);
@@ -789,18 +787,18 @@ async fn a_too_large_request_degrades_then_strips_and_retries() {
     let resolver = crate::llm::media_resolver::MediaResolver::with_store(files);
 
     let mut messages = vec![LLMMessage {
-        role: "system".into(),
+        role: kimi_core::types::Role::System,
         content: "sys".into(),
         ..Default::default()
     }];
     for file_id in &file_ids {
         messages.push(LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "look".into(),
-            blocks: vec![crate::rpc::types::ContentBlock::MediaRef {
-                file_id: file_id.clone(),
-                kind: crate::rpc::types::MediaKind::Image,
-            }],
+            blocks: vec![crate::llm::media_resolver::file_media_part(
+                file_id.clone(),
+                crate::rpc::types::MediaKind::Image,
+            )],
             ..Default::default()
         });
     }
@@ -905,12 +903,12 @@ async fn an_interruption_cancels_an_in_flight_media_upload() {
         },
     };
     let messages = vec![LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: String::new(),
-        blocks: vec![crate::turn_loop::types::ContentBlock::MediaRef {
-            file_id: meta.id.clone(),
-            kind: crate::rpc::types::MediaKind::Video,
-        }],
+        blocks: vec![crate::llm::media_resolver::file_media_part(
+            meta.id.clone(),
+            crate::rpc::types::MediaKind::Video,
+        )],
         ..Default::default()
     }];
     let server_rpc = Arc::new(RpcServer::new());
@@ -999,7 +997,7 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
                 .messages
                 .iter()
                 .flat_map(|message| message.blocks.iter())
-                .filter(|block| !matches!(block, crate::rpc::types::ContentBlock::Text { .. }))
+                .filter(|block| !matches!(block, crate::rpc::types::ContentPart::Text { .. }))
                 .count();
             self.seen_media.lock().unwrap().push(media);
             let call = self.step_calls.fetch_add(1, Ordering::SeqCst);
@@ -1053,23 +1051,23 @@ async fn a_media_recovery_applies_to_later_turns_until_invalidated() {
 
     let history = |prompt: &str| {
         let mut messages = vec![LLMMessage {
-            role: "system".into(),
+            role: kimi_core::types::Role::System,
             content: "sys".into(),
             ..Default::default()
         }];
         for file_id in &file_ids {
             messages.push(LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "look".into(),
-                blocks: vec![crate::rpc::types::ContentBlock::MediaRef {
-                    file_id: file_id.clone(),
-                    kind: crate::rpc::types::MediaKind::Image,
-                }],
+                blocks: vec![crate::llm::media_resolver::file_media_part(
+                    file_id.clone(),
+                    crate::rpc::types::MediaKind::Image,
+                )],
                 ..Default::default()
             });
         }
         messages.push(LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: prompt.into(),
             ..Default::default()
         });
@@ -1168,7 +1166,7 @@ async fn an_image_format_rejection_strips_the_media_and_retries() {
                 .messages
                 .iter()
                 .flat_map(|message| message.blocks.iter())
-                .filter(|block| !matches!(block, crate::rpc::types::ContentBlock::Text { .. }))
+                .filter(|block| !matches!(block, crate::rpc::types::ContentPart::Text { .. }))
                 .count();
             self.seen_media.lock().unwrap().push(media);
             let call = self.step_calls.fetch_add(1, Ordering::SeqCst);
@@ -1219,18 +1217,18 @@ async fn an_image_format_rejection_strips_the_media_and_retries() {
     let resolver = crate::llm::media_resolver::MediaResolver::with_store(files);
 
     let mut messages = vec![LLMMessage {
-        role: "system".into(),
+        role: kimi_core::types::Role::System,
         content: "sys".into(),
         ..Default::default()
     }];
     for file_id in &file_ids {
         messages.push(LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "look".into(),
-            blocks: vec![crate::rpc::types::ContentBlock::MediaRef {
-                file_id: file_id.clone(),
-                kind: crate::rpc::types::MediaKind::Image,
-            }],
+            blocks: vec![crate::llm::media_resolver::file_media_part(
+                file_id.clone(),
+                crate::rpc::types::MediaKind::Image,
+            )],
             ..Default::default()
         });
     }
@@ -1299,10 +1297,9 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 5,
-                        output_tokens: 3,
-                        total_tokens: 8,
-                        ..Default::default()
+                        input_other: 5,
+                        output: 3,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -1311,13 +1308,13 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
     }
 
     let image = |tag: &str, bytes: usize| LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: String::new(),
-        blocks: vec![ContentBlock::Image {
-            media_type: "image/png".into(),
-            data: format!("{tag}{}", "A".repeat(bytes)),
-            name: None,
-        }],
+        blocks: vec![crate::llm::media_resolver::inline_image_part(
+            "image/png".into(),
+            format!("{tag}{}", "A".repeat(bytes)),
+            None,
+        )],
         tool_calls: Vec::new(),
         tool_call_id: None,
         tools: Vec::new(),
@@ -1363,19 +1360,19 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
     let turn = run_turn(input, &callbacks).await.unwrap();
 
     let sent = captured.lock().unwrap().clone();
-    let omitted_block = |block: &ContentBlock| {
+    let omitted_block = |block: &ContentPart| {
         matches!(
             block,
-            ContentBlock::Text { text, .. }
+            ContentPart::Text { text, .. }
                 if text == "[image omitted: dropped to fit the request media budget]"
         )
     };
     let omitted = |message: &LLMMessage| message.blocks.iter().any(omitted_block);
 
-    let media: Vec<&ContentBlock> = sent
+    let media: Vec<&ContentPart> = sent
         .iter()
         .flat_map(|m| m.blocks.iter())
-        .filter(|b| omitted_block(b) || matches!(b, ContentBlock::Image { .. }))
+        .filter(|b| omitted_block(b) || matches!(b, ContentPart::ImageUrl { .. }))
         .collect();
     assert_eq!(media.len(), 3, "{sent:?}");
     assert!(
@@ -1384,7 +1381,7 @@ async fn test_over_budget_media_are_omitted_from_the_request_and_warned_about() 
     );
     assert!(omitted_block(media[1]));
     assert!(
-        matches!(media[2], ContentBlock::Image { .. }),
+        matches!(media[2], ContentPart::ImageUrl { .. }),
         "the newest media stays: {:?}",
         media[2]
     );
@@ -1442,10 +1439,9 @@ async fn a_request_over_the_byte_budget_evicts_media_before_sending() {
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 5,
-                        output_tokens: 3,
-                        total_tokens: 8,
-                        ..Default::default()
+                        input_other: 5,
+                        output: 3,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -1454,13 +1450,13 @@ async fn a_request_over_the_byte_budget_evicts_media_before_sending() {
     }
 
     let image = |tag: &str, bytes: usize| LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: String::new(),
-        blocks: vec![ContentBlock::Image {
-            media_type: "image/png".into(),
-            data: format!("{tag}{}", "A".repeat(bytes)),
-            name: None,
-        }],
+        blocks: vec![crate::llm::media_resolver::inline_image_part(
+            "image/png".into(),
+            format!("{tag}{}", "A".repeat(bytes)),
+            None,
+        )],
         tool_calls: Vec::new(),
         tool_call_id: None,
         tools: Vec::new(),
@@ -1518,13 +1514,13 @@ async fn a_request_over_the_byte_budget_evicts_media_before_sending() {
     assert!(
         matches!(
             &sent[1].blocks[0],
-            ContentBlock::Text { text, .. } if text == "[image omitted: dropped to fit the provider request size limit; re-read the file to view it]"
+            ContentPart::Text { text, .. } if text == "[image omitted: dropped to fit the provider request size limit; re-read the file to view it]"
         ),
         "the oldest media is evicted before send: {:?}",
         sent[1].blocks[0]
     );
-    assert!(matches!(sent[1].blocks[1], ContentBlock::Image { .. }));
-    assert!(matches!(sent[1].blocks[2], ContentBlock::Image { .. }));
+    assert!(matches!(sent[1].blocks[1], ContentPart::ImageUrl { .. }));
+    assert!(matches!(sent[1].blocks[2], ContentPart::ImageUrl { .. }));
     let warnings: Vec<serde_json::Value> = events
         .lock()
         .unwrap()
@@ -1572,11 +1568,11 @@ async fn a_successful_overflow_compaction_reports_compaction_finished() {
                         tool_calls: vec![],
                         finish_reason: Some("stop".into()),
                         usage: TokenUsage {
-                            input_tokens: 7,
-                            output_tokens: 3,
-                            total_tokens: 10,
+                            input_other: 7,
+                            output: 3,
                             input_cache_read: 2,
                             input_cache_creation: 1,
+                            raw: None,
                         },
                         timing: None,
                     }),
@@ -1598,7 +1594,7 @@ async fn a_successful_overflow_compaction_reports_compaction_finished() {
     };
 
     let mut messages = vec![LLMMessage {
-        role: "system".into(),
+        role: kimi_core::types::Role::System,
         content: "sys".into(),
         ..Default::default()
     }];
@@ -1673,7 +1669,7 @@ async fn a_successful_overflow_compaction_reports_compaction_finished() {
 #[test]
 fn the_in_turn_gauge_rebases_on_the_measured_summary_output() {
     let summary = LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: format!(
             "{} the summary body",
             crate::compaction::COMPACTION_SUMMARY_PREFIX
@@ -1682,13 +1678,13 @@ fn the_in_turn_gauge_rebases_on_the_measured_summary_output() {
     };
     let history = vec![
         LLMMessage {
-            role: "system".into(),
+            role: kimi_core::types::Role::System,
             content: "system prompt".into(),
             ..Default::default()
         },
         summary,
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "kept reply".into(),
             ..Default::default()
         },

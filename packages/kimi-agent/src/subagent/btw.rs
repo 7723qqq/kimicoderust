@@ -115,8 +115,8 @@ mod tests {
     async fn test_start_btw_creates_instance_and_seeds_history() {
         let manager = Arc::new(SubagentManager::new());
         let history = vec![
-            LLMMessage::new("user", "how does auth work?"),
-            LLMMessage::new("assistant", "it uses bearer tokens"),
+            LLMMessage::new(kimi_core::types::Role::User, "how does auth work?"),
+            LLMMessage::new(kimi_core::types::Role::Assistant, "it uses bearer tokens"),
         ];
 
         let agent_id = start_btw(&manager, &history).await.unwrap();
@@ -162,14 +162,15 @@ mod tests {
         let in_flight_call = crate::turn_loop::types::ToolCall {
             id: "call-read-pending".into(),
             name: "Read".into(),
-            arguments: serde_json::json!({ "path": "test.txt" }),
+            arguments: Some(serde_json::json!({ "path": "test.txt" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         };
         let history = vec![
-            LLMMessage::new("user", "check the config"),
+            LLMMessage::new(kimi_core::types::Role::User, "check the config"),
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: "reading now".into(),
                 blocks: Vec::new(),
                 tool_calls: vec![in_flight_call],

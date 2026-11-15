@@ -1,3 +1,4 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -7,7 +8,7 @@ use serde_json::Value;
 use crate::_base::di::lifecycle::IDisposable;
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::file_log::{FileLogWriter, FileLogWriterOptions, create_file_log_writer};
-use crate::_base::log::log::{ILogService, ILogger, LogLevel, LogPayload};
+use crate::_base::log::log::{I_LOG_SERVICE, ILogService, ILogger, LogLevel, LogPayload};
 use crate::_base::log::log_config::{ILogOptions, resolve_session_log_path};
 use crate::_base::log::log_service::{BoundLogger, LogLevelState, track_log_close};
 use crate::app::scopes::LifecycleScope;
@@ -133,6 +134,6 @@ pub fn register_session_log_service() {
     register_scoped_service(
         LifecycleScope::Session,
         ScopeActivation::OnScopeCreated,
-        "log",
+        I_LOG_SERVICE.name(),
     );
 }

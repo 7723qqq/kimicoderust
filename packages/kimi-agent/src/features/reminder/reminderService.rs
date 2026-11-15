@@ -1,9 +1,12 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
+use crate::_base::log::log::I_LOG_SERVICE;
 use crate::agent::actor_service::agent_actor_runtime::AgentActorHost;
 use crate::agent::actor_service::agent_actor_service::{
     AgentActorContext, AgentActorDurable, AgentActorOptions, AgentActorService,
@@ -13,11 +16,11 @@ use crate::agent::actor_service::services::{
 };
 use crate::agent::agent_context::AgentContext;
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
-use crate::agent::context_memory::types::ContextMessage;
+use crate::agent::context_memory::types::{ContextMessage, InjectionOrigin, PromptOrigin};
 use crate::features::reminder::types::{
     ContextInjectionContent, ContextInjectionContext, ContextInjectionResult, ReminderNotification,
 };
-use kimi_core::types::ContentBlock;
+use kimi_core::types::ContentPart;
 
 #[derive(Clone)]
 pub struct ReminderEntry {
@@ -227,15 +230,8 @@ pub fn find_injections(history: &[ContextMessage], variant: &str) -> Vec<usize> 
         let matches = message
             .origin
             .as_ref()
-            .and_then(|origin| origin.get("kind"))
-            .and_then(Value::as_str)
-            == Some("injection")
-            && message
-                .origin
-                .as_ref()
-                .and_then(|origin| origin.get("variant"))
-                .and_then(Value::as_str)
-                == Some(variant);
+            .and_then(PromptOrigin::injection_variant)
+            == Some(variant);
         if matches {
             positions.push(index);
         }
@@ -275,10 +271,14 @@ pub fn is_raw_injection_message(content: &Value) -> bool {
     !content.is_array()
 }
 
-fn text_context_message(role: impl Into<String>, text: String, origin: Value) -> ContextMessage {
+fn text_context_message(
+    role: crate::human::llm::message::Role,
+    text: String,
+    origin: PromptOrigin,
+) -> ContextMessage {
     ContextMessage {
-        role: role.into(),
-        blocks: vec![ContentBlock::Text { text, meta: None }],
+        role,
+        content: vec![ContentPart::Text { text, meta: None }],
         origin: Some(origin),
         ..Default::default()
     }
@@ -290,12 +290,12 @@ pub fn append_reminder(
     notification: &ReminderNotification,
 ) {
     let message = text_context_message(
-        "user",
+        crate::human::llm::message::Role::User,
         wrap_system_reminder(content),
         reminder_origin(
             &notification.variant,
             notification.owner_prompt_id.clone(),
-            "ownerPromptId",
+            None,
         ),
     );
     runtime
@@ -319,8 +319,8 @@ pub fn provider_context(
     let last_disclosure = last_injection
         .as_ref()
         .and_then(|message| message.origin.as_ref())
-        .filter(|origin| origin.get("kind").and_then(Value::as_str) == Some("injection"))
-        .and_then(|origin| origin.get("disclosure").cloned());
+        .and_then(PromptOrigin::injection_disclosure)
+        .cloned();
     ContextInjectionContext {
         injected_positions,
         last_injected_at,
@@ -381,7 +381,7 @@ pub fn append_result(
     let Some(result) = content else {
         return;
     };
-    let origin = reminder_origin(&entry.variant, result.disclosure, "disclosure");
+    let origin = reminder_origin(&entry.variant, None, result.disclosure);
     let memory = runtime.service::<dyn IAgentContextMemoryService>("contextMemoryService");
     match result.content {
         ContextInjectionContent::Text(text) => {
@@ -389,7 +389,7 @@ pub fn append_result(
                 return;
             }
             memory.append(&[text_context_message(
-                "user",
+                crate::human::llm::message::Role::User,
                 wrap_system_reminder(&text),
                 origin,
             )]);
@@ -407,7 +407,7 @@ pub fn append_result(
             memory.append(&[ContextMessage {
                 role: message.role,
                 blocks: message.content,
-                tools: message.tools.unwrap_or_default(),
+                tools: message.tools,
                 origin: Some(origin),
                 ..Default::default()
             }]);
@@ -417,8 +417,8 @@ pub fn append_result(
                 return;
             }
             memory.append(&[ContextMessage {
-                role: "user".to_string(),
-                blocks: parts,
+                role: crate::human::llm::message::Role::User,
+                content: parts,
                 origin: Some(origin),
                 ..Default::default()
             }]);
@@ -622,10 +622,12 @@ fn provider_failed(
     if signal.as_ref().is_some_and(|signal| signal.is_cancelled()) {
         return;
     }
-    runtime.service::<dyn LogService>("logService").error(
-        "context provider failed; skipping it",
-        json!({"name": entry.variant, "error": error}),
-    );
+    runtime
+        .service::<dyn LogService>(I_LOG_SERVICE.name())
+        .error(
+            "context provider failed; skipping it",
+            json!({"name": entry.variant, "error": error}),
+        );
 }
 
 fn panic_message(error: Box<dyn std::any::Any + Send>) -> String {
@@ -638,12 +640,17 @@ fn panic_message(error: Box<dyn std::any::Any + Send>) -> String {
     "unknown error".to_string()
 }
 
-fn reminder_origin<T: Into<Value>>(variant: &str, value: Option<T>, key: &str) -> Value {
-    let mut origin = json!({ "kind": "injection", "variant": variant });
-    if let Some(value) = value {
-        origin[key] = value.into();
-    }
-    origin
+fn reminder_origin(
+    variant: &str,
+    owner_prompt_id: Option<String>,
+    disclosure: Option<Value>,
+) -> PromptOrigin {
+    PromptOrigin::Injection(InjectionOrigin {
+        kind: "injection".to_string(),
+        variant: variant.to_string(),
+        owner_prompt_id,
+        disclosure,
+    })
 }
 
 fn trim_js(value: &str) -> &str {
@@ -684,3 +691,7 @@ fn is_js_whitespace(character: char) -> bool {
 fn wrap_system_reminder(content: &str) -> String {
     super::systemReminder::wrap_system_reminder(content)
 }
+
+
+pub static I_AGENT_REMINDER_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentReminderService>>> =
+    LazyLock::new(|| create_decorator("agentReminderService"));

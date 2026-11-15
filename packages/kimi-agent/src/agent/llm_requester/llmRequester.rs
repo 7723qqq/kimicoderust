@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
@@ -9,8 +11,10 @@ pub use crate::app::llm_protocol::errors::AgentLLMRequestFinish;
 use crate::human::llm::message::{StreamedMessagePart, ToolDescription as Tool};
 use crate::human::llm::requester::requester::LlmCredentialProvider;
 use crate::human::llm::thinking::ThinkingEffort;
+use crate::human::llm::usage::TokenUsage;
 use crate::llm_adapter::contract::message::Message;
 use crate::llm_adapter::contract::request_trace::LLMRequestTrace;
+use crate::llm_adapter::model::model_requester::ModelRequestTiming;
 use crate::session::cache_observation::CacheObservation;
 use crate::wire::record::WireAsyncError;
 
@@ -77,9 +81,20 @@ pub enum PromptCacheProbe {
     Compaction,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AgentLLMRequestAttemptFailure {
+    pub usage: Option<TokenUsage>,
+    pub message_id: Option<String>,
+    pub timing: Option<ModelRequestTiming>,
+}
+
+pub type AgentLLMRequestAttemptFailureGetter =
+    Arc<dyn Fn() -> Option<AgentLLMRequestAttemptFailure> + Send + Sync>;
+
 pub struct AgentLLMRequestTask {
     pub trace: LLMRequestTrace,
     pub result: BoxFuture<'static, Result<AgentLLMRequestFinish, WireAsyncError>>,
+    pub attempt_failure: AgentLLMRequestAttemptFailureGetter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,3 +146,7 @@ pub trait IAgentLLMRequesterService: Send + Sync {
         signal: Option<AbortSignal>,
     ) -> AgentLLMRequestTask;
 }
+
+
+pub static I_AGENT_LLM_REQUESTER_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentLLMRequesterService>>> =
+    LazyLock::new(|| create_decorator("agentLLMRequesterService"));

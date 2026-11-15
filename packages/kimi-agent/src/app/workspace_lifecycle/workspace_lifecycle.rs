@@ -7,7 +7,7 @@ use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::instantiation::{
     ServiceIdentifier, ServicesAccessor, create_decorator,
 };
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::wire::record::WireAsyncError;
 
 pub trait IWorkspaceScopeHandle: Send + Sync {
@@ -40,7 +40,7 @@ pub trait IWorkspaceLifecycleService: Send + Sync {
     fn on_did_materialize_handler(
         &self,
         listener: Arc<dyn Fn(Arc<dyn IWorkspaceScopeHandle>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     async fn handler_for(
         &self,
         reference: WorkspaceRef,
@@ -49,5 +49,5 @@ pub trait IWorkspaceLifecycleService: Send + Sync {
     fn sessions(&self) -> Arc<dyn WorkspaceSessionRegistry>;
 }
 
-pub static I_WORKSPACE_LIFECYCLE_SERVICE: Lazy<ServiceIdentifier<DynamicValue>> =
+pub static I_WORKSPACE_LIFECYCLE_SERVICE: Lazy<ServiceIdentifier<Arc<dyn IWorkspaceLifecycleService>>> =
     Lazy::new(|| create_decorator("workspaceLifecycleService"));

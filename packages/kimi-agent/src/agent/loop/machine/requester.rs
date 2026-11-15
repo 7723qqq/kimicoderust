@@ -10,8 +10,8 @@ use crate::_base::utils::abort::{
     AbortController, AbortSignal, abort_error, is_abort_error, link_abort_signal,
 };
 use crate::agent::llm_requester::llm_requester::{
-    AgentLLMRequestFinish, AgentLLMRequestOverrides, AgentLLMRequestSource,
-    IAgentLLMRequesterService,
+    AgentLLMRequestAttemptFailure, AgentLLMRequestFinish, AgentLLMRequestOverrides,
+    AgentLLMRequestSource, IAgentLLMRequesterService,
 };
 use crate::human::llm::errors::{LlmErrorKind, LlmRemoteErrorMessage, to_llm_error_message};
 use crate::human::llm::finish_reason::FinishInfo;
@@ -51,6 +51,7 @@ pub type MachineRequesterOptions = CreateMachineRequesterOptions;
 struct RequesterState {
     last_finish: Option<AgentLLMRequestFinish>,
     last_error: Option<Value>,
+    last_attempt_failure: Option<AgentLLMRequestAttemptFailure>,
 }
 
 pub struct MachineRequester {
@@ -65,6 +66,10 @@ impl MachineRequester {
 
     pub fn last_error(&self) -> Option<Value> {
         self.state.lock().last_error.clone()
+    }
+
+    pub fn last_attempt_failure(&self) -> Option<AgentLLMRequestAttemptFailure> {
+        self.state.lock().last_attempt_failure.clone()
     }
 }
 
@@ -163,6 +168,7 @@ impl LlmRequester for MachineRequesterImpl {
             .map(|signal| link_abort_signal(signal, controller.clone()));
         let signal = controller.signal();
         self.state.lock().last_error = None;
+        self.state.lock().last_attempt_failure = None;
         (control.on_event)(LlmRequestEvent::Sent);
         let source = match (self.options.source.as_ref().and_then(|source| source()), step) {
             (
@@ -198,6 +204,7 @@ impl LlmRequester for MachineRequesterImpl {
         if let Some(on_trace) = &self.options.on_trace {
             on_trace(task.trace);
         }
+        let attempt_failure = task.attempt_failure.clone();
         let result = task.result.await;
         cancellation_task.abort();
         if let Some(unlink) = unlink {
@@ -227,8 +234,10 @@ impl LlmRequester for MachineRequesterImpl {
                 (control.on_event)(LlmRequestEvent::Done);
             }
             Err(error) => {
+                let attempt_failure = attempt_failure();
                 self.state.lock().last_finish = None;
                 self.state.lock().last_error = Some(Value::String(error.to_string()));
+                self.state.lock().last_attempt_failure = attempt_failure;
                 let error = to_remote_error_message(error, &signal);
                 (control.on_event)(LlmRequestEvent::FailedRemote {
                     error,

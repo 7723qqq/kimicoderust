@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
+use crate::_base::utils::workdir_slug::workspace_root_key;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectIdentityKind {
     GitRemote,
@@ -32,19 +34,6 @@ fn digest(value: &str) -> String {
     hasher.update(value.as_bytes());
     let bytes = hasher.finalize();
     bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()[..12].to_string()
-}
-
-pub fn workspace_root_key(root: &str) -> String {
-    let slashed = root.replace('\\', "/");
-    let shaped = Regex::new(r"^(?:[A-Za-z]:[\\/]|\\\\|//)")
-        .expect("static win-shaped regex")
-        .is_match(&slashed);
-    let normalized = slashed.trim_end_matches('/');
-    if shaped {
-        normalized.to_lowercase()
-    } else {
-        normalized.to_string()
-    }
 }
 
 pub fn normalize_remote_url(raw: &str) -> Option<String> {

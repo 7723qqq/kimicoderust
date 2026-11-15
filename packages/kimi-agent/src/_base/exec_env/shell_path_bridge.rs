@@ -189,6 +189,7 @@ fn to_msys_path(native_path: &str) -> String {
     native_path.replace('\\', "/")
 }
 
+#[derive(Clone)]
 pub struct RemoteShellPathBridge;
 
 impl RemoteShellPathBridge {

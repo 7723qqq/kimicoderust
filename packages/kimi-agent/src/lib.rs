@@ -71,10 +71,10 @@ use std::sync::Arc;
 /// 将 EventStore 折叠出的通用模型消息转换为 TurnLoop 所需的 LLMMessage
 pub fn event_store_message_to_llm(msg: crate::native::event_store::Message) -> LLMMessage {
     let role = match msg.role {
-        crate::native::event_store::MessageRole::System => "system",
-        crate::native::event_store::MessageRole::User => "user",
-        crate::native::event_store::MessageRole::Assistant => "assistant",
-        crate::native::event_store::MessageRole::Tool => "tool",
+        crate::native::event_store::MessageRole::System => kimi_core::types::Role::System,
+        crate::native::event_store::MessageRole::User => kimi_core::types::Role::User,
+        crate::native::event_store::MessageRole::Assistant => kimi_core::types::Role::Assistant,
+        crate::native::event_store::MessageRole::Tool => kimi_core::types::Role::Tool,
     };
 
     let mut tool_calls = Vec::new();
@@ -96,14 +96,26 @@ pub fn event_store_message_to_llm(msg: crate::native::event_store::Message) -> L
             let arguments = c
                 .get("function")
                 .and_then(|f| f.get("arguments"))
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
+                .and_then(|arguments| match arguments {
+                    serde_json::Value::String(raw) => Some(raw.clone()),
+                    serde_json::Value::Null => None,
+                    other => Some(other.to_string()),
+                });
+            let extras = c
+                .get("extras")
+                .and_then(serde_json::Value::as_object)
+                .cloned();
+            let raw_id = c
+                .get("rawId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
             tool_calls.push(crate::turn_loop::types::ToolCall {
                 id,
                 name,
                 arguments,
-                extras: None,
-                args_parse_error: None,
+                extras,
+                raw_id,
+                _stream_index: None,
             });
         }
     }
@@ -111,12 +123,12 @@ pub fn event_store_message_to_llm(msg: crate::native::event_store::Message) -> L
     // v2's provider lowerers skip a content part they do not recognize and
     // keep the rest (`human/llm/requester/bases/*/lower.ts`); dropping the
     // whole array here erased a multimodal message's body with no trace.
-    let blocks: Vec<crate::rpc::types::ContentBlock> = match msg.blocks {
+    let blocks: Vec<crate::rpc::types::ContentPart> = match msg.blocks {
         serde_json::Value::Null => Vec::new(),
         serde_json::Value::Array(items) => items
             .into_iter()
             .filter_map(|item| match serde_json::from_value(item) {
-                Ok(block) => Some(block),
+                Ok(block) => Some(crate::llm::wire::provider_block_to_content_part(&block)),
                 Err(error) => {
                     tracing::warn!(%error, "dropping a content block whose shape does not decode");
                     None
@@ -133,7 +145,7 @@ pub fn event_store_message_to_llm(msg: crate::native::event_store::Message) -> L
     };
 
     LLMMessage {
-        role: role.to_string(),
+        role,
         content: msg.content,
         blocks,
         tool_calls,
@@ -679,11 +691,11 @@ mod engine_tests {
         assert_eq!(converted.blocks.len(), 2);
         assert!(matches!(
             converted.blocks[0],
-            crate::rpc::types::ContentBlock::Text { .. }
+            crate::rpc::types::ContentPart::Text { .. }
         ));
         assert!(matches!(
             converted.blocks[1],
-            crate::rpc::types::ContentBlock::ImageUrl { .. }
+            crate::rpc::types::ContentPart::ImageUrl { .. }
         ));
 
         let not_an_array = crate::native::event_store::Message {
@@ -820,7 +832,7 @@ mod engine_tests {
                     thinking: Vec::new(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),
-                    usage: crate::rpc::types::TokenUsage::default(),
+                    usage: kimi_core::types::TokenUsage::default(),
                     timing: None,
                 })
             })
@@ -902,14 +914,15 @@ mod engine_tests {
                         tool_calls: vec![crate::turn_loop::types::ToolCall {
                             id: "call_read_1".into(),
                             name: "Read".into(),
-                            arguments: serde_json::json!({
+                            arguments: Some(serde_json::json!({
                                 "path": "package.json"
-                            }),
+                            }).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
-                        usage: crate::rpc::types::TokenUsage::default(),
+                        usage: kimi_core::types::TokenUsage::default(),
                         timing: None,
                     })
                 } else {
@@ -919,7 +932,7 @@ mod engine_tests {
                         thinking: Vec::new(),
                         tool_calls: Vec::new(),
                         finish_reason: Some("stop".into()),
-                        usage: crate::rpc::types::TokenUsage::default(),
+                        usage: kimi_core::types::TokenUsage::default(),
                         timing: None,
                     })
                 }

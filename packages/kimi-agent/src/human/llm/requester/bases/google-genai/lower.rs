@@ -21,12 +21,17 @@ pub fn is_modern_gemini_model(model_name: &str) -> bool {
     let Some(rest) = model_name.strip_prefix("gemini-") else {
         return false;
     };
-    let digit_count = rest.chars().take_while(char::is_ascii_digit).count();
-    if digit_count == 0 || rest.chars().nth(digit_count) != Some('-') {
+    let mut characters = rest.chars();
+    let Some(first) = characters.next() else {
         return false;
+    };
+    match first {
+        '3'..='9' => characters.next() == Some('-'),
+        '1'..='9' => {
+            characters.next().is_some_and(|c| c.is_ascii_digit()) && characters.next() == Some('-')
+        }
+        _ => false,
     }
-    let number: u32 = rest[..digit_count].parse().unwrap_or(0);
-    number >= 3
 }
 
 fn is_nested_function_response_part(part: &GooglePart) -> bool {

@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use crate::tool_input_display::{TodoListItem, ToolInputDisplay};
+use crate::tool_input_display::{CommandLanguage, FileIoOperation, TodoListItem, ToolInputDisplay};
 use crate::tools::agent_tool::agent_call_display;
 
 fn text<'a>(args: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -15,7 +15,7 @@ pub fn tool_input_display(name: &str, args: &Value) -> Option<ToolInputDisplay> 
             command: text(args, "command")?.to_string(),
             cwd: text(args, "cwd").map(str::to_string),
             description: text(args, "description").map(str::to_string),
-            language: Some("bash".to_string()),
+            language: Some(CommandLanguage::Bash),
         },
 
         "powershell" => ToolInputDisplay::Command {
@@ -25,7 +25,7 @@ pub fn tool_input_display(name: &str, args: &Value) -> Option<ToolInputDisplay> 
             language: None,
         },
         "read" => ToolInputDisplay::FileIo {
-            operation: "read".to_string(),
+            operation: FileIoOperation::Read,
             path: text(args, "path")?.to_string(),
             detail: None,
             content: None,
@@ -33,7 +33,7 @@ pub fn tool_input_display(name: &str, args: &Value) -> Option<ToolInputDisplay> 
             after: None,
         },
         "write" => ToolInputDisplay::FileIo {
-            operation: "write".to_string(),
+            operation: FileIoOperation::Write,
             path: text(args, "path")?.to_string(),
             detail: None,
             content: text(args, "content").map(str::to_string),
@@ -41,7 +41,7 @@ pub fn tool_input_display(name: &str, args: &Value) -> Option<ToolInputDisplay> 
             after: None,
         },
         "edit" => ToolInputDisplay::FileIo {
-            operation: "edit".to_string(),
+            operation: FileIoOperation::Edit,
             path: text(args, "path")?.to_string(),
             detail: None,
             content: None,
@@ -58,7 +58,7 @@ pub fn tool_input_display(name: &str, args: &Value) -> Option<ToolInputDisplay> 
                 detail.push_str(", include_ignored: true");
             }
             ToolInputDisplay::FileIo {
-                operation: "glob".to_string(),
+                operation: FileIoOperation::Glob,
                 path: text(args, "path").unwrap_or(".").to_string(),
                 detail: Some(detail),
                 content: None,
@@ -68,7 +68,7 @@ pub fn tool_input_display(name: &str, args: &Value) -> Option<ToolInputDisplay> 
         }
 
         "grep" => ToolInputDisplay::FileIo {
-            operation: "grep".to_string(),
+            operation: FileIoOperation::Grep,
             path: text(args, "path").unwrap_or(".").to_string(),
             detail: None,
             content: None,
@@ -96,8 +96,12 @@ pub fn tool_input_display(name: &str, args: &Value) -> Option<ToolInputDisplay> 
                         .iter()
                         .filter_map(|item| {
                             Some(TodoListItem {
+                                id: None,
+                                parent_id: None,
+                                kind: None,
                                 title: item["title"].as_str()?.to_string(),
                                 status: item["status"].as_str()?.to_string(),
+                                progress: None,
                             })
                         })
                         .collect::<Vec<_>>()

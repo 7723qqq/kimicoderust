@@ -1061,16 +1061,17 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "_base/errors/errorCode.generated.ts",
-      "verdict": "partial",
+      "verdict": "equivalent",
       "rustPaths": [
         "packages/kimi-core/src/primitives/errors/domains.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
         "2026-11-13 机械比对：v2 ERROR_CODE_UNION 的 172 个码与 domains.rs 中 BUILTIN_DOMAINS 的 172 个 pub const 码值集合完全相同（v2-only=[]，engine-only=[]）。",
-        "2026-11-15 重 pin 分诊：v2 2c6264660e/b3e4eac6f0 的 ERROR_CODE_UNION 现有 177 个码（含 turn.not_found）；Rust `packages/kimi-core/src/primitives/errors/domains.rs` 只有 176 个，缺 turn.not_found，故降为 partial。"
+        "2026-11-15 重 pin 分诊：v2 2c6264660e/b3e4eac6f0 的 ERROR_CODE_UNION 现有 177 个码（含 turn.not_found）；Rust `packages/kimi-core/src/primitives/errors/domains.rs` 只有 176 个，缺 turn.not_found，故降为 partial。",
+        "2026-11-15 补齐：按 `errorCode.generated.ts:167` 在 `domains.rs:484-496` 注册 `agent_loop::TURN_NOT_FOUND`，码表总数断言 `codes.rs:287` 同步为 177，与 v2 ERROR_CODE_UNION 的 177 个码一致。"
       ],
-      "note": "生成码表主集合一致；turn.not_found 缺失。",
+      "note": "生成码表主集合与 v2 一致（177 个码，含 turn.not_found）。",
       "naReason": "",
       "lines": 178,
       "exports": 1,
@@ -14904,16 +14905,18 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm-kimi/files.ts",
-      "verdict": "partial",
+      "verdict": "equivalent",
       "rustPaths": [
+        "packages/kimi-agent/src/human/llm-kimi/files.rs",
         "packages/kimi-agent/src/llm/files_upload.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
         "2026-11-13 核对：Kimi 文件上传（multipart 构造、文件名/类型、上传端点）在 `llm/files_upload.rs`（`multipart_body`/`upload_filename`/`upload_media`）中落地；候选的 server/files.rs 等为同名误配，已排除。",
-        "2026-11-15 重 pin 分诊：v2 f6a5ebe62c 校验 Kimi 文件上传响应（extract_status/status 必须 ready，error 细节取 status_details/extract_error/error.message）；Rust `llm/files_upload.rs` 只按 HTTP 状态分类，未解析上传体状态，故降为 partial。"
+        "2026-11-15 重 pin 分诊：v2 f6a5ebe62c 校验 Kimi 文件上传响应（extract_status/status 必须 ready，error 细节取 status_details/extract_error/error.message）；Rust `llm/files_upload.rs` 只按 HTTP 状态分类，未解析上传体状态，故降为 partial。",
+        "2026-11-15 补齐：v2 的精确路径孪生是 `human/llm-kimi/files.rs`，与 `llm/files_upload.rs` 两条上传路径同时按 `human/llm-kimi/files.ts:31-104,166` 校验响应体——id 非空、extract_status 非 ready 即报错、status 仅放行 ready/ok/processed（extract_status=ready 且 status=uploaded 例外），错误细节按 status_details → extract_error → error(.message) → message 取值，错误文案与 v2 逐字一致。"
       ],
-      "note": "上传主路径一致；上传体状态校验未移植。",
+      "note": "响应体状态校验已在两条上传路径落地，与 v2 文案一致。",
       "naReason": "",
       "lines": 123,
       "exports": 5,
@@ -15740,16 +15743,17 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/anthropic/lower.ts",
-      "verdict": "partial",
+      "verdict": "equivalent",
       "rustPaths": [
-        "packages/kimi-agent/src/llm/anthropic.rs"
+        "packages/kimi-agent/src/human/llm/requester/bases/anthropic/lower.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
         "2026-11-13 核对：Anthropic 响应降级（stop_reason 映射、usage 提取、错误体解析）在 `llm/anthropic.rs::parse_response` 中落地。",
-        "2026-11-15 重 pin 分诊：v2 e6d935e06a 对 Anthropic 文本块跳过纯空白文本（`text.trim().length > 0`）；Rust `llm/anthropic.rs` 只过滤空字符串（`text.is_empty()`），纯空白仍下发，故降为 partial。"
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 对 Anthropic 文本块跳过纯空白文本（`text.trim().length > 0`）；Rust `llm/anthropic.rs` 只过滤空字符串（`text.is_empty()`），纯空白仍下发，故降为 partial。",
+        "2026-11-15 补齐：v2 文件的路径孪生是 `human/llm/requester/bases/anthropic/lower.rs`，其非 tool 分支在 `:202` 已用 `!text.trim().is_empty()`，与 `anthropic/lower.ts:159-162` 逐字对齐；tool 分支 :162 的 `!text.is_empty()` 对应 v2 `:134-137` 的 truthy 判定。旧 `llm/anthropic.rs:543-544` 属原生 HTTP 遗留面，不在 v2 引擎端口内。"
       ],
-      "note": "文本块转换主路径一致；纯空白过滤口径不同。",
+      "note": "v2 引擎端口（human/llm 孪生）的空白过滤已与 v2 一致。",
       "naReason": "",
       "lines": 185,
       "exports": 3,
@@ -15948,16 +15952,17 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/google-genai/contract.ts",
-      "verdict": "partial",
+      "verdict": "equivalent",
       "rustPaths": [
-        "packages/kimi-agent/src/llm/google_genai.rs"
+        "packages/kimi-agent/src/human/llm/requester/bases/google-genai/contract.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
         "2026-11-13 核对：Google GenAI 线协议契约在 `llm/google_genai.rs` 中落地。",
-        "2026-11-15 重 pin 分诊：v2 e6d935e06a 给 GooglePart 的 functionCall 增加 `id`、functionResponse 增加 `id` 且 parts 变可选；Rust `llm/google_genai.rs` 的请求/响应构造无这些 id 字段，故降为 partial。"
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 给 GooglePart 的 functionCall 增加 `id`、functionResponse 增加 `id` 且 parts 变可选；Rust `llm/google_genai.rs` 的请求/响应构造无这些 id 字段，故降为 partial。",
+        "2026-11-15 补齐：v2 契约的路径孪生是 `human/llm/requester/bases/google-genai/contract.rs`，`GoogleFunctionCall.id`（:46-51）与 `GoogleFunctionResponse.id`（:53-61）均为 optional，`parts` 为 `Option<Vec<GooglePart>>`（:59-60），与 `contract.ts:12-18` 一致。旧 `llm/google_genai.rs` 为原生 HTTP 遗留面。"
       ],
-      "note": "Google GenAI 契约主字段一致；functionCall/functionResponse id 缺失。",
+      "note": "functionCall/functionResponse id 与可选 parts 已在 v2 引擎端口落地。",
       "naReason": "",
       "lines": 18,
       "exports": 2,
@@ -15989,16 +15994,17 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/google-genai/format.ts",
-      "verdict": "partial",
+      "verdict": "equivalent",
       "rustPaths": [
-        "packages/kimi-agent/src/llm/google_genai.rs"
+        "packages/kimi-agent/src/human/llm/requester/bases/google-genai/format.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
         "2026-11-13 核对：Google GenAI 请求格式化（contents/parts/tools/systemInstruction 的 wire 形状）在 `llm/google_genai.rs` 中落地。",
-        "2026-11-15 重 pin 分诊：v2 e6d935e06a 引入 `modernFunctionResponses`（gemini-3+ 的嵌套 media parts）、文本 thoughtSignature 透传与 rawId；Rust `llm/google_genai.rs` 无 model-name 门控、无文本签名透传，故降为 partial。"
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 引入 `modernFunctionResponses`（gemini-3+ 的嵌套 media parts）、文本 thoughtSignature 透传与 rawId；Rust `llm/google_genai.rs` 无 model-name 门控、无文本签名透传，故降为 partial。",
+        "2026-11-15 补齐：路径孪生 `human/llm/requester/bases/google-genai/format.rs` 按 `format.ts:45-56,116-162` 落地——`lower_google_gen_ai_messages` 接收 model_name 并计算 `modern_function_responses`（:46-57），`extract_chunk_parts` 统一取 `thoughtSignature/thought_signature` 生成文本 meta 与 think encrypted、function call 带 rawId/extras（:166-231）；文本分支由 truthy 改为 `is_string` 以接受空串（对齐 v2 :139 的 `typeof ... === 'string'`）。"
       ],
-      "note": "Google GenAI 格式化主路径一致；modern function response 与文本签名未移植。",
+      "note": "modern function response、文本签名与空串文本口径已对齐 v2。",
       "naReason": "",
       "lines": 420,
       "exports": 11,
@@ -16015,16 +16021,17 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/google-genai/lower.ts",
-      "verdict": "partial",
+      "verdict": "equivalent",
       "rustPaths": [
-        "packages/kimi-agent/src/llm/google_genai.rs"
+        "packages/kimi-agent/src/human/llm/requester/bases/google-genai/lower.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
         "2026-11-13 核对：Google GenAI 响应降级（candidates/usageMetadata/finishReason）在 `llm/google_genai.rs` 的解析中落地。",
-        "2026-11-15 重 pin 分诊：v2 e6d935e06a 增加 `buildRawIdById`/`rawIdById`，functionResponse 按 rawId 对应并在 modern 模型下嵌套 media；Rust 无 raw_id 映射，functionResponse 总是携带 parts，故降为 partial。"
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 增加 `buildRawIdById`/`rawIdById`，functionResponse 按 rawId 对应并在 modern 模型下嵌套 media；Rust 无 raw_id 映射，functionResponse 总是携带 parts，故降为 partial。",
+        "2026-11-15 补齐：路径孪生 `human/llm/requester/bases/google-genai/lower.rs` 按 `lower.ts:60-68,73-75,90,115-140,154-166,205-210` 落地——`build_tool_raw_id_by_id`（:146-159）、`modern_function_responses` 门控（:20-33，正则口径与 v2 :53 一致）、functionResponse 的 id 与按 5 类 MIME 拆分的嵌套 parts（:195-222）、assistant 文本签名透传（:257-272）、functionCall id（:319-327）。"
       ],
-      "note": "消息降级主路径一致；rawId 与 modern 嵌套规则未移植。",
+      "note": "rawId 映射、functionResponse id 与 modern 嵌套 media 已对齐 v2。",
       "naReason": "",
       "lines": 182,
       "exports": 3,
@@ -16060,17 +16067,18 @@
     {
       "unit": "packages/agent-core-v2",
       "tsPath": "human/llm/requester/bases/google-genai/requester.ts",
-      "verdict": "partial",
+      "verdict": "equivalent",
       "rustPaths": [
-        "packages/kimi-agent/src/llm/http.rs",
-        "packages/kimi-agent/src/llm/google_genai.rs"
+        "packages/kimi-agent/src/human/llm/requester/bases/google-genai/requester.rs",
+        "packages/kimi-agent/src/human/llm/requester/bases/google-genai/format.rs"
       ],
       "candidateRustPaths": [],
       "evidence": [
         "2026-11-13 核对：Google GenAI 请求器（流式/非流式、错误归类）在 `llm/http.rs` + `llm/google_genai.rs` 中落地。",
-        "2026-11-15 重 pin 分诊：v2 e6d935e06a 把 modelName 传入 `lowerGoogleGenAIMessages` 以启用 modern 分支；Rust 请求器未按模型名分支，故降为 partial。"
+        "2026-11-15 重 pin 分诊：v2 e6d935e06a 把 modelName 传入 `lowerGoogleGenAIMessages` 以启用 modern 分支；Rust 请求器未按模型名分支，故降为 partial。",
+        "2026-11-15 补齐：路径孪生 `human/llm/requester/bases/google-genai/requester.rs:107` 以 `lower_google_gen_ai_messages(&input.messages, &input.model.model)` 传入模型名，对应 `requester.ts:70`。"
       ],
-      "note": "请求器主路径一致；模型名门控未移植。",
+      "note": "请求器已把模型名传入降级层以启用 modern 分支。",
       "naReason": "",
       "lines": 274,
       "exports": 6,
@@ -21739,7 +21747,7 @@
       "evidence": [
         "2026-11-12 核对：`llm/tool_args.rs::parse_tool_arguments` 与 v2 `parseToolCallArguments` 的三个分支一致。"
       ],
-      "note": "null/空串→{}、解析失败→{} + ArgsParseError(raw,error)。",
+      "note": "null/空串→{}；解析失败→{} + parseFailed/error，仅记录 debug 日志并继续 schema 校验。",
       "naReason": "",
       "lines": 21,
       "exports": 1,

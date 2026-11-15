@@ -79,6 +79,8 @@ pub struct ContextApplyCompactionPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_head_user_message_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appended_injection_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_tail: Option<bool>,
@@ -208,6 +210,7 @@ fn context_apply_compaction_schema() -> Value {
             "summaryOutputTokens": {"type": "number"},
             "keptUserMessageCount": {"type": "number"},
             "keptHeadUserMessageCount": {"type": "number"},
+            "appendedInjectionCount": {"type": "number"},
             "droppedCount": {"type": "number"},
             "legacyTail": {"type": "boolean"},
             "wireLines": {

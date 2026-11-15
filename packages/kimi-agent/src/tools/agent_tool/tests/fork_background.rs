@@ -11,17 +11,18 @@ async fn fork_inherits_conversation_history_and_runs_natively() {
     manager.register_builtin_profiles().await;
 
     let parent_history = Arc::new(std::sync::Mutex::new(vec![
-        crate::turn_loop::types::LLMMessage::new("user", "parent prompt"),
+        crate::turn_loop::types::LLMMessage::new(kimi_core::types::Role::User, "parent prompt"),
         crate::turn_loop::types::LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "I will call a tool".into(),
             blocks: Vec::new(),
             tool_calls: vec![crate::turn_loop::types::ToolCall {
                 id: "call-1".into(),
                 name: "Agent".into(),
-                arguments: serde_json::json!({ "prompt": "child task", "fork": true }),
+                arguments: Some(serde_json::json!({ "prompt": "child task", "fork": true }).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             tool_call_id: None,
             tools: Vec::new(),

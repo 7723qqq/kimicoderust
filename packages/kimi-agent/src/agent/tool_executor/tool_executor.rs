@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
@@ -279,7 +281,7 @@ impl Default for ToolExecutorHooks {
 
 pub trait IAgentToolExecutorService: Send + Sync {
     fn execute(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         calls: Vec<ToolCall>,
         options: ToolExecutorExecuteOptions,
     ) -> BoxStream<'static, Result<ToolExecutionResult, WireAsyncError>>;
@@ -299,3 +301,7 @@ pub trait IAgentToolExecutorService: Send + Sync {
 
     fn register_missing_tool_describer(&self, describer: MissingToolDescriber) -> DisposableRef;
 }
+
+
+pub static I_AGENT_TOOL_EXECUTOR_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentToolExecutorService>>> =
+    LazyLock::new(|| create_decorator("agentToolExecutorService"));

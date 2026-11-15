@@ -87,7 +87,10 @@ impl From<UserToolExecutionResponse> for ExecutableToolResult {
             stop_turn_reason: response.stop_turn_reason,
             truncated: response.truncated,
             note: response.note,
-            delivery: response.delivery,
+            delivery: response
+                .delivery
+                .as_ref()
+                .map(crate::llm::wire::tool_delivery_from_wire),
             spill: response.spill.map(|spill| ToolResultSpill {
                 output_path: spill.output_path,
                 total_chars: spill.total_chars,

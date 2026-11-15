@@ -18,6 +18,7 @@ use crate::wire::record::WireAsyncError;
 
 const TASKKILL_TIMEOUT_MS: u64 = 5_000;
 
+#[derive(Clone)]
 pub struct HostProcessService {
     pub timers: Arc<dyn IHostTimers>,
 }

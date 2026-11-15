@@ -52,13 +52,141 @@ pub fn upload_filename(media_type: &str) -> String {
     format!("upload.{extension}")
 }
 
-fn file_id_of(body: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    value
+const READY_FILE_OBJECT_STATUSES: [&str; 3] = ["ready", "ok", "processed"];
+
+fn read_non_empty_string(value: Option<&serde_json::Value>) -> Option<String> {
+    let text = value?.as_str()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn read_upload_failure_detail(
+    record: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    if let Some(detail) = read_non_empty_string(record.get("status_details")) {
+        return Some(detail);
+    }
+    if let Some(extract_error) = record.get("extract_error") {
+        if let Some(detail) = read_non_empty_string(Some(extract_error)) {
+            return Some(detail);
+        }
+        if let Ok(serialized) = serde_json::to_string(extract_error) {
+            return Some(serialized);
+        }
+    }
+    if let Some(raw_error) = record.get("error") {
+        if let Some(detail) = read_non_empty_string(Some(raw_error)) {
+            return Some(detail);
+        }
+        if let Some(nested) = raw_error
+            .as_object()
+            .and_then(|error| read_non_empty_string(error.get("message")))
+        {
+            return Some(nested);
+        }
+    }
+    read_non_empty_string(record.get("message"))
+}
+
+fn js_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                value.to_string()
+            } else if let Some(value) = value.as_u64() {
+                value.to_string()
+            } else {
+                value.as_f64().unwrap_or_default().to_string()
+            }
+        }
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::Null => String::new(),
+                value => js_string(value),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        serde_json::Value::Object(_) => "[object Object]".to_string(),
+    }
+}
+
+fn upload_status_error(
+    id: &str,
+    field: &str,
+    value: &serde_json::Value,
+    detail: Option<String>,
+) -> UploadError {
+    let rendered = js_string(value);
+    let summary = if value.as_str() == Some("error") {
+        format!("Kimi file upload failed for file \"{id}\" ({field}={rendered})")
+    } else {
+        format!("Kimi file upload for file \"{id}\" is not ready ({field}={rendered})")
+    };
+    UploadError::Other(match detail {
+        Some(detail) => format!("{summary}: {detail}"),
+        None => summary,
+    })
+}
+
+fn parse_uploaded_file(text: &str) -> Result<String, UploadError> {
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(UploadError::Other(format!(
+                "media upload returned no file id: {text}"
+            )));
+        }
+    };
+    let Some(record) = value.as_object() else {
+        return Err(UploadError::Other(
+            "Kimi file upload returned an invalid response payload".to_string(),
+        ));
+    };
+    let Some(id) = record
         .get("id")
         .and_then(serde_json::Value::as_str)
-        .filter(|id| !id.is_empty())
+        .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
+    else {
+        return Err(UploadError::Other(
+            "Kimi file upload returned an empty file id".to_string(),
+        ));
+    };
+    let extract_status = record
+        .get("extract_status")
+        .filter(|value| !value.is_null());
+    if let Some(extract_status) = extract_status
+        && extract_status.as_str() != Some("ready")
+    {
+        return Err(upload_status_error(
+            &id,
+            "extract_status",
+            extract_status,
+            read_upload_failure_detail(record),
+        ));
+    }
+    let status = record.get("status").filter(|value| !value.is_null());
+    let allow_uploaded_with_ready_extract = extract_status.and_then(serde_json::Value::as_str)
+        == Some("ready")
+        && status.and_then(serde_json::Value::as_str) == Some("uploaded");
+    if let Some(status) = status
+        && !allow_uploaded_with_ready_extract
+        && status
+            .as_str()
+            .is_none_or(|status| !READY_FILE_OBJECT_STATUSES.contains(&status))
+    {
+        return Err(upload_status_error(
+            &id,
+            "status",
+            status,
+            read_upload_failure_detail(record),
+        ));
+    }
+    Ok(id)
 }
 
 fn classify_status(status: u16, body: &str) -> UploadError {
@@ -113,8 +241,7 @@ pub async fn upload_media(
             "media upload response body could not be read: {error}"
         ))
     })?;
-    file_id_of(&text)
-        .ok_or_else(|| UploadError::Other(format!("media upload returned no file id: {text}")))
+    parse_uploaded_file(&text)
 }
 
 #[cfg(test)]
@@ -183,11 +310,29 @@ mod tests {
     #[test]
     fn test_the_response_file_id_is_read() {
         assert_eq!(
-            file_id_of(r#"{"id":"file-abc","object":"file"}"#).as_deref(),
-            Some("file-abc")
+            parse_uploaded_file(r#"{"id":"file-abc","object":"file"}"#).unwrap(),
+            "file-abc"
         );
-        assert_eq!(file_id_of(r#"{"id":""}"#), None);
-        assert_eq!(file_id_of("not json"), None);
+        assert!(parse_uploaded_file(r#"{"id":""}"#).is_err());
+        assert!(parse_uploaded_file("not json").is_err());
+        assert_eq!(
+            parse_uploaded_file(r#"{"id":"file-abc","status":"ready"}"#).unwrap(),
+            "file-abc"
+        );
+        assert!(parse_uploaded_file(r#"{"id":"file-abc","status":"uploading"}"#).is_err());
+        assert!(
+            parse_uploaded_file(r#"{"id":"file-abc","extract_status":"error"}"#)
+                .unwrap_err()
+                .message()
+                .contains("extract_status=error")
+        );
+        assert_eq!(
+            parse_uploaded_file(
+                r#"{"id":"file-abc","extract_status":"ready","status":"uploaded"}"#
+            )
+            .unwrap(),
+            "file-abc"
+        );
     }
 
     #[test]

@@ -11,13 +11,10 @@ use super::watch::TurnPhase;
 use crate::callbacks::HostCallbacks;
 use crate::features::goal::tools::update_goal::update_goal_tool::evaluate_goal_completion;
 use crate::llm::files_upload::UploadError;
-use crate::llm::media_budget::{
-    MEDIA_BUDGET_EXCEEDED_CODE, MEDIA_DEGRADED_CODE, MEDIA_STRIPPED_CODE, MediaBudget,
-    MediaEvictionPlan, MediaRecoveryAction, degrade_leading_media, estimate_request_bytes,
-    plan_media_eviction, strip_all_media,
-};
+use crate::llm::media_budget::{MEDIA_BUDGET_EXCEEDED_CODE, MediaBudget};
 use crate::llm::media_resolver::{MediaResolver, ResolvedRequest, has_media_refs, inline_entries};
-use crate::rpc::types::{BoxFuture, TokenUsage, ToolExecuteRequest};
+use crate::rpc::types::{BoxFuture, ToolExecuteRequest};
+use kimi_core::types::TokenUsage;
 
 #[derive(Default)]
 struct CallbackStateSnapshot {
@@ -98,6 +95,14 @@ async fn non_history_state_fingerprint(callbacks: &dyn crate::callbacks::HostCal
     };
     let (todos, tasks) = futures_util::future::join(read("todo"), read("task")).await;
     serde_json::json!({ "todos": todos, "tasks": tasks }).to_string()
+}
+
+fn token_count_u32(value: u64) -> Result<u32, String> {
+    u32::try_from(value).map_err(|error| error.to_string())
+}
+
+fn optional_token_count_u32(value: Option<u64>) -> Result<Option<u32>, String> {
+    value.map(token_count_u32).transpose()
 }
 
 #[derive(Default)]
@@ -260,9 +265,9 @@ fn emit_step_end_event(
         "provider_finish_reason": provider_finish_reason(result.finish_reason.as_deref()),
         "raw_finish_reason": result.finish_reason.as_deref(),
         "usage": {
-            "input_tokens": result.usage.input_tokens,
-            "output_tokens": result.usage.output_tokens,
-            "total_tokens": result.usage.total_tokens,
+            "input_tokens": result.usage.input_other,
+            "output_tokens": result.usage.output,
+            "total_tokens": result.usage.measured_context_tokens(),
             "input_cache_read": result.usage.input_cache_read,
             "input_cache_creation": result.usage.input_cache_creation,
         },
@@ -404,8 +409,6 @@ async fn budgeted_request<'a>(
     messages: &'a [LLMMessage],
     callbacks: &dyn HostCallbacks,
     cancel: Option<&tokio_util::sync::CancellationToken>,
-    request_byte_budget: u64,
-    media_recovery: Option<&kimi_core::types::SharedMediaRecovery>,
 ) -> Result<Option<Cow<'a, [LLMMessage]>>, UploadError> {
     let target = llm.media_target();
     let mut request = match resolver {
@@ -436,67 +439,6 @@ async fn budgeted_request<'a>(
             entries: inline_entries(messages),
         },
     };
-    if let Some(plan) = plan_media_eviction(
-        &request.entries,
-        estimate_request_bytes(&request.messages, &request.entries),
-        request_byte_budget,
-    ) {
-        let target = request.messages.to_mut();
-        match &plan {
-            MediaEvictionPlan::MediaDegraded {
-                degrade_count,
-                estimated_bytes,
-                evicted_media_count,
-            } => {
-                callbacks.emit_event(serde_json::json!({
-                    "type": "warning",
-                    "code": MEDIA_DEGRADED_CODE,
-                    "message": format!(
-                        "estimated request size exceeds the budget; evicting older media before send ({} evicted, {} bytes after)",
-                        evicted_media_count, estimated_bytes
-                    ),
-                }));
-                degrade_leading_media(target, &request.entries, *degrade_count);
-                if let Some(cell) = media_recovery {
-                    cell.lock().unwrap_or_else(|e| e.into_inner()).mark(
-                        llm.model_name().to_string(),
-                        MediaRecoveryAction::Degraded(*degrade_count),
-                    );
-                }
-                for entry in request.entries.iter_mut().take(*degrade_count) {
-                    entry.bytes = 0;
-                }
-            }
-            MediaEvictionPlan::MediaStripped {
-                estimated_bytes,
-                evicted_media_count,
-            } => {
-                callbacks.emit_event(serde_json::json!({
-                    "type": "warning",
-                    "code": MEDIA_STRIPPED_CODE,
-                    "message": format!(
-                        "estimated request size exceeds the budget; stripping all media before send ({} evicted, {} bytes after)",
-                        evicted_media_count, estimated_bytes
-                    ),
-                }));
-                strip_all_media(target, &request.entries);
-                if let Some(cell) = media_recovery {
-                    let keys: Vec<String> = request
-                        .entries
-                        .iter()
-                        .map(|entry| entry.key.clone())
-                        .collect();
-                    cell.lock().unwrap_or_else(|e| e.into_inner()).mark(
-                        llm.model_name().to_string(),
-                        MediaRecoveryAction::Stripped(keys),
-                    );
-                }
-                for entry in request.entries.iter_mut() {
-                    entry.bytes = 0;
-                }
-            }
-        }
-    }
     if let Some(message) = budget.apply(&mut request.messages, &request.entries) {
         callbacks.emit_event(serde_json::json!({
             "type": "warning",
@@ -547,7 +489,7 @@ pub fn run_turn_continued_with_observations<'a>(
         let mut hook_guard = hook_guard;
 
         let mut steps = 0u32;
-        let mut usage = crate::rpc::types::TokenUsage::default();
+        let mut usage = kimi_core::types::TokenUsage::default();
         let mut llm_retries = 0u32;
 
         let mut carry_previous_turn_aborted = previous_turn_aborted;
@@ -797,7 +739,7 @@ fn run_turn_inner<'a>(
         input
             .llm
             .set_turn_watch(Some(Arc::clone(&turn_watch_state)));
-        let mut total_usage = crate::rpc::types::TokenUsage::default();
+        let mut total_usage = kimi_core::types::TokenUsage::default();
 
         let mut last_request_usage: Option<crate::turn_loop::types::RequestMeasurement> = None;
         let mut steps: u32 = 0;
@@ -811,7 +753,7 @@ fn run_turn_inner<'a>(
             started.elapsed().as_millis().min(i64::MAX as u128) as i64
         };
 
-        let mut compaction_usage = crate::rpc::types::TokenUsage::default();
+        let mut compaction_usage = kimi_core::types::TokenUsage::default();
         let mut did_compact = false;
 
         let mut cache_observations: Vec<crate::session::cache_observation::CacheObservation> =
@@ -858,7 +800,7 @@ fn run_turn_inner<'a>(
             input.llm.system_prompt().to_string()
         };
         let mut messages = vec![LLMMessage {
-            role: "system".into(),
+            role: kimi_core::types::Role::System,
             content: system_prompt,
             ..Default::default()
         }];
@@ -883,7 +825,7 @@ fn run_turn_inner<'a>(
                 .await;
             if let Some(block) = outcome.block {
                 messages.push(LLMMessage {
-                    role: "assistant".into(),
+                    role: kimi_core::types::Role::Assistant,
                     content: block,
                     origin: Some(serde_json::json!({
                         "kind": "hook_result",
@@ -895,7 +837,7 @@ fn run_turn_inner<'a>(
                 return Ok(finish!(
                     LoopTurnStopReason::EndTurn,
                     0,
-                    crate::rpc::types::TokenUsage::default(),
+                    kimi_core::types::TokenUsage::default(),
                     0,
                     0,
                     messages,
@@ -906,7 +848,7 @@ fn run_turn_inner<'a>(
                 let prompt = &mut messages[prompt_index];
 
                 let original_parts = if prompt.blocks.is_empty() {
-                    vec![ContentBlock::Text {
+                    vec![ContentPart::Text {
                         text: prompt.content.clone(),
                         meta: None,
                     }]
@@ -1189,7 +1131,8 @@ fn run_turn_inner<'a>(
             if let Some(ref goal) = goal
                 && goal.status.is_active()
             {
-                let turn_tokens = total_usage.output_tokens as i64;
+                let turn_tokens = i64::try_from(total_usage.output)
+                    .map_err(|error| error.to_string())?;
                 let turns_this_turn = 0;
                 if goal.would_exceed_budget(turn_tokens, turns_this_turn, turn_wall_clock_ms) {
                     callbacks.emit_event(serde_json::json!({
@@ -1365,7 +1308,9 @@ fn run_turn_inner<'a>(
                             }
                             context_tokens.rebase_with_summary(
                                 &messages,
-                                report.usage.as_ref().map(|usage| usage.output_tokens),
+                                optional_token_count_u32(
+                                    report.usage.as_ref().map(|usage| usage.output),
+                                )?,
                             );
 
                             last_compacted_token_count = Some(context_tokens.tokens());
@@ -1457,7 +1402,7 @@ fn run_turn_inner<'a>(
                     && let Some(tools) = toolset.drain_pending_tool_schemas()
                 {
                     let message = LLMMessage {
-                        role: "system".into(),
+                        role: kimi_core::types::Role::System,
                         origin: Some(serde_json::json!({
                             "kind": "injection",
                             "variant": crate::tools::tool_select_state::DYNAMIC_TOOL_SCHEMA_VARIANT,
@@ -1530,8 +1475,6 @@ fn run_turn_inner<'a>(
                     &messages,
                     callbacks.as_ref(),
                     Some(turn_cancel.token()),
-                    input.llm_request_byte_budget,
-                    input.media_recovery.as_ref(),
                 )
                 .await
                 {
@@ -1585,7 +1528,7 @@ fn run_turn_inner<'a>(
                         &request_messages,
                     )),
                     input.max_context_tokens,
-                    Some(total_usage.input_tokens),
+                    Some(token_count_u32(total_usage.input_other)?),
                     structure_strict,
                     &input.agent_id,
                     input
@@ -1937,7 +1880,9 @@ fn run_turn_inner<'a>(
                     }
                     context_tokens.rebase_with_summary(
                         &messages,
-                        report.usage.as_ref().map(|usage| usage.output_tokens),
+                        optional_token_count_u32(
+                            report.usage.as_ref().map(|usage| usage.output),
+                        )?,
                     );
                 }
             };
@@ -1952,8 +1897,11 @@ fn run_turn_inner<'a>(
                 spliced_after: false,
             });
 
-            if step_result.usage.input_tokens > 0 {
-                context_tokens.record_measured(step_result.usage.input_tokens, &messages);
+            if step_result.usage.input_other > 0 {
+                context_tokens.record_measured(
+                    token_count_u32(step_result.usage.input_other)?,
+                    &messages,
+                );
             }
             llm_retries += step_result.attempts.saturating_sub(1);
             last_finish_reason = step_result.finish_reason.clone();
@@ -2029,7 +1977,7 @@ fn run_turn_inner<'a>(
                 LoopStepStopReason::Complete => {
                     if !step_result.content.is_empty() {
                         messages.push(LLMMessage {
-                            role: "assistant".into(),
+                            role: kimi_core::types::Role::Assistant,
                             content: step_result.content.clone(),
 
                             blocks: step_result.thinking.clone(),
@@ -2066,14 +2014,8 @@ fn run_turn_inner<'a>(
                     return Ok(result);
                 }
                 LoopStepStopReason::ToolCalls(mut tool_calls) => {
-                    for tc in &mut tool_calls {
-                        if tc.arguments.is_null() {
-                            tc.arguments = serde_json::json!({});
-                        }
-                    }
-
                     messages.push(LLMMessage {
-                        role: "assistant".into(),
+                        role: kimi_core::types::Role::Assistant,
                         content: step_result.content.clone(),
                         blocks: step_result.thinking.clone(),
                         tool_calls: tool_calls.clone(),
@@ -2097,7 +2039,7 @@ fn run_turn_inner<'a>(
                     });
                     for (tool_call_id, veto) in &denied_in_swarm_mode {
                         messages.push(LLMMessage {
-                            role: "tool".into(),
+                            role: kimi_core::types::Role::Tool,
                             content: crate::swarm::mode::veto_message(*veto),
                             blocks: Vec::new(),
                             tool_calls: Vec::new(),
@@ -2122,7 +2064,7 @@ fn run_turn_inner<'a>(
                         let refusal = crate::swarm::mode::veto_message(veto);
                         for tc in &tool_calls {
                             messages.push(LLMMessage {
-                                role: "tool".into(),
+                                role: kimi_core::types::Role::Tool,
                                 content: refusal.clone(),
                                 blocks: Vec::new(),
                                 tool_calls: Vec::new(),
@@ -2136,10 +2078,29 @@ fn run_turn_inner<'a>(
                         continue;
                     }
 
+                    let mut parsed_arguments: Vec<serde_json::Value> = tool_calls
+                        .iter()
+                        .map(|call| {
+                            let parsed = crate::llm::tool_args::parse_tool_arguments(
+                                call.arguments.as_deref(),
+                            );
+                            if parsed.parse_failed {
+                                tracing::debug!(
+                                    tool_name = %call.name,
+                                    tool_call_id = %call.id,
+                                    raw_length = call.arguments.as_ref().map_or(0, |raw| raw.encode_utf16().count()),
+                                    error = ?parsed.error,
+                                    "tool args JSON parse failed"
+                                );
+                            }
+                            parsed.data
+                        })
+                        .collect();
                     let mut refusals: Vec<Option<String>> = tool_calls
                         .iter()
-                        .map(|tc| {
-                            unusable_tool_arguments(tc, &step_tool_defs, &tool_defs)
+                        .zip(&parsed_arguments)
+                        .map(|(tc, arguments)| {
+                            unusable_tool_arguments(tc, arguments, &step_tool_defs, &tool_defs)
                                 .map(|reason| reason.message(&tc.name))
                         })
                         .collect();
@@ -2166,14 +2127,14 @@ fn run_turn_inner<'a>(
                                 "tool_call_id": call.id,
                                 "tool_name": call.name,
                                 "dup_type": "same_step",
-                                "args_hash": crate::tools::tool_dedupe::args_hash(&call.arguments),
+                                "args_hash": crate::tools::tool_dedupe::args_hash(&parsed_arguments[index]),
                                 "trace_id": trace_id,
                             }));
                         }
                         let turn_repeat_count = tool_dedupe.turn_repeat_count();
                         for index in &dedupe_plan.cross_step {
                             let call = &tool_calls[*index];
-                            let args_hash = crate::tools::tool_dedupe::args_hash(&call.arguments);
+                            let args_hash = crate::tools::tool_dedupe::args_hash(&parsed_arguments[*index]);
                             callbacks.telemetry(serde_json::json!({
                                 "event": "tool_call_dedup_detected",
                                 "turn_id": turn_id,
@@ -2227,6 +2188,7 @@ fn run_turn_inner<'a>(
                             &turn_id,
                             &input.agent_id,
                             &mut tool_calls[index],
+                            &mut parsed_arguments[index],
                             turn_cancel.token().clone(),
                         )
                         .await;
@@ -2247,7 +2209,10 @@ fn run_turn_inner<'a>(
                         .as_ref()
                         .map(|toolset| toolset.workspace_root().to_string_lossy().into_owned());
 
+                    let execution_arguments = parsed_arguments.clone();
                     let exec_fn = {
+                        let execution_arguments = execution_arguments.clone();
+                        let call_index = call_index.clone();
                         let turn_id = turn_id.clone();
                         let agent_id = input.agent_id.clone();
                         let callbacks = callbacks.clone();
@@ -2270,6 +2235,7 @@ fn run_turn_inner<'a>(
                             let toolset = toolset.clone();
                             let tool_descriptions = tool_descriptions.clone();
                             let workspace_dir = workspace_dir.clone();
+                            let execution_arguments = execution_arguments.clone();
                             async move {
                                 if let Some(original) = dup_source {
                                     let shared = dedupe_cells[original]
@@ -2286,17 +2252,20 @@ fn run_turn_inner<'a>(
                                         .await;
                                     return Ok(shared.clone());
                                 }
+                                let arguments = index
+                                    .map(|index| execution_arguments[index].clone())
+                                    .expect("scheduled call has parsed arguments");
                                 let req = ToolExecuteRequest {
                                     turn_id: turn_id.clone(),
                                     agent_id: agent_id.clone(),
                                     tool_call_id: tc.id.clone(),
                                     tool_name: tc.name.clone(),
-                                    arguments: tc.arguments.clone(),
+                                    arguments: arguments.clone(),
                                 };
 
                                 let resolution = crate::tools::resolve::resolve_tool_execution(
                                     &tc.name,
-                                    &tc.arguments,
+                                    &arguments,
                                     workspace_dir.as_ref().map(String::as_str),
                                 );
                                 let call_description = match resolution.description {
@@ -2325,7 +2294,7 @@ fn run_turn_inner<'a>(
                                         "turn_id": turn_id,
                                         "tool_call_id": tc.id,
                                         "tool_name": tc.name,
-                                        "args": tc.arguments,
+                                        "args": arguments,
                                     });
 
                                     if let Some(display) = call_display
@@ -2373,7 +2342,10 @@ fn run_turn_inner<'a>(
                                             ExecutableToolResult {
                                                 spill: None,
                                                 parts: Vec::new(),
-                                                delivery: response.delivery,
+                                                delivery: response
+                                                    .delivery
+                                                    .as_ref()
+                                                    .map(crate::llm::wire::tool_delivery_from_wire),
                                                 stop_turn: response.stop_turn,
                                                 content: response.content,
                                                 is_error: response.is_error,
@@ -2424,7 +2396,7 @@ fn run_turn_inner<'a>(
                         if tc.name.eq_ignore_ascii_case("bash")
                             && let Some(toolset) = input.toolset.as_ref()
                             && let Some(command) =
-                                tc.arguments.get("command").and_then(|value| value.as_str())
+                                parsed_arguments[index].get("command").and_then(|value| value.as_str())
                             && crate::features::tower::bashGuard::command_needs_tower_guard(command)
                         {
                             let main_checkout =
@@ -2452,8 +2424,7 @@ fn run_turn_inner<'a>(
                                     .and_then(|cwd| std::fs::canonicalize(&cwd).ok())
                                     .map(crate::tools::strip_verbatim_prefix)
                                     .unwrap_or_else(|| std::path::PathBuf::from("."));
-                                let cwd = tc
-                                    .arguments
+                                let cwd = parsed_arguments[index]
                                     .get("cwd")
                                     .and_then(|value| value.as_str())
                                     .filter(|cwd| !cwd.is_empty())
@@ -2492,7 +2463,7 @@ fn run_turn_inner<'a>(
                             callbacks.as_ref(),
                             &input.agent_id,
                             &tc.name,
-                            &tc.arguments,
+                            &parsed_arguments[index],
                         )
                         .await
                         {
@@ -2504,7 +2475,10 @@ fn run_turn_inner<'a>(
                         .iter()
                         .map(|tc| ScheduledToolCall {
                             tool_call: tc.clone(),
-                            accesses: tool_scheduler::infer_tool_accesses(&tc.name, &tc.arguments),
+                            accesses: tool_scheduler::infer_tool_accesses(
+                                &tc.name,
+                                &execution_arguments[call_index[&tc.id]],
+                            ),
                         })
                         .collect();
                     let run_count = predicted_stop_index.map(|stop| {
@@ -2567,7 +2541,7 @@ fn run_turn_inner<'a>(
                                 "turn_id": turn_id,
                                 "tool_call_id": skipped_call.id,
                                 "tool_name": skipped_call.name,
-                                "args": skipped_call.arguments,
+                                "args": execution_arguments[index],
                             }));
                             callbacks.emit_event(serde_json::json!({
                                 "type": "tool.native",
@@ -2575,7 +2549,7 @@ fn run_turn_inner<'a>(
                                 "turn_id": turn_id,
                                 "tool_call_id": skipped_call.id,
                                 "tool_name": skipped_call.name,
-                                "arguments": skipped_call.arguments,
+                                "arguments": execution_arguments[index],
                                 "content": tool_scheduler::SKIPPED_TOOL_OUTPUT,
                                 "is_error": true,
                                 "note": null,
@@ -2640,7 +2614,7 @@ fn run_turn_inner<'a>(
                         let call = &tool_calls[index];
                         let name = call.name.to_ascii_lowercase();
                         if name == "bash" {
-                            let arguments = &call.arguments;
+                            let arguments = &execution_arguments[index];
                             let cwd_arg = arguments.get("cwd").and_then(|value| value.as_str());
                             if let Some(cwd) = cwd_arg {
                                 step_access.declared_cwds.push(cwd.to_string());
@@ -2696,7 +2670,7 @@ fn run_turn_inner<'a>(
                         }
                         let targets_file = matches!(name.as_str(), "read" | "edit" | "write");
                         for access in
-                            tool_scheduler::infer_tool_accesses(&call.name, &call.arguments)
+                            tool_scheduler::infer_tool_accesses(&call.name, &execution_arguments[index])
                         {
                             let crate::turn_loop::types::ToolResourceAccess::File(access) = access
                             else {
@@ -2750,7 +2724,7 @@ fn run_turn_inner<'a>(
                             continue;
                         }
                         for access in
-                            tool_scheduler::infer_tool_accesses(&call.name, &call.arguments)
+                            tool_scheduler::infer_tool_accesses(&call.name, &execution_arguments[index])
                         {
                             let crate::turn_loop::types::ToolResourceAccess::File(access) = access
                             else {
@@ -2773,8 +2747,7 @@ fn run_turn_inner<'a>(
                         if !call.name.eq_ignore_ascii_case("Bash") {
                             continue;
                         }
-                        let Some(command) = call
-                            .arguments
+                        let Some(command) = execution_arguments[index]
                             .get("command")
                             .and_then(|value| value.as_str())
                         else {
@@ -2797,7 +2770,7 @@ fn run_turn_inner<'a>(
                             continue;
                         };
                         let receipt =
-                            progress_receipt(&call.name, &call.arguments, !result.is_error);
+                            progress_receipt(&call.name, &execution_arguments[index], !result.is_error);
                         let blind = match input.toolset.as_ref() {
                             Some(toolset) => toolset.observe_progress(&receipt),
                             None => local_progress_tracker.observe(&receipt),
@@ -2818,7 +2791,7 @@ fn run_turn_inner<'a>(
                                 "turn_id": turn_id,
                                 "tool_call_id": tc.id,
                                 "tool_name": tc.name,
-                                "args": tc.arguments,
+                                "args": execution_arguments[i],
                             }));
                             callbacks.emit_event(serde_json::json!({
                                 "type": "tool.native",
@@ -2826,7 +2799,7 @@ fn run_turn_inner<'a>(
                                 "turn_id": turn_id,
                                 "tool_call_id": tc.id,
                                 "tool_name": tc.name,
-                                "arguments": tc.arguments,
+                                "arguments": execution_arguments[i],
                                 "content": tr.content,
                                 "is_error": tr.is_error,
                                 "note": tr.note,
@@ -2871,12 +2844,12 @@ fn run_turn_inner<'a>(
                             content
                         } else {
                             match rendered_parts.as_slice() {
-                                [ContentBlock::Text { text, .. }] => text.clone(),
+                                [ContentPart::Text { text, .. }] => text.clone(),
                                 _ => String::new(),
                             }
                         };
                         messages.push(LLMMessage {
-                            role: "tool".into(),
+                            role: kimi_core::types::Role::Tool,
                             content,
                             blocks: rendered_parts,
                             tool_calls: Vec::new(),
@@ -2892,7 +2865,7 @@ fn run_turn_inner<'a>(
                             && !delivery.blocks.is_empty()
                         {
                             messages.push(LLMMessage {
-                                role: "user".into(),
+                                role: kimi_core::types::Role::User,
                                 content: String::new(),
                                 blocks: delivery.blocks.clone(),
                                 tool_calls: Vec::new(),
@@ -2935,7 +2908,7 @@ fn run_turn_inner<'a>(
                             Some(&telemetry),
                             Some(crate::compaction::estimate_messages_tokens(&messages)),
                             input.max_context_tokens,
-                            Some(total_usage.input_tokens),
+                            Some(token_count_u32(total_usage.input_other)?),
                         )
                         .await;
 
@@ -2964,7 +2937,7 @@ fn run_turn_inner<'a>(
                             if vetoed.is_empty() {
                                 if !step_res.content.is_empty() {
                                     messages.push(LLMMessage {
-                                        role: "assistant".into(),
+                                        role: kimi_core::types::Role::Assistant,
                                         content: step_res.content,
                                         blocks: step_res.thinking,
                                         tool_calls: Vec::new(),
@@ -2977,7 +2950,7 @@ fn run_turn_inner<'a>(
                                 }
                             } else {
                                 messages.push(LLMMessage {
-                                    role: "assistant".into(),
+                                    role: kimi_core::types::Role::Assistant,
                                     content: step_res.content,
                                     blocks: step_res.thinking,
                                     tool_calls: vetoed.clone(),
@@ -2996,7 +2969,7 @@ fn run_turn_inner<'a>(
                                         "turn_id": turn_id,
                                         "tool_call_id": call.id,
                                         "tool_name": call.name,
-                                        "args": call.arguments,
+                                        "args": crate::llm::tool_args::parse_tool_arguments(call.arguments.as_deref()).data,
                                     }));
                                     callbacks.emit_event(serde_json::json!({
                                         "type": "tool.native",
@@ -3004,13 +2977,13 @@ fn run_turn_inner<'a>(
                                         "turn_id": turn_id,
                                         "tool_call_id": call.id,
                                         "tool_name": call.name,
-                                        "arguments": call.arguments,
+                                        "arguments": crate::llm::tool_args::parse_tool_arguments(call.arguments.as_deref()).data,
                                         "content": rendered,
                                         "is_error": true,
                                         "note": null,
                                     }));
                                     messages.push(LLMMessage {
-                                        role: "tool".into(),
+                                        role: kimi_core::types::Role::Tool,
                                         content: rendered.clone(),
                                         tool_call_id: Some(call.id.clone()),
                                         ..Default::default()
@@ -3138,8 +3111,6 @@ fn format_elapsed(ms: i64) -> String {
 }
 
 enum UnusableArguments {
-    NotJson(String),
-
     NotObject,
 
     Schema(String),
@@ -3148,17 +3119,13 @@ enum UnusableArguments {
 impl UnusableArguments {
     fn message(&self, tool_name: &str) -> String {
         match self {
-            Self::NotJson(detail) => crate::i18n::LocalizedText::with_params(
-                "engine.tools.argsNotJson",
-                crate::i18n::i18n_params!["tool" => tool_name, "detail" => detail],
-            ),
             Self::NotObject => crate::i18n::LocalizedText::with_params(
                 "engine.tools.argsNotObject",
                 crate::i18n::i18n_params!["tool" => tool_name],
             ),
             Self::Schema(detail) => crate::i18n::LocalizedText::with_params(
-                "engine.tools.argsInvalidSchema",
-                crate::i18n::i18n_params!["tool" => tool_name, "detail" => detail],
+                "engine.execution.invalidArgs",
+                crate::i18n::i18n_params!["toolName" => tool_name, "error" => detail],
             ),
         }
         .render()
@@ -3167,18 +3134,16 @@ impl UnusableArguments {
 
 fn unusable_tool_arguments(
     call: &ToolCall,
+    arguments: &serde_json::Value,
     step_defs: &[crate::rpc::types::ToolInfo],
     turn_defs: &[crate::rpc::types::ToolInfo],
 ) -> Option<UnusableArguments> {
-    if let Some(failure) = &call.args_parse_error {
-        return Some(UnusableArguments::NotJson(failure.error.clone()));
-    }
-    if !call.arguments.is_object() {
+    if !arguments.is_object() {
         return Some(UnusableArguments::NotObject);
     }
     let definition = find_tool_definition(step_defs, &call.name)
         .or_else(|| find_tool_definition(turn_defs, &call.name))?;
-    crate::tools::args_validate::validate(&definition.input_schema, &call.arguments)
+    crate::tools::args_validate::validate(&definition.input_schema, arguments)
         .err()
         .map(UnusableArguments::Schema)
 }

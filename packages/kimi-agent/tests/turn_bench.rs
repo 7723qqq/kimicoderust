@@ -88,9 +88,10 @@ impl LLM for BenchLlm {
             .map(|(i, path)| ToolCall {
                 id: format!("call-{seq}-{i}"),
                 name: "read".into(),
-                arguments: serde_json::json!({ "path": path, "_bench_step": seq }),
+                arguments: Some(serde_json::json!({ "path": path, "_bench_step": seq }).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             })
             .collect();
         Box::pin(async move {
@@ -175,7 +176,7 @@ async fn run_turn_sync(
         agent_id: MAIN_AGENT_ID.to_string(),
         llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "bench".into(),
             ..Default::default()
         }],

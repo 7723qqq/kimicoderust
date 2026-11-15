@@ -1,3 +1,5 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::session::agent_lifecycle::agent_lifecycle::I_AGENT_LIFECYCLE_SERVICE;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -34,7 +36,7 @@ impl SessionLegacyService {
             return Err(Box::new(Error2::new(SESSION_NOT_FOUND, format!("session {session_id} does not exist"))));
         };
         let context = ensure_main_agent(&session).await?;
-        let handle = session.accessor().get::<IAgentLifecycleService>().handle_of(&context.agent_id);
+        let handle = session.accessor().get(&I_AGENT_LIFECYCLE_SERVICE).handle_of(&context.agent_id);
         handle.ok_or_else(|| Box::new(Error2::new(AGENT_NOT_FOUND, "Main agent was not found")) as WireAsyncError)
     }
 }

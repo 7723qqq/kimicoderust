@@ -1,17 +1,21 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::session::agent_lifecycle::agent_lifecycle::I_AGENT_LIFECYCLE_SERVICE;
+use crate::agent::r#loop::r#loop::I_AGENT_LOOP_SERVICE;
+use crate::_base::log::log::I_LOG_SERVICE;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use kimi_core::primitives::errors::{Error2, Error2Options};
 use parking_lot::Mutex;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 use crate::_base::di::scope::{IAgentScopeHandle, ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
-use crate::agent::context_memory::types::PromptOrigin;
 use crate::agent::r#loop::r#loop::{IAgentLoopService, LoopSubmitOptions};
 use crate::app::scopes::LifecycleScope;
 use crate::app::session_manager::session_manager::ISessionManager;
+use crate::human::agent::origin::USER_PROMPT_ORIGIN;
 use crate::human::agent::turn::{UserMeta, create_user_entry};
 use crate::human::llm::message::{ContentPart, UserMessage};
 use crate::agent::r#loop::r#loop::TextPart;
@@ -50,7 +54,7 @@ impl RestGateway {
             ));
             error
         })?;
-        let agents = session.accessor().get::<IAgentLifecycleService>();
+        let agents = session.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
         agents.handle_of(agent_id).ok_or_else(|| {
             let mut details = Map::new();
             details.insert("agentId".to_string(), Value::String(agent_id.to_string()));
@@ -73,7 +77,7 @@ impl RestGateway {
         agent_id: &str,
         input: &str,
     ) -> Result<Option<PromptLaunchResult>, WireAsyncError> {
-        let loop_ = self.agent(session_id, agent_id)?.accessor().get::<IAgentLoopService>();
+        let loop_ = self.agent(session_id, agent_id)?.accessor().get(&I_AGENT_LOOP_SERVICE);
         let submitted = loop_.submit(user_entry(input)?, None);
         await_launch(&loop_, submitted.id).await
     }
@@ -84,7 +88,7 @@ impl RestGateway {
         agent_id: &str,
         content: &str,
     ) -> Result<Option<PromptLaunchResult>, WireAsyncError> {
-        let loop_ = self.agent(session_id, agent_id)?.accessor().get::<IAgentLoopService>();
+        let loop_ = self.agent(session_id, agent_id)?.accessor().get(&I_AGENT_LOOP_SERVICE);
         let submitted = loop_.submit(
             user_entry(content)?,
             Some(LoopSubmitOptions {
@@ -101,7 +105,7 @@ impl RestGateway {
         agent_id: &str,
         reason: Option<String>,
     ) -> Result<(), WireAsyncError> {
-        let loop_ = self.agent(session_id, agent_id)?.accessor().get::<IAgentLoopService>();
+        let loop_ = self.agent(session_id, agent_id)?.accessor().get(&I_AGENT_LOOP_SERVICE);
         loop_.cancel(
             None,
             reason.map(|reason| -> WireAsyncError {
@@ -119,7 +123,7 @@ impl RestGateway {
         let Some(session) = self.sessions.get(session_id) else {
             return Ok(());
         };
-        session.accessor().get::<ILogService>().flush().await
+        session.accessor().get(&I_LOG_SERVICE).flush().await
     }
 
     pub async fn flush_global_logs(&self) -> Result<(), WireAsyncError> {
@@ -185,18 +189,16 @@ async fn await_launch(
 }
 
 fn user_entry(input: &str) -> Result<crate::agent::r#loop::machine::UserEntry, WireAsyncError> {
-    let origin = serde_json::from_value::<PromptOrigin>(json!({"kind": "user"}))
-        .map_err(|error| -> WireAsyncError { Box::new(error) })?;
     Ok(create_user_entry(
         UserMessage {
-            role: "user".to_string(),
-            content: vec![ContentPart::Text(TextPart {
-                type_: "text".to_string(),
+            role: crate::human::llm::message::Role::User,
+            content: vec![ContentPart::Text {
                 text: input.to_string(),
-            })],
+                meta: None,
+            }],
         },
         UserMeta {
-            origin: Some(origin),
+            origin: Some(USER_PROMPT_ORIGIN.clone()),
             tracked: Some(true),
             ..Default::default()
         },

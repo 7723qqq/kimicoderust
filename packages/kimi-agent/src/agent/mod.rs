@@ -29,6 +29,7 @@ pub(crate) mod permission_rules;
 pub(crate) mod plugin;
 pub(crate) mod plugin_command;
 pub(crate) mod profile;
+pub(crate) mod registrations;
 pub(crate) mod progress_track;
 pub(crate) mod prompt;
 pub(crate) mod replay_builder;

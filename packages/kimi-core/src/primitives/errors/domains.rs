@@ -483,12 +483,14 @@ pub mod agent_loop {
 
     pub const LOOP_MAX_STEPS_EXCEEDED: &str = "loop.max_steps_exceeded";
     pub const TURN_AGENT_BUSY: &str = "turn.agent_busy";
+    pub const TURN_NOT_FOUND: &str = "turn.not_found";
 
     pub static DOMAIN: ErrorDomain = ErrorDomain {
         id: "LoopErrors",
         codes: &[
             ("LOOP_MAX_STEPS_EXCEEDED", LOOP_MAX_STEPS_EXCEEDED),
             ("TURN_AGENT_BUSY", TURN_AGENT_BUSY),
+            ("TURN_NOT_FOUND", TURN_NOT_FOUND),
         ],
         retryable: &["turn.agent_busy"],
         info: &[("loop.max_steps_exceeded", ErrorInfo::new(false, true))],

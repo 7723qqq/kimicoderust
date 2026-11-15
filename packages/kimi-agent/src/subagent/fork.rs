@@ -167,7 +167,7 @@ pub fn close_trailing_open_tool_exchange(history: &[LLMMessage]) -> Vec<LLMMessa
     result.extend_from_slice(&history[idx + 1..]);
     for tc in open_calls {
         result.push(LLMMessage {
-            role: "tool".into(),
+            role: kimi_core::types::Role::Tool,
             content: INHERITED_IN_FLIGHT_TOOL_OUTPUT.into(),
             blocks: Vec::new(),
             tool_calls: Vec::new(),
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_history_without_tool_calls() {
-        let history = vec![LLMMessage::new("user", "hi")];
+        let history = vec![LLMMessage::new(kimi_core::types::Role::User, "hi")];
         assert_eq!(close_trailing_open_tool_exchange(&history), history);
     }
 
@@ -205,12 +205,13 @@ mod tests {
             name: "Read".into(),
             arguments: "{}".into(),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         };
         let history = vec![
-            LLMMessage::new("user", "hi"),
+            LLMMessage::new(kimi_core::types::Role::User, "hi"),
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: String::new(),
                 blocks: Vec::new(),
                 tool_calls: vec![read_call],
@@ -221,7 +222,7 @@ mod tests {
                 origin: None,
             },
             LLMMessage {
-                role: "tool".into(),
+                role: kimi_core::types::Role::Tool,
                 content: "contents".into(),
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),
@@ -241,12 +242,13 @@ mod tests {
             name: "Agent".into(),
             arguments: "{}".into(),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         };
         let history = vec![
-            LLMMessage::new("user", "hi"),
+            LLMMessage::new(kimi_core::types::Role::User, "hi"),
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: "delegating the follow-up".into(),
                 blocks: Vec::new(),
                 tool_calls: vec![agent_call],
@@ -273,19 +275,21 @@ mod tests {
             name: "Read".into(),
             arguments: "{}".into(),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         };
         let agent_call = ToolCall {
             id: "call_agent".into(),
             name: "Agent".into(),
             arguments: "{}".into(),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         };
         let history = vec![
-            LLMMessage::new("user", "hi"),
+            LLMMessage::new(kimi_core::types::Role::User, "hi"),
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: String::new(),
                 blocks: Vec::new(),
                 tool_calls: vec![read_call, agent_call],
@@ -296,7 +300,7 @@ mod tests {
                 origin: None,
             },
             LLMMessage {
-                role: "tool".into(),
+                role: kimi_core::types::Role::Tool,
                 content: "contents".into(),
                 blocks: Vec::new(),
                 tool_calls: Vec::new(),

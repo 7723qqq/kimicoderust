@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 use crate::_base::di::instantiation::{
-    IInstantiationService, ServicesAccessorExt, create_decorator,
+    IInstantiationService, IInstantiationServiceExt, ServicesAccessorExt, create_decorator,
 };
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::log::log::ILogger;

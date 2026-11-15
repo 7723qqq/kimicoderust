@@ -33,7 +33,7 @@ impl LLM for CapturingLlm {
                 thinking: vec![],
                 tool_calls: vec![],
                 finish_reason: Some("stop".into()),
-                usage: crate::rpc::types::TokenUsage::default(),
+                usage: kimi_core::types::TokenUsage::default(),
                 timing: None,
             })
         })
@@ -155,7 +155,10 @@ impl HostCallbacks for PreparingCallbacks {
             let active = vec![crate::tools::tool_select_ops::ToolSelectTool {
                 name: "mcp__s__alpha".to_string(),
                 description: "old".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
+                parameters: serde_json::json!({"type": "object"})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
                 source: crate::tools::tool_select_ops::ToolSelectSource::Mcp,
                 disclosure: Some(crate::tools::registry::ToolDisclosure::Inline),
                 origin: crate::tools::tool_select_ops::ToolSelectOrigin::Initial,

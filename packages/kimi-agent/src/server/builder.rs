@@ -984,7 +984,7 @@ impl HttpServer {
         session_id: &str,
         item: Value,
         prompt: String,
-        blocks: Vec<crate::rpc::types::ContentBlock>,
+        blocks: Vec<crate::rpc::types::ContentPart>,
         origin: Option<Value>,
     ) {
         let (_item, run) = self

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 
 pub type WorkspaceTrustAsyncError = Box<dyn Error + Send + Sync>;
 
@@ -23,5 +23,5 @@ pub trait IWorkspaceTrust: Send + Sync {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(WorkspaceTrustChange) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
 }

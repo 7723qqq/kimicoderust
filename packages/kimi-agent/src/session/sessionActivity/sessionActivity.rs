@@ -1,8 +1,10 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,5 +55,9 @@ pub trait ISessionActivityView: Send + Sync {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(SessionActivityChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
 }
+
+
+pub static I_SESSION_ACTIVITY_VIEW: LazyLock<ServiceIdentifier<Arc<dyn ISessionActivityView>>> =
+    LazyLock::new(|| create_decorator("sessionActivityView"));

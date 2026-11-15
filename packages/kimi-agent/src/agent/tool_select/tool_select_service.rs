@@ -32,6 +32,7 @@ use super::tool_select::{
     IAgentToolSelectService, LoadToolsResult, ShapedToolEntry, Tool, ToolSelectAnnouncement,
     ToolSelectCapabilities,
 };
+use kimi_core::types::Deferred;
 use crate::tools::select_tools::{
     STOP_RETRY_THRESHOLD, inactive_loaded_tool_output, not_loaded_tool_output,
 };
@@ -364,7 +365,7 @@ impl AgentToolSelectService {
             }
             shaped.push(ShapedToolEntry {
                 tool: entry,
-                deferred: Some(true),
+                deferred: Some(Deferred),
             });
         }
         shaped
@@ -431,7 +432,7 @@ impl AgentToolSelectService {
             if !is_dynamic_tool_schema_message(&message) {
                 continue;
             }
-            for tool in message.tools {
+            for tool in message.tools.unwrap_or_default() {
                 names.insert(tool.name);
             }
         }
@@ -663,7 +664,7 @@ impl AgentToolSelectService {
     ) -> Vec<ContextMessage> {
         let inline_names = tools
             .iter()
-            .filter(|tool| tool.deferred != Some(true))
+            .filter(|tool| tool.deferred.is_none())
             .map(|tool| tool.name.clone())
             .collect::<HashSet<_>>();
         messages
@@ -677,13 +678,16 @@ impl AgentToolSelectService {
         mut message: ContextMessage,
         inline_names: &HashSet<String>,
     ) -> Option<ContextMessage> {
-        if message.role != "system" || message.tools.is_empty() {
+        if message.role != "system" {
             return Some(message);
         }
+        let Some(tools) = message.tools.as_ref().filter(|tools| !tools.is_empty()) else {
+            return Some(message);
+        };
         let current = self.current_tools();
         let loaded = collect_loaded_dynamic_tools(&self.context.get(), &current);
         let mut kept = Vec::new();
-        for tool in &message.tools {
+        for tool in tools {
             let info = current.iter().find(|info| info.name == tool.name);
             let active = match info {
                 Some(info) => self
@@ -711,14 +715,14 @@ impl AgentToolSelectService {
                 kept.push(tool.clone());
             }
         }
-        if kept.len() == message.tools.len() {
+        if kept.len() == tools.len() {
             return Some(message);
         }
         if !kept.is_empty() {
-            message.tools = kept;
+            message.tools = Some(kept);
             return Some(message);
         }
-        message.tools.clear();
+        message.tools = None;
         if message.content.is_empty() && message.tool_calls.is_empty() {
             None
         } else {
@@ -758,7 +762,7 @@ impl IAgentToolSelectService for AgentToolSelectService {
     }
 
     fn prepare_for_request(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         signal: Option<CancellationToken>,
     ) -> BoxFuture<'static, Result<(), WireAsyncError>> {
         let this = self.clone();

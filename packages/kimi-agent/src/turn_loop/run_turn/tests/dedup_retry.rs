@@ -60,16 +60,18 @@ async fn test_same_step_duplicate_executes_once() {
                             ToolCall {
                                 id: "tc1".into(),
                                 name: "read".into(),
-                                arguments: serde_json::json!({"path": "/a.txt"}),
+                                arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             },
                             ToolCall {
                                 id: "tc2".into(),
                                 name: "read".into(),
-                                arguments: serde_json::json!({"path": "/a.txt"}),
+                                arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             },
                         ],
                         finish_reason: Some("tool_calls".into()),
@@ -118,7 +120,7 @@ async fn test_same_step_duplicate_executes_once() {
         turn_id: "test-same-step-dedup".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -201,16 +203,18 @@ async fn test_same_step_duplicate_of_host_tool_still_executes_twice() {
                             ToolCall {
                                 id: "tc1".into(),
                                 name: "echo".into(),
-                                arguments: serde_json::json!({"text": "hello"}),
+                                arguments: Some(serde_json::json!({"text": "hello"}).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             },
                             ToolCall {
                                 id: "tc2".into(),
                                 name: "echo".into(),
-                                arguments: serde_json::json!({"text": "hello"}),
+                                arguments: Some(serde_json::json!({"text": "hello"}).to_string()),
                                 extras: None,
-                                args_parse_error: None,
+                                raw_id: None,
+                                _stream_index: None,
                             },
                         ],
                         finish_reason: Some("tool_calls".into()),
@@ -257,7 +261,7 @@ async fn test_same_step_duplicate_of_host_tool_still_executes_twice() {
         turn_id: "test-host-tool-no-dedup".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -313,9 +317,10 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
                     tool_calls: vec![ToolCall {
                         id: format!("tc{call}"),
                         name: "read".into(),
-                        arguments: serde_json::json!({"path": "/a.txt"}),
+                        arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage: TokenUsage::default(),
@@ -350,7 +355,7 @@ async fn test_repeat_streak_appends_reminders_and_force_stops() {
         turn_id: "test-repeat-streak".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -483,12 +488,10 @@ async fn test_changing_malformed_payloads_do_not_force_stop() {
                     tool_calls: vec![ToolCall {
                         id: format!("bad{call}"),
                         name: "Bash".into(),
-                        arguments: serde_json::json!({}),
+                        arguments: Some(format!(r#"{{"command":"ls {call}"#)),
                         extras: None,
-                        args_parse_error: Some(crate::turn_loop::types::ArgsParseError {
-                            raw: format!(r#"{{"command":"ls {call}"#),
-                            error: "EOF while parsing an object".into(),
-                        }),
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage: TokenUsage::default(),
@@ -501,7 +504,7 @@ async fn test_changing_malformed_payloads_do_not_force_stop() {
         call: AtomicU32::new(0),
     };
     let server = Arc::new(RpcServer::new());
-    let callbacks = rpc_callbacks(server.clone());
+    let callbacks = broken_callbacks(server.clone());
     let input = RunTurnInput {
         llm_request_byte_budget: u64::MAX,
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -509,7 +512,7 @@ async fn test_changing_malformed_payloads_do_not_force_stop() {
         turn_id: "test-changing-malformed".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -598,12 +601,10 @@ impl LLM for SameBrokenCallLlm {
                 tool_calls: vec![ToolCall {
                     id: format!("bad{call}"),
                     name: "Bash".into(),
-                    arguments: serde_json::json!({}),
+                    arguments: Some(raw.to_string()),
                     extras: None,
-                    args_parse_error: Some(crate::turn_loop::types::ArgsParseError {
-                        raw: raw.to_string(),
-                        error: "EOF while parsing an object".into(),
-                    }),
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 finish_reason: Some("tool_calls".into()),
                 usage: TokenUsage::default(),
@@ -611,6 +612,16 @@ impl LLM for SameBrokenCallLlm {
             })
         })
     }
+}
+
+fn broken_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
+    let callbacks = rpc_callbacks(server.clone());
+    let tools = crate::tools::core_tool_defs::core_tool_defs()
+        .into_iter()
+        .filter(|tool| tool.name == "Bash")
+        .collect::<Vec<_>>();
+    register_tool_defs(&server, tools);
+    callbacks
 }
 
 fn broken_turn_input<'a>(llm: &'a SameBrokenCallLlm, max_steps: u32) -> RunTurnInput<'a> {
@@ -621,7 +632,7 @@ fn broken_turn_input<'a>(llm: &'a SameBrokenCallLlm, max_steps: u32) -> RunTurnI
         turn_id: "test-rejected-repeat".into(),
         llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -650,7 +661,7 @@ async fn test_repeated_rejected_calls_force_stop_the_turn() {
         call: AtomicU32::new(0),
     };
     let server = Arc::new(RpcServer::new());
-    let callbacks = rpc_callbacks(server.clone());
+    let callbacks = broken_callbacks(server.clone());
     let _breaker = ArmedRepeatBreaker::new().await;
     let result = run_turn(broken_turn_input(&llm, 20), &callbacks)
         .await
@@ -671,7 +682,7 @@ async fn test_repeated_rejected_calls_force_stop_the_turn() {
 
     for message in &tool_msgs[..12] {
         assert!(
-            message.content.contains("Invalid Bash arguments"),
+            message.content.contains("Invalid args for tool \"Bash\""),
             "{}",
             message.content
         );
@@ -708,7 +719,7 @@ async fn test_handoff_runs_when_the_force_stop_lands_on_the_step_cap() {
         call: AtomicU32::new(0),
     };
     let server = Arc::new(RpcServer::new());
-    let callbacks = rpc_callbacks(server.clone());
+    let callbacks = broken_callbacks(server.clone());
     let _breaker = ArmedRepeatBreaker::new().await;
     let result = run_turn(broken_turn_input(&llm, 12), &callbacks)
         .await
@@ -750,10 +761,9 @@ async fn test_turn_result_llm_retry_counter() {
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        total_tokens: 2,
-                        ..Default::default()
+                        input_other: 1,
+                        output: 1,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -776,7 +786,7 @@ async fn test_turn_result_llm_retry_counter() {
         turn_id: "test-retry-counter".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -866,7 +876,7 @@ async fn test_max_attempts_caps_llm_retries() {
         turn_id: "test-max-attempts".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],

@@ -554,7 +554,6 @@ pub fn session_enqueue_turn(
             .map_err(|e| napi::Error::from_reason(format!("prompt parse: {e}")))?;
         // A client submits an uploaded file as a `kimi-file://` media URL; the
         // engine is the side that knows it is a daemon reference.
-        prompt.blocks = crate::llm::media_resolver::normalize_media_refs(prompt.blocks);
         let admission = match admission.as_str() {
             "newTurn" => Admission::NewTurn,
             "activeOrNewTurn" => Admission::ActiveOrNewTurn,
@@ -643,7 +642,7 @@ pub fn session_turn_outcome(env: Env, session_id: String, turn_id: f64) -> napi:
                             &turn_event_count,
                             &native_tool_count,
                             &llm_transport,
-                        ),
+                        )?,
                     )?;
                     obj.set_named_property("result", result_obj)?;
                 }

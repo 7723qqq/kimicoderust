@@ -212,6 +212,7 @@ struct OAuthServiceState {
     shutdown: Option<Shared<BoxFuture<'static, ()>>>,
 }
 
+#[derive(Clone)]
 pub struct McpOAuthService {
     store: Arc<dyn McpOAuthStore>,
     client_label: Option<String>,

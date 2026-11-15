@@ -56,8 +56,8 @@ pub fn turn_wrote_memory(messages: &[LLMMessage]) -> bool {
     messages.iter().any(|message| {
         message.tool_calls.iter().any(|call| {
             call.name.eq_ignore_ascii_case("memory")
-                && call
-                    .arguments
+                && crate::llm::tool_args::parse_tool_arguments(call.arguments.as_deref())
+                    .data
                     .get("action")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|action| MEMORY_MUTATION_ACTIONS.contains(&action))
@@ -74,6 +74,7 @@ pub fn tool_activity(messages: &[LLMMessage]) -> Vec<String> {
 }
 
 fn render_tool_call(call: &ToolCall) -> String {
+    let arguments = crate::llm::tool_args::parse_tool_arguments(call.arguments.as_deref()).data;
     let target = [
         "path",
         "file_path",
@@ -84,7 +85,7 @@ fn render_tool_call(call: &ToolCall) -> String {
         "prompt",
     ]
     .iter()
-    .find_map(|key| call.arguments.get(*key).and_then(|value| value.as_str()))
+    .find_map(|key| arguments.get(*key).and_then(|value| value.as_str()))
     .map(|value| truncate_chars(value, TOOL_LINE_MAX_CHARS));
     match target {
         Some(target) => format!("{}({target})", call.name),
@@ -470,13 +471,14 @@ mod tests {
 
     fn call(name: &str) -> LLMMessage {
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             tool_calls: vec![ToolCall {
                 id: "call-1".into(),
                 name: name.into(),
-                arguments: serde_json::json!({ "path": "global/profile.md" }),
+                arguments: Some(serde_json::json!({ "path": "global/profile.md" }).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             ..Default::default()
         }
@@ -484,13 +486,14 @@ mod tests {
 
     fn memory_call(action: &str) -> LLMMessage {
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             tool_calls: vec![ToolCall {
                 id: "call-1".into(),
                 name: "Memory".into(),
-                arguments: serde_json::json!({ "action": action }),
+                arguments: Some(serde_json::json!({ "action": action }).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             ..Default::default()
         }
@@ -601,25 +604,27 @@ mod tests {
         let messages = vec![
             call("Read"),
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 tool_calls: vec![ToolCall {
                     id: "call-2".into(),
                     name: "Bash".into(),
-                    arguments: serde_json::json!({ "command": "cargo test" }),
+                    arguments: Some(serde_json::json!({ "command": "cargo test" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 ..Default::default()
             },
             LLMMessage::tool_result("call-2", "a very long tool result"),
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 tool_calls: vec![ToolCall {
                     id: "call-3".into(),
                     name: "TodoList".into(),
-                    arguments: serde_json::json!({ "todos": [] }),
+                    arguments: Some(serde_json::json!({ "todos": [] }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 ..Default::default()
             },

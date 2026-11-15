@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use futures_util::{FutureExt, future::BoxFuture};
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::exec_env::shell_path_bridge::{ShellPathBridge, get_shell_path_bridge};
 use crate::_base::utils::paths::is_windows_absolute_path;
 use crate::environment::environment::{
@@ -27,7 +27,7 @@ pub struct LocalEnvironment {
     host: crate::os::interface::host_environment::HostEnvironmentInfo,
     path: EnvironmentPath,
     workspace: EnvironmentWorkspace,
-    shell_path_bridge: Option<Arc<dyn ShellPathBridge>>,
+    shell_path_bridge: Option<Arc<ShellPathBridge>>,
     fs: Option<Arc<dyn IHostFileSystem>>,
     process: Option<Arc<dyn IHostProcessService>>,
     current_status: Mutex<EnvironmentStatus>,
@@ -154,7 +154,7 @@ impl Environment for LocalEnvironment {
         Some(self.workspace.clone())
     }
 
-    fn shell_path_bridge(&self) -> Option<Arc<dyn ShellPathBridge>> {
+    fn shell_path_bridge(&self) -> Option<Arc<ShellPathBridge>> {
         self.shell_path_bridge.clone()
     }
 
@@ -183,7 +183,7 @@ impl Environment for LocalEnvironment {
         async {}.boxed()
     }
 
-    fn on_did_change_status(&self, listener: StatusListener) -> Box<dyn IDisposable> {
+    fn on_did_change_status(&self, listener: StatusListener) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().insert(id, listener);
         let listeners = Arc::downgrade(&self.listeners);

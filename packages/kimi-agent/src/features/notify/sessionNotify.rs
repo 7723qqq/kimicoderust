@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use serde::{Deserialize, Serialize};
 
 use crate::persistence::JsonAtomicDocumentStore;
@@ -86,3 +89,7 @@ impl ISessionNotify for SessionNotify {
         SessionNotify::enabled(self)
     }
 }
+
+
+pub static I_SESSION_NOTIFY: LazyLock<ServiceIdentifier<Arc<dyn ISessionNotify>>> =
+    LazyLock::new(|| create_decorator("sessionNotify"));

@@ -186,7 +186,7 @@ fn extract_chunk_parts(response: &Map<String, Value>) -> Vec<StreamedMessagePart
                     hidden: None,
                     reasoning_key: None,
                 }));
-            } else if part.get("text").is_some_and(truthy) {
+            } else if part.get("text").is_some_and(Value::is_string) {
                 let Some(text) = part.get("text").and_then(Value::as_str) else {
                     continue;
                 };

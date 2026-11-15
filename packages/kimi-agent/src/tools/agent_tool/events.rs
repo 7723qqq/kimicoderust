@@ -51,7 +51,7 @@ pub(crate) fn emit_completed(
     agent_id: &str,
     agent_name: &str,
     summary: &str,
-    usage: &crate::rpc::types::TokenUsage,
+    usage: &kimi_core::types::TokenUsage,
 ) {
     emit_subagent_event(
         callbacks,
@@ -111,11 +111,11 @@ pub(crate) fn emit_cancelled(
     }
 }
 
-pub(crate) fn usage_json(usage: &crate::rpc::types::TokenUsage) -> serde_json::Value {
+pub(crate) fn usage_json(usage: &kimi_core::types::TokenUsage) -> serde_json::Value {
     serde_json::json!({
-        "input_tokens": usage.input_tokens,
-        "output_tokens": usage.output_tokens,
-        "total_tokens": usage.total_tokens,
+        "input_tokens": usage.input_other,
+        "output_tokens": usage.output,
+        "total_tokens": usage.measured_context_tokens(),
         "input_cache_read": usage.input_cache_read,
         "input_cache_creation": usage.input_cache_creation,
     })

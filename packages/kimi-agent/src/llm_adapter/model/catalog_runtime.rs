@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::human::llm::capability::ModelCapability;
 use crate::human::llm::model::{LlmConnection, LlmModel};
 use crate::human::llm::protocol::base::ProtocolName;
@@ -29,7 +29,7 @@ pub trait IProviderCatalogRuntime: Send + Sync {
     fn on_changed(
         &self,
         listener: Arc<dyn Fn(Vec<String>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
 }
 
 pub fn raw_record_of(definition: &CatalogModelDefinition) -> ModelRecord {
@@ -241,7 +241,7 @@ pub struct ProviderCatalogRuntimeService {
     alias_order: Mutex<Vec<String>>,
     provider_order: Mutex<Vec<String>>,
     dirty: AtomicBool,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl ProviderCatalogRuntimeService {
@@ -394,8 +394,8 @@ impl IProviderCatalogRuntime for ProviderCatalogRuntimeService {
     fn on_changed(
         &self,
         listener: Arc<dyn Fn(Vec<String>) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
-        Box::new(CatalogSubscription {
+    ) -> DisposableRef {
+        Arc::new(CatalogSubscription {
             unsubscribe: Mutex::new(Some(self.catalog.on_changed(listener))),
         })
     }

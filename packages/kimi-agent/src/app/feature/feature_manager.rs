@@ -8,7 +8,7 @@ use crate::_base::di::fiber::{
     FiberHandle, FiberProvideOptions, FiberState, ServiceClassRecipe, ServiceRecipe,
 };
 use crate::_base::di::instantiation::ServiceIdentifier;
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::wire::record::WireAsyncError;
 
 use super::feature_service_contribution::ContributedFeatureService;
@@ -44,5 +44,5 @@ pub trait IFeatureManager: Send + Sync {
 
     fn contributed_services(&self) -> Vec<ContributedFeatureService>;
 
-    fn on_did_change_units(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable>;
+    fn on_did_change_units(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef;
 }

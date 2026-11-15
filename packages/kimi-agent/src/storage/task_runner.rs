@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::_base::utils::xml_escape::{escape_xml, escape_xml_attr, escape_xml_tags};
 use crate::primitives::deadline::Deadline;
 use crate::primitives::read::ReadOutcome;
 use crate::storage::state_store::align_to_character_start;
@@ -802,25 +803,6 @@ fn is_user_cancellation(reason: Option<&str>) -> bool {
             || reason.eq_ignore_ascii_case("stopped by user")
             || reason.eq_ignore_ascii_case("user cancelled")
     })
-}
-
-/// v2 `escapeXml`.
-fn escape_xml(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// v2 `escapeXmlAttr`.
-fn escape_xml_attr(input: &str) -> String {
-    input.replace('&', "&amp;").replace('"', "&quot;")
-}
-
-/// v2 `escapeXmlTags`.
-fn escape_xml_tags(input: &str) -> String {
-    input.replace('<', "&lt;").replace('>', "&gt;")
 }
 
 impl TaskRunner {

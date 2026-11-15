@@ -176,6 +176,8 @@ pub struct AssistantDeltaPayload {
     pub agent_id: String,
     pub turn_id: u64,
     pub delta: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -184,6 +186,17 @@ pub struct ThinkingDeltaPayload {
     pub agent_id: String,
     pub turn_id: u64,
     pub delta: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStepStreamResetPayload {
+    pub agent_id: String,
+    pub turn_id: u64,
+    pub step: u64,
+    pub step_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,6 +251,11 @@ macro_rules! agent_event {
 
             pub fn as_event(&self) -> &Event2 {
                 &self.event
+            }
+
+            pub fn from_event(event: Event2) -> Option<Self> {
+                let payload = serde_json::from_value(event.payload.clone()).ok()?;
+                Some(Self { event, payload })
             }
         }
 
@@ -305,6 +323,14 @@ agent_event!(
 );
 agent_event!(AssistantDelta, AssistantDeltaPayload, ASSISTANT_DELTA_CLASS, "assistant.delta", false, None);
 agent_event!(ThinkingDelta, ThinkingDeltaPayload, THINKING_DELTA_CLASS, "thinking.delta", false, None);
+agent_event!(
+    TurnStepStreamReset,
+    TurnStepStreamResetPayload,
+    TURN_STEP_STREAM_RESET_CLASS,
+    "turn.step.stream_reset",
+    false,
+    None
+);
 agent_event!(ToolCallDelta, ToolCallDeltaPayload, TOOL_CALL_DELTA_CLASS, "tool.call.delta", false, None);
 
 pub fn register_turn_event_classes() -> Result<(), String> {
@@ -424,3 +450,4 @@ pub type TurnStepRetryingEvent = TypedTurnEvent<TurnStepRetryingPayload>;
 pub type TurnStepInterruptedEvent = TypedTurnEvent<TurnStepInterruptedPayload>;
 pub type AssistantDeltaEvent = TypedTurnEvent<AssistantDeltaPayload>;
 pub type ThinkingDeltaEvent = TypedTurnEvent<ThinkingDeltaPayload>;
+pub type TurnStepStreamResetEvent = TypedTurnEvent<TurnStepStreamResetPayload>;

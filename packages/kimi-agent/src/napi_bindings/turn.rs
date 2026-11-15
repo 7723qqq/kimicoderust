@@ -508,7 +508,7 @@ pub(crate) fn spawn_cron_dispatcher(workspace: &str) {
                 );
                 let _ = live.session.enqueue_turn(TurnRequest {
                     prompt: LLMMessage {
-                        role: "user".into(),
+                        role: kimi_core::types::Role::User,
                         content: rendered.clone(),
                         ..Default::default()
                     },
@@ -1038,21 +1038,25 @@ async fn run_turn_rust_impl(
     let messages: Vec<LLMMessage> = params
         .messages
         .iter()
-        .map(|m| LLMMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-            blocks: parse_host_json(m.blocks_json.as_deref(), "message blocks", &m.role),
-            tool_calls: parse_host_json(
-                m.tool_calls_json.as_deref(),
-                "message tool calls",
-                &m.role,
-            ),
-            tool_call_id: m.tool_call_id.clone(),
-            prompt_id: None,
-            origin: None,
-            tools: Vec::new(),
+        .map(|m| {
+            let role = serde_json::from_value(serde_json::Value::String(m.role.clone()))
+                .map_err(|error| napi::Error::from_reason(format!("Invalid message role: {error}")))?;
+            Ok(LLMMessage {
+                role,
+                content: m.content.clone(),
+                blocks: parse_host_json(m.blocks_json.as_deref(), "message blocks", &m.role),
+                tool_calls: parse_host_json(
+                    m.tool_calls_json.as_deref(),
+                    "message tool calls",
+                    &m.role,
+                ),
+                tool_call_id: m.tool_call_id.clone(),
+                prompt_id: None,
+                origin: None,
+                tools: Vec::new(),
+            })
         })
-        .collect();
+        .collect::<napi::Result<Vec<_>>>()?;
 
     // A malformed schema used to become `Value::Null` and ride into the request
     // body verbatim, where the provider rejected the whole turn with a 400 that
@@ -1135,12 +1139,12 @@ async fn run_turn_rust_impl(
         );
     }
 
-    Ok(js_run_turn_result(
+    js_run_turn_result(
         result,
         &turn_event_count,
         &native_tool_count,
         llm.transport(),
-    ))
+    )
 }
 
 /// Project a `TurnResult` onto the napi result shape. The counters come from
@@ -1150,20 +1154,22 @@ pub(crate) fn js_run_turn_result(
     turn_event_count: &std::sync::atomic::AtomicU32,
     native_tool_count: &std::sync::atomic::AtomicU32,
     llm_transport: &str,
-) -> JsRunTurnResult {
-    JsRunTurnResult {
+) -> napi::Result<JsRunTurnResult> {
+    let usage = crate::rpc::types::TokenUsage::from_engine(result.usage)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    Ok(JsRunTurnResult {
         stop_reason: format!("{:?}", result.stop_reason),
         steps: result.steps,
-        input_tokens: result.usage.input_tokens,
-        output_tokens: result.usage.output_tokens,
-        total_tokens: result.usage.total_tokens,
-        input_cache_read: result.usage.input_cache_read,
-        input_cache_creation: result.usage.input_cache_creation,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+        input_cache_read: usage.input_cache_read,
+        input_cache_creation: usage.input_cache_creation,
         events_emitted: turn_event_count.load(std::sync::atomic::Ordering::Relaxed),
         llm_retries: result.llm_retries,
         llm_transport: llm_transport.to_string(),
         native_tool_calls: native_tool_count.load(std::sync::atomic::Ordering::Relaxed),
-    }
+    })
 }
 
 /// Build the JS object for a `JsRunTurnResult` — shared by the per-turn

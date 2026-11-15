@@ -117,14 +117,10 @@ fn has_todo_list_write(message: &LLMMessage) -> bool {
         if !is_todo_list_tool(&call.name) {
             return false;
         }
-        match &call.arguments {
-            Value::Object(_) => call.arguments.get("todos").is_some_and(Value::is_array),
-            Value::String(raw) => serde_json::from_str::<Value>(raw)
-                .ok()
-                .and_then(|args| args.get("todos").map(Value::is_array))
-                .unwrap_or(false),
-            _ => false,
-        }
+        crate::llm::tool_args::parse_tool_arguments(call.arguments.as_deref())
+            .data
+            .get("todos")
+            .is_some_and(Value::is_array)
     })
 }
 
@@ -287,7 +283,7 @@ mod tests {
 
     fn assistant_message() -> LLMMessage {
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "working".into(),
             ..Default::default()
         }
@@ -295,13 +291,14 @@ mod tests {
 
     fn todo_list_write(todos: &Value) -> LLMMessage {
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             tool_calls: vec![ToolCall {
                 id: "call_todo_write".into(),
                 name: TODO_LIST_TOOL_NAME.into(),
-                arguments: serde_json::json!({ "todos": todos }),
+                arguments: Some(serde_json::json!({ "todos": todos }).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             ..Default::default()
         }
@@ -309,13 +306,14 @@ mod tests {
 
     fn todo_list_query() -> LLMMessage {
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             tool_calls: vec![ToolCall {
                 id: "call_todo_query".into(),
                 name: TODO_LIST_TOOL_NAME.into(),
-                arguments: serde_json::json!({}),
+                arguments: Some(serde_json::json!({}).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             ..Default::default()
         }
@@ -323,7 +321,7 @@ mod tests {
 
     fn prior_todo_reminder() -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(&render_todo_list_reminder(
                 &read_reminder_items(&todos_value()),
                 10,
@@ -477,7 +475,7 @@ mod tests {
     #[test]
     fn test_reminder_marker_recognizes_engine_built_injections() {
         let built = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(&render_todo_list_reminder(
                 &read_reminder_items(&todos_value()),
                 10,
@@ -489,14 +487,14 @@ mod tests {
         // A reminder persisted before the rewrite still counts toward the
         // spacing threshold.
         let legacy = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(LEGACY_TODO_LIST_REMINDER_MARKER),
             ..Default::default()
         };
         assert!(is_todo_list_reminder(&legacy));
 
         let quoted = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "The todo list has not been updated in the last 10 steps.".into(),
             ..Default::default()
         };

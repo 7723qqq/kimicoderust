@@ -5,7 +5,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::context_memory::types::ContextMessage;
-pub use kimi_core::types::ToolDescription as Tool;
+pub use kimi_core::types::{Deferred, ToolDescription as Tool};
 use crate::tools::tool_retriever::ToolSearchHit;
 use crate::wire::record::WireAsyncError;
 use tokio_util::sync::CancellationToken;
@@ -33,7 +33,7 @@ pub struct ShapedToolEntry {
     #[serde(flatten)]
     pub tool: ToolSelectTool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred: Option<bool>,
+    pub deferred: Option<Deferred>,
 }
 
 pub use crate::tools::tool_select_state::ToolSelectAnnouncementDisclosure;
@@ -64,7 +64,7 @@ pub trait IAgentToolSelectService: Send + Sync {
     fn enabled(&self, capabilities: Option<ToolSelectCapabilities>) -> bool;
 
     fn prepare_for_request(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         signal: Option<CancellationToken>,
     ) -> BoxFuture<'static, Result<(), WireAsyncError>>;
 

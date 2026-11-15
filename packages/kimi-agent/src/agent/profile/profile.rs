@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use serde::{Deserialize, Serialize};
 
 pub use super::errors::ProfileErrors;
@@ -265,3 +268,7 @@ pub trait AgentProfileService: Send + Sync {
 }
 
 pub use self::AgentProfileService as IAgentProfileService;
+
+
+pub static I_AGENT_PROFILE_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn AgentProfileService>>> =
+    LazyLock::new(|| create_decorator("agentProfileService"));

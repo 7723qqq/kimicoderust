@@ -20,8 +20,7 @@ use std::time::{Duration, Instant};
 
 use kimi_agent::config::{KimiConfig, ResolvedNativeLlm};
 use kimi_agent::events::EventBus;
-use kimi_agent::rpc::types::TokenUsage;
-use kimi_agent::turn_loop::types::{LLM, LLMChatParams, LLMChatResponse};
+use kimi_agent::turn_loop::types::{LLM, LLMChatParams, LLMChatResponse, TokenUsage};
 use kimi_tui_app::{RecordingTransport, UiState};
 use kimi_ui_core::{EntryKind, InputEvent, Key, KeyEvent};
 
@@ -53,9 +52,8 @@ impl LLM for StubLlm {
                 content: "the build is two steps".into(),
                 finish_reason: Some("stop".into()),
                 usage: TokenUsage {
-                    input_tokens: 3,
-                    output_tokens: 5,
-                    total_tokens: 8,
+                    input_other: 3,
+                    output: 5,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -322,9 +320,10 @@ impl LLM for GatedToolLlm {
                     tool_calls: vec![kimi_agent::turn_loop::types::ToolCall {
                         id: "c1".into(),
                         name: "Glob".into(),
-                        arguments: serde_json::json!({ "pattern": "*.rs" }),
+                        arguments: Some(serde_json::json!({ "pattern": "*.rs" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     ..Default::default()

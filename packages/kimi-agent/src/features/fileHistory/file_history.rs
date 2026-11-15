@@ -1,6 +1,10 @@
 use indexmap::IndexMap;
+use std::sync::{Arc, LazyLock};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 
 pub const AGENT_FILE_HISTORY_SERVICE_ID: &str = "agentFileHistoryService";
 pub const FILE_HISTORY_BLOB_PREFIX: &str = "file-history";
@@ -123,3 +127,7 @@ pub trait IAgentFileHistoryService: Send + Sync {
         phase: FileHistoryCheckpointPhase,
     ) -> Result<Option<FileHistoryContent>, String>;
 }
+
+
+pub static I_AGENT_FILE_HISTORY_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentFileHistoryService>>> =
+    LazyLock::new(|| create_decorator("agentFileHistoryService"));

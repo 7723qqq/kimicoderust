@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::_base::utils::abort::{AbortController, AbortSignal};
-use crate::human::llm::message::{ContentPart, ToolCall};
+use crate::human::llm::message::{ContentPart, Deferred, ToolCall};
 use crate::human::tool::executor::{
     OnToolUpdate, ToolExecuteInput, ToolExecutor, ToolResult, ToolUpdate,
 };
@@ -399,6 +399,7 @@ impl MachineToolsInner {
     fn handle_progress(&self, tool_call_id: &str, update: AgentToolUpdate) {
         let Some(handler) = self
             .progress_handlers
+            .lock()
             .get(tool_call_id)
             .cloned()
             .flatten()
@@ -488,7 +489,7 @@ fn materialize_definition(inner: &Weak<MachineToolsInner>, info: ToolInfo) -> To
                 .cloned()
                 .unwrap_or_else(Map::new)
         }),
-        deferred: (info.disclosure == ToolDisclosure::Deferred).then_some(true),
+        deferred: (info.disclosure == ToolDisclosure::Deferred).then_some(Deferred),
         execute: Arc::new(move |input| {
             let weak = weak.clone();
             Box::pin(async move {

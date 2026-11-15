@@ -21,8 +21,9 @@ pub(super) use crate::callbacks::HostCallbacks;
 pub(super) use crate::rpc::types::{
     AskQuestionRequest, AskQuestionResponse, BoxFuture, ListToolsResponse, LlmChatRequest,
     LlmChatResponse, PermissionCheckRequest, PermissionDecision, SecondaryModelEntry,
-    SecondaryModelPool, TokenUsage, ToolExecuteRequest, ToolExecuteResponse,
+    SecondaryModelPool, ToolExecuteRequest, ToolExecuteResponse,
 };
+pub(super) use kimi_core::types::TokenUsage;
 pub(super) use crate::subagent::secondary::{PRIMARY_MODEL_CHOICE, SecondaryModelRuntime};
 pub(super) use crate::subagent::types::SummaryPolicy;
 pub(super) use crate::turn_loop::types::{

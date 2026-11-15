@@ -26,10 +26,9 @@ impl LLM for BashThenStopLlm {
             requests.lock().unwrap().push(params.messages.to_vec());
             let first = requests.lock().unwrap().len() == 1;
             let usage = TokenUsage {
-                input_tokens: 1,
-                output_tokens: 1,
-                total_tokens: 2,
-                ..Default::default()
+                input_other: 1,
+                output: 1,
+                                ..Default::default()
             };
             if first {
                 Ok(LLMChatResponse {
@@ -38,9 +37,10 @@ impl LLM for BashThenStopLlm {
                     tool_calls: vec![ToolCall {
                         id: "tc-bash".into(),
                         name: "Bash".into(),
-                        arguments: bash_args,
+                        arguments: Some(bash_args.to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage,
@@ -109,7 +109,7 @@ fn bash_turn_input<'a>(llm: &'a BashThenStopLlm) -> RunTurnInput<'a> {
         turn_id: "test-bash-targets".into(),
         llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -440,16 +440,16 @@ async fn a_hard_failed_turn_still_reports_its_completed_steps_through_the_sink()
                     tool_calls: vec![ToolCall {
                         id: "tc-1".into(),
                         name: "Bash".into(),
-                        arguments: serde_json::json!({ "command": "echo hi" }),
+                        arguments: Some(serde_json::json!({ "command": "echo hi" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }],
                     finish_reason: Some("tool_calls".into()),
                     usage: TokenUsage {
-                        input_tokens: 10,
-                        output_tokens: 5,
-                        total_tokens: 15,
-                        ..Default::default()
+                        input_other: 10,
+                        output: 5,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -466,7 +466,7 @@ async fn a_hard_failed_turn_still_reports_its_completed_steps_through_the_sink()
         turn_id: "test-turn-sink-on-failure".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],

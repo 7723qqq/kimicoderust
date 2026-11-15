@@ -849,6 +849,9 @@ export const en = {
       overflowFailed:
         'Compaction failed to bring the context under the model window after {{max_attempts}} attempts.',
     },
+    execution: {
+      invalidArgs: 'Invalid args for tool "{{toolName}}": {{error}}',
+    },
     permission: {
     compactionAuthorizationRequired: 'Compaction requires authorization.',
       autoModeCannotAsk: 'Auto mode cannot ask interactive questions',
@@ -1194,11 +1197,7 @@ export const en = {
       argMustBeArray: 'Invalid {{tool}} arguments: `{{field}}` must be an array.',
       argMustNotBeEmpty: 'Invalid {{tool}} arguments: `{{field}}` must not be empty.',
       argRequired: 'Invalid {{tool}} arguments: `{{field}}` is required.',
-      argsNotJson:
-        'Invalid {{tool}} arguments: the arguments are not valid JSON ({{detail}}).',
       argsNotObject: 'Invalid {{tool}} arguments: the arguments must be a JSON object.',
-      argsInvalidSchema:
-        'Invalid {{tool}} arguments: {{detail}}.',
     },
     tui: {
       turnStoppedFiltered: 'Turn stopped: provider safety policy blocked the response.',

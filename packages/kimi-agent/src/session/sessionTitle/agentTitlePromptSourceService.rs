@@ -3,21 +3,26 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use serde_json::Value;
+
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
 use crate::agent::context_memory::hook_parts::is_user_prompt_submit_hook_part;
-use crate::agent::context_memory::types::ContextMessage;
+use crate::agent::context_memory::types::{ContextMessage, PromptOrigin};
 use crate::agent::r#loop::r#loop::IAgentLoopService;
 use crate::agent::prompt::prompt_metadata_text::{
     prompt_metadata_text_from_content_parts, prompt_metadata_text_from_text,
 };
 use crate::app::scopes::LifecycleScope;
-use crate::human::agent::origin::{annotate_bundled_skill_parts, is_skill_activation_part};
+use crate::human::agent::origin::{
+    BundledSkillActivation, SkillSource, annotate_bundled_skill_parts, is_skill_activation_part,
+};
 use crate::human::llm::message::ContentPart;
 use crate::wire::record::WireAsyncError;
 
 use super::agent_title_prompt_source::{
-    IAgentTitlePromptSource, TitleDigestExcerpt, TitleDigestTurn, TitleTurnExcerpt,
+    I_AGENT_TITLE_PROMPT_SOURCE, IAgentTitlePromptSource, TitleDigestExcerpt, TitleDigestTurn,
+    TitleTurnExcerpt,
 };
 
 pub struct AgentTitlePromptSourceService {
@@ -114,10 +119,14 @@ impl AgentTitlePromptSourceService {
                 continue;
             }
             all.push(ContextMessage {
-                role: "user".to_string(),
+                role: crate::human::llm::message::Role::User,
                 content: item.message.content.clone(),
                 tool_calls: Vec::new(),
-                origin: item.meta.and_then(|meta| meta.origin),
+                origin: item
+                    .meta
+                    .and_then(|meta| meta.origin)
+                    .and_then(|origin| serde_json::to_value(origin).ok())
+                    .and_then(|origin| serde_json::from_value(origin).ok()),
                 ..Default::default()
             });
         }
@@ -142,31 +151,50 @@ impl IAgentTitlePromptSource for AgentTitlePromptSourceService {
 
 fn is_natural_language_prompt(message: &ContextMessage) -> bool {
     message.role == "user"
-        && message.origin.as_ref().is_none_or(|origin| {
-            serde_json::to_value(origin)
-                .ok()
-                .and_then(|origin| origin.get("kind").and_then(|kind| kind.as_str()).map(ToString::to_string))
-                .as_deref()
-                == Some("user")
-        })
+        && message
+            .origin
+            .as_ref()
+            .is_none_or(|origin| origin.kind() == "user")
 }
 
 fn prompt_metadata_text_from_user_message(message: &ContextMessage) -> Option<String> {
-    let origin = message.origin.as_ref().and_then(|origin| serde_json::to_value(origin).ok());
-    let bundled = origin
-        .as_ref()
-        .and_then(|origin| origin.get("skillActivations"))
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default();
-    let parts = annotate_bundled_skill_parts(&message.content, bundled)
+    let (bundled, client_metadata) = match message.origin.as_ref() {
+        Some(PromptOrigin::User(origin)) if origin.kind == "user" => (
+            kernel_skill_activations(origin.skill_activations.as_deref()),
+            origin.client_metadata.clone(),
+        ),
+        _ => (Vec::new(), None),
+    };
+    let parts = annotate_bundled_skill_parts(&message.content, &bundled)
         .into_iter()
         .filter(|part| !is_skill_activation_part(part) && !is_user_prompt_submit_hook_part(part))
         .collect::<Vec<_>>();
-    let client_metadata = origin
-        .and_then(|origin| origin.get("clientMetadata").cloned())
-        .and_then(|value| serde_json::from_value(value).ok());
-    prompt_metadata_text_from_content_parts(&parts, client_metadata)
+    let client_metadata = client_metadata.map(|entries| {
+        Value::Array(entries.into_iter().map(Value::Object).collect())
+    });
+    prompt_metadata_text_from_content_parts(&parts, client_metadata.as_ref())
+}
+
+fn kernel_skill_activations(
+    activations: Option<&[crate::agent::context_memory::types::BundledSkillActivation]>,
+) -> Vec<BundledSkillActivation> {
+    activations
+        .unwrap_or_default()
+        .iter()
+        .map(|activation| BundledSkillActivation {
+            activation_id: activation.activation_id.clone(),
+            skill_name: activation.skill_name.clone(),
+            skill_args: activation.skill_args.clone(),
+            skill_type: activation.skill_type.clone(),
+            skill_path: activation.skill_path.clone(),
+            skill_source: activation.skill_source.map(|source| match source {
+                crate::agent::context_memory::types::SkillSource::Project => SkillSource::Project,
+                crate::agent::context_memory::types::SkillSource::User => SkillSource::User,
+                crate::agent::context_memory::types::SkillSource::Extra => SkillSource::Extra,
+                crate::agent::context_memory::types::SkillSource::Builtin => SkillSource::Builtin,
+            }),
+        })
+        .collect()
 }
 
 fn final_assistant_text(messages: &[ContextMessage]) -> Option<String> {

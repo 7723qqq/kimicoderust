@@ -8,3 +8,7 @@ pub mod permission_rules;
 pub mod permission_rules_ops;
 #[path = "permissionRulesService.rs"]
 pub mod permission_rules_service;
+#[path = "projectPermissionRules.rs"]
+pub mod project_permission_rules;
+#[path = "projectPermissionRulesService.rs"]
+pub mod project_permission_rules_service;

@@ -1,6 +1,16 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::features::todo::todoItem::TodoItem;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoUpdatedEvent {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub todos: Vec<TodoItem>,
+    pub rev: u64,
+}
 
 pub const TODO_UPDATED_EVENT: &str = "todo.updated";
 pub const TOOLS_UPDATE_STORE_EVENT: &str = "tools.update_store";

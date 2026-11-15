@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::utils::abort::{AbortSignal, abortable};
 use crate::mcp_core::connection_manager::{
     McpConnectionManager, McpConnectionView, McpResolved, McpServerEntry, McpStatusListener,
@@ -117,7 +117,7 @@ impl McpConnectionView for MergedMcpConnectionView {
             .max(self.overlay.initial_load_duration_ms())
     }
 
-    fn on_status_change(&self, listener: McpStatusListener) -> Box<dyn IDisposable> {
+    fn on_status_change(&self, listener: McpStatusListener) -> DisposableRef {
         let overlay_names = self.overlay_names.clone();
         let base_listener = listener.clone();
         let unsubscribe_base = self.base.on_status_change(Arc::new(move |entry| {

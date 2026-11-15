@@ -28,14 +28,13 @@ fn prompt_content_maps_uploaded_files_to_media_blocks() {
     assert_eq!(blocks.len(), 2);
 
     match &blocks[0] {
-        crate::rpc::types::ContentBlock::MediaRef { file_id, kind } => {
-            assert_eq!(file_id, &png.id);
-            assert_eq!(*kind, crate::rpc::types::MediaKind::Image);
+        crate::rpc::types::ContentPart::ImageUrl { image_url } => {
+            assert_eq!(image_url.url, format!("kimi-file://{}", png.id));
         }
         other => panic!("expected a media reference, got {other:?}"),
     }
     match &blocks[1] {
-        crate::rpc::types::ContentBlock::Text { text, .. } => {
+        crate::rpc::types::ContentPart::Text { text, .. } => {
             assert!(text.contains("doc.pdf"));
             assert!(text.contains("application/pdf"));
         }
@@ -70,7 +69,7 @@ fn prompt_content_compresses_an_over_budget_inline_image_with_a_caption() {
     assert_eq!(blocks.len(), 2, "the caption precedes the compressed image");
 
     match &blocks[0] {
-        crate::rpc::types::ContentBlock::Text { text, .. } => {
+        crate::rpc::types::ContentPart::Text { text, .. } => {
             assert!(text.starts_with(
                 "<system>Image compressed to fit model limits: original 4000x3000 image/png ("
             ));
@@ -79,14 +78,15 @@ fn prompt_content_compresses_an_over_budget_inline_image_with_a_caption() {
         other => panic!("expected the compression caption, got {other:?}"),
     }
     match &blocks[1] {
-        crate::rpc::types::ContentBlock::Image {
-            media_type,
-            data: sent,
-            name,
-        } => {
-            assert_eq!(name.as_deref(), Some("shot.png"));
+        crate::rpc::types::ContentPart::ImageUrl { image_url } => {
+            assert_eq!(image_url.name.as_deref(), Some("shot.png"));
+            let (media_type, sent) = image_url
+                .url
+                .strip_prefix("data:")
+                .and_then(|rest| rest.split_once(";base64,"))
+                .expect("inline base64 image");
             assert!(media_type.starts_with("image/"));
-            assert_ne!(sent, &data, "the sent bytes are the compressed ones");
+            assert_ne!(sent, data, "the sent bytes are the compressed ones");
         }
         other => panic!("expected the compressed image, got {other:?}"),
     }

@@ -752,7 +752,7 @@ impl TowerService {
         }
         Some(TowerWakeNotification {
             message: LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: text,
                 ..LLMMessage::default()
             },

@@ -1,4 +1,3 @@
-use std::any::{Any, type_name};
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -14,11 +13,11 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
 use crate::_base::di::instantiation::{
-    DependencyKind, I_INSTANTIATION_SERVICE, ScopeActivation, ServiceDependency, ServicesAccessor,
-    create_decorator,
+    DependencyKind, I_INSTANTIATION_SERVICE, ScopeActivation, ServiceDependency,
+    ServiceIdentifier, ServicesAccessor, create_decorator,
 };
 use crate::_base::di::instantiation_service::{InstantiationService, register_descriptor_dependencies};
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::register_scoped_service;
 use crate::app::scopes::LifecycleScope;
 use crate::environment::environment::{Environment, EnvironmentBinding, EnvironmentCapability, EnvironmentLease};
@@ -264,7 +263,8 @@ impl EnvironmentService {
                 }),
             })),
             Err(error) => {
-                for environment_id in host.environment_ids.lock().clone().into_iter().rev() {
+                let environment_ids = host.environment_ids.lock().clone();
+                for environment_id in environment_ids.into_iter().rev() {
                     registry
                         .remove(&environment_id)
                         .await
@@ -340,15 +340,9 @@ struct EnvironmentProviderHostImpl {
 }
 
 impl EnvironmentProviderHost for EnvironmentProviderHostImpl {
-    fn get<T: ?Sized + 'static>(&self) -> Arc<T> {
-        let id = provider_service_identifier::<T>();
-        self.instantiation.invoke_function(|accessor| {
-            let value: Arc<dyn Any> = accessor.get_dynamic(&id);
-            Arc::downcast::<Arc<T>>(value)
-                .unwrap_or_else(|_| panic!("service type does not match its identifier"))
-                .as_ref()
-                .clone()
-        })
+    fn get_dynamic(&self, id: &ServiceIdentifier<DynamicValue>) -> DynamicValue {
+        self.instantiation
+            .invoke_function(|accessor| accessor.get_dynamic(id))
     }
 
     fn register_environment(
@@ -361,24 +355,6 @@ impl EnvironmentProviderHost for EnvironmentProviderHostImpl {
     }
 }
 
-fn provider_service_identifier<T: ?Sized + 'static>() -> crate::_base::di::instantiation::ServiceIdentifier<DynamicValue> {
-    let short_name = type_name::<T>()
-        .rsplit("::")
-        .next()
-        .expect("service type has a name");
-    let name = if short_name == "ITelemetryService" {
-        "agentTelemetryService".to_string()
-    } else {
-        let name = short_name.strip_prefix('I').unwrap_or(short_name);
-        let mut chars = name.chars();
-        match chars.next() {
-            Some(first) => format!("{}{}", first.to_lowercase(), chars.as_str()),
-            None => name.to_string(),
-        }
-    };
-    create_decorator(name)
-}
-
 #[async_trait]
 impl IEnvironmentService for EnvironmentService {
     fn ready(&self) -> BoxFuture<'static, Result<(), WireAsyncError>> {
@@ -388,7 +364,7 @@ impl IEnvironmentService for EnvironmentService {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(EnvironmentRegistryChange) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.inner.registry.on_did_change(listener)
     }
 

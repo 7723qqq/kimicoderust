@@ -48,7 +48,7 @@ fn walk_directory(
         if depth > WALK_MAX_DEPTH {
             return Ok(true);
         }
-        if expired(deadline) {
+        if expired(deadline_ms) {
             return Ok(false);
         }
         let path = if relative_dir.is_empty() {
@@ -79,7 +79,7 @@ fn walk_directory(
             }) {
                 continue;
             }
-            if expired(deadline) {
+            if expired(deadline_ms) {
                 return Ok(false);
             }
             let kind = if entry.is_symbolic_link {
@@ -143,6 +143,7 @@ fn expired(deadline_ms: Option<i64>) -> bool {
     deadline_ms.is_some_and(|deadline| chrono::Utc::now().timestamp_millis() >= deadline)
 }
 
+#[derive(Clone)]
 pub struct HostFileSystem;
 
 impl HostFileSystem {

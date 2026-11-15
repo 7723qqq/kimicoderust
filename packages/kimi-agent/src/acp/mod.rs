@@ -5,7 +5,7 @@
 //! answers the ACP handshake with the spec shape: numeric `protocolVersion`,
 //! `agentCapabilities`, `authMethods` (types.rs). `session/prompt` runs a real
 //! turn through `ServerEngine` when one is attached and accepts both the
-//! string and the ACP `ContentBlock[]` prompt form.
+//! string and the ACP `ContentPart[]` prompt form.
 //!
 //! Outbound traffic goes through [`AcpChannel`]: `session/update`
 //! notifications while a turn runs, plus server-initiated requests
@@ -468,7 +468,7 @@ impl AcpServer {
         engine: &Arc<crate::server::engine::ServerEngine>,
         session_id: &str,
         prompt: &str,
-        media: Vec<crate::rpc::types::ContentBlock>,
+        media: Vec<crate::rpc::types::ContentPart>,
         origin: Option<serde_json::Value>,
     ) -> Result<crate::server::engine::TurnReport, crate::server::engine::EngineError> {
         let history = self
@@ -563,9 +563,9 @@ impl AcpServer {
                         "content": report.reply,
                         "steps": report.steps,
                         "usage": {
-                            "inputTokens": report.usage.input_tokens,
-                            "outputTokens": report.usage.output_tokens,
-                            "totalTokens": report.usage.total_tokens,
+                            "inputTokens": report.usage.input_other,
+                            "outputTokens": report.usage.output,
+                            "totalTokens": report.usage.measured_context_tokens(),
                         }
                     }),
                 )
@@ -1582,6 +1582,10 @@ impl AcpServer {
                                     );
                                 }
                                 for call in &message.tool_calls {
+                                    let arguments = crate::llm::tool_args::parse_tool_arguments(
+                                        call.arguments.as_deref(),
+                                    )
+                                    .data;
                                     let tool_call_id =
                                         events_map::acp_tool_call_id(&stored.turn_id, &call.id);
                                     created_calls.insert(tool_call_id.clone());
@@ -1595,13 +1599,12 @@ impl AcpServer {
                                                 "title": call.name,
                                                 "kind": events_map::infer_tool_kind(&call.name),
                                                 "status": "in_progress",
-                                                "rawInput": call.arguments,
+                                                "rawInput": arguments,
                                                 "content": [{
                                                     "type": "content",
                                                     "content": {
                                                         "type": "text",
-                                                        "text": serde_json::to_string(&call.arguments)
-                                                            .unwrap_or_default(),
+                                                        "text": call.arguments.clone().unwrap_or_default(),
                                                     },
                                                 }],
                                             },
@@ -2105,10 +2108,10 @@ fn apply_plan_toggle(store: &SqliteSessionStore, session_id: &str, plan: bool) {
 }
 
 /// Accept both prompt forms: the legacy plain string and the ACP
-/// `ContentBlock[]` array (v2 `acpBlocksToContentParts`, convert.ts:26-78).
+/// `ContentPart[]` array (v2 `acpBlocksToContentParts`, convert.ts:26-78).
 fn acp_prompt_to_parts(
     value: &serde_json::Value,
-) -> Option<(String, Vec<crate::rpc::types::ContentBlock>)> {
+) -> Option<(String, Vec<crate::rpc::types::ContentPart>)> {
     match value {
         serde_json::Value::String(text) => Some((text.clone(), Vec::new())),
         serde_json::Value::Array(blocks) => {
@@ -2121,8 +2124,7 @@ fn acp_prompt_to_parts(
 /// ACP `image` content blocks (`{type:"image", mimeType, data}`) become native
 /// media blocks; every other block type is flattened to text by
 /// [`acp_blocks_to_text`].
-fn acp_blocks_to_media(blocks: &[serde_json::Value]) -> Vec<crate::rpc::types::ContentBlock> {
-    use crate::rpc::types::ContentBlock;
+fn acp_blocks_to_media(blocks: &[serde_json::Value]) -> Vec<crate::rpc::types::ContentPart> {
     let mut media = Vec::new();
     for block in blocks {
         if block.get("type").and_then(|value| value.as_str()) != Some("image") {
@@ -2137,11 +2139,11 @@ fn acp_blocks_to_media(blocks: &[serde_json::Value]) -> Vec<crate::rpc::types::C
             .and_then(|value| value.as_str())
             .map(|s| s.to_string());
         if let Some(data) = block.get("data").and_then(|value| value.as_str()) {
-            media.push(ContentBlock::Image {
-                media_type: media_type.to_string(),
-                data: data.to_string(),
+            media.push(crate::llm::media_resolver::inline_image_part(
+                media_type.to_string(),
+                data.to_string(),
                 name,
-            });
+            ));
         }
     }
     media

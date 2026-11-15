@@ -1,3 +1,4 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -8,7 +9,7 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::log::log::ILogService;
 use crate::app::session_index::session_index::ISessionIndexMirror;
 use crate::app::session_index::session_index_source::{SessionSummaryInput, build_session_summary};
@@ -77,7 +78,7 @@ pub struct SessionMetadata {
     ready: Arc<Mutex<Option<Shared<BoxFuture<'static, Result<(), SharedMetadataError>>>>>>,
     listeners: Arc<Mutex<HashMap<u64, Arc<dyn Fn(SessionMetadataChangedEvent) + Send + Sync>>>>,
     next_listener_id: Arc<Mutex<u64>>,
-    _subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    _subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl SessionMetadata {
@@ -374,7 +375,7 @@ impl SessionMetadata {
         }
     }
 
-    pub fn on_did_change_metadata(&self, listener: Arc<dyn Fn(SessionMetadataChangedEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_did_change_metadata(&self, listener: Arc<dyn Fn(SessionMetadataChangedEvent) + Send + Sync>) -> DisposableRef {
         let id = {
             let mut next = self.next_listener_id.lock();
             let id = *next;
@@ -440,7 +441,7 @@ impl ISessionMetadata for SessionMetadata {
         SessionMetadata::effective_cwd(self)
     }
 
-    fn on_did_change_metadata(&self, listener: Arc<dyn Fn(SessionMetadataChangedEvent) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_change_metadata(&self, listener: Arc<dyn Fn(SessionMetadataChangedEvent) + Send + Sync>) -> DisposableRef {
         SessionMetadata::on_did_change_metadata(self, listener)
     }
 

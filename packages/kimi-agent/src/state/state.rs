@@ -141,6 +141,21 @@ pub struct StateKeyBuilder<T = Value> {
 
 pub type StateDefinition<T> = StateKeyBuilder<T>;
 
+impl<T> StateKeyBuilder<T>
+where
+    T: std::any::Any + Send + Sync + 'static,
+{
+    pub fn erased_key(&self) -> StateKey<DynamicValue> {
+        let initial = self.initial.clone();
+        StateKey {
+            name: self.name.clone(),
+            initial: Arc::new(move || Arc::new(initial()) as DynamicValue),
+            snapshot_excluded: false,
+            replayable: None,
+        }
+    }
+}
+
 impl StateKeyBuilder<Value> {
     pub fn replayable(self, opts: ReplayableOptions) -> Arc<ReplayableStateKey> {
         Arc::new(ReplayableStateKey::new(self.name, self.initial, opts))

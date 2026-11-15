@@ -2,6 +2,7 @@ use indexmap::{IndexMap, IndexSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
+use once_cell::sync::Lazy;
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -9,22 +10,32 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
+use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
+use crate::_base::di::instantiation::{
+    DependencyKind, ServiceDependency, refine_service_decorator,
+};
+use crate::_base::di::instantiation_service::register_descriptor_dependencies;
 use crate::_base::di::lifecycle::DisposableRef;
+use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
+use crate::app::scopes::LifecycleScope;
 use crate::_base::event::Subscription;
 use crate::_base::utils::canonical_args::canonical_telemetry_args;
 use crate::_base::utils::env::parse_boolean_env;
-use crate::agent::r#loop::r#loop::{IAgentLoopService, LoopNotify};
+use crate::agent::r#loop::r#loop::{
+    I_AGENT_LOOP_SERVICE, IAgentLoopService, LoopNotify,
+};
 use crate::agent::r#loop::turn_ops::TurnEnded;
 use crate::_base::state::state_registry::StateKey;
 use crate::agent::state::errors::StateError;
-use crate::agent::state::agent_state::IAgentStateService;
+use crate::agent::state::agent_state::{I_AGENT_STATE_SERVICE, IAgentStateService};
 use crate::agent::tool_executor::tool_executor::{
-    ExecutableToolOutput, ExecutableToolResult, IAgentToolExecutorService, ToolCallDupType,
+    I_AGENT_TOOL_EXECUTOR_SERVICE, ExecutableToolOutput, ExecutableToolResult,
+    IAgentToolExecutorService, ToolCallDupType,
 };
 use crate::agent::tool_executor::tool_hooks::ToolDidExecuteContext;
-use crate::app::bootstrap::bootstrap::IBootstrapService;
-use crate::app::event::event_bus::IEventBus;
-use crate::app::telemetry::telemetry::ITelemetryService;
+use crate::app::bootstrap::bootstrap::{I_BOOTSTRAP_SERVICE, IBootstrapService};
+use crate::app::event::event_bus::{I_EVENT_BUS, IEventBus};
+use crate::app::telemetry::telemetry::{I_TELEMETRY_SERVICE, ITelemetryService};
 use crate::features::reminder::system_reminder::wrap_system_reminder;
 use crate::hooks::HookRegistration;
 use crate::human::llm::message::ContentPart;
@@ -32,7 +43,8 @@ use crate::llm_adapter::contract::request_trace::LLMRequestTrace;
 use crate::tool::tool_args_parse::parse_tool_arguments;
 
 use super::tool_dedupe::{
-    IAgentToolDedupeService, REPEAT_BREAKER_STOP_REASON, ToolDedupeOutput, ToolDedupeResult,
+    I_AGENT_TOOL_DEDUPE_SERVICE, IAgentToolDedupeService, REPEAT_BREAKER_STOP_REASON,
+    ToolDedupeOutput, ToolDedupeResult,
 };
 
 pub const REPEAT_BREAKER_ENV: &str = "KIMI_CODE_REPEAT_BREAKER";
@@ -739,7 +751,7 @@ impl AgentToolDedupeServiceInner {
         if self.call_key_by_call_id().contains_key(tool_call_id) {
             return;
         }
-        let raw = raw_arguments.filter(|raw| parse_tool_arguments(Some(*raw)).1.is_some());
+        let raw = raw_arguments.filter(|raw| parse_tool_arguments(Some(*raw)).parse_failed);
         let key_args = raw
             .map(|raw| Value::String(raw.to_string()))
             .unwrap_or_else(|| args.clone());
@@ -914,5 +926,80 @@ fn from_executable(result: ExecutableToolResult) -> ToolDedupeResult {
         spill_exempt: result.spill_exempt,
         message: None,
     }
+}
+
+fn dependency<T>(args: &[DynamicValue], index: usize) -> Arc<T>
+where
+    T: Send + Sync + 'static + ?Sized,
+{
+    Arc::downcast::<Arc<T>>(args[index].clone())
+        .unwrap_or_else(|_| panic!("toolDedupe dependency {index} has an incompatible type"))
+        .as_ref()
+        .clone()
+}
+
+static AGENT_TOOL_DEDUPE_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
+    let ctor: Constructor<DynamicValue> = Arc::new(|args| {
+        let service: Arc<dyn IAgentToolDedupeService> = Arc::new(
+            AgentToolDedupeService::new(
+                dependency::<dyn ITelemetryService>(&args, 0),
+                dependency::<dyn IAgentLoopService>(&args, 1),
+                dependency::<dyn IAgentToolExecutorService>(&args, 2),
+                dependency::<dyn IAgentStateService>(&args, 3),
+                dependency::<dyn IBootstrapService>(&args, 4),
+                dependency::<dyn IEventBus>(&args, 5),
+            )
+            .expect("tool dedupe service constructs from resolved agent-scope dependencies"),
+        );
+        Arc::new(service) as DynamicValue
+    });
+    let descriptor = SyncDescriptor::new(ctor, Vec::new());
+    register_descriptor_dependencies(
+        &descriptor,
+        vec![
+            ServiceDependency {
+                id: refine_service_decorator(&I_TELEMETRY_SERVICE),
+                index: 0,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_LOOP_SERVICE),
+                index: 1,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_TOOL_EXECUTOR_SERVICE),
+                index: 2,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_AGENT_STATE_SERVICE),
+                index: 3,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_BOOTSTRAP_SERVICE),
+                index: 4,
+                kind: DependencyKind::Instance,
+            },
+            ServiceDependency {
+                id: refine_service_decorator(&I_EVENT_BUS),
+                index: 5,
+                kind: DependencyKind::Instance,
+            },
+        ],
+    );
+    register_scoped_service(
+        LifecycleScope::Agent.as_str().to_string(),
+        refine_service_decorator(&I_AGENT_TOOL_DEDUPE_SERVICE),
+        descriptor,
+        ScopeActivation::OnScopeCreated,
+        "toolDedupe",
+    )
+    .map_err(|error| error.to_string())
+});
+
+pub fn ensure_agent_tool_dedupe_service_registered() -> Result<(), String> {
+    Lazy::force(&AGENT_TOOL_DEDUPE_SERVICE_REGISTRATION).clone()
 }
 

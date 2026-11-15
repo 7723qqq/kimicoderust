@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 
 use crate::events::EngineEvent;
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 use crate::server::engine::{ServerEngine, TurnReport};
 use crate::server::hub::EventHub;
 use crate::session::sqlite_store::SqliteSessionStore;
@@ -13,7 +13,7 @@ use crate::session::wake::{WakePayload, WakeReplayHandler, WakeReplayStatus};
 pub struct RunInput {
     pub prompt_id: String,
     pub prompt: String,
-    pub blocks: Vec<ContentBlock>,
+    pub blocks: Vec<ContentPart>,
 
     pub origin: Option<Value>,
 
@@ -51,7 +51,7 @@ pub enum CancelOutcome {
 struct Entry {
     item: Value,
     prompt: String,
-    blocks: Vec<ContentBlock>,
+    blocks: Vec<ContentPart>,
     origin: Option<Value>,
 
     prompt_events: bool,
@@ -73,7 +73,7 @@ impl PromptQueue {
         session_id: &str,
         item: Value,
         prompt: String,
-        blocks: Vec<ContentBlock>,
+        blocks: Vec<ContentPart>,
         origin: Option<Value>,
     ) -> (Value, Option<RunInput>) {
         let mut state = self.lock();
@@ -150,7 +150,7 @@ impl PromptQueue {
         &self,
         session_id: &str,
         prompt: String,
-        blocks: Vec<ContentBlock>,
+        blocks: Vec<ContentPart>,
         origin: Option<Value>,
         wake: Option<WakePayload>,
     ) -> (String, Option<RunInput>) {
@@ -174,7 +174,7 @@ impl PromptQueue {
 
     fn new_wake_entry(
         prompt: String,
-        blocks: Vec<ContentBlock>,
+        blocks: Vec<ContentPart>,
         origin: Option<Value>,
         wake: Option<WakePayload>,
     ) -> Entry {
@@ -532,7 +532,7 @@ impl PromptQueue {
         &self,
         session_id: &str,
         ids: &[String],
-    ) -> Vec<(Value, String, Vec<ContentBlock>, Option<Value>)> {
+    ) -> Vec<(Value, String, Vec<ContentPart>, Option<Value>)> {
         let mut state = self.lock();
         let mut taken = Vec::new();
         if let Some(queue) = state.queued.get_mut(session_id) {
@@ -988,7 +988,7 @@ mod tests {
         let payload = crate::session::wake::WakePayload::new(
             "tower_inbox",
             crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "caller-rendered wake".into(),
                 ..Default::default()
             },
@@ -1025,7 +1025,7 @@ mod tests {
         let payload = crate::session::wake::WakePayload::new(
             "tower_inbox",
             crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "queued wake".into(),
                 ..Default::default()
             },
@@ -1047,7 +1047,7 @@ mod tests {
         let payload = crate::session::wake::WakePayload::new(
             "tower_inbox",
             crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "discarded wake".into(),
                 ..Default::default()
             },
@@ -1067,7 +1067,7 @@ mod tests {
         let payload = crate::session::wake::WakePayload::new(
             "tower_inbox",
             crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "original server wake".into(),
                 ..Default::default()
             },
@@ -1112,7 +1112,7 @@ mod tests {
         let payload = crate::session::wake::WakePayload::new(
             "tower_inbox",
             crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "server wake retained after failure".into(),
                 ..Default::default()
             },
@@ -1187,7 +1187,7 @@ mod tests {
         let payload = crate::session::wake::WakePayload::new(
             "tower_inbox",
             crate::turn_loop::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "http driver retained wake".into(),
                 ..Default::default()
             },

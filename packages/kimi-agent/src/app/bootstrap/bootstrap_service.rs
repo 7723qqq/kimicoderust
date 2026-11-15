@@ -4,7 +4,9 @@ use std::sync::Arc;
 use once_cell::sync::Lazy;
 
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
-use crate::_base::di::instantiation::{DependencyKind, ScopeActivation, ServiceDependency};
+use crate::_base::di::instantiation::{
+    DependencyKind, ScopeActivation, ServiceDependency, refine_service_decorator,
+};
 use crate::_base::di::instantiation_service::register_descriptor_dependencies;
 use crate::_base::di::scope::register_scoped_service;
 use crate::app::scopes::LifecycleScope;
@@ -177,7 +179,7 @@ static BOOTSTRAP_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
     );
     register_scoped_service(
         LifecycleScope::App.as_str().to_string(),
-        I_BOOTSTRAP_SERVICE.clone(),
+        refine_service_decorator(&I_BOOTSTRAP_SERVICE),
         descriptor,
         ScopeActivation::OnScopeCreated,
         "bootstrap",

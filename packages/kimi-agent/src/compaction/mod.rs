@@ -13,10 +13,10 @@
 pub use crate::agent::micro_compaction::micro_compaction_service as micro;
 pub(crate) mod window;
 
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 use crate::turn_loop::retry::{RetryConfig, retry_delay};
 use crate::turn_loop::turn_step::{retry_after_hint, step_delay};
-use crate::turn_loop::types::{ContentBlock, LLM, LLMChatParams, LLMMessage};
+use crate::turn_loop::types::{ContentPart, LLM, LLMChatParams, LLMMessage};
 use tokio_util::sync::CancellationToken;
 
 /// Default context window (tokens) assumed when the engine has no model
@@ -144,28 +144,20 @@ pub const MEDIA_TOKEN_ESTIMATE: u32 = 2000;
 /// blocks, tool call names/arguments, and the tool call id (v2
 /// `estimateTokensForMessage`).
 pub fn estimate_message_tokens(message: &LLMMessage) -> u32 {
-    let mut tokens = estimate_tokens(&message.role) + estimate_tokens(&message.content);
+    let mut tokens = estimate_tokens(message.role.as_str()) + estimate_tokens(&message.content);
     for block in &message.blocks {
         tokens += match block {
-            ContentBlock::Text { text, .. } => estimate_tokens(text),
-            ContentBlock::Image { .. }
-            | ContentBlock::MediaRef { .. }
-            | ContentBlock::ImageUrl { .. }
-            | ContentBlock::AudioUrl { .. }
-            | ContentBlock::VideoUrl { .. } => MEDIA_TOKEN_ESTIMATE,
-            // v2 keeps a details-derived summary in `think`; Rust parks it in
-            // `details_summary`, so count the parked text or the estimate
-            // silently drops it.
-            ContentBlock::Think {
-                think,
-                details_summary,
-                ..
-            } => estimate_tokens(think) + details_summary.as_deref().map_or(0, estimate_tokens),
+            ContentPart::Text { text, .. } => estimate_tokens(text),
+            ContentPart::ImageUrl { .. }
+            | ContentPart::AudioUrl { .. }
+            | ContentPart::VideoUrl { .. }
+            | ContentPart::DocumentUrl { .. } => MEDIA_TOKEN_ESTIMATE,
+            ContentPart::Think { think, .. } => estimate_tokens(think),
         };
     }
     for call in &message.tool_calls {
         tokens += estimate_tokens(&call.name);
-        tokens += estimate_tokens_for_json(&call.arguments.to_string());
+        tokens += estimate_tokens_for_json(&serde_json::to_string(&call.arguments).unwrap());
     }
     if let Some(id) = &message.tool_call_id {
         tokens += estimate_tokens(id);
@@ -283,7 +275,7 @@ fn apply_compaction(messages: &[LLMMessage], count: u32) -> Vec<LLMMessage> {
     let mut compacted = Vec::with_capacity(messages.len() - count as usize + 2);
     compacted.push(messages[0].clone());
     compacted.push(LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: summary_placeholder(count as usize - 1),
         ..Default::default()
     });
@@ -634,7 +626,7 @@ pub(crate) fn select_kept_user_messages(user_messages: &[LLMMessage]) -> Vec<LLM
         .sum();
     let omitted = total_tokens.saturating_sub(kept_tokens);
     let elision = LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: compaction_elision_text(omitted),
         // v2 `createCompactionElisionMessage` tags the note as an injection so
         // a later compaction does not mistake it for user input.
@@ -656,7 +648,7 @@ pub const COMPACTION_CONTINUATION_TEXT: &str = "<system-reminder>\nContext compa
 /// Build the continuation message that anchors context compaction resumption.
 pub fn compaction_continuation_message() -> LLMMessage {
     LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: COMPACTION_CONTINUATION_TEXT.into(),
         // v2 `createCompactionContinuationMessage` tags the note as an
         // injection; compaction's kept-user selection must not re-keep it.
@@ -1469,9 +1461,9 @@ impl CompactionReport {
             // v2 `usageTelemetry`: `input_tokens` is the *total* input — the
             // uncached remainder plus both cache buckets.
             payload["input_tokens"] = serde_json::json!(
-                usage.input_tokens + usage.input_cache_read + usage.input_cache_creation
+                usage.input_other + usage.input_cache_read + usage.input_cache_creation
             );
-            payload["output_tokens"] = serde_json::json!(usage.output_tokens);
+            payload["output_tokens"] = serde_json::json!(usage.output);
             payload["input_cache_read"] = serde_json::json!(usage.input_cache_read);
             payload["input_cache_creation"] = serde_json::json!(usage.input_cache_creation);
         }
@@ -1827,7 +1819,7 @@ pub(crate) fn apply_compaction_with_summary(
     compacted.extend(kept);
     compacted.extend(in_flight_turn);
     compacted.push(LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: summary_text,
         // v2 `createCompactionSummaryMessage`: the origin lets a later
         // compaction and the renderer tell this from typed user input.

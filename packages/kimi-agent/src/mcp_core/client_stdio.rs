@@ -9,11 +9,13 @@ use futures_util::{FutureExt, StreamExt};
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::utils::abort::{AbortError, AbortSignal, abort_error};
 use crate::_base::utils::proxy::{proxy_env_for_child, reconcile_child_no_proxy};
 use crate::app::environment::environment::EnvironmentResolver;
-use crate::environment::environment::{EnvironmentLease, LOCAL_ENVIRONMENT_ID};
+use crate::environment::environment::{
+    EnvironmentLease, EnvironmentResource, LOCAL_ENVIRONMENT_ID,
+};
 use crate::environment::environment_registry::EnvironmentError;
 use crate::mcp_core::errors::MCP_STARTUP_FAILED;
 use crate::os::interface::host_process::{HostProcessError, IHostProcess, OS_PROCESS_SPAWN_FAILED};
@@ -66,7 +68,7 @@ impl Error for SharedProcessError {}
 struct StdioTransportState {
     process: Option<Arc<dyn IHostProcess>>,
     lease: Option<EnvironmentLease>,
-    tracked: Option<Box<dyn IDisposable>>,
+    tracked: Option<DisposableRef>,
     started: bool,
     closed: bool,
     finished: bool,
@@ -388,6 +390,13 @@ struct TransportDisposable {
 impl IDisposable for TransportDisposable {
     fn dispose(&self) {
         tokio::spawn(self.transport.close());
+    }
+}
+
+impl EnvironmentResource for TransportDisposable {
+    fn dispose(&self) -> futures_util::future::BoxFuture<'static, ()> {
+        let transport = self.transport.clone_handle();
+        Box::pin(transport.close())
     }
 }
 

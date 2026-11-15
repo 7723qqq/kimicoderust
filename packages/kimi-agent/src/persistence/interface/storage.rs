@@ -2,12 +2,14 @@ use std::error::Error;
 use std::fmt;
 use std::ops::Deref;
 use std::pin::Pin;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use futures_util::Stream;
 use kimi_core::primitives::errors::{Error2, Error2Options};
 use serde_json::{Map, Value};
 
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use crate::_base::utils::abort::AbortSignal;
 use crate::wire::record::WireAsyncError;
 
@@ -102,11 +104,11 @@ fn read_errno(error: &(dyn Error + 'static)) -> Option<String> {
     match io.kind() {
         std::io::ErrorKind::NotFound => Some("ENOENT".to_string()),
         std::io::ErrorKind::PermissionDenied => {
-            if io.raw_os_error() == Some(libc::EPERM) {
-                Some("EPERM".to_string())
-            } else {
-                Some("EACCES".to_string())
+            #[cfg(unix)]
+            if io.raw_os_error() == Some(1) {
+                return Some("EPERM".to_string());
             }
+            Some("EACCES".to_string())
         }
         std::io::ErrorKind::StorageFull => Some("ENOSPC".to_string()),
         _ => io.raw_os_error().map(|errno| errno.to_string()),
@@ -188,3 +190,7 @@ pub trait IFileSystemStorageService: Send + Sync {
     async fn flush(&self) -> Result<(), WireAsyncError>;
     async fn close(&self) -> Result<(), WireAsyncError>;
 }
+
+pub static I_FILE_SYSTEM_STORAGE_SERVICE: LazyLock<
+    ServiceIdentifier<Arc<dyn IFileSystemStorageService>>,
+> = LazyLock::new(|| create_decorator("fileSystemStorageService"));

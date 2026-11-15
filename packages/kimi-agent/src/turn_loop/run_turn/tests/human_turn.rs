@@ -44,34 +44,35 @@ fn interrupted_response() -> LLMChatResponse {
     LLMChatResponse {
         content: "partial answer".into(),
         thinking: vec![
-            ContentBlock::Think {
+            ContentPart::Think {
                 think: "   ".into(),
                 encrypted: None,
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             },
-            ContentBlock::Think {
+            ContentPart::Think {
                 think: String::new(),
                 encrypted: Some(String::new()),
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             },
-            ContentBlock::Think {
+            ContentPart::Think {
                 think: "reasoning".into(),
                 encrypted: Some("signature".into()),
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             },
         ],
         tool_calls: vec![ToolCall {
             id: "partial-call".into(),
             name: "Bash".into(),
-            arguments: serde_json::json!({ "command": "echo partial" }),
+            arguments: Some(serde_json::json!({ "command": "echo partial" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
         finish_reason: None,
         usage: TokenUsage::default(),
@@ -133,11 +134,14 @@ async fn cancelled_stream_salvages_only_non_vacuous_assistant_content() {
     assert_eq!(salvaged.blocks.len(), 2, "vacuous thinking is filtered");
     assert!(matches!(
         &salvaged.blocks[0],
-        ContentBlock::Think { encrypted: Some(value), .. } if value.is_empty()
+        ContentPart::Think { encrypted: Some(value), .. } if value.is_empty()
     ));
     assert!(matches!(
         &salvaged.blocks[1],
-        ContentBlock::Think { think, encrypted: Some(value), .. }
-            if think == "reasoning" && value == "signature"
+        ContentPart::Think {
+            think,
+            encrypted: Some(value),
+            ..
+        } if think == "reasoning" && value == "signature"
     ));
 }

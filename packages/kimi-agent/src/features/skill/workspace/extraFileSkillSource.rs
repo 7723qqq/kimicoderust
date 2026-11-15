@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
 use crate::app::config::config_service::ConfigService;
 
@@ -29,7 +29,7 @@ pub struct ExtraFileSkillSource {
     os_home_dir: String,
     on_did_change_emitter: Arc<Emitter<()>>,
     watch_state: Mutex<ExtraWatchState>,
-    _config_subscription: Box<dyn IDisposable>,
+    _config_subscription: DisposableRef,
 }
 
 impl ExtraFileSkillSource {

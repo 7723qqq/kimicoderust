@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 
 pub const HOOK_EVENT_TYPES: &[&str] = &[
     "PreToolUse",
@@ -87,7 +87,7 @@ pub struct HookBlockDecision {
 #[derive(Debug, Clone, PartialEq)]
 pub enum HookMatcherValue {
     Text(String),
-    Parts(Vec<ContentBlock>),
+    Parts(Vec<ContentPart>),
 }
 
 impl HookMatcherValue {
@@ -97,7 +97,7 @@ impl HookMatcherValue {
             Self::Parts(parts) => parts
                 .iter()
                 .filter_map(|part| match part {
-                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    ContentPart::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

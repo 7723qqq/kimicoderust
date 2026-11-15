@@ -703,6 +703,9 @@ impl FoldState {
                     "name": read_string(event, "name").unwrap_or_default(),
                     "arguments": arguments,
                 });
+                if let Some(raw_id) = event.get("rawId").and_then(Value::as_str) {
+                    call["rawId"] = json!(raw_id);
+                }
                 if let Some(extras) = event.get("extras") {
                     call["extras"] = extras.clone();
                 }

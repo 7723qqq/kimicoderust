@@ -9,12 +9,12 @@ use futures_util::future::BoxFuture;
 use serde::Serialize;
 
 use crate::_base::utils::abort::{AbortError, AbortSignal, abort_error};
+use crate::agent::media::image_format_policy::DEFAULT_INLINE_IMAGE_BYTE_BUDGET;
 use crate::app::telemetry::events::{
     ImageCompressEvent, ImageCompressOutcome, ImageCropErrorKind, ImageCropEvent,
 };
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::human::llm::message::ContentPart;
-use crate::llm::image_policy::DEFAULT_INLINE_IMAGE_BYTE_BUDGET;
 use crate::native::image_compress::{
     CompressConfig, CompressResult as NativeCompressResult, CropConfig, CropError, CropResult,
     compress_image, crop_image,

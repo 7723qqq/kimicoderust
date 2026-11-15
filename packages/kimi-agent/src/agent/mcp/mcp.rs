@@ -1,8 +1,10 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::utils::abort::AbortSignal;
 use crate::mcp_core::connection_manager::{
     McpResolved, McpServerEntry, McpStatusListener,
@@ -32,5 +34,9 @@ pub trait IAgentMcpService: Send + Sync {
         name: &str,
         signal: Option<AbortSignal>,
     ) -> Result<(), WireAsyncError>;
-    fn on_status_change(&self, listener: McpStatusListener) -> Box<dyn IDisposable>;
+    fn on_status_change(&self, listener: McpStatusListener) -> DisposableRef;
 }
+
+
+pub static I_AGENT_MCP_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentMcpService>>> =
+    LazyLock::new(|| create_decorator("agentMcpService"));

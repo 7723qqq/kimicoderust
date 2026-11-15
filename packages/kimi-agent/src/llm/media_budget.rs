@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::llm::media_resolver::{build_media_path_tag, unavailable_text};
-use crate::rpc::types::{ContentBlock, MediaKind};
+use crate::rpc::types::{ContentPart, MediaKind};
 use kimi_core::types::LLMMessage;
 
 pub const REQUEST_MEDIA_BUDGET_BYTES: usize = 20 * 1024 * 1024;
@@ -128,7 +128,7 @@ fn set_block_text(messages: &mut [LLMMessage], entry: &Entry, text: String) {
     else {
         return;
     };
-    *block = ContentBlock::Text { text, meta: None };
+    *block = ContentPart::Text { text, meta: None };
 }
 
 pub fn budget_omitted_media(kind: MediaKind) -> String {
@@ -137,6 +137,54 @@ pub fn budget_omitted_media(kind: MediaKind) -> String {
         kind.as_str()
     )
 }
+
+fn replace_with_recovery_text(
+    messages: &mut [LLMMessage],
+    entry: &Entry,
+    placeholder: fn(MediaKind) -> String,
+) {
+    let text = match &entry.path {
+        Some(path) => build_media_path_tag(entry.kind, path),
+        None => placeholder(entry.kind),
+    };
+    set_block_text(messages, entry, text);
+}
+
+pub const MEDIA_DEGRADE_KEEP_RECENT: usize = 2;
+
+pub fn degraded_media_placeholder(kind: MediaKind) -> String {
+    match kind {
+        MediaKind::Image => {
+            "[image omitted: dropped to fit the provider request size limit; re-read the file to view it]"
+        }
+        MediaKind::Audio => {
+            "[audio omitted: dropped to fit the provider request size limit; re-read the file to hear it]"
+        }
+        MediaKind::Video => {
+            "[video omitted: dropped to fit the provider request size limit; re-read the file to view it]"
+        }
+    }
+    .to_string()
+}
+
+pub fn stripped_media_placeholder(kind: MediaKind) -> String {
+    match kind {
+        MediaKind::Image => {
+            "[image omitted for provider compatibility; re-read the file to view it or get conversion guidance]"
+        }
+        MediaKind::Audio => {
+            "[audio omitted for provider compatibility; re-read the file to hear it]"
+        }
+        MediaKind::Video => {
+            "[video omitted for provider compatibility; re-read the file to view it]"
+        }
+    }
+    .to_string()
+}
+
+pub const MEDIA_DEGRADED_CODE: &str = "media-degraded";
+
+pub const MEDIA_STRIPPED_CODE: &str = "media-stripped";
 
 pub fn is_request_too_large(error: &str) -> bool {
     kimi_core::error::llm_http_status(error) == Some(413)
@@ -179,13 +227,67 @@ pub fn is_image_format_error(error: &str) -> bool {
     names_media_type && lower.contains("image")
 }
 
+pub fn degrade_older_media(
+    messages: &mut [LLMMessage],
+    entries: &[Entry],
+    keep_recent: usize,
+) -> usize {
+    let to_degrade = entries.len().saturating_sub(keep_recent);
+    degrade_leading_media(messages, entries, to_degrade)
+}
+
+pub fn degrade_leading_media(
+    messages: &mut [LLMMessage],
+    entries: &[Entry],
+    count: usize,
+) -> usize {
+    let to_degrade = count.min(entries.len());
+    for entry in entries.iter().take(to_degrade) {
+        replace_with_recovery_text(messages, entry, degraded_media_placeholder);
+    }
+    to_degrade
+}
+
+pub fn strip_all_media(messages: &mut [LLMMessage], entries: &[Entry]) -> usize {
+    let mut replaced = 0;
+    for entry in entries {
+        replace_with_recovery_text(messages, entry, stripped_media_placeholder);
+        replaced += 1;
+    }
+    replaced
+}
+
+pub fn apply_media_recovery(
+    messages: &mut [LLMMessage],
+    entries: &[Entry],
+    recovery: &MediaRecovery,
+) -> (bool, bool) {
+    match &recovery.action {
+        MediaRecoveryAction::Degraded(count) => {
+            degrade_leading_media(messages, entries, *count);
+            (true, false)
+        }
+        MediaRecoveryAction::Stripped(keys) => {
+            let mut remaining = 0usize;
+            for entry in entries {
+                if keys.iter().any(|key| key == &entry.key) {
+                    replace_with_recovery_text(messages, entry, stripped_media_placeholder);
+                } else {
+                    remaining += 1;
+                }
+            }
+            (true, remaining == 0)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn media_message(block: ContentBlock) -> LLMMessage {
+    fn media_message(block: ContentPart) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: String::new(),
             blocks: vec![block],
             tool_calls: Vec::new(),
@@ -223,7 +325,7 @@ mod tests {
 
     fn omitted_text(message: &LLMMessage) -> Option<&str> {
         match message.blocks.first() {
-            Some(ContentBlock::Text { text, .. }) => Some(text.as_str()),
+            Some(ContentPart::Text { text, .. }) => Some(text.as_str()),
             _ => None,
         }
     }
@@ -239,12 +341,12 @@ mod tests {
         warning
     }
 
-    fn inline_image(tag: &str) -> ContentBlock {
-        ContentBlock::Image {
-            media_type: "image/png".into(),
-            data: tag.to_string(),
-            name: None,
-        }
+    fn inline_image(tag: &str) -> ContentPart {
+        crate::llm::media_resolver::inline_image_part(
+            "image/png".into(),
+            tag.to_string(),
+            None,
+        )
     }
 
     #[test]

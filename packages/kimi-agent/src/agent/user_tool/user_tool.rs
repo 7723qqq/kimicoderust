@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -26,3 +29,7 @@ pub trait IAgentUserToolService: Send + Sync {
 
     fn unregister(&self, name: &str);
 }
+
+
+pub static I_AGENT_USER_TOOL_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentUserToolService>>> =
+    LazyLock::new(|| create_decorator("agentUserToolService"));

@@ -1,16 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TokenUsage {
-    pub input_other: u64,
-    pub output: u64,
-    pub input_cache_read: u64,
-    pub input_cache_creation: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw: Option<Map<String, Value>>,
-}
+pub use kimi_core::types::TokenUsage;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

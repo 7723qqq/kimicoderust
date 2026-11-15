@@ -396,7 +396,7 @@ fn render_wake_message(
         }
     }
     LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: lines.join("\n"),
         ..LLMMessage::default()
     }
@@ -460,7 +460,7 @@ mod tests {
 
     fn message(text: &str) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: text.into(),
             ..LLMMessage::default()
         }

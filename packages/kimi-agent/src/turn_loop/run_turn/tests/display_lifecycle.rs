@@ -11,13 +11,14 @@ async fn a_swarm_tool_call_rides_its_display_on_the_started_event() {
         tool_responses: vec![ToolCall {
             id: "tc-swarm".into(),
             name: "AgentSwarm".into(),
-            arguments: serde_json::json!({
+            arguments: Some(serde_json::json!({
                 "description": "three-way review",
                 "prompt_template": "review {{item}}",
                 "items": ["a", "b", "c"],
-            }),
+            }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -44,7 +45,7 @@ async fn a_swarm_tool_call_rides_its_display_on_the_started_event() {
         turn_id: "test-swarm-display".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "go".into(),
             ..Default::default()
         }],
@@ -94,9 +95,10 @@ async fn a_tool_without_a_display_ships_none() {
         tool_responses: vec![ToolCall {
             id: "tc-plain".into(),
             name: "ExitPlanMode".into(),
-            arguments: serde_json::json!({}),
+            arguments: Some(serde_json::json!({}).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -123,7 +125,7 @@ async fn a_tool_without_a_display_ships_none() {
         turn_id: "test-no-display".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "go".into(),
             ..Default::default()
         }],
@@ -170,9 +172,10 @@ async fn test_tool_call_lifecycle_events_bracket_execution() {
         tool_responses: vec![ToolCall {
             id: "tc-lifecycle".into(),
             name: "WebSearch".into(),
-            arguments: serde_json::json!({ "query": "x" }),
+            arguments: Some(serde_json::json!({ "query": "x" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -199,7 +202,7 @@ async fn test_tool_call_lifecycle_events_bracket_execution() {
         turn_id: "test-tool-call-lifecycle".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -260,9 +263,10 @@ async fn step_boundaries_are_paired_one_begin_and_one_end_per_step() {
         tool_responses: vec![ToolCall {
             id: "tc-boundary".into(),
             name: "WebSearch".into(),
-            arguments: serde_json::json!({ "query": "x" }),
+            arguments: Some(serde_json::json!({ "query": "x" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -289,7 +293,7 @@ async fn step_boundaries_are_paired_one_begin_and_one_end_per_step() {
         turn_id: "test-step-boundaries".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -398,7 +402,7 @@ async fn test_filtered_finish_surfaces_filtered_reason() {
         turn_id: "test-filtered".into(),
         llm: &FilteredLlm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -513,7 +517,7 @@ async fn stop_reason_of_a_single_response(
             turn_id: turn_id.to_string(),
             llm: &llm,
             messages: vec![LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "Hello!".into(),
                 ..Default::default()
             }],

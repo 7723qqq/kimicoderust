@@ -205,13 +205,7 @@ fn reminder_history(messages: &[ContextMessage]) -> Vec<LLMMessage> {
     messages
         .iter()
         .map(|message| LLMMessage {
-            role: match message.role {
-                Role::System => "system",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::Tool => "tool",
-            }
-            .to_string(),
+            role: message.role,
             origin: message
                 .origin
                 .as_ref()

@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use crate::_base::di::instantiation::{IInstantiationService, LiveRef};
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::safely_call_listener;
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::paths::canonical_workspace_root;
@@ -94,7 +94,7 @@ pub struct WorkspaceInstanceManagerDependencies {
     pub app_state: Arc<dyn IAppStateService>,
     pub config: Arc<dyn IConfigService>,
     pub event: Arc<dyn IEventService>,
-    pub git: LiveRef<IGitService>,
+    pub git: LiveRef<Arc<dyn IGitService>>,
     pub identity: Arc<dyn IAgentIdentity>,
     pub index: Arc<dyn ISessionIndex>,
     pub index_mirror: Arc<dyn ISessionIndexMirror>,
@@ -104,7 +104,7 @@ pub struct WorkspaceInstanceManagerDependencies {
     pub config_store: Arc<dyn IMcpConfigStore>,
     pub plugins: Arc<dyn IPluginService>,
     pub model_providers: Arc<dyn IProviderService>,
-    pub session_manager: LiveRef<ISessionManager>,
+    pub session_manager: LiveRef<Arc<dyn ISessionManager>>,
     pub agent_profiles: Arc<dyn IAgentProfileRegistry>,
     pub builtin_agent_profiles: Arc<dyn IBuiltinAgentProfileLoader>,
     pub builtin_skills: Arc<dyn IBuiltinSkillSource>,
@@ -135,7 +135,7 @@ struct ManagerState {
 struct WorkspaceInstanceManagerInner {
     dependencies: Arc<WorkspaceInstanceManagerDependencies>,
     state: Arc<Mutex<ManagerState>>,
-    _workspace_store_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    _workspace_store_subscription: Mutex<Option<DisposableRef>>,
 }
 
 #[derive(Clone)]
@@ -543,6 +543,7 @@ impl WorkspaceInstanceManager {
                         user_agent_profile_loader: input.user_agent_profiles,
                         plugin_agent_profile_loader: input.plugin_agent_profiles,
                         workspace_mcp: input.mcp,
+                        trust: input.trust,
                         models: dependencies.models.clone(),
                         providers: dependencies.model_providers.clone(),
                         environments: dependencies.environments.clone(),
@@ -566,7 +567,7 @@ impl WorkspaceInstanceManager {
         }
     }
 
-    pub fn on_did_change(&self, listener: Arc<dyn Fn(WorkspaceInstanceChange) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_did_change(&self, listener: Arc<dyn Fn(WorkspaceInstanceChange) + Send + Sync>) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             if state.disposed {
@@ -629,7 +630,7 @@ impl IWorkspaceContext for WorkspaceContextData {
 
 #[async_trait]
 impl IWorkspaceInstanceManager for WorkspaceInstanceManager {
-    fn on_did_change(&self, listener: Arc<dyn Fn(WorkspaceInstanceChange) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: Arc<dyn Fn(WorkspaceInstanceChange) + Send + Sync>) -> DisposableRef {
         WorkspaceInstanceManager::on_did_change(self, listener)
     }
 

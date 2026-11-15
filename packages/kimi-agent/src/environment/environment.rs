@@ -6,7 +6,7 @@ use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::os::interface::host_environment::HostEnvironmentInfo;
 use crate::os::interface::host_file_system::IHostFileSystem;
 use crate::os::interface::host_process::IHostProcessService;
@@ -14,7 +14,7 @@ use crate::wire::record::WireAsyncError;
 
 pub use super::environment_registry::EnvironmentError;
 
-pub type ShellPathBridge = Arc<dyn crate::_base::exec_env::shell_path_bridge::ShellPathBridge>;
+pub type ShellPathBridge = Arc<crate::_base::exec_env::shell_path_bridge::ShellPathBridge>;
 pub type StatusListener = Arc<dyn Fn(EnvironmentStatus) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,7 +218,7 @@ pub trait Environment: Send + Sync {
     fn fs(&self) -> Arc<dyn IHostFileSystem>;
     fn process(&self) -> Arc<dyn IHostProcessService>;
     fn status(&self) -> EnvironmentStatus;
-    fn on_did_change_status(&self, listener: StatusListener) -> Box<dyn IDisposable>;
+    fn on_did_change_status(&self, listener: StatusListener) -> DisposableRef;
     fn when_ready(&self) -> Option<BoxFuture<'static, Result<(), WireAsyncError>>>;
     fn connect_error(&self) -> Option<String>;
     fn connect(&self) -> BoxFuture<'static, Result<(), WireAsyncError>>;

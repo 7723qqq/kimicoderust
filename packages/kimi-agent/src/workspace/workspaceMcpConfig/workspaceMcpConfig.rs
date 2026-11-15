@@ -5,7 +5,7 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::mcp_core::config_schema::McpServerConfig;
 
 pub type McpConfigAsyncError = Box<dyn Error + Send + Sync>;
@@ -50,9 +50,9 @@ pub trait IWorkspaceMcpConfigService: Send + Sync {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(McpServersChangeEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_change_tunables(
         &self,
         listener: Arc<dyn Fn(McpTunables) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
 }

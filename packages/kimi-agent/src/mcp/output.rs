@@ -1,7 +1,7 @@
 //! MCP tool-result conversion (v2 `agent/mcp/output.ts`, upstream #3688).
 //!
 //! Every block an MCP server returns is accounted for. Text reaches the model
-//! as text; media reaches it as a [`ContentBlock::MediaRef`], so the request
+//! as text; media reaches it as a nested media URL, so the request
 //! resolver decides per model what can actually be taken (inline base64, a
 //! provider reference, or a `<image path="...">` tag); and the original bytes
 //! are preserved in the attachment store *before* the block is capped or
@@ -18,8 +18,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::types::{McpContent, McpToolCallResult};
+use crate::agent::media::image_format_policy;
 use crate::llm::media_resolver::KIMI_FILE_SCHEME;
-use crate::rpc::types::{ContentBlock, MediaKind};
+use crate::rpc::types::{ContentPart, MediaKind};
 use crate::server::files::FileStore;
 
 /// v2 `MCP_MAX_BINARY_PART_BYTES`: one binary part larger than this is not
@@ -35,7 +36,7 @@ const MCP_MAX_INLINE_NOTICES_CHARS: usize = 4096;
 /// would sit in a session's media directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedAttachment {
-    /// The store id, which is what a [`ContentBlock::MediaRef`] carries.
+    /// The store id referenced by a `kimi-file://` media URL.
     pub file_id: String,
     pub path: Option<String>,
     pub reference: String,
@@ -49,7 +50,7 @@ pub struct McpOutput {
     pub content: String,
     /// The result body in the order the server returned it, media included
     /// (v2 `mcpResultToExecutableOutput` output parts).
-    pub parts: Vec<ContentBlock>,
+    pub parts: Vec<ContentPart>,
     /// `true` when an original was withheld from the model but preserved (or
     /// could not be preserved) — the caller marks the result truncated.
     pub truncated: bool,
@@ -204,7 +205,7 @@ fn dropped_block_notice(reason: &str) -> String {
 /// What one content block became.
 struct ConvertedBlock {
     text: Option<String>,
-    media: Option<ContentBlock>,
+    media: Option<ContentPart>,
     /// The `data:` URL this block carried, when it carried one — what the
     /// caller preserves.
     inline_url: Option<(String, String)>,
@@ -232,7 +233,7 @@ fn decode_base64(payload: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("Invalid base64 attachment: {e}"))
 }
 
-/// Convert one MCP content block (v2 `convertMCPContentBlock`, output.ts:50-118).
+/// Convert one MCP content block (v2 `convertMCPContentPart`, output.ts:50-118).
 fn convert_block(block: &McpContent, provider_type: Option<&str>) -> ConvertedBlock {
     let mime = block.mime_type.clone();
     match block.content_type.as_str() {
@@ -322,12 +323,12 @@ fn convert_block(block: &McpContent, provider_type: Option<&str>) -> ConvertedBl
             let normalized = strip_mime_params(mime_type);
             match media_kind_of(&normalized) {
                 Some(MediaKind::Image) => {
-                    if !crate::llm::image_policy::is_model_accepted_image_mime(
+                    if !image_format_policy::is_model_accepted_image_mime(
                         &normalized,
                         provider_type,
                     ) {
                         return ConvertedBlock::text_only(
-                            crate::llm::image_policy::build_unsupported_image_notice(
+                            image_format_policy::build_unsupported_image_notice(
                                 &normalized,
                                 Some(&uri),
                                 provider_type,
@@ -337,32 +338,35 @@ fn convert_block(block: &McpContent, provider_type: Option<&str>) -> ConvertedBl
                     ConvertedBlock {
                         text: None,
                         inline_url: parse_data_url(&uri),
-                        media: Some(ContentBlock::ImageUrl {
-                            url: uri,
-                            id: None,
-                            name: None,
-                        }),
+                        media: Some(crate::llm::media_resolver::media_url_part(
+                            MediaKind::Image,
+                            uri,
+                            None,
+                            None,
+                        )),
                         undelivered: None,
                     }
                 }
                 Some(MediaKind::Audio) => ConvertedBlock {
                     text: None,
                     inline_url: parse_data_url(&uri),
-                    media: Some(ContentBlock::AudioUrl {
-                        url: uri,
-                        id: None,
-                        name: None,
-                    }),
+                    media: Some(crate::llm::media_resolver::media_url_part(
+                        MediaKind::Audio,
+                        uri,
+                        None,
+                        None,
+                    )),
                     undelivered: None,
                 },
                 Some(MediaKind::Video) => ConvertedBlock {
                     text: None,
                     inline_url: parse_data_url(&uri),
-                    media: Some(ContentBlock::VideoUrl {
-                        url: uri,
-                        id: None,
-                        name: None,
-                    }),
+                    media: Some(crate::llm::media_resolver::media_url_part(
+                        MediaKind::Video,
+                        uri,
+                        None,
+                        None,
+                    )),
                     undelivered: None,
                 },
                 None => ConvertedBlock::text_only(dropped_block_notice(&format!(
@@ -393,16 +397,16 @@ impl ConvertedBlock {
             self.media = None;
         } else {
             self.media = Some(match strip_mime_params(mime_type).as_str() {
-                m if m.starts_with("image/") => ContentBlock::ImageUrl {
+                m if m.starts_with("image/") => ContentPart::ImageUrl {
                     url,
                     id: None,
                     name: None,
                 },
-                m if m.starts_with("audio/") => ContentBlock::Text {
+                m if m.starts_with("audio/") => ContentPart::Text {
                     text: "[audio attachment delivered as a reference]".to_string(),
                     meta: None,
                 },
-                _ => ContentBlock::Text {
+                _ => ContentPart::Text {
                     text: "[video attachment delivered as a reference]".to_string(),
                     meta: None,
                 },
@@ -427,7 +431,7 @@ pub fn mcp_result_to_output(
 ) -> McpOutput {
     let aborted = || cancelled.is_some_and(|is_cancelled| is_cancelled());
     let mut texts: Vec<String> = Vec::new();
-    let mut parts: Vec<ContentBlock> = Vec::new();
+    let mut parts: Vec<ContentPart> = Vec::new();
     let mut notices: Vec<String> = Vec::new();
     let mut captions: Vec<String> = Vec::new();
     // payload -> the id it was preserved under, so a repeat of the same
@@ -454,7 +458,7 @@ pub fn mcp_result_to_output(
         });
 
         // Preserve the original before anything below can cap or drop it.
-        let mut media_ref: Option<ContentBlock> = None;
+        let mut media_ref: Option<ContentPart> = None;
         let mut original_path = None;
         let original_mime = converted
             .inline_url
@@ -470,7 +474,9 @@ pub fn mcp_result_to_output(
                         .map(|path| path.to_string_lossy().to_string())
                 });
                 media_ref =
-                    media_kind_of(&mime).map(|kind| ContentBlock::MediaRef { file_id, kind });
+                    media_kind_of(&mime).map(|kind| {
+                        crate::llm::media_resolver::file_media_part(file_id, kind)
+                    });
                 if media_ref.is_none() {
                     media_ref = converted.media.take();
                 }
@@ -484,10 +490,10 @@ pub fn mcp_result_to_output(
                             notices.push(attachment_notice(&saved, &mime, bytes.len()));
                             if let Some(kind) = media_kind_of(&mime) {
                                 preserved.insert(payload.clone(), saved.file_id.clone());
-                                media_ref = Some(ContentBlock::MediaRef {
-                                    file_id: saved.file_id.clone(),
+                                media_ref = Some(crate::llm::media_resolver::file_media_part(
+                                    saved.file_id.clone(),
                                     kind,
-                                });
+                                ));
                             }
                         }
                         Err(reason) => {
@@ -551,18 +557,18 @@ pub fn mcp_result_to_output(
             ));
             converted.text = None;
             let payload = base64::engine::general_purpose::STANDARD.encode(&compressed.data);
-            converted.media = Some(ContentBlock::ImageUrl {
-                url: data_url(&compressed.mime_type, &payload),
-                id: None,
-                name: None,
-            });
+            converted.media = Some(crate::llm::media_resolver::inline_image_part(
+                compressed.mime_type.clone(),
+                payload,
+                None,
+            ));
             media_ref = match files {
                 Some(files) => {
                     match save_attachment(&compressed.data, &compressed.mime_type, files) {
-                        Ok(saved) => Some(ContentBlock::MediaRef {
-                            file_id: saved.file_id,
-                            kind: MediaKind::Image,
-                        }),
+                        Ok(saved) => Some(crate::llm::media_resolver::file_media_part(
+                            saved.file_id,
+                            MediaKind::Image,
+                        )),
                         Err(_) => converted.media.take(),
                     }
                 }
@@ -571,7 +577,7 @@ pub fn mcp_result_to_output(
         }
 
         if let Some(text) = converted.text {
-            parts.push(ContentBlock::Text {
+            parts.push(ContentPart::Text {
                 text: text.clone(),
                 meta: None,
             });
@@ -593,7 +599,7 @@ pub fn mcp_result_to_output(
         result.meta.as_ref(),
     ) {
         let extras_text = format!("\n<mcp-result-extras>\n{extras}\n</mcp-result-extras>");
-        parts.push(ContentBlock::Text {
+        parts.push(ContentPart::Text {
             text: extras_text.clone(),
             meta: None,
         });
@@ -602,7 +608,7 @@ pub fn mcp_result_to_output(
 
     let (notice_text, notice_spilled) = bound_notices(&notices, files, &aborted);
     if !notice_text.is_empty() {
-        parts.push(ContentBlock::Text {
+        parts.push(ContentPart::Text {
             text: notice_text.clone(),
             meta: None,
         });
@@ -619,36 +625,35 @@ pub fn mcp_result_to_output(
     }
 }
 
-fn is_media_part(part: &ContentBlock) -> bool {
+fn is_media_part(part: &ContentPart) -> bool {
     matches!(
         part,
-        ContentBlock::Image { .. }
-            | ContentBlock::ImageUrl { .. }
-            | ContentBlock::AudioUrl { .. }
-            | ContentBlock::VideoUrl { .. }
-            | ContentBlock::MediaRef { .. }
+        ContentPart::ImageUrl { .. }
+            | ContentPart::AudioUrl { .. }
+            | ContentPart::VideoUrl { .. }
+            | ContentPart::DocumentUrl { .. }
     )
 }
 
 /// v2 `wrapMediaOnly` (`output.ts:412-423`): a result carrying media but no
 /// non-empty text is wrapped in an `<mcp_tool_result name="…">` envelope so
 /// the model can tell whose media it is looking at.
-fn wrap_media_only(parts: &mut Vec<ContentBlock>, qualified_tool_name: &str) {
+fn wrap_media_only(parts: &mut Vec<ContentPart>, qualified_tool_name: &str) {
     let has_media = parts.iter().any(is_media_part);
     let has_non_empty_text = parts
         .iter()
-        .any(|part| matches!(part, ContentBlock::Text { text, .. } if !text.is_empty()));
+        .any(|part| matches!(part, ContentPart::Text { text, .. } if !text.is_empty()));
     if !has_media || has_non_empty_text {
         return;
     }
     parts.insert(
         0,
-        ContentBlock::Text {
+        ContentPart::Text {
             text: format!("<mcp_tool_result name=\"{qualified_tool_name}\">"),
             meta: None,
         },
     );
-    parts.push(ContentBlock::Text {
+    parts.push(ContentPart::Text {
         text: "</mcp_tool_result>".to_string(),
         meta: None,
     });
@@ -932,14 +937,14 @@ mod tests {
             .parts
             .iter()
             .position(|part| {
-                matches!(part, ContentBlock::Text { text, .. } if text.contains("<mcp-result-extras>"))
+                matches!(part, ContentPart::Text { text, .. } if text.contains("<mcp-result-extras>"))
             })
             .expect("the extras part is present");
         let notice = output
             .parts
             .iter()
             .position(|part| {
-                matches!(part, ContentBlock::Text { text, .. } if text.contains("Original attachment saved at:"))
+                matches!(part, ContentPart::Text { text, .. } if text.contains("Original attachment saved at:"))
             })
             .expect("the notice part is present");
         assert!(extras < notice, "{:?}", output.parts);
@@ -972,16 +977,16 @@ mod tests {
         );
         let mut file_ids = Vec::new();
         for block in &output.parts {
-            if let ContentBlock::MediaRef { file_id, kind } = block {
-                assert_eq!(*kind, MediaKind::Image);
-                file_ids.push(file_id.clone());
+            if let Some((file_id, kind)) = crate::llm::media_resolver::media_ref_of(block) {
+                assert_eq!(kind, MediaKind::Image);
+                file_ids.push(file_id.to_string());
             }
         }
         assert_eq!(file_ids.len(), 1, "the image must ride as one MediaRef");
         assert!(
             matches!(
                 output.parts.first(),
-                Some(ContentBlock::Text { text, .. })
+                Some(ContentPart::Text { text, .. })
                     if text == "<mcp_tool_result name=\"mcp__srv__t\">"
             ),
             "a media-only result is wrapped: {:?}",
@@ -990,7 +995,7 @@ mod tests {
         assert!(
             matches!(
                 output.parts.get(2),
-                Some(ContentBlock::Text { text, .. }) if text == "</mcp_tool_result>"
+                Some(ContentPart::Text { text, .. }) if text == "</mcp_tool_result>"
             ),
             "the envelope closes before the notices: {:?}",
             output.parts
@@ -1031,9 +1036,9 @@ mod tests {
         let ids: Vec<&String> = output
             .parts
             .iter()
-            .filter_map(|block| match block {
-                ContentBlock::MediaRef { file_id, .. } => Some(file_id),
-                _ => None,
+            .filter_map(|block| {
+                crate::llm::media_resolver::media_ref_of(block)
+                    .map(|(file_id, _)| file_id.to_string())
             })
             .collect();
         assert_eq!(ids.len(), 2, "{:?}", output.parts);
@@ -1151,7 +1156,7 @@ mod tests {
             output
                 .parts
                 .iter()
-                .any(|part| matches!(part, ContentBlock::MediaRef { .. }))
+                .any(|part| crate::llm::media_resolver::media_ref_of(part).is_some())
         );
     }
 
@@ -1179,7 +1184,7 @@ mod tests {
             output
                 .parts
                 .iter()
-                .any(|part| matches!(part, ContentBlock::ImageUrl { .. }))
+                .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
         );
         let _ = std::fs::remove_file(original);
     }
@@ -1201,7 +1206,7 @@ mod tests {
         assert!(!output.truncated);
         assert!(matches!(
             output.parts.get(1),
-            Some(ContentBlock::ImageUrl { .. })
+            Some(ContentPart::ImageUrl { .. })
         ));
     }
 
@@ -1232,7 +1237,7 @@ mod tests {
         let output = mcp_result_to_output(&image, "mcp__srv__t", None, None, None);
         assert!(output.parts.iter().any(|part| matches!(
             part,
-            ContentBlock::ImageUrl { url, .. } if url == "https://example.com/image.png"
+            ContentPart::ImageUrl { image_url, .. } if image_url.url == "https://example.com/image.png"
         )));
 
         let audio = result_with(vec![McpContent {
@@ -1244,7 +1249,7 @@ mod tests {
         let output = mcp_result_to_output(&audio, "mcp__srv__t", None, None, None);
         assert!(output.parts.iter().any(|part| matches!(
             part,
-            ContentBlock::AudioUrl { url, .. } if url == "https://example.com/audio.mp3"
+            ContentPart::AudioUrl { audio_url, .. } if audio_url.url == "https://example.com/audio.mp3"
         )));
 
         let video = result_with(vec![McpContent {
@@ -1256,7 +1261,7 @@ mod tests {
         let output = mcp_result_to_output(&video, "mcp__srv__t", None, None, None);
         assert!(output.parts.iter().any(|part| matches!(
             part,
-            ContentBlock::VideoUrl { url, .. } if url == "https://example.com/video.mp4"
+            ContentPart::VideoUrl { video_url, .. } if video_url.url == "https://example.com/video.mp4"
         )));
     }
 
@@ -1304,7 +1309,7 @@ mod tests {
             !output
                 .parts
                 .iter()
-                .any(|part| matches!(part, ContentBlock::ImageUrl { .. }))
+                .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
         );
     }
 }

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -1598,11 +1597,14 @@ impl IInstantiationService for InstantiationService {
         InstantiationService::cascade(self)
     }
 
-    fn invoke_function<R>(&self, callback: impl FnOnce(&dyn ServicesAccessor) -> R) -> R {
+    fn invoke_function_dyn(&self, callback: &mut dyn FnMut(&dyn ServicesAccessor)) {
         InstantiationService::invoke_function(self, callback)
     }
 
-    fn create_instance<T>(&self, descriptor: &SyncDescriptor0<T>) -> T {
+    fn create_instance<T>(&self, descriptor: &SyncDescriptor0<T>) -> T
+    where
+        Self: Sized,
+    {
         (descriptor.ctor)()
     }
 
@@ -1620,7 +1622,10 @@ impl IInstantiationService for InstantiationService {
         id: ServiceIdentifier<T>,
         instance_or_descriptor: DynamicValue,
         options: Option<ProvideOptions>,
-    ) -> Arc<dyn ProvideHandle> {
+    ) -> Arc<dyn ProvideHandle>
+    where
+        Self: Sized,
+    {
         self.arc()
             .provide(
                 super::instantiation::refine_service_decorator(&id),
@@ -1635,7 +1640,10 @@ impl IInstantiationService for InstantiationService {
             .unwrap_or_else(|error| panic!("{error}"));
     }
 
-    fn unprovide<T>(&self, id: &ServiceIdentifier<T>) {
+    fn unprovide<T>(&self, id: &ServiceIdentifier<T>)
+    where
+        Self: Sized,
+    {
         InstantiationService::unprovide(self, super::instantiation::refine_service_decorator(id));
     }
 
@@ -1643,8 +1651,8 @@ impl IInstantiationService for InstantiationService {
         IDisposable::dispose(self);
     }
 
-    fn dispose_async(&self) -> impl Future<Output = ()> + Send {
-        self.arc().dispose_async()
+    fn dispose_async(&self) -> BoxFuture<'static, ()> {
+        self.arc().dispose_async().boxed()
     }
 }
 

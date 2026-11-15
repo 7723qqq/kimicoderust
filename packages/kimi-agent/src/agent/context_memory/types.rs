@@ -205,7 +205,7 @@ pub struct RetryOrigin {
     pub trigger: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum PromptOrigin {
     User(UserPromptOrigin),
@@ -222,7 +222,71 @@ pub enum PromptOrigin {
     Retry(RetryOrigin),
 }
 
+impl<'de> Deserialize<'de> for PromptOrigin {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let kind = value
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| serde::de::Error::missing_field("kind"))?;
+        let origin = match kind.as_str() {
+            "user" => serde_json::from_value(value).map(Self::User),
+            "skill_activation" => serde_json::from_value(value).map(Self::SkillActivation),
+            "plugin_command" => serde_json::from_value(value).map(Self::PluginCommand),
+            "injection" => serde_json::from_value(value).map(Self::Injection),
+            "shell_command" => serde_json::from_value(value).map(Self::ShellCommand),
+            "compaction_summary" => serde_json::from_value(value).map(Self::CompactionSummary),
+            "system_trigger" => serde_json::from_value(value).map(Self::SystemTrigger),
+            "task" => serde_json::from_value(value).map(Self::Task),
+            "cron_job" => serde_json::from_value(value).map(Self::CronJob),
+            "cron_missed" => serde_json::from_value(value).map(Self::CronMissed),
+            "hook_result" => serde_json::from_value(value).map(Self::HookResult),
+            "retry" => serde_json::from_value(value).map(Self::Retry),
+            _ => {
+                return Err(serde::de::Error::unknown_variant(
+                    &kind,
+                    &[
+                        "user",
+                        "skill_activation",
+                        "plugin_command",
+                        "injection",
+                        "shell_command",
+                        "compaction_summary",
+                        "system_trigger",
+                        "task",
+                        "cron_job",
+                        "cron_missed",
+                        "hook_result",
+                        "retry",
+                    ],
+                ));
+            }
+        };
+        origin.map_err(serde::de::Error::custom)
+    }
+}
+
 impl PromptOrigin {
+    pub fn injection_variant(&self) -> Option<&str> {
+        match self {
+            Self::Injection(origin) if origin.kind == "injection" => {
+                Some(origin.variant.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn injection_disclosure(&self) -> Option<&Value> {
+        match self {
+            Self::Injection(origin) if origin.kind == "injection" => origin.disclosure.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn kind(&self) -> &str {
         match self {
             Self::User(origin) => &origin.kind,

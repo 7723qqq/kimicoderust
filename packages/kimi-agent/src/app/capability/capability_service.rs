@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
 use crate::_base::di::instantiation::{
     DependencyKind, ScopeActivation, ServiceDependency, create_decorator,
+    refine_service_decorator,
 };
 use crate::_base::di::instantiation_service::register_descriptor_dependencies;
 use crate::_base::di::lifecycle::IDisposable;
@@ -481,7 +482,7 @@ static CAPABILITY_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| 
         &descriptor,
         vec![
             ServiceDependency {
-                id: I_BOOTSTRAP_SERVICE.clone(),
+                id: refine_service_decorator(&I_BOOTSTRAP_SERVICE),
                 index: 0,
                 kind: DependencyKind::Instance,
             },
@@ -496,7 +497,7 @@ static CAPABILITY_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| 
                 kind: DependencyKind::Instance,
             },
             ServiceDependency {
-                id: I_LOG_SERVICE.clone(),
+                id: refine_service_decorator(&I_LOG_SERVICE),
                 index: 3,
                 kind: DependencyKind::Instance,
             },

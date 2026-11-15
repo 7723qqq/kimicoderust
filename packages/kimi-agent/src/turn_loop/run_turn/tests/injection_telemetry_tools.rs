@@ -33,10 +33,9 @@ async fn test_injections_appended_before_llm_call() {
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 1,
-                        output_tokens: 1,
-                        total_tokens: 2,
-                        ..Default::default()
+                        input_other: 1,
+                        output: 1,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -57,7 +56,7 @@ async fn test_injections_appended_before_llm_call() {
         turn_id: "test-injection".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -145,7 +144,7 @@ async fn test_permission_mode_reminders_follow_the_mode_transitions() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
     let prompt = |text: &str| LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: text.into(),
         ..Default::default()
     };
@@ -216,22 +215,24 @@ async fn test_todo_reminder_reads_state_updated_earlier_in_turn() {
                     vec![ToolCall {
                         id: "todo-update".into(),
                         name: "TodoList".into(),
-                        arguments: serde_json::json!({
+                        arguments: Some(serde_json::json!({
                             "todos": [
                                 { "title": "Initial first task", "status": "done" },
                                 { "title": "Updated second task", "status": "in_progress" }
                             ]
-                        }),
+                        }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }]
                 } else if call <= 10 {
                     vec![ToolCall {
                         id: format!("work-{call}"),
                         name: "Echo".into(),
-                        arguments: serde_json::json!({ "step": call }),
+                        arguments: Some(serde_json::json!({ "step": call }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     }]
                 } else {
                     Vec::new()
@@ -296,7 +297,7 @@ async fn test_todo_reminder_reads_state_updated_earlier_in_turn() {
         turn_id: "test-todo-reminder-live-state".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "keep the todo list current".into(),
             ..Default::default()
         }],
@@ -370,7 +371,7 @@ async fn test_run_turn_with_telemetry_emits_started_and_ended() {
         turn_id: "test-telemetry-ok".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -438,7 +439,7 @@ async fn test_run_turn_with_telemetry_omits_an_absent_plugin_snapshot() {
         turn_id: "test-telemetry-no-plugins".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -499,7 +500,7 @@ async fn test_run_turn_with_telemetry_consumes_stop_hook_continuation() {
         turn_id: "test-telemetry-stop-hook".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -562,7 +563,7 @@ async fn test_run_turn_with_telemetry_reports_cancellation_as_interrupted() {
         turn_id: "test-telemetry-cancel".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -648,9 +649,10 @@ async fn test_list_tools_refreshes_table_per_step() {
                         tool_calls: vec![ToolCall {
                             id: "tc1".into(),
                             name: "read".into(),
-                            arguments: serde_json::json!({"path": "/a.txt"}),
+                            arguments: Some(serde_json::json!({"path": "/a.txt"}).to_string()),
                             extras: None,
-                            args_parse_error: None,
+                            raw_id: None,
+                            _stream_index: None,
                         }],
                         finish_reason: Some("tool_calls".into()),
                         usage: TokenUsage::default(),
@@ -712,7 +714,7 @@ async fn test_list_tools_refreshes_table_per_step() {
         turn_id: "test-list-tools-refresh".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -806,7 +808,7 @@ async fn test_list_tools_failure_falls_back_to_snapshot() {
         turn_id: "test-list-tools-fallback".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
@@ -902,7 +904,7 @@ async fn test_list_tools_skipped_in_host_proxy_mode() {
         turn_id: "test-list-tools-host-proxy".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],

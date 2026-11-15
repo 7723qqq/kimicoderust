@@ -246,7 +246,13 @@ fn recover_folded_length(record: &WireRecord, state: &TranscriptState) -> usize 
     let kept_head_user_message_count = read_number(record, "keptHeadUserMessageCount");
     let compacted_count = read_number(record, "compactedCount");
     if let Some(kept) = kept_user_message_count {
-        return kept as usize + if kept_head_user_message_count.is_none() { 2 } else { 3 };
+        return kept as usize
+            + if kept_head_user_message_count.is_none() {
+                2
+            } else {
+                3
+            }
+            + read_number(record, "appendedInjectionCount").unwrap_or(0) as usize;
     }
     if let Some(compacted) = compacted_count {
         if (compacted as usize) < state.folded_length {

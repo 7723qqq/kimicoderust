@@ -931,8 +931,8 @@ impl AgentToolExecutorService {
         describe_missing: Option<MissingToolDescriber>,
     ) -> PreflightedToolCall {
         let tool_name = tool_call.name.clone();
-        let (args, parse_error) = parse_tool_arguments(tool_call.arguments.as_deref());
-        if let Some(error) = parse_error
+        let parsed = parse_tool_arguments(tool_call.arguments.as_deref());
+        if parsed.parse_failed
             && let Some(log) = &self.log
         {
             log.debug(
@@ -941,10 +941,11 @@ impl AgentToolExecutorService {
                     "toolName": tool_name,
                     "toolCallId": tool_call.id,
                     "rawLength": tool_call.arguments.as_ref().map_or(0, |raw| raw.encode_utf16().count()),
-                    "error": error.error,
+                    "error": parsed.error,
                 })),
             );
         }
+        let args = parsed.data;
         let Some(tool) = self.tool_registry.resolve(&tool_name) else {
             let output = describe_missing
                 .and_then(|describe| describe(&tool_name))
@@ -998,7 +999,7 @@ impl AgentToolExecutorService {
 
 impl IAgentToolExecutorService for AgentToolExecutorService {
     fn execute(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         calls: Vec<ToolCall>,
         options: ToolExecutorExecuteOptions,
     ) -> BoxStream<'static, Result<ToolExecutionResult, WireAsyncError>> {

@@ -70,7 +70,8 @@ use super::compaction_ops::{
     full_compaction_wire_ranges_key,
 };
 use super::compaction_utils::{
-    CompactionTruncatedError, find_api_status_error, take_recent_messages_within_token_budget,
+    CompactionTruncatedError, HistoryTokenProfile, assistant_usage_total,
+    build_history_token_profile, find_api_status_error, take_recent_messages_within_token_budget,
 };
 use super::full_compaction::{
     FullCompactionHooks, FullCompactionInput, FullCompactionTask, IAgentFullCompactionService,
@@ -493,7 +494,33 @@ impl AgentFullCompactionService {
     }
 
     fn current_request_tokens(&self) -> u64 {
-        self.request_tokens_for_context(&self.context.get())
+        self.history_request_tokens(&self.context.get())
+    }
+
+    fn history_request_tokens(&self, messages: &[ContextMessage]) -> u64 {
+        let estimated = self.request_tokens_for_context(messages);
+        match self.usage_anchored_request_tokens(messages) {
+            Some(anchored) => estimated.max(anchored),
+            None => estimated,
+        }
+    }
+
+    fn usage_anchored_request_tokens(&self, messages: &[ContextMessage]) -> Option<u64> {
+        for index in (0..messages.len()).rev() {
+            let Some(usage_tokens) = assistant_usage_total(&messages[index]) else {
+                continue;
+            };
+            let tail = messages[index + 1..]
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<Message>>();
+            return Some(
+                usage_tokens
+                    .saturating_add(self.token_counting.estimate_messages(&tail, None) as u64),
+            );
+        }
+        None
     }
 
     fn request_tokens_for_context(&self, messages: &[ContextMessage]) -> u64 {
@@ -520,11 +547,11 @@ impl AgentFullCompactionService {
         self.tool_select
             .default_tools(None)
             .into_iter()
-            .filter(|tool| tool.deferred != Some(true))
+            .filter(|tool| tool.deferred.is_none())
             .map(|tool| Tool {
                 name: tool.name,
                 description: tool.description,
-                parameters: tool.parameters.as_object().cloned().unwrap_or_default(),
+                parameters: tool.parameters,
                 deferred: tool.deferred,
             })
             .collect()
@@ -656,7 +683,7 @@ impl AgentFullCompactionService {
                 None,
             ));
         }
-        Ok(self.request_tokens_for_context(&history))
+        Ok(self.history_request_tokens(&history))
     }
 
     fn create_active_compaction(
@@ -986,7 +1013,7 @@ impl AgentFullCompactionService {
             estimate_text: Arc::new(move |text| token_counting.estimate_text(text) as u64),
         };
         let non_history_state_before = non_history_state_fingerprint(&apply_deps);
-        let tokens_before = self.request_tokens_for_context(&original_history);
+        let tokens_before = self.history_request_tokens(&original_history);
         let mut generation_state = CompactionGenerationState::default();
         let mut thinking_effort = self.profile.data().base.thinking_level.clone();
         let signal = active.task.abort_controller.signal();
@@ -1007,6 +1034,15 @@ impl AgentFullCompactionService {
             let instruction = render_compaction_instruction(CompactionInstructionInput {
                 custom_instruction: data.instruction.clone(),
             });
+            let instruction_message = create_user_message(&instruction);
+            let token_counting = self.token_counting.clone();
+            let token_profile = build_history_token_profile(
+                &original_history,
+                self.request_tokens(&[]),
+                Arc::new(move |message: &Message| {
+                    token_counting.estimate_message(message, None) as u64
+                }),
+            );
             let max_attempts = resolved_model
                 .compaction_max_attempts
                 .unwrap_or(MAX_COMPACTION_RETRY_ATTEMPTS);
@@ -1016,18 +1052,19 @@ impl AgentFullCompactionService {
                 .map(Into::into)
                 .collect::<Vec<Message>>();
             let this = self.this();
-            let request_tokens = Arc::new(move |messages: &[Message]| {
-                this.request_tokens(messages)
-            });
-            let token_counting = self.token_counting.clone();
-            let estimate_message = Arc::new(move |message: &Message| {
-                token_counting.estimate_message(message, None) as u64
-            });
-            let this = self.this();
             let get_effective = Arc::new(move || this.get_effective_max_context_tokens());
             let this = self.this();
-            let pre_shrink = Arc::new(move |history: &[Message], instruction: &str, max_output| {
-                this.pre_shrink_history_to_window_budget(history, instruction, max_output)
+            let pre_shrink_instruction = instruction_message;
+            let pre_shrink_history_tokens = original_history.clone();
+            let pre_shrink_profile = token_profile.clone();
+            let pre_shrink = Arc::new(move |history: &[Message], max_output| {
+                this.pre_shrink_history_to_window_budget(
+                    history,
+                    &pre_shrink_history_tokens,
+                    &pre_shrink_instruction,
+                    max_output,
+                    &pre_shrink_profile,
+                )
             });
             let this = self.this();
             let should_recover = Arc::new(
@@ -1046,8 +1083,7 @@ impl AgentFullCompactionService {
                 max_attempts,
                 compaction_max_output_size,
                 origin_turn_id: active.origin_turn_id,
-                request_tokens,
-                estimate_message,
+                token_profile,
                 get_effective_max_context_tokens: get_effective,
                 llm_requester: self.llm_requester.clone(),
                 pre_shrink_history: pre_shrink,
@@ -1165,8 +1201,10 @@ impl AgentFullCompactionService {
     fn pre_shrink_history_to_window_budget(
         &self,
         history: &[Message],
-        instruction: &str,
+        history_tokens: &[ContextMessage],
+        instruction_message: &Message,
         compaction_max_output_size: Option<u32>,
+        token_profile: &HistoryTokenProfile,
     ) -> Vec<Message> {
         let effective_max_tokens = self.get_effective_max_context_tokens();
         if effective_max_tokens == 0 {
@@ -1176,25 +1214,21 @@ impl AgentFullCompactionService {
             .unwrap_or(effective_max_tokens / 8)
             .min(effective_max_tokens / 8);
         let input_limit = effective_max_tokens as i64 - output_reserve as i64;
-        let overhead_tokens = self.request_tokens(&[]) as i64;
-        let estimated_messages_tokens = self.token_counting.estimate_messages(history, None) as i64
-            + self
-                .token_counting
-                .estimate_message(&create_user_message(instruction), None) as i64;
-        if estimated_messages_tokens + overhead_tokens <= input_limit {
+        let total_input_tokens = self.history_request_tokens(history_tokens) as i64
+            + self.token_counting.estimate_message(instruction_message, None) as i64;
+        if total_input_tokens <= input_limit {
             return history.to_vec();
         }
         let message_budget =
-            (input_limit as f64 * OVERFLOW_CONTEXT_SAFETY_RATIO).floor() as i64 - overhead_tokens;
+            (input_limit as f64 * OVERFLOW_CONTEXT_SAFETY_RATIO).floor() as i64
+                - token_profile.overhead_tokens as i64;
         if message_budget <= 0 {
             return history.to_vec();
         }
-        let token_counting = self.token_counting.clone();
-        let estimate = move |message: &Message| token_counting.estimate_message(message, None) as u64;
         let pre_shrunk = take_recent_messages_within_token_budget(
             history,
             message_budget as u64,
-            Some(&estimate),
+            Some(token_profile.estimate_message.as_ref()),
         );
         if pre_shrunk.is_empty() {
             history.to_vec()
@@ -1217,9 +1251,14 @@ impl AgentFullCompactionService {
     }
 
     fn token_count_with_pending(&self) -> u64 {
-        self.token_counting
+        let counted = self
+            .token_counting
             .get(&agent_context_of_scope(&self.agent), None, None)
-            .size as u64
+            .size as u64;
+        match self.usage_anchored_request_tokens(&self.context.get()) {
+            Some(anchored) => counted.max(anchored),
+            None => counted,
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::llm_adapter::protocol::protocol::Protocol;
 use crate::llm_adapter::provider::provider::OAuthRef;
 use crate::wire::record::WireAsyncError;
@@ -115,11 +115,11 @@ pub trait IModelService: Send + Sync {
     fn on_did_change_models(
         &self,
         listener: Arc<dyn Fn(ModelsChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_change_default_model(
         &self,
         listener: Arc<dyn Fn(DefaultModelChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn get(&self, id: &str) -> Option<ModelRecord>;
     fn list(&self) -> ModelsSection;
     fn get_default_model(&self) -> Option<String>;

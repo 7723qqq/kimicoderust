@@ -259,7 +259,7 @@ fn scan_previous_session_reminders_reads_ids_off_reminder_messages() {
     ));
     let headerless = crate::injection::wrap_system_reminder("- task-x \"not a reminder\" (bash)");
     let plain = LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: "- task-y \"user pasted a dash line\" (bash)".into(),
         ..Default::default()
     };

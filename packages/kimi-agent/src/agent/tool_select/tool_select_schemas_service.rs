@@ -26,7 +26,7 @@ impl AgentToolSelectSchemasService {
                     Ok(tool_select.drain_pending_tool_schemas().map(|tools| {
                         ContextInjectionResult {
                             content: ContextInjectionContent::Message(ContextInjectionMessage {
-                                role: "system".to_string(),
+                                role: crate::human::llm::message::Role::System,
                                 content: Vec::new(),
                                 tools: Some(tools),
                             }),

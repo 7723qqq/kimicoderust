@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use indexmap::IndexMap;
 use parking_lot::Mutex;
@@ -10,6 +10,7 @@ use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::lifecycle::{DisposableRef, DisposableStore, IDisposable, to_disposable};
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::_base::event::{Emitter, Event};
+use crate::state::state::StateKeyBuilder;
 
 pub struct StateKey<T> {
     pub name: String,
@@ -88,8 +89,51 @@ where
 }
 
 pub trait IStateRegistry: Send + Sync {
+    fn contribute_state_dynamic(
+        &self,
+        key: StateKey<DynamicValue>,
+    ) -> Result<DisposableRef, BugIndicatingError>;
+    fn has_dynamic(&self, key: &StateKey<DynamicValue>) -> bool;
+    fn get_dynamic(&self, key: &StateKey<DynamicValue>) -> DynamicValue;
+    fn set_dynamic(&self, key: &StateKey<DynamicValue>, value: DynamicValue);
     fn snapshot(&self) -> HashMap<String, serde_json::Value>;
     fn inspect(&self) -> StateInspection;
+}
+
+pub trait IStateRegistryExt: IStateRegistry {
+    fn contribute_state<T>(
+        &self,
+        key: &StateKeyBuilder<T>,
+    ) -> Result<DisposableRef, BugIndicatingError>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.contribute_state_dynamic(key.erased_key())
+    }
+
+    fn has<T>(&self, key: &StateKeyBuilder<T>) -> bool
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.has_dynamic(&key.erased_key())
+    }
+
+    fn get<T>(&self, key: &StateKeyBuilder<T>) -> T
+    where
+        T: Any + Clone + Send + Sync + 'static,
+    {
+        Arc::downcast::<T>(self.get_dynamic(&key.erased_key()))
+            .expect("state value type does not match its key")
+            .as_ref()
+            .clone()
+    }
+
+    fn set<T>(&self, key: &StateKeyBuilder<T>, value: T)
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.set_dynamic(&key.erased_key(), Arc::new(value));
+    }
 }
 
 static NEXT_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -102,6 +146,7 @@ pub struct StateRegistry {
     any_emitter: Arc<Emitter<StateChange>>,
     pub on_did_change_any: Event<StateChange>,
     store: DisposableStore,
+    this: OnceLock<Weak<StateRegistry>>,
     pub(crate) inspect_scope: String,
     pub(crate) inspect_parent: Option<Arc<dyn IStateRegistry>>,
 }
@@ -119,7 +164,7 @@ impl StateRegistry {
         let store = DisposableStore::new();
         let close_emitter = any_emitter.clone();
         store.add(to_disposable(move || close_emitter.dispose()));
-        Arc::new(Self {
+        let registry = Arc::new(Self {
             values: Mutex::new(IndexMap::new()),
             registrations: Mutex::new(HashMap::new()),
             excluded_from_snapshot: Mutex::new(HashSet::new()),
@@ -127,13 +172,16 @@ impl StateRegistry {
             on_did_change_any: any_emitter.event(),
             any_emitter,
             store,
+            this: OnceLock::new(),
             inspect_scope: scope.into(),
             inspect_parent: parent,
-        })
+        });
+        let _ = registry.this.set(Arc::downgrade(&registry));
+        registry
     }
 
     pub fn contribute_state<T>(
-        self: &Arc<Self>,
+        &self,
         key: StateKey<T>,
     ) -> Result<DisposableRef, BugIndicatingError>
     where
@@ -149,7 +197,7 @@ impl StateRegistry {
     }
 
     pub fn contribute_key<T>(
-        self: &Arc<Self>,
+        &self,
         key: StateKey<T>,
     ) -> Result<DisposableRef, BugIndicatingError>
     where
@@ -161,6 +209,11 @@ impl StateRegistry {
                 key.name
             )));
         }
+        let Some(registry) = self.this.get().cloned() else {
+            return Err(BugIndicatingError::new(
+                "state registry is not attached to an Arc",
+            ));
+        };
         let registration = NEXT_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed);
         self.registrations
             .lock()
@@ -172,9 +225,11 @@ impl StateRegistry {
         if key.snapshot_excluded {
             self.excluded_from_snapshot.lock().insert(key.name.clone());
         }
-        let registry = self.clone();
         let name = key.name;
         Ok(to_disposable(move || {
+            let Some(registry) = registry.upgrade() else {
+                return;
+            };
             if registry.registrations.lock().get(&name) != Some(&registration) {
                 return;
             }
@@ -267,6 +322,26 @@ impl StateRegistry {
 }
 
 impl IStateRegistry for StateRegistry {
+    fn contribute_state_dynamic(
+        &self,
+        key: StateKey<DynamicValue>,
+    ) -> Result<DisposableRef, BugIndicatingError> {
+        self.contribute_state(key)
+    }
+
+    fn has_dynamic(&self, key: &StateKey<DynamicValue>) -> bool {
+        self.has(key)
+    }
+
+    fn get_dynamic(&self, key: &StateKey<DynamicValue>) -> DynamicValue {
+        self.get(key).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn set_dynamic(&self, key: &StateKey<DynamicValue>, value: DynamicValue) {
+        self.set(key, value)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
     fn snapshot(&self) -> HashMap<String, serde_json::Value> {
         let excluded = self.excluded_from_snapshot.lock().clone();
         self.values

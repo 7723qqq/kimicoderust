@@ -97,7 +97,7 @@ fn redact_value(value: &serde_json::Value, depth: usize) -> serde_json::Value {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct FormatOptions {
     pub ansi: bool,
     pub omit_context_keys: Vec<String>,

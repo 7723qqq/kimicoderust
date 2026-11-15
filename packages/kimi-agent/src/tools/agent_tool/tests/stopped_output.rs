@@ -146,9 +146,10 @@ impl LLM for PartialThenBlockLlm {
             let echo_call = |id: &str| ToolCall {
                 id: id.into(),
                 name: "echo".into(),
-                arguments: serde_json::json!({}),
+                arguments: Some(serde_json::json!({}).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             };
 
             if seed_first && call == 0 {

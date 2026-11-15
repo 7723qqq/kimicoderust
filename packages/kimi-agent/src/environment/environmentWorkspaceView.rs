@@ -18,7 +18,7 @@ pub struct EnvironmentWorkspaceView {
     pub binding: EnvironmentBinding,
     pub host: HostEnvironmentInfo,
     pub path: EnvironmentPath,
-    pub shell_path_bridge: Option<Arc<dyn ShellPathBridge>>,
+    pub shell_path_bridge: Option<Arc<ShellPathBridge>>,
     pub work_dir: String,
     pub primary_dir: Option<String>,
     pub follows_primary: Option<bool>,

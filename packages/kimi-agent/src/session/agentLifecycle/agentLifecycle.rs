@@ -1,9 +1,11 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::IAgentScopeHandle;
 use crate::agent::agent_context::agent_context::AgentContext;
 use crate::agent::permission_policy::types::PermissionMode;
@@ -62,25 +64,25 @@ pub trait IAgentLifecycleService: Send + Sync {
     fn on_did_create(
         &self,
         listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_create_scope(
         &self,
         listener: Arc<dyn Fn(AgentScopeCreatedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_will_close(
         &self,
         listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_close(
         &self,
         listener: Arc<dyn Fn(Arc<AgentContext>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     async fn create(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         opts: Option<CreateAgentOptions>,
     ) -> Result<Arc<AgentContext>, WireAsyncError>;
     async fn fork(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         source: Arc<AgentContext>,
         opts: Option<ForkAgentOptions>,
     ) -> Result<Arc<AgentContext>, WireAsyncError>;
@@ -90,7 +92,11 @@ pub trait IAgentLifecycleService: Send + Sync {
     async fn remove(&self, agent: Arc<AgentContext>) -> Result<(), WireAsyncError>;
     fn handle_of(&self, agent_id: &str) -> Option<Arc<IAgentScopeHandle>>;
     fn adopt(
-        self: &Arc<Self>,
+        self: Arc<Self>,
         handle: Arc<IAgentScopeHandle>,
     ) -> Result<Arc<AgentContext>, WireAsyncError>;
 }
+
+
+pub static I_AGENT_LIFECYCLE_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentLifecycleService>>> =
+    LazyLock::new(|| create_decorator("agentLifecycleService"));

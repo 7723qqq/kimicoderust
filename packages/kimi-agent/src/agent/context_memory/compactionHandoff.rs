@@ -74,6 +74,7 @@ pub struct ContextCompactionShape {
     pub tokens_after: u64,
     pub kept_user_message_count: usize,
     pub kept_head_user_message_count: Option<usize>,
+    pub appended_injection_count: usize,
     pub dropped_count: Option<usize>,
     pub messages: Vec<ContextMessage>,
 }
@@ -106,6 +107,7 @@ pub fn build_context_compaction_shape(
                 .unwrap_or_else(|| (estimate.messages)(&messages)),
             kept_user_message_count: 0,
             kept_head_user_message_count: None,
+            appended_injection_count: 0,
             dropped_count: input.dropped_count,
             messages,
         };
@@ -131,10 +133,33 @@ pub fn build_context_compaction_shape(
         .clone()
         .unwrap_or_else(|| input.summary.clone());
     let in_flight_turn = input.in_flight_turn.clone().unwrap_or_default();
+    let in_flight_start = if in_flight_turn.is_empty() {
+        history.len()
+    } else {
+        history
+            .iter()
+            .rposition(is_real_user_input)
+            .map_or(history.len(), |index| index + 1)
+    };
+    let appended_injections = history
+        .get(input.compacted_count..)
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+        .filter(|(offset, message)| {
+            input.compacted_count + offset < in_flight_start
+                && message
+                    .origin
+                    .as_ref()
+                    .is_some_and(|origin| origin.kind() == "injection")
+        })
+        .map(|(_, message)| message.clone())
+        .collect::<Vec<_>>();
     let tokens_after = input.tokens_after.unwrap_or_else(|| {
         let mut estimated = kept_messages.clone();
         estimated.extend(in_flight_turn.clone());
         estimated.push(create_compaction_continuation_message());
+        estimated.extend(appended_injections.iter().cloned());
         input.request_overhead_tokens.unwrap_or(0)
             + input
                 .summary_output_tokens
@@ -151,6 +176,7 @@ pub fn build_context_compaction_shape(
     messages.extend(in_flight_turn);
     messages.push(create_compaction_summary_message(&context_summary));
     messages.push(create_compaction_continuation_message());
+    messages.extend(appended_injections.iter().cloned());
     ContextCompactionShape {
         summary: input.summary,
         context_summary,
@@ -159,6 +185,7 @@ pub fn build_context_compaction_shape(
         tokens_after,
         kept_user_message_count,
         kept_head_user_message_count,
+        appended_injection_count: appended_injections.len(),
         dropped_count: input.dropped_count,
         messages,
     }

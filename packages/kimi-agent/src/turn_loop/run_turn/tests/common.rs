@@ -19,6 +19,16 @@ pub(super) fn rpc_callbacks(server: Arc<RpcServer>) -> Arc<dyn HostCallbacks> {
     Arc::new(RpcHostCallbacks { server })
 }
 
+pub(super) fn register_tool_defs(server: &Arc<RpcServer>, tools: Vec<ToolInfo>) {
+    RpcServer::register_arc(server, types::methods::HOST_LIST_TOOLS, move |_params| {
+        let tools = tools.clone();
+        Box::pin(async move {
+            let resp = types::ListToolsResponse { tools };
+            serde_json::to_value(&resp).map_err(|e| JsonRpcError::internal_error(e.to_string()))
+        })
+    });
+}
+
 pub(super) struct EventCapturingCallbacks {
     pub(super) inner: Arc<dyn HostCallbacks>,
     pub(super) events: Arc<Mutex<Vec<serde_json::Value>>>,
@@ -105,10 +115,9 @@ impl LLM for PredictTestLlm {
                     tool_calls: tcs,
                     finish_reason: Some("tool_calls".into()),
                     usage: TokenUsage {
-                        input_tokens: 10,
-                        output_tokens: 5,
-                        total_tokens: 15,
-                        ..Default::default()
+                        input_other: 10,
+                        output: 5,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -119,10 +128,9 @@ impl LLM for PredictTestLlm {
                     tool_calls: vec![],
                     finish_reason: Some("stop".into()),
                     usage: TokenUsage {
-                        input_tokens: 10,
-                        output_tokens: 5,
-                        total_tokens: 15,
-                        ..Default::default()
+                        input_other: 10,
+                        output: 5,
+                                                ..Default::default()
                     },
                     timing: None,
                 })
@@ -166,10 +174,9 @@ impl LLM for SequencedLlm {
                 tool_calls,
                 finish_reason: Some(finish_reason.into()),
                 usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
-                    ..Default::default()
+                    input_other: 10,
+                    output: 5,
+                                        ..Default::default()
                 },
                 timing: None,
             })

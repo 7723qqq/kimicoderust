@@ -90,7 +90,7 @@ pub fn is_system_reminder(text: &str) -> bool {
 /// them from real user prompts.
 pub fn injection_message(text: String) -> LLMMessage {
     LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: text,
         ..Default::default()
     }
@@ -101,7 +101,7 @@ pub fn injection_message(text: String) -> LLMMessage {
 /// replay renderer both key on it.
 pub fn injection_message_named(text: String, variant: &str) -> LLMMessage {
     LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: text,
         origin: Some(serde_json::json!({
             "kind": "injection",
@@ -877,27 +877,27 @@ mod tests {
     fn test_split_injections_separates_and_preserves_order() {
         let mut messages = vec![
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "plain user message".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: wrap_system_reminder("reminder 1"),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: wrap_system_reminder("reminder 2"),
                 ..Default::default()
             },
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: "assistant reply".into(),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: wrap_system_reminder("reminder 3"),
                 ..Default::default()
             },
@@ -924,12 +924,12 @@ mod tests {
         // Edge case: all injections
         let mut all_inj = vec![
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: wrap_system_reminder("a"),
                 ..Default::default()
             },
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: wrap_system_reminder("b"),
                 ..Default::default()
             },
@@ -942,7 +942,7 @@ mod tests {
 
         // Edge case: no injections
         let mut no_inj = vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "regular".into(),
             ..Default::default()
         }];
@@ -1054,7 +1054,7 @@ mod tests {
             today_local()
         ));
         let history = vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: disclosure,
             ..Default::default()
         }];
@@ -1072,7 +1072,7 @@ mod tests {
 
         // The compaction spliced the disclosure away.
         let spliced = vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "<summary>earlier conversation</summary>".into(),
             ..Default::default()
         }];
@@ -1184,7 +1184,7 @@ mod tests {
                       reminder over any earlier date statement for the current date. DO \
                       NOT mention this to the user explicitly.";
         let msg = |text: &str| LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(text),
             ..Default::default()
         };
@@ -1208,7 +1208,7 @@ mod tests {
         // alone must not move the baseline.
         assert_eq!(
             scan_date_baseline(&[LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: change.to_string(),
                 ..Default::default()
             }]),

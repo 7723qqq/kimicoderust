@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
@@ -108,7 +108,7 @@ pub struct OAuthService {
     region_service: Arc<dyn IRegionService>,
     flows: Arc<Mutex<HashMap<String, Arc<FlowState>>>>,
     refresh_chain: tokio::sync::Mutex<()>,
-    provider_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    provider_subscription: Mutex<Option<DisposableRef>>,
     self_weak: std::sync::Weak<OAuthService>,
 }
 

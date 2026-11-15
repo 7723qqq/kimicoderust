@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -29,3 +32,7 @@ pub trait IAgentTitlePromptSource: Send + Sync {
     async fn first_turn_excerpt(&self) -> Result<TitleTurnExcerpt, WireAsyncError>;
     async fn digest_excerpt(&self) -> Result<TitleDigestExcerpt, WireAsyncError>;
 }
+
+
+pub static I_AGENT_TITLE_PROMPT_SOURCE: LazyLock<ServiceIdentifier<Arc<dyn IAgentTitlePromptSource>>> =
+    LazyLock::new(|| create_decorator("agentTitlePromptSource"));

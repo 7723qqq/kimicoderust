@@ -12,7 +12,8 @@ use crate::llm::http::EventSink;
 use crate::llm::usage::classify_deepseek_cache_split;
 use crate::llm::wire::StreamDelta;
 use crate::primitives::deadline::{Deadline, bounded};
-use crate::rpc::types::{AntigravityLimits, BoxFuture, ContentBlock, NativeLlmConfig, TokenUsage};
+use crate::rpc::types::{AntigravityLimits, BoxFuture, ContentPart, NativeLlmConfig};
+use kimi_core::types::TokenUsage;
 use kimi_core::types::{LLM, LLMChatParams, LLMChatResponse, LLMMessage};
 
 pub const TRANSCRIPT_POLL: Duration = Duration::from_millis(250);
@@ -240,11 +241,11 @@ pub struct StreamResult {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct RawUsage {
     #[serde(default)]
-    pub input_tokens: Option<u32>,
+    pub input_tokens: Option<u64>,
     #[serde(default)]
-    pub output_tokens: Option<u32>,
+    pub output_tokens: Option<u64>,
     #[serde(default)]
-    pub cache_read_tokens: Option<u32>,
+    pub cache_read_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -465,7 +466,7 @@ fn message_text(message: &LLMMessage) -> String {
         .blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -573,12 +574,11 @@ pub fn parse_usage(raw: &RawUsage) -> TokenUsage {
     let input_cache_read = split.cached();
     let output_tokens = raw.output_tokens.unwrap_or(0);
     TokenUsage {
-        input_tokens,
-        output_tokens,
-
-        total_tokens: input_tokens.saturating_add(output_tokens),
+        input_other: input_tokens,
+        output: output_tokens,
         input_cache_read,
         input_cache_creation: 0,
+        raw: None,
     }
 }
 
@@ -1068,12 +1068,12 @@ impl AntigravityLlm {
                     let thinking_blocks = if thinking.is_empty() {
                         Vec::new()
                     } else {
-                        vec![ContentBlock::Think {
+                        vec![ContentPart::Think {
                             think: std::mem::take(&mut thinking),
                             encrypted: None,
                             details_index: None,
                             reasoning_key: None,
-                            details_summary: None,
+                            hidden: None,
                         }]
                     };
                     *self
@@ -1359,12 +1359,12 @@ impl AntigravityLlm {
 
         let mut thinking_blocks = Vec::new();
         if !thinking.trim().is_empty() {
-            thinking_blocks.push(ContentBlock::Think {
+            thinking_blocks.push(ContentPart::Think {
                 think: thinking,
                 encrypted: None,
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             });
         }
 
@@ -1609,7 +1609,7 @@ mod tests {
     }
 
     fn user(text: &str) -> LLMMessage {
-        LLMMessage::new("user", text)
+        LLMMessage::new(kimi_core::types::Role::User, text)
     }
 
     fn limited(
@@ -1712,7 +1712,7 @@ mod tests {
 
         let two = vec![
             user("first"),
-            LLMMessage::new("assistant", "reply"),
+            LLMMessage::new(kimi_core::types::Role::Assistant, "reply"),
             user("second"),
         ];
         assert_eq!(
@@ -1735,14 +1735,14 @@ mod tests {
             output_tokens: Some(50),
             cache_read_tokens: Some(30),
         });
-        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.input_other, 100);
         assert_eq!(usage.input_cache_read, 30);
         assert_eq!(usage.input_cache_creation, 0);
-        assert_eq!(usage.output_tokens, 50);
-        assert_eq!(usage.total_tokens, 150);
+        assert_eq!(usage.output, 50);
+        assert_eq!(usage.measured_context_tokens(), 150);
 
         let empty = parse_usage(&RawUsage::default());
-        assert_eq!(empty.total_tokens, 0);
+        assert_eq!(empty.measured_context_tokens(), 0);
     }
 
     #[test]
@@ -1798,9 +1798,9 @@ mod tests {
         assert_eq!(response.content, "hello");
         assert_eq!(response.finish_reason.as_deref(), Some("stop"));
         assert!(response.tool_calls.is_empty());
-        assert_eq!(response.usage.total_tokens, 150);
+        assert_eq!(response.usage.measured_context_tokens(), 150);
         match &response.thinking[0] {
-            ContentBlock::Think { think, .. } => assert_eq!(think, "why"),
+            ContentPart::Think { think, .. } => assert_eq!(think, "why"),
             other => panic!("unexpected thinking block: {other:?}"),
         }
         let events = emitted.lock().unwrap();
@@ -1864,7 +1864,7 @@ mod tests {
         assert_eq!(partial.content, "partial");
         assert!(matches!(
             partial.thinking.as_slice(),
-            [ContentBlock::Think { think, .. }] if think == "why"
+            [ContentPart::Think { think, .. }] if think == "why"
         ));
         assert!(llm.take_interrupted_response().is_none());
     }
@@ -1997,7 +1997,7 @@ mod tests {
         llm.chat(params(vec![user("first")])).await.unwrap();
         let extended = vec![
             user("first"),
-            LLMMessage::new("assistant", "one"),
+            LLMMessage::new(kimi_core::types::Role::Assistant, "one"),
             user("second"),
         ];
         llm.chat(params(extended)).await.unwrap();

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::rpc::types::BoxFuture;
-use crate::tool_input_display::ToolInputDisplay;
+use crate::tool_input_display::{FileIoOperation, ToolInputDisplay};
 
 pub const SNAPSHOT_RECORD_VERSION: u32 = 1;
 pub const SNAPSHOT_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -201,23 +201,20 @@ pub fn resolve_snapshot_target(
     let ToolInputDisplay::FileIo { operation, path, .. } = display else {
         return None;
     };
-    if operation == "edit" {
-        return Some(SnapshotTarget {
-            path: path.clone(),
-            tool: operation.clone(),
-            mode: SnapshotWriteMode::Edit,
-        });
-    }
-    if operation != "write" {
-        return None;
-    }
-    if args.get("mode").and_then(Value::as_str) == Some("append") {
+    let (tool, mode) = match operation {
+        FileIoOperation::Edit => ("edit", SnapshotWriteMode::Edit),
+        FileIoOperation::Write => ("write", SnapshotWriteMode::Overwrite),
+        _ => return None,
+    };
+    if mode == SnapshotWriteMode::Overwrite
+        && args.get("mode").and_then(Value::as_str) == Some("append")
+    {
         return None;
     }
     Some(SnapshotTarget {
         path: path.clone(),
-        tool: operation.clone(),
-        mode: SnapshotWriteMode::Overwrite,
+        tool: tool.to_string(),
+        mode,
     })
 }
 
@@ -254,11 +251,11 @@ pub fn pick_snapshot<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_input_display::ToolInputDisplay;
+    use crate::tool_input_display::{FileIoOperation, ToolInputDisplay};
 
-    fn file_io(operation: &str, path: &str) -> ToolInputDisplay {
+    fn file_io(operation: FileIoOperation, path: &str) -> ToolInputDisplay {
         ToolInputDisplay::FileIo {
-            operation: operation.to_string(),
+            operation,
             path: path.to_string(),
             detail: None,
             content: None,
@@ -290,7 +287,7 @@ mod tests {
     #[test]
     fn target_resolution_matches_v2() {
         assert_eq!(
-            resolve_snapshot_target(Some(&file_io("edit", "/w/a.rs")), &serde_json::json!({})),
+            resolve_snapshot_target(Some(&file_io(FileIoOperation::Edit, "/w/a.rs")), &serde_json::json!({})),
             Some(SnapshotTarget {
                 path: "/w/a.rs".into(),
                 tool: "edit".into(),
@@ -298,7 +295,7 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve_snapshot_target(Some(&file_io("write", "/w/a.rs")), &serde_json::json!({})),
+            resolve_snapshot_target(Some(&file_io(FileIoOperation::Write, "/w/a.rs")), &serde_json::json!({})),
             Some(SnapshotTarget {
                 path: "/w/a.rs".into(),
                 tool: "write".into(),
@@ -306,11 +303,11 @@ mod tests {
             })
         );
         assert!(resolve_snapshot_target(
-            Some(&file_io("write", "/w/a.rs")),
+            Some(&file_io(FileIoOperation::Write, "/w/a.rs")),
             &serde_json::json!({ "mode": "append" })
         )
         .is_none());
-        assert!(resolve_snapshot_target(Some(&file_io("read", "/w/a.rs")), &serde_json::json!({}))
+        assert!(resolve_snapshot_target(Some(&file_io(FileIoOperation::Read, "/w/a.rs")), &serde_json::json!({}))
             .is_none());
         assert!(resolve_snapshot_target(None, &serde_json::json!({})).is_none());
         assert!(resolve_snapshot_target(

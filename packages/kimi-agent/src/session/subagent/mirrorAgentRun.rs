@@ -1,3 +1,9 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::session::agent_lifecycle::agent_lifecycle::I_AGENT_LIFECYCLE_SERVICE;
+use crate::agent::profile::profile::I_AGENT_PROFILE_SERVICE;
+use crate::state::event_dispatcher::I_EVENT_DISPATCHER;
+use crate::session::subagent::subagent::I_SESSION_SUBAGENT_SERVICE;
+use crate::session::session_token_counting::session_token_counting::I_SESSION_TOKEN_COUNTING_SERVICE;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -12,7 +18,7 @@ use crate::_base::utils::error_message::error_message;
 use crate::agent::profile::profile::IAgentProfileService;
 use crate::agent::scope_context::scope_context::try_agent_context_of;
 use crate::app::event::event2::{Event2, Event2Class, register_event2_class};
-use crate::app::telemetry::telemetry::ITelemetryService;
+use crate::app::telemetry::telemetry::{ITelemetryService, I_TELEMETRY_SERVICE};
 use crate::human::llm::usage::TokenUsage;
 use crate::llm_adapter::contract::errors::is_provider_rate_limit_error;
 use crate::session::agent_lifecycle::agent_lifecycle::IAgentLifecycleService;
@@ -45,13 +51,7 @@ macro_rules! subagent_event {
             pub const OBSERVABLE: bool = true;
 
             pub fn new(payload: $payload) -> Self {
-                let class = Event2Class {
-                    type_: $type.to_string(),
-                    durable: true,
-                    observable: true,
-                    agent_domain: false,
-                    schema: None,
-                };
+                let class = Self::class();
                 let event = Event2::new(
                     &class,
                     serde_json::to_value(&payload).expect("subagent event is serializable"),
@@ -60,8 +60,23 @@ macro_rules! subagent_event {
                 Self { event, payload }
             }
 
+            pub fn class() -> Arc<Event2Class> {
+                Arc::new(Event2Class {
+                    type_: $type.to_string(),
+                    durable: true,
+                    observable: true,
+                    agent_domain: false,
+                    schema: None,
+                })
+            }
+
             pub fn as_event(&self) -> &Event2 {
                 &self.event
+            }
+
+            pub fn from_event(event: Event2) -> Option<Self> {
+                let payload = serde_json::from_value(event.payload.clone()).ok()?;
+                Some(Self { event, payload })
             }
         }
 
@@ -117,6 +132,20 @@ subagent_event!(SubagentFailed, SubagentFailedPayload, "subagent.failed",
 subagent_event!(SubagentCancelled, SubagentCancelledPayload, "subagent.cancelled",
     subagent_id: String);
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypedSubagentEvent<T> {
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[serde(flatten)]
+    pub payload: T,
+}
+
+pub type SubagentSpawnedEvent = TypedSubagentEvent<SubagentSpawnedPayload>;
+pub type SubagentStartedEvent = TypedSubagentEvent<SubagentStartedPayload>;
+pub type SubagentCompletedEvent = TypedSubagentEvent<SubagentCompletedPayload>;
+pub type SubagentFailedEvent = TypedSubagentEvent<SubagentFailedPayload>;
+pub type SubagentCancelledEvent = TypedSubagentEvent<SubagentCancelledPayload>;
+
 pub fn register_mirror_agent_run_events() {
     for type_ in [
         SubagentSpawned::TYPE,
@@ -167,10 +196,10 @@ pub fn emit_agent_run_spawned(
 ) {
     let child_profile = requester
         .accessor()
-        .get::<IAgentLifecycleService>()
+        .get(&I_AGENT_LIFECYCLE_SERVICE)
         .handle_of(target_agent_id)
-        .map(|handle| handle.accessor().get::<IAgentProfileService>());
-    let dispatcher = requester.accessor().get::<IEventDispatcher>();
+        .map(|handle| handle.accessor().get(&I_AGENT_PROFILE_SERVICE));
+    let dispatcher = requester.accessor().get(&I_EVENT_DISPATCHER);
     let event = SubagentSpawned::new(SubagentSpawnedPayload {
         subagent_id: target_agent_id.to_string(),
         subagent_name: meta.profile_name.clone(),
@@ -191,7 +220,7 @@ pub fn emit_agent_run_spawned(
     if let Some(child_profile) = child_profile {
         child_profile.republish_status();
     }
-    requester.accessor().get::<ITelemetryService>().track2(
+    requester.accessor().get(&I_TELEMETRY_SERVICE).track2(
         "subagent_created",
         json!({
             "subagent_name": meta.profile_name,
@@ -211,9 +240,9 @@ pub async fn mirror_agent_run(
     run: AgentRunHandle,
     options: MirrorAgentRunOptions,
 ) -> Result<AgentRunCompletion, WireAsyncError> {
-    let dispatcher = requester.accessor().get::<IEventDispatcher>();
-    let subagents = requester.accessor().get::<ISessionSubagentService>();
-    let agent_lifecycle = requester.accessor().get::<IAgentLifecycleService>();
+    let dispatcher = requester.accessor().get(&I_EVENT_DISPATCHER);
+    let subagents = requester.accessor().get(&I_SESSION_SUBAGENT_SERVICE);
+    let agent_lifecycle = requester.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
     if options.defer_started != Some(true) {
         let dispatcher = dispatcher.clone();
         let agent_id = run.agent_id.clone();
@@ -363,7 +392,7 @@ fn child_context_tokens(
     Some(
         child
             .accessor()
-            .get::<ISessionTokenCountingService>()
+            .get(&I_SESSION_TOKEN_COUNTING_SERVICE)
             .status_size(&context),
     )
 }

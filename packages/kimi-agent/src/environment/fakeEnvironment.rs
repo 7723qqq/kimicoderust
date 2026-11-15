@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use futures_util::{FutureExt, future::BoxFuture};
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::exec_env::shell_path_bridge::ShellPathBridge;
 use crate::environment::environment::{
     Environment, EnvironmentCapability, EnvironmentIdentity, EnvironmentPath, EnvironmentStatus,
@@ -143,7 +143,7 @@ impl Environment for FakeEnvironment {
         Some(self.workspace.clone())
     }
 
-    fn shell_path_bridge(&self) -> Option<Arc<dyn ShellPathBridge>> {
+    fn shell_path_bridge(&self) -> Option<Arc<ShellPathBridge>> {
         None
     }
 
@@ -169,7 +169,7 @@ impl Environment for FakeEnvironment {
         async {}.boxed()
     }
 
-    fn on_did_change_status(&self, listener: StatusListener) -> Box<dyn IDisposable> {
+    fn on_did_change_status(&self, listener: StatusListener) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().insert(id, listener);
         let listeners = Arc::downgrade(&self.listeners);

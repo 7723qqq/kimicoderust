@@ -15,7 +15,7 @@ use crate::rpc::types::{
     PermissionDecision, StateReadRequest, StateReadResponse, StateWriteRequest, StateWriteResponse,
     ToolExecuteRequest, ToolExecuteResponse,
 };
-use crate::turn_loop::types::{ContentBlock, GoalContext, LLMMessage};
+use crate::turn_loop::types::{ContentPart, GoalContext, LLMMessage};
 
 /// Sentinel returned by [`HostCallbacks::checkpoint`] when the host has no
 /// checkpoint support — the trait default, or a napi host that never wired the
@@ -1419,11 +1419,14 @@ impl HostCallbacks for NativeToolCallbacks {
                     }
                     let spill_exempt = request.tool_name.eq_ignore_ascii_case("read");
                     let has_media = result.parts.iter().any(|part| {
-                        !matches!(part, ContentBlock::Text { .. } | ContentBlock::Think { .. })
+                        !matches!(part, ContentPart::Text { .. } | ContentPart::Think { .. })
                     });
                     let spill = result.spill;
                     let raw = ToolExecuteResponse {
-                        delivery: result.delivery,
+                        delivery: result
+                            .delivery
+                            .as_ref()
+                            .map(crate::llm::wire::tool_delivery_to_wire),
                         stop_turn: result.stop_turn,
                         content: result.content,
                         is_error: result.is_error,

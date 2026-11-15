@@ -84,8 +84,8 @@ pub fn render_session_start(dirs: &[PluginSkillDir], session_id: &str) -> Option
         let content = render_skill_content(dirs, &dir.plugin_id, &skill, session_id);
         blocks.push(format!(
             "<plugin_session_start plugin=\"{}\" skill=\"{}\">\n{}\n</plugin_session_start>",
-            crate::native::escape::escape_xml_attr(&dir.plugin_id),
-            crate::native::escape::escape_xml_attr(&skill.name),
+            crate::_base::utils::xml_escape::escape_xml_attr(&dir.plugin_id),
+            crate::_base::utils::xml_escape::escape_xml_attr(&skill.name),
             content
         ));
     }
@@ -441,7 +441,7 @@ fn render_skill_content(
     match instructions {
         Some(instructions) => format!(
             "<plugin-instructions plugin=\"{}\">\n{}\n</plugin-instructions>\n\n{content}",
-            crate::native::escape::escape_xml_attr(plugin_id),
+            crate::_base::utils::xml_escape::escape_xml_attr(plugin_id),
             instructions
         ),
         None => content,
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn test_neutralized_notice_after_compaction() {
         let mut summary = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "summary".into(),
             ..Default::default()
         };

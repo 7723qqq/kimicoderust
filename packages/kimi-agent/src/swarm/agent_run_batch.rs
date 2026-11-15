@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 
-use crate::rpc::types::{BoxFuture, TokenUsage};
+use crate::rpc::types::BoxFuture;
+use kimi_core::types::TokenUsage;
 
 /// Initial burst of attempts launched without spacing (v2 INITIAL_LAUNCH_LIMIT).
 const INITIAL_LAUNCH_LIMIT: usize = 5;

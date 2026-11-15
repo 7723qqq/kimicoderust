@@ -15,7 +15,7 @@ use crate::llm_adapter::contract::message::{Message, create_user_message};
 use crate::llm_adapter::contract::request_trace::LLMRequestTrace;
 
 use super::compaction_utils::{
-    CompactionAttemptResult, CompactionTruncatedError, collect_summary,
+    CompactionAttemptResult, CompactionTruncatedError, HistoryTokenProfile, collect_summary,
     drop_oldest_message_and_leading_tool_results, shared_error,
     shrink_compaction_history_after_overflow, snip_large_tool_results,
 };
@@ -36,12 +36,11 @@ pub struct CompactionGenerationDeps<'a> {
     pub max_attempts: u32,
     pub compaction_max_output_size: Option<u32>,
     pub origin_turn_id: Option<u64>,
-    pub request_tokens: Arc<dyn Fn(&[Message]) -> u64 + Send + Sync>,
-    pub estimate_message: Arc<dyn Fn(&Message) -> u64 + Send + Sync>,
+    pub token_profile: HistoryTokenProfile,
     pub get_effective_max_context_tokens: Arc<dyn Fn() -> u32 + Send + Sync>,
     pub llm_requester: Arc<dyn IAgentLLMRequesterService>,
     pub pre_shrink_history:
-        Arc<dyn Fn(&[Message], &str, Option<u32>) -> Vec<Message> + Send + Sync>,
+        Arc<dyn Fn(&[Message], Option<u32>) -> Vec<Message> + Send + Sync>,
     pub should_recover_from_context_overflow:
         Arc<dyn Fn(&(dyn Error + Send + Sync), u64) -> bool + Send + Sync>,
     pub observe_context_overflow: Arc<dyn Fn(u64) + Send + Sync>,
@@ -62,11 +61,7 @@ pub async fn generate_compaction_summary(
     let mut overflow_shrink_count = 0usize;
     let mut request_attempts = 0u32;
     let mut cache_probe_pending = true;
-    let pre_shrunk = (deps.pre_shrink_history)(
-        &history_for_model,
-        deps.instruction,
-        deps.compaction_max_output_size,
-    );
+    let pre_shrunk = (deps.pre_shrink_history)(&history_for_model, deps.compaction_max_output_size);
     dropped_count += history_for_model.len() - pre_shrunk.len();
     history_for_model = pre_shrunk;
 
@@ -75,7 +70,7 @@ pub async fn generate_compaction_summary(
         let snipped = snip_large_tool_results(messages_to_compact, None);
         let mut messages = snipped;
         messages.push(create_user_message(deps.instruction));
-        let estimated_compaction_request_tokens = (deps.request_tokens)(&messages);
+        let estimated_compaction_request_tokens = (deps.token_profile.estimate_request)(&messages);
         let effective_max_tokens = (deps.get_effective_max_context_tokens)();
         let used_context_tokens = (effective_max_tokens > 0).then(|| {
             estimated_compaction_request_tokens.saturating_add(
@@ -153,11 +148,10 @@ pub async fn generate_compaction_summary(
                         return Err(error);
                     }
                     let before = messages_to_compact.len();
-                    let estimate = |message: &Message| (deps.estimate_message)(message);
                     let shrunk = shrink_compaction_history_after_overflow(
                         messages_to_compact,
                         overflow_shrink_count,
-                        Some(&estimate),
+                        Some(deps.token_profile.estimate_message.as_ref()),
                     );
                     if shrunk.is_empty() {
                         return Err(error);

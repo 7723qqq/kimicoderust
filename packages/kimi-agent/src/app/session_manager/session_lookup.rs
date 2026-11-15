@@ -1,3 +1,10 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::session::session_context::session_context::I_SESSION_CONTEXT;
+use crate::app::session_index::session_index::I_SESSION_INDEX;
+use crate::workspace::session_lifecycle::session_lifecycle::I_SESSION_LIFECYCLE_SERVICE;
+use crate::app::session_manager::session_manager::I_SESSION_MANAGER;
+use crate::workspace::workspace_instance::workspace_instance_manager::I_WORKSPACE_INSTANCE_MANAGER;
+use crate::app::workspace_lifecycle::workspace_lifecycle::I_WORKSPACE_LIFECYCLE_SERVICE;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
@@ -8,7 +15,7 @@ use crate::_base::di::instantiation::ServicesAccessor;
 use crate::_base::di::lifecycle::{DisposableRef, DisposableStore};
 use crate::_base::di::scope::ISessionScopeHandle;
 use crate::app::session_index::session_index::ISessionIndex;
-use crate::app::telemetry::telemetry::ITelemetryService;
+use crate::app::telemetry::telemetry::{ITelemetryService, I_TELEMETRY_SERVICE};
 use crate::app::workspace_lifecycle::workspace_lifecycle::{
     IWorkspaceLifecycleService, IWorkspaceScopeHandle, WorkspaceRef,
 };
@@ -27,11 +34,11 @@ pub async fn handler_for_session(
     accessor: &dyn ServicesAccessor,
     session_id: &str,
 ) -> Result<Option<Arc<dyn IWorkspaceScopeHandle>>, WireAsyncError> {
-    let Some(summary) = accessor.get::<ISessionIndex>().get(session_id).await? else {
+    let Some(summary) = accessor.get(&I_SESSION_INDEX).get(session_id).await? else {
         return Ok(None);
     };
     let result = accessor
-        .get::<IWorkspaceLifecycleService>()
+        .get(&I_WORKSPACE_LIFECYCLE_SERVICE)
         .handler_for(WorkspaceRef::WorkspaceId {
             workspace_id: summary.workspace_id,
             root: summary.cwd,
@@ -54,10 +61,10 @@ pub fn live_handler_for_session(
     accessor: &dyn ServicesAccessor,
     session_id: &str,
 ) -> Option<Arc<dyn IWorkspaceScopeHandle>> {
-    for handler in accessor.get::<IWorkspaceLifecycleService>().handlers().list() {
+    for handler in accessor.get(&I_WORKSPACE_LIFECYCLE_SERVICE).handlers().list() {
         if handler
             .accessor()
-            .get::<ISessionLifecycleService>()
+            .get(&I_SESSION_LIFECYCLE_SERVICE)
             .get(session_id)
             .is_some()
         {
@@ -73,17 +80,17 @@ pub fn follow_workspace_handlers(
         dyn Fn(Arc<dyn ISessionLifecycleService>) -> DisposableRef + Send + Sync,
     >,
 ) -> DisposableRef {
-    let lifecycle = accessor.get::<IWorkspaceLifecycleService>();
+    let lifecycle = accessor.get(&I_WORKSPACE_LIFECYCLE_SERVICE);
     let store = DisposableStore::new();
     for handler in lifecycle.handlers().list() {
-        store.add(follow(handler.accessor().get::<ISessionLifecycleService>()));
+        store.add(follow(handler.accessor().get(&I_SESSION_LIFECYCLE_SERVICE)));
     }
     let followed_store = store.clone();
     store.add(Arc::from(lifecycle.on_did_materialize_handler(Arc::new(
         move |handler| {
             if !followed_store.is_disposed() {
                 followed_store.add(follow(
-                    handler.accessor().get::<ISessionLifecycleService>(),
+                    handler.accessor().get(&I_SESSION_LIFECYCLE_SERVICE),
                 ));
             }
         },
@@ -95,11 +102,11 @@ pub async fn program_for_session(
     accessor: &dyn ServicesAccessor,
     session_id: &str,
 ) -> Result<Option<WorkspaceInstanceLease>, WireAsyncError> {
-    let manager = accessor.get::<ISessionManager>();
+    let manager = accessor.get(&I_SESSION_MANAGER);
     if let Some(live) = manager.get(session_id) {
-        let context = live.accessor().get::<ISessionContext>();
+        let context = live.accessor().get(&I_SESSION_CONTEXT);
         return accessor
-            .get::<IWorkspaceInstanceManager>()
+            .get(&I_WORKSPACE_INSTANCE_MANAGER)
             .acquire(WorkspaceInstanceRef::WorkspaceId {
                 workspace_id: context.workspace_id(),
                 root: Some(context.cwd()),
@@ -107,11 +114,11 @@ pub async fn program_for_session(
             .await
             .map(Some);
     }
-    let Some(summary) = accessor.get::<ISessionIndex>().get(session_id).await? else {
+    let Some(summary) = accessor.get(&I_SESSION_INDEX).get(session_id).await? else {
         return Ok(None);
     };
     accessor
-        .get::<IWorkspaceInstanceManager>()
+        .get(&I_WORKSPACE_INSTANCE_MANAGER)
         .acquire(WorkspaceInstanceRef::WorkspaceId {
             workspace_id: summary.workspace_id,
             root: summary.cwd,
@@ -126,7 +133,7 @@ pub async fn resume_session_by_id(
     options: Option<ResumeSessionOptions>,
 ) -> Result<Option<Arc<ISessionScopeHandle>>, WireAsyncError> {
     let result = accessor
-        .get::<ISessionManager>()
+        .get(&I_SESSION_MANAGER)
         .resume(session_id, options)
         .await;
     if let Err(error) = &result {
@@ -139,7 +146,7 @@ pub async fn resume_session_by_id(
             reason.to_string().into(),
         )]);
         accessor
-            .get::<ITelemetryService>()
+            .get(&I_TELEMETRY_SERVICE)
             .with_context(Map::from_iter([(
                 "session_id".to_string(),
                 session_id.to_string().into(),
@@ -153,14 +160,14 @@ pub fn get_live_session_by_id(
     accessor: &dyn ServicesAccessor,
     session_id: &str,
 ) -> Option<Arc<ISessionScopeHandle>> {
-    accessor.get::<ISessionManager>().get(session_id)
+    accessor.get(&I_SESSION_MANAGER).get(session_id)
 }
 
 pub async fn close_session_by_id(
     accessor: &dyn ServicesAccessor,
     session_id: &str,
 ) -> Result<(), WireAsyncError> {
-    accessor.get::<ISessionManager>().close(session_id).await
+    accessor.get(&I_SESSION_MANAGER).close(session_id).await
 }
 
 pub type SessionReloadedCallback = Arc<
@@ -214,7 +221,7 @@ pub fn follow_session_lifecycles(
     accessor: &dyn ServicesAccessor,
     follow: Arc<dyn Fn(Arc<dyn SessionLifecycleEvents>) -> DisposableRef + Send + Sync>,
 ) -> DisposableRef {
-    let manager = accessor.get::<ISessionManager>();
+    let manager = accessor.get(&I_SESSION_MANAGER);
     let events: Arc<dyn SessionLifecycleEvents> = manager;
     follow(events)
 }

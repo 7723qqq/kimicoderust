@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::instantiation::{ServiceIdentifier, ServicesAccessor, create_decorator};
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::ISessionScopeHandle;
 use crate::agent::profile::profile::BindAgentInput;
 use crate::app::session_index::session_index::SessionSummary;
@@ -104,11 +104,11 @@ pub trait SessionLifecycleEvents: Send + Sync {
     fn on_did_close_session(
         &self,
         listener: Arc<dyn Fn(SessionClosedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_archive_session(
         &self,
         listener: Arc<dyn Fn(SessionArchivedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
 }
 
 #[async_trait]
@@ -116,23 +116,23 @@ pub trait ISessionManager: SessionLifecycleEvents {
     fn on_will_create_session(
         &self,
         listener: Arc<dyn Fn(SessionWillCreateEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_create_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionCreatedEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_will_close_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillCloseEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_will_delete_session(
         &self,
         listener: Arc<dyn Fn(LifecycleWaitEvent<SessionWillDeleteEvent>) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_fork_session(
         &self,
         listener: Arc<dyn Fn(SessionForkedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     async fn resolve_creation_environment(
         &self,
         options: CreateManagedSessionOptions,
@@ -175,7 +175,7 @@ pub trait ISessionManager: SessionLifecycleEvents {
     ) -> Result<SessionMeta, WireAsyncError>;
 }
 
-pub static I_SESSION_MANAGER: Lazy<ServiceIdentifier<DynamicValue>> =
+pub static I_SESSION_MANAGER: Lazy<ServiceIdentifier<Arc<dyn ISessionManager>>> =
     Lazy::new(|| create_decorator("sessionManager"));
 
 pub type SessionManagerAccessor = dyn ServicesAccessor;

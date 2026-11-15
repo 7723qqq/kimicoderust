@@ -48,7 +48,7 @@ pub struct WorkflowStartResult {
 
 #[async_trait]
 pub trait IWorkflowService: Send + Sync {
-    async fn start(self: &Arc<Self>, input: WorkflowStartInput) -> Result<WorkflowStartResult, WireAsyncError>;
+    async fn start(self: Arc<Self>, input: WorkflowStartInput) -> Result<WorkflowStartResult, WireAsyncError>;
     fn status(&self, run_id: &str) -> Option<WorkflowRunResult>;
     async fn wait(&self, run_id: &str, timeout_ms: Option<u64>) -> WorkflowRunResult;
     async fn cancel(&self, run_id: &str);
@@ -139,7 +139,7 @@ impl WorkflowService {
 
 #[async_trait]
 impl IWorkflowService for WorkflowService {
-    async fn start(self: &Arc<Self>, input: WorkflowStartInput) -> Result<WorkflowStartResult, WireAsyncError> {
+    async fn start(self: Arc<Self>, input: WorkflowStartInput) -> Result<WorkflowStartResult, WireAsyncError> {
         let run_id = format!("wf_{}", self.counter.fetch_add(1, Ordering::SeqCst) + 1);
         let entry = Arc::new(WorkflowRunEntry::new(run_id.clone(), workflow_now_ms()));
         self.runs.lock().insert(run_id.clone(), entry.clone());

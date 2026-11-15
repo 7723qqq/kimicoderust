@@ -33,7 +33,7 @@ impl<'a> From<&'a Result<TurnOutcome, String>> for GoalTurnEnd<'a> {
         match outcome {
             Ok(TurnOutcome::Ran(result)) => GoalTurnEnd::Ran {
                 stop: &result.stop_reason,
-                output_tokens: result.usage.output_tokens.into(),
+                output_tokens: result.usage.output.into(),
             },
             Ok(TurnOutcome::CancelledBeforeStart) => GoalTurnEnd::Skipped,
             Err(error) => GoalTurnEnd::Failed {

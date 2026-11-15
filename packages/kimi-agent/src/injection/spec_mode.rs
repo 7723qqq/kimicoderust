@@ -195,7 +195,7 @@ mod tests {
 
     fn reminder_message(body: &str) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(body),
             ..Default::default()
         }
@@ -203,7 +203,7 @@ mod tests {
 
     fn assistant() -> LLMMessage {
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "working".into(),
             ..Default::default()
         }
@@ -235,7 +235,7 @@ mod tests {
         // The turn loop passes the live history, so the disclosure the first
         // pass appended is what suppresses a repeat.
         let history = vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: first[0].clone(),
             ..Default::default()
         }];
@@ -342,7 +342,7 @@ mod tests {
             reminder_message(SPEC_MODE_FULL_REMINDER),
             assistant(),
             LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "keep going".into(),
                 ..Default::default()
             },

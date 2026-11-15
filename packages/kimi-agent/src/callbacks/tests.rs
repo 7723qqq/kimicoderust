@@ -2474,7 +2474,7 @@ async fn tool_select_persistence_rides_the_event_sink_instead_of_the_store() {
     let initial = vec![crate::tools::tool_select_ops::ToolSelectTool {
         name: "mcp__s__alpha".to_string(),
         description: "d".to_string(),
-        parameters: serde_json::json!({}),
+        parameters: serde_json::json!({}).as_object().cloned().unwrap_or_default(),
         source: crate::tools::tool_select_ops::ToolSelectSource::Builtin,
         disclosure: None,
         origin: crate::tools::tool_select_ops::ToolSelectOrigin::Initial,

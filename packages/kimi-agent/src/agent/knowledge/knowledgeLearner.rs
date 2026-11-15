@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::json;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::log::log::ILogService;
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
 use crate::agent::context_memory::types::Role;
@@ -58,7 +58,7 @@ static GIT_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i-u)git|commit|push").expect("valid git pattern"));
 
 pub struct KnowledgeLearner {
-    _registration: Box<dyn IDisposable>,
+    _registration: DisposableRef,
 }
 
 impl KnowledgeLearner {

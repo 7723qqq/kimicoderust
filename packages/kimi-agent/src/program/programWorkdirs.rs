@@ -55,6 +55,14 @@ pub fn own<T: ProgramDisposable + 'static>(value: T, disposables: &SharedDisposa
     value
 }
 
+pub fn own_arc<T: ProgramDisposable + 'static>(
+    value: Arc<T>,
+    disposables: &SharedDisposables,
+) -> Arc<T> {
+    disposables.lock().push(value.clone());
+    value
+}
+
 pub struct ProgramHarness {
     pub user_agent_profiles: Arc<dyn IUserAgentProfileLoader>,
     pub explicit_skills: Arc<dyn IExplicitFileSkillSource>,
@@ -77,6 +85,7 @@ pub struct ProgramView {
 #[derive(Clone)]
 pub struct ProgramWorkdir {
     pub context_key: String,
+    pub local_config: Arc<FileProjectLocalConfigService>,
     pub dirs: Arc<dyn IWorkspaceDirs>,
     pub fs: Arc<dyn IWorkspaceFsService>,
     pub instructions: Arc<dyn IWorkspaceInstructionsService>,
@@ -193,6 +202,7 @@ impl ProgramWorkdirs {
         let key_for_dispose = context_key.clone();
         let workdir = ProgramWorkdir {
             context_key: context_key.clone(),
+            local_config: entry.view.local_config.clone(),
             dirs: entry.view.dirs.clone(),
             fs: entry.view.fs.clone(),
             instructions: entry.view.instructions.clone(),
@@ -258,14 +268,14 @@ impl ProgramWorkdirs {
             let local = environments.inspect(LOCAL_ENVIRONMENT_ID);
             let in_process = watchable(environment_id);
             let trust_covered = environment_id == LOCAL_ENVIRONMENT_ID;
-            let git: LiveRef<IGitService> = if in_process {
+            let git: LiveRef<Arc<dyn IGitService>> = if in_process {
                 dependencies.git.clone()
             } else {
-                LiveRef::constant(GitService::new(
+                LiveRef::constant(Arc::new(GitService::new(
                     environments.clone(),
                     host_fs.clone(),
                     environment_id.to_string(),
-                ))
+                )) as Arc<dyn IGitService>)
             };
             let context = Arc::new(ContextWithCwd {
                 base: context,
@@ -336,7 +346,7 @@ impl ProgramWorkdirs {
             } else {
                 Arc::new(NoopWorkspaceAgentProfileLoader)
             };
-            let workspace_skills = own(
+            let workspace_skills = own_arc(
                 WorkspaceRootSkillSource::new(
                     EnvironmentSkillDiscovery::new(dependencies.log.clone(), host_fs.clone()),
                     context.clone(),
@@ -348,7 +358,7 @@ impl ProgramWorkdirs {
                 ),
                 own_root,
             );
-            let skills = own(
+            let skills = own_arc(
                 WorkspaceSkillCatalogService::new(
                     dependencies.builtin_skills.clone(),
                     dependencies.user_skills.clone(),

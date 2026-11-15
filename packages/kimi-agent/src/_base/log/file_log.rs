@@ -307,6 +307,7 @@ pub struct FileLogWriterOptions {
     pub format: Option<FormatOptions>,
 }
 
+#[derive(Clone)]
 pub struct FileLogWriter {
     sink: Arc<RotatingFileWriter>,
     format: FormatOptions,

@@ -19,7 +19,7 @@ use crate::_base::utils::abort::{AbortSignal, user_cancellation_reason};
 use crate::_base::utils::xml_escape::{escape_xml, escape_xml_attr, escape_xml_tags};
 use crate::agent::actor_service::services::EventBusService;
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
-use crate::agent::context_memory::types::ContextMessage;
+use crate::agent::context_memory::types::{ContextMessage, PromptOrigin, TaskOrigin};
 use crate::agent::tool_executor::tool_executor::IAgentToolRegistryService;
 use crate::agent::tool_policy::tool_policy::IAgentToolPolicyService;
 use crate::agent::r#loop::r#loop::{IAgentLoopService, LoopNotify, LoopNotifyHandle};
@@ -46,7 +46,7 @@ use crate::session::agent_lifecycle::agent_lifecycle::MAIN_AGENT_ID;
 use crate::state::event_dispatcher::IEventDispatcher;
 use crate::wire::record::WireAsyncError;
 use kimi_core::primitives::errors::{Error2, Error2Options};
-use kimi_core::types::ContentBlock;
+use kimi_core::types::ContentPart;
 
 use super::config_section::resolve_agent_task_config;
 use super::errors::TaskErrors;
@@ -1952,15 +1952,13 @@ impl AgentTaskService {
         let prefix = format!("- {task_id} \"");
         self.context.get().iter().any(|message| {
             let matches_origin = message.origin.as_ref().is_some_and(|origin| {
-                origin.get("kind").and_then(Value::as_str) == Some("injection")
-                    && origin.get("variant").and_then(Value::as_str)
-                        == Some(TASK_RESUME_TERMINATION_VARIANT)
+                origin.injection_variant() == Some(TASK_RESUME_TERMINATION_VARIANT)
             });
             if !matches_origin {
                 return false;
             }
             message.blocks.iter().any(|part| match part {
-                ContentBlock::Text { text, .. } => text.lines().any(|line| line.starts_with(&prefix)),
+                ContentPart::Text { text, .. } => text.lines().any(|line| line.starts_with(&prefix)),
                 _ => false,
             }) || message.content.lines().any(|line| line.starts_with(&prefix))
         })
@@ -2073,9 +2071,14 @@ impl AgentTaskService {
             let notification = build_agent_task_notification(info, self.now_ms(), Some(&output));
             let text = render_notification_xml(&notification);
             let message = ContextMessage {
-                role: "user".to_string(),
-                blocks: vec![ContentBlock::Text { text, meta: None }],
-                origin: Some(task_origin_value(&origin)),
+                role: crate::human::llm::message::Role::User,
+                content: vec![ContentPart::Text { text, meta: None }],
+                origin: Some(PromptOrigin::Task(TaskOrigin {
+                    kind: "task".to_string(),
+                    task_id: origin.task_id.clone(),
+                    status: info.status(),
+                    notification_id: origin.notification_id.clone(),
+                })),
                 ..Default::default()
             };
             Ok(Some(AgentTaskNotificationBuildContext {
@@ -2646,15 +2649,6 @@ fn task_notification_origin(task_id: String, status: AgentTaskStatus) -> TaskNot
         task_id,
         status: status.as_str().to_string(),
     }
-}
-
-fn task_origin_value(origin: &TaskNotificationOrigin) -> Value {
-    json!({
-        "kind": "task",
-        "taskId": origin.task_id,
-        "status": origin.status,
-        "notificationId": origin.notification_id,
-    })
 }
 
 fn task_notification_id(task_id: &str, status: &str) -> String {

@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use crate::human::llm::message::ContentPart;
 use crate::tool::tool_contract::{ToolDelivery, ToolResultSpill};
 
@@ -38,3 +42,7 @@ pub type ToolDedupeErrorResult = ToolDedupeResult;
 pub const REPEAT_BREAKER_STOP_REASON: &str = "repeat_breaker";
 
 pub trait IAgentToolDedupeService: Send + Sync {}
+
+pub static I_AGENT_TOOL_DEDUPE_SERVICE: Lazy<
+    ServiceIdentifier<Arc<dyn IAgentToolDedupeService>>,
+> = Lazy::new(|| create_decorator("agentToolDedupeService"));

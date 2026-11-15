@@ -1,3 +1,4 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, LazyLock};
@@ -9,7 +10,7 @@ use futures_util::FutureExt;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::safely_call_listener;
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::paths::subtree_watch_filter;
@@ -69,7 +70,7 @@ struct InstructionsState {
     reload_requested: bool,
     loaded: bool,
     pending_changes: IndexMap<String, WatchChange>,
-    watchers: Vec<Box<dyn IDisposable>>,
+    watchers: Vec<DisposableRef>,
     watched_primary: Option<String>,
     listeners: IndexMap<u64, InstructionsListener>,
     next_listener_id: u64,
@@ -89,7 +90,7 @@ struct WorkspaceInstructionsServiceInner {
     watch_enabled: bool,
     state: Arc<Mutex<InstructionsState>>,
     ready: ReloadFuture,
-    _dirs_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    _dirs_subscription: Mutex<Option<DisposableRef>>,
 }
 
 #[derive(Clone)]
@@ -200,7 +201,7 @@ impl WorkspaceInstructionsService {
         self.current()
     }
 
-    pub fn on_did_change(&self, listener: InstructionsListener) -> Box<dyn IDisposable> {
+    pub fn on_did_change(&self, listener: InstructionsListener) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             if state.is_disposed {
@@ -408,7 +409,7 @@ impl IWorkspaceInstructionsService for WorkspaceInstructionsService {
         WorkspaceInstructionsService::snapshot(self)
     }
 
-    fn on_did_change(&self, listener: InstructionsListener) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: InstructionsListener) -> DisposableRef {
         WorkspaceInstructionsService::on_did_change(self, listener)
     }
 
@@ -431,7 +432,7 @@ impl ISessionInstructionsProvider for WorkspaceSessionInstructionsProvider {
         self.service.ready().await
     }
 
-    fn on_did_change(&self, listener: InstructionsListener) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: InstructionsListener) -> DisposableRef {
         self.service.on_did_change(listener)
     }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::env::parse_boolean_env;
@@ -29,7 +29,7 @@ struct FlagServiceInner {
 
 pub struct FlagService {
     inner: Arc<FlagServiceInner>,
-    _config_subscription: Box<dyn IDisposable>,
+    _config_subscription: DisposableRef,
 }
 
 impl FlagService {

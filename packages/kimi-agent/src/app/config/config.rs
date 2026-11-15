@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::app::config::config_pure::deep_merge;
 use crate::app::config::errors::CONFIG_INVALID;
@@ -306,15 +306,15 @@ pub trait IConfigRegistry: Send + Sync {
     fn on_did_register_section(
         &self,
         listener: ConfigSectionRegisteredListener,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_unregister_section(
         &self,
         listener: ConfigSectionRegisteredListener,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_register_overlay(
         &self,
         listener: ConfigOverlayRegisteredListener,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn register_section(
         &self,
         domain: &str,
@@ -397,15 +397,15 @@ pub trait IConfigService: Send + Sync {
     fn on_did_change_configuration(
         &self,
         listener: ConfigChangeListener,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_section_change(
         &self,
         listener: ConfigSectionChangeListener,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn on_did_change_diagnostics(
         &self,
         listener: ConfigDiagnosticsListener,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn get(&self, domain: &str) -> Option<Value>;
     async fn assert_valid(&self, domain: &str) -> Result<(), WireAsyncError>;
     fn inspect(&self, domain: &str) -> ConfigInspectValue;

@@ -244,17 +244,13 @@ fn check_unique_indexes(
 
 #[async_trait]
 impl IQueryStore for MiniDbQueryStore {
-    async fn put<T>(
+    async fn put_value(
         &self,
         collection: &str,
         key: &str,
-        value: T,
+        value: Value,
         columns: Option<HashMap<String, f64>>,
-    ) -> Result<(), WireAsyncError>
-    where
-        T: Serialize + Send + Sync + 'static,
-    {
-        let value = serde_json::to_value(value)?;
+    ) -> Result<(), WireAsyncError> {
         self.with_db(OperationKind::Write, None, move |db| {
             check_unique_indexes(db, collection, key, &value)?;
             let previous = db.entries.insert(
@@ -330,27 +326,21 @@ impl IQueryStore for MiniDbQueryStore {
         .await
     }
 
-    async fn get<T>(&self, collection: &str, key: &str) -> Result<Option<T>, WireAsyncError>
-    where
-        T: for<'de> Deserialize<'de> + Send + Sync + 'static,
-    {
+    async fn get_value(&self, collection: &str, key: &str) -> Result<Option<Value>, WireAsyncError> {
         self.with_db(OperationKind::Read, None, move |db| {
-            db.entries
+            Ok(db
+                .entries
                 .get(&physical_key(collection, key))
-                .map(|entry| serde_json::from_value(entry.value.clone()).map_err(Into::into))
-                .transpose()
+                .map(|entry| entry.value.clone()))
         })
         .await
     }
 
-    async fn get_many<T>(
+    async fn get_many_values(
         &self,
         collection: &str,
         keys: &[String],
-    ) -> Result<HashMap<String, T>, WireAsyncError>
-    where
-        T: for<'de> Deserialize<'de> + Send + Sync + 'static,
-    {
+    ) -> Result<HashMap<String, Value>, WireAsyncError> {
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
@@ -358,7 +348,7 @@ impl IQueryStore for MiniDbQueryStore {
             let mut out = HashMap::new();
             for key in keys {
                 if let Some(entry) = db.entries.get(&physical_key(collection, key)) {
-                    out.insert(key.clone(), serde_json::from_value(entry.value.clone())?);
+                    out.insert(key.clone(), entry.value.clone());
                 }
             }
             Ok(out)
@@ -366,10 +356,7 @@ impl IQueryStore for MiniDbQueryStore {
         .await
     }
 
-    fn query<T>(&self, collection: &str) -> Box<dyn IQuery<T>>
-    where
-        T: for<'de> Deserialize<'de> + Send + Sync + 'static,
-    {
+    fn query_values(&self, collection: &str) -> Box<dyn IQuery<Value>> {
         Box::new(MiniDbQuery {
             store: self.clone(),
             collection: collection.to_string(),
@@ -383,14 +370,11 @@ impl IQueryStore for MiniDbQueryStore {
         })
     }
 
-    async fn page_by_column<T>(
+    async fn page_by_column_values(
         &self,
         _collection: &str,
         query: ColumnPageQuery,
-    ) -> Result<Page<T>, WireAsyncError>
-    where
-        T: for<'de> Deserialize<'de> + Send + Sync + 'static,
-    {
+    ) -> Result<Page<Value>, WireAsyncError> {
         self.with_db(OperationKind::Read, None, move |db| {
             let mut rows = db
                 .entries
@@ -421,7 +405,7 @@ impl IQueryStore for MiniDbQueryStore {
             });
             let mut items = Vec::new();
             for (_, entry) in rows.into_iter().take(query.limit) {
-                items.push(serde_json::from_value(entry.value.clone())?);
+                items.push(entry.value.clone());
             }
             Ok(Page {
                 items,
@@ -538,7 +522,10 @@ impl IQueryStore for MiniDbQueryStore {
     }
 
     async fn get_checkpoint(&self, source: &str) -> Result<Option<Checkpoint>, WireAsyncError> {
-        self.get(CHECKPOINT_COLLECTION, source).await
+        match self.get_value(CHECKPOINT_COLLECTION, source).await? {
+            Some(value) => Ok(Some(serde_json::from_value(value)?)),
+            None => Ok(None),
+        }
     }
 
     async fn set_checkpoint(

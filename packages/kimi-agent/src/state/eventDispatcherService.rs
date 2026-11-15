@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::_base::di::collection::CollectionView;
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::on_unexpected_error;
 use crate::_base::log::log::ILogService;
 use crate::agent::agent_context::agent_space::AgentSpaceImpl;
@@ -198,7 +198,7 @@ impl super::state::FoldContext for FoldContextImpl {
 
 struct LateAttachment {
     participant: Arc<dyn DurableAgentRuntimeParticipant>,
-    resolve: Arc<dyn Fn(Box<dyn IDisposable>) + Send + Sync>,
+    resolve: Arc<dyn Fn(DisposableRef) + Send + Sync>,
     reject: Arc<dyn Fn(WireAsyncError) + Send + Sync>,
 }
 
@@ -244,7 +244,7 @@ struct EventDispatcherServiceInner {
 #[derive(Clone)]
 pub struct EventDispatcherService {
     inner: Arc<EventDispatcherServiceInner>,
-    _registrations: Arc<Mutex<Vec<Box<dyn IDisposable>>>>,
+    _registrations: Arc<Mutex<Vec<DisposableRef>>>,
 }
 
 #[derive(Clone)]
@@ -443,7 +443,7 @@ impl EventDispatcherService {
             .and_then(|scope| scope.agent_context().space())
     }
 
-    pub fn attach(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Box<dyn IDisposable> {
+    pub fn attach(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> DisposableRef {
         if self.inner.state.lock().restore_phase != RestorePhase::New {
             panic!(
                 "Agent runtime participant '{}' attached while the event dispatcher is in phase '{}'; durable runtime owners must attach before restore",
@@ -458,7 +458,7 @@ impl EventDispatcherService {
         })
     }
 
-    pub async fn attach_late(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Result<Box<dyn IDisposable>, WireAsyncError> {
+    pub async fn attach_late(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Result<DisposableRef, WireAsyncError> {
         if self.inner.state.lock().restore_phase == RestorePhase::Restoring {
             let (sender, receiver) = tokio::sync::oneshot::channel();
             self.inner.state.lock().late_attachments.push(LateAttachment {
@@ -481,22 +481,16 @@ impl EventDispatcherService {
         }
         let previous = self.inner.state.lock().late_attachment_tail.clone();
         let this = self.clone();
-        let pending = async move {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let settled = async move {
             if let Some(previous) = previous {
                 previous.await;
             }
-            this.attach_late_now(participant).await.map_err(SharedDispatchError::new)
+            let result = this.attach_late_now(participant).await.map_err(SharedDispatchError::new);
+            let _ = sender.send(result);
         }
         .boxed()
         .shared();
-        let settled = {
-            let pending = pending.clone();
-            async move {
-                let _ = pending.await;
-            }
-            .boxed()
-            .shared()
-        };
         let serial = {
             let mut state = self.inner.state.lock();
             state.late_attachment_serial += 1;
@@ -512,10 +506,13 @@ impl EventDispatcherService {
                 state.late_attachment_tail = None;
             }
         });
-        pending.await.map_err(SharedDispatchError::boxed)
+        receiver
+            .await
+            .unwrap_or_else(|_| Err(SharedDispatchError::new("late attach cancelled".into())))
+            .map_err(SharedDispatchError::boxed)
     }
 
-    async fn attach_late_now(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Result<Box<dyn IDisposable>, WireAsyncError> {
+    async fn attach_late_now(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Result<DisposableRef, WireAsyncError> {
         if self.inner.state.lock().disposed {
             return Err(format!(
                 "Agent runtime participant '{}' late-attached to a disposed event dispatcher",
@@ -1504,7 +1501,7 @@ impl EventDispatcherServiceInner {
 
 #[async_trait]
 impl DurableRuntimeParticipantHost for EventDispatcherService {
-    fn attach(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Box<dyn IDisposable> {
+    fn attach(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> DisposableRef {
         EventDispatcherService::attach(self, participant)
     }
 }
@@ -1523,7 +1520,7 @@ impl IEventDispatcher for EventDispatcherService {
         EventDispatcherService::dispatch(self, event).await
     }
 
-    async fn attach_late(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Result<Box<dyn IDisposable>, WireAsyncError> {
+    async fn attach_late(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Result<DisposableRef, WireAsyncError> {
         EventDispatcherService::attach_late(self, participant).await
     }
 

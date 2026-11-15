@@ -22,7 +22,7 @@ use kimi_agent::{
             SessionBtwCancelParams, SessionBtwPromptParams, SessionCancelParams,
             SessionEnqueueParams, SessionGenerateTitleParams, SessionHistoryParams,
             SessionIdParams, SessionOutcomeResult, SessionStatusResult, SessionTurnOutcomeParams,
-            TokenUsage,
+            TokenUsage as RpcTokenUsage,
         },
     },
     session::{
@@ -380,7 +380,9 @@ async fn main() -> anyhow::Result<()> {
                     let output = RunTurnResult {
                         stop_reason: format!("{:?}", res.stop_reason),
                         steps: res.steps,
-                        usage: res.usage,
+                        usage: RpcTokenUsage::from_engine(res.usage).map_err(|e| {
+                            types::JsonRpcError::internal_error(format!("Serialization error: {e}"))
+                        })?,
                         events_emitted: turn_event_count.load(Ordering::Relaxed),
                         llm_retries: res.llm_retries,
                         llm_transport: llm.transport().to_string(),
@@ -394,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
                     let output = RunTurnResult {
                         stop_reason: format!("Error: {e}"),
                         steps: 0,
-                        usage: TokenUsage::default(),
+                        usage: RpcTokenUsage::default(),
                         events_emitted: 0,
                         llm_retries: 0,
                         llm_transport: llm.transport().to_string(),
@@ -579,7 +581,7 @@ async fn main() -> anyhow::Result<()> {
             let receipt = entry
                 .session
                 .enqueue_turn(TurnRequest::user(
-                    wire_message_to_llm(input.prompt),
+                    wire_message_to_llm(input.prompt)?,
                     admission,
                 ))
                 .map_err(types::JsonRpcError::internal_error)?;
@@ -621,7 +623,9 @@ async fn main() -> anyhow::Result<()> {
                     result: Some(RunTurnResult {
                         stop_reason: format!("{:?}", res.stop_reason),
                         steps: res.steps,
-                        usage: res.usage,
+                        usage: RpcTokenUsage::from_engine(res.usage).map_err(|e| {
+                            types::JsonRpcError::internal_error(format!("Serialization error: {e}"))
+                        })?,
                         events_emitted: entry.turn_event_count.load(Ordering::Relaxed),
                         llm_retries: res.llm_retries,
                         llm_transport: entry.llm_transport.clone(),
@@ -1695,42 +1699,67 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
 
 /// Convert a wire `Message` into the engine's `LLMMessage` (the tool-call
 /// structural mapping).
-fn wire_message_to_llm(m: Message) -> LLMMessage {
-    LLMMessage {
-        role: m.role,
+fn wire_message_to_llm(m: Message) -> Result<LLMMessage, types::JsonRpcError> {
+    let role = match m.role.as_str() {
+        "system" => kimi_core::types::Role::System,
+        "user" => kimi_core::types::Role::User,
+        "assistant" => kimi_core::types::Role::Assistant,
+        "tool" => kimi_core::types::Role::Tool,
+        _ => {
+            return Err(types::JsonRpcError::internal_error(format!(
+                "Invalid message role: {}",
+                m.role
+            )));
+        }
+    };
+    Ok(LLMMessage {
+        role,
         content: m.content,
-        blocks: m.blocks,
+        blocks: m
+            .blocks
+            .iter()
+            .map(kimi_agent::llm::wire::provider_block_to_content_part)
+            .collect(),
         tool_calls: m
             .tool_calls
             .into_iter()
             .map(|tc| ToolCall {
                 id: tc.id,
                 name: tc.name,
-                arguments: tc.arguments,
-                extras: tc.extras,
-                args_parse_error: None,
+                arguments: match tc.arguments {
+                    serde_json::Value::String(raw) => Some(raw),
+                    serde_json::Value::Null => None,
+                    other => Some(other.to_string()),
+                },
+                extras: tc.extras.and_then(|extras| extras.as_object().cloned()),
+                raw_id: None,
+                _stream_index: None,
             })
             .collect(),
         tool_call_id: m.tool_call_id,
         prompt_id: None,
         origin: None,
         tools: Vec::new(),
-    }
+    })
 }
 
 fn llm_message_to_wire(m: LLMMessage) -> Message {
     Message {
-        role: m.role,
+        role: m.role.as_str().to_string(),
         content: m.content,
-        blocks: m.blocks,
+        blocks: m
+            .blocks
+            .iter()
+            .map(kimi_agent::llm::wire::content_part_to_provider_block)
+            .collect(),
         tool_calls: m
             .tool_calls
             .into_iter()
             .map(|tc| types::LlmToolCall {
                 id: tc.id,
                 name: tc.name,
-                arguments: tc.arguments,
-                extras: tc.extras,
+                arguments: tc.arguments.map_or(serde_json::Value::Null, serde_json::Value::String),
+                extras: tc.extras.map(serde_json::Value::Object),
             })
             .collect(),
         tool_call_id: m.tool_call_id,
@@ -1812,7 +1841,7 @@ async fn run_self_test() -> anyhow::Result<()> {
     };
 
     let messages = vec![LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: "Hello!".into(),
         ..Default::default()
     }];
@@ -1852,7 +1881,9 @@ async fn run_self_test() -> anyhow::Result<()> {
             eprintln!("  Steps: {}", res.steps);
             eprintln!(
                 "  Usage: {} in / {} out / {} total",
-                res.usage.input_tokens, res.usage.output_tokens, res.usage.total_tokens
+                res.usage.input_other,
+                res.usage.output,
+                res.usage.measured_context_tokens()
             );
             eprintln!("Self-test PASSED");
             Ok(())
@@ -1898,9 +1929,8 @@ impl LLM for MockLlm {
                 tool_calls: vec![],
                 finish_reason: Some("stop".into()),
                 usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
+                    input_other: 10,
+                    output: 5,
                     ..Default::default()
                 },
                 timing: None,

@@ -9,7 +9,7 @@ use crate::native::file_type::{
     FileKind, MEDIA_SNIFF_BYTES, detect_file_type, resolve_mime, sniff_image_dimensions,
 };
 use crate::native::image_compress::{self, CompressConfig, CropConfig};
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 use crate::turn_loop::types::ExecutableToolResult;
 
 pub const READ_IMAGE_BYTE_BUDGET: u64 = 256 * 1024;
@@ -361,20 +361,21 @@ pub fn read_image_media(
             let mime = resolve_mime(path, &header);
             let data = std::fs::read(path).ok()?;
             let base64 = BASE64_STANDARD.encode(&data);
-            let media_block = ContentBlock::VideoUrl {
-                url: format!("data:{mime};base64,{base64}"),
-                id: None,
-                name: None,
-            };
+            let media_block = crate::llm::media_resolver::media_url_part(
+                crate::rpc::types::MediaKind::Video,
+                format!("data:{mime};base64,{base64}"),
+                None,
+                None,
+            );
             return Some(ExecutableToolResult {
                 spill: None,
                 parts: vec![
-                    ContentBlock::Text {
+                    ContentPart::Text {
                         text: format!("<video path=\"{}\">", path.display()),
                         meta: None,
                     },
                     media_block,
-                    ContentBlock::Text {
+                    ContentPart::Text {
                         text: "</video>".to_string(),
                         meta: None,
                     },
@@ -508,20 +509,20 @@ pub fn read_image_media(
         };
         let note = build_media_note(&mime, byte_size, Some((width, height)), &delivery);
         let base64 = BASE64_STANDARD.encode(&data);
-        let media_block = ContentBlock::Image {
-            media_type: mime.clone(),
-            data: base64,
-            name: None,
-        };
+        let media_block = crate::llm::media_resolver::inline_image_part(
+            mime.clone(),
+            base64,
+            None,
+        );
         return Some(ExecutableToolResult {
             spill: None,
             parts: vec![
-                ContentBlock::Text {
+                ContentPart::Text {
                     text: format!("<image path=\"{}\">", path.display()),
                     meta: None,
                 },
                 media_block,
-                ContentBlock::Text {
+                ContentPart::Text {
                     text: "</image>".to_string(),
                     meta: None,
                 },
@@ -655,20 +656,20 @@ pub fn read_image_media(
         &delivered.delivery,
     );
     let base64 = BASE64_STANDARD.encode(&delivered.data);
-    let media_block = ContentBlock::Image {
-        media_type: delivered.mime,
-        data: base64,
-        name: None,
-    };
+    let media_block = crate::llm::media_resolver::inline_image_part(
+        delivered.mime,
+        base64,
+        None,
+    );
     Some(ExecutableToolResult {
         spill: None,
         parts: vec![
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: format!("<image path=\"{}\">", path.display()),
                 meta: None,
             },
             media_block,
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: "</image>".to_string(),
                 meta: None,
             },
@@ -716,6 +717,15 @@ mod tests {
         ReadMediaRequest::default()
     }
 
+    fn inline_image(block: &ContentPart) -> (String, String) {
+        let ContentPart::ImageUrl { image_url } = block else {
+            panic!("expected an image block");
+        };
+        let rest = image_url.url.strip_prefix("data:").expect("a data URL");
+        let (media_type, data) = rest.split_once(";base64,").expect("base64 data");
+        (media_type.to_string(), data.to_string())
+    }
+
     #[test]
     fn text_files_fall_through_to_the_text_read() {
         let path = std::env::temp_dir().join(format!("kimi-read-text-{}.txt", fastrand::u32(..)));
@@ -737,17 +747,17 @@ mod tests {
         assert_eq!(result.parts.len(), 3);
         assert!(matches!(
             &result.parts[0],
-            ContentBlock::Text { text, .. } if text == &format!("<video path=\"{}\">", path.display())
+            ContentPart::Text { text, .. } if text == &format!("<video path=\"{}\">", path.display())
         ));
         match &result.parts[1] {
-            ContentBlock::VideoUrl { url, .. } => {
-                assert!(url.starts_with("data:video/mp4;base64,"), "{url}");
+            ContentPart::VideoUrl { video_url } => {
+                assert!(video_url.url.starts_with("data:video/mp4;base64,"), "{}", video_url.url);
             }
             other => panic!("expected a video block, got {other:?}"),
         }
         assert!(matches!(
             &result.parts[2],
-            ContentBlock::Text { text, .. } if text == "</video>"
+            ContentPart::Text { text, .. } if text == "</video>"
         ));
         let _ = std::fs::remove_file(&path);
     }
@@ -812,12 +822,11 @@ mod tests {
         assert_eq!(result.parts.len(), 3);
         assert!(matches!(
             &result.parts[0],
-            ContentBlock::Text { text, .. } if text == &format!("<image path=\"{}\">", path.display())
+            ContentPart::Text { text, .. } if text == &format!("<image path=\"{}\">", path.display())
         ));
         match &result.parts[1] {
-            ContentBlock::Image {
-                media_type, data, ..
-            } => {
+            block => {
+                let (media_type, data) = inline_image(block);
                 assert_eq!(media_type, "image/png");
                 assert!(!data.is_empty());
             }
@@ -825,7 +834,7 @@ mod tests {
         }
         assert!(matches!(
             &result.parts[2],
-            ContentBlock::Text { text, .. } if text == "</image>"
+            ContentPart::Text { text, .. } if text == "</image>"
         ));
         let _ = std::fs::remove_file(&path);
     }
@@ -897,7 +906,7 @@ mod tests {
         assert!(!note.contains("compute absolute coordinates using the original image size"));
         assert!(result.delivery.is_none());
         assert_eq!(result.parts.len(), 3);
-        assert!(matches!(&result.parts[1], ContentBlock::Image { .. }));
+        assert!(matches!(&result.parts[1], ContentPart::ImageUrl { .. }));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -942,8 +951,9 @@ mod tests {
         assert!(result.delivery.is_none());
         assert_eq!(result.parts.len(), 3);
         match &result.parts[1] {
-            ContentBlock::Image { data, .. } => {
-                assert_eq!(data, &BASE64_STANDARD.encode(&bytes));
+            block => {
+                let (_, data) = inline_image(block);
+                assert_eq!(data, BASE64_STANDARD.encode(&bytes));
             }
             other => panic!("expected an image block, got {other:?}"),
         }
@@ -1022,7 +1032,8 @@ mod tests {
         assert!(kimi_res.delivery.is_none());
         assert_eq!(kimi_res.parts.len(), 3);
         match &kimi_res.parts[1] {
-            ContentBlock::Image { media_type, .. } => {
+            block => {
+                let (media_type, _) = inline_image(block);
                 assert_eq!(media_type, "image/heic");
             }
             other => panic!("expected image block, got {other:?}"),

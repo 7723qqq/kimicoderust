@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 
 pub const CACHE_BREAK_MIN_DROP_TOKENS: u64 = 2000;
 
@@ -45,7 +45,7 @@ pub struct CacheObservationInput<'a> {
 }
 
 pub fn input_total(usage: &TokenUsage) -> u64 {
-    u64::from(usage.input_tokens)
+    u64::from(usage.input_other)
         + u64::from(usage.input_cache_read)
         + u64::from(usage.input_cache_creation)
 }
@@ -53,16 +53,12 @@ pub fn input_total(usage: &TokenUsage) -> u64 {
 impl CacheObservation {
     pub fn usage(&self) -> TokenUsage {
         let total = self.input_tokens.unwrap_or(0);
-        let cache_read = self.cache_read.min(u64::from(u32::MAX)) as u32;
-        let cache_creation = self.cache_creation.min(u64::from(u32::MAX)) as u32;
         TokenUsage {
-            input_tokens: total
-                .saturating_sub(self.cache_read + self.cache_creation)
-                .min(u64::from(u32::MAX)) as u32,
-            output_tokens: self.output_tokens.min(u64::from(u32::MAX)) as u32,
-            total_tokens: 0,
-            input_cache_read: cache_read,
-            input_cache_creation: cache_creation,
+            input_other: total.saturating_sub(self.cache_read + self.cache_creation),
+            output: self.output_tokens,
+            input_cache_read: self.cache_read,
+            input_cache_creation: self.cache_creation,
+            raw: None,
         }
     }
 }
@@ -85,7 +81,7 @@ pub fn build_cache_observation(input: CacheObservationInput<'_>) -> CacheObserva
             .map_or(0, |usage| u64::from(usage.input_cache_creation)),
         output_tokens: input
             .usage
-            .map_or(0, |usage| u64::from(usage.output_tokens)),
+            .map_or(0, |usage| u64::from(usage.output)),
     }
 }
 
@@ -191,10 +187,10 @@ impl CacheBreakTracker {
             effort: cache.thinking_effort.clone().unwrap_or_default(),
             projection: cache.projection.clone(),
             message_count: Some(cache.message_count),
-            input_other: u64::from(usage.input_tokens),
+            input_other: u64::from(usage.input_other),
             input_cache_read: u64::from(usage.input_cache_read),
             input_cache_creation: u64::from(usage.input_cache_creation),
-            output: u64::from(usage.output_tokens),
+            output: u64::from(usage.output),
             at: now_ms,
         };
         let previous = self.baseline.replace(current.clone())?;
@@ -226,8 +222,8 @@ impl CacheBreakTracker {
 }
 
 pub fn is_unmeasured(usage: &TokenUsage) -> bool {
-    usage.input_tokens == 0
-        && usage.output_tokens == 0
+    usage.input_other == 0
+        && usage.output == 0
         && usage.input_cache_read == 0
         && usage.input_cache_creation == 0
 }
@@ -320,7 +316,7 @@ pub fn build_cache_probe(
         input_tokens: usage.map_or(0, input_total),
         input_cache_read: usage.map_or(0, |usage| u64::from(usage.input_cache_read)),
         input_cache_creation: usage.map_or(0, |usage| u64::from(usage.input_cache_creation)),
-        output_tokens: usage.map_or(0, |usage| u64::from(usage.output_tokens)),
+        output_tokens: usage.map_or(0, |usage| u64::from(usage.output)),
 
         model_match: match source {
             CacheProbeSource::Compaction => {
@@ -400,13 +396,13 @@ pub fn projection_label(
 mod tests {
     use super::*;
 
-    fn usage(input_other: u32, cache_read: u32, cache_creation: u32, output: u32) -> TokenUsage {
+    fn usage(input_other: u64, cache_read: u64, cache_creation: u64, output: u64) -> TokenUsage {
         TokenUsage {
-            input_tokens: input_other,
-            output_tokens: output,
-            total_tokens: input_other + cache_read + cache_creation + output,
+            input_other,
+            output,
             input_cache_read: cache_read,
             input_cache_creation: cache_creation,
+            raw: None,
         }
     }
 

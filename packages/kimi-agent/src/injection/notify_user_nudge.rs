@@ -202,7 +202,13 @@ mod tests {
 
     fn msg(role: &str, content: &str) -> LLMMessage {
         LLMMessage {
-            role: role.into(),
+            role: match role {
+                "system" => kimi_core::types::Role::System,
+                "user" => kimi_core::types::Role::User,
+                "assistant" => kimi_core::types::Role::Assistant,
+                "tool" => kimi_core::types::Role::Tool,
+                _ => panic!("unknown test role: {role}"),
+            },
             content: content.into(),
             ..Default::default()
         }
@@ -210,7 +216,7 @@ mod tests {
 
     fn assistant_with_calls(calls: &[&str]) -> LLMMessage {
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: String::new(),
             tool_calls: calls
                 .iter()
@@ -219,7 +225,8 @@ mod tests {
                     name: name.to_string(),
                     arguments: serde_json::Value::Null,
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 })
                 .collect(),
             ..Default::default()

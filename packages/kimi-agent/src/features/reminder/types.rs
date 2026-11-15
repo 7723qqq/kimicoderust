@@ -15,8 +15,8 @@ pub struct ContextInjectionContext<D = Value> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextInjectionMessage {
-    pub role: String,
-    pub content: Vec<kimi_core::types::ContentBlock>,
+    pub role: crate::human::llm::message::Role,
+    pub content: Vec<kimi_core::types::ContentPart>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<kimi_core::types::ToolDescription>>,
 }
@@ -25,7 +25,7 @@ pub struct ContextInjectionMessage {
 #[serde(untagged)]
 pub enum ContextInjectionContent {
     Text(String),
-    Parts(Vec<kimi_core::types::ContentBlock>),
+    Parts(Vec<kimi_core::types::ContentPart>),
     Message(ContextInjectionMessage),
 }
 

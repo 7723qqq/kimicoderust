@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::_base::log::log::ILogService;
@@ -81,10 +81,10 @@ impl<T> Default for ChangeListeners<T> {
 }
 
 impl<T> ChangeListeners<T> {
-    fn add(self: &Arc<Self>, listener: Arc<dyn Fn(T) + Send + Sync>) -> Box<dyn IDisposable> {
+    fn add(self: &Arc<Self>, listener: Arc<dyn Fn(T) + Send + Sync>) -> DisposableRef {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().insert(id, listener);
-        Box::new(ChangeSubscription {
+        Arc::new(ChangeSubscription {
             owner: self.clone(),
             id,
         })
@@ -654,11 +654,11 @@ impl IPluginService for PluginService {
         Some(ids)
     }
 
-    fn on_did_reload(&self, listener: PluginReloadListener) -> Box<dyn IDisposable> {
+    fn on_did_reload(&self, listener: PluginReloadListener) -> DisposableRef {
         self.reload_listeners.add(listener)
     }
 
-    fn on_did_mutate(&self, listener: PluginMutationListener) -> Box<dyn IDisposable> {
+    fn on_did_mutate(&self, listener: PluginMutationListener) -> DisposableRef {
         self.mutation_listeners.add(listener)
     }
 }

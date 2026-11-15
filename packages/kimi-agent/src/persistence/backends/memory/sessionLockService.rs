@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::persistence::interface::session_lock::{
     ISessionLockService, SessionLockHeldEvent, SessionLockHolds, SessionLockHoldsBackend,
     SessionLockLease,
@@ -47,7 +47,7 @@ impl ISessionLockService for InMemorySessionLockService {
     fn on_did_hold(
         &self,
         listener: Arc<dyn Fn(SessionLockHeldEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         self.holds.on_did_hold(listener)
     }
 

@@ -18,6 +18,7 @@ use crate::mcp_core::config_schema::validate_mcp_server_config;
 use crate::mcp_core::errors::MCP_SERVER_NOT_FOUND;
 use crate::persistence::interface::storage::{IFileSystemStorageService, StorageWriteOptions};
 use crate::wire::record::WireAsyncError;
+use crate::_base::di::lifecycle::DisposableRef;
 
 const CONFIG_SCOPE: &str = "";
 const MCP_CONFIG_KEY: &str = "mcp.json";
@@ -49,7 +50,7 @@ pub trait IMcpConfigStore: Send + Sync {
     fn on_did_write(
         &self,
         listener: McpConfigWriteListener,
-    ) -> Box<dyn crate::_base::di::lifecycle::IDisposable>;
+    ) -> DisposableRef;
     async fn list(&self) -> Result<Vec<GlobalMcpServerConfig>, WireAsyncError>;
     async fn get(&self, name: &str) -> Result<GlobalMcpServerConfig, WireAsyncError>;
     async fn add(&self, server: GlobalMcpServerConfig) -> Result<Vec<GlobalMcpServerConfig>, WireAsyncError>;
@@ -193,7 +194,7 @@ impl IMcpConfigStore for McpConfigStore {
     fn on_did_write(
         &self,
         listener: McpConfigWriteListener,
-    ) -> Box<dyn crate::_base::di::lifecycle::IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().insert(id, listener);
         let listeners = self.listeners.clone();

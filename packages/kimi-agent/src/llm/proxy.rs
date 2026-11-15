@@ -113,23 +113,26 @@ impl LLM for HostLlmProxy {
                 .map(|tc| ToolCall {
                     id: tc.id,
                     name: tc.name,
-                    arguments: tc.arguments,
-                    extras: tc.extras,
-                    args_parse_error: None,
+                    arguments: match tc.arguments {
+                        serde_json::Value::String(raw) => Some(raw),
+                        serde_json::Value::Null => None,
+                        other => Some(other.to_string()),
+                    },
+                    extras: tc.extras.and_then(|extras| extras.as_object().cloned()),
+                    raw_id: None,
+                    _stream_index: None,
                 })
                 .collect();
 
-            let usage = crate::rpc::types::TokenUsage {
-                input_tokens: response.usage.input_tokens,
-                output_tokens: response.usage.output_tokens,
-                total_tokens: response.usage.total_tokens,
-                input_cache_read: response.usage.input_cache_read,
-                input_cache_creation: response.usage.input_cache_creation,
-            };
+            let usage = response.usage.into_engine();
 
             let mut result = LLMChatResponse {
                 content: response.content,
-                thinking: response.thinking,
+                thinking: response
+                    .thinking
+                    .iter()
+                    .map(crate::llm::wire::provider_block_to_content_part)
+                    .collect(),
                 tool_calls,
                 finish_reason: response.finish_reason,
                 usage,
@@ -166,9 +169,13 @@ fn chat_request(
         .messages
         .iter()
         .map(|m| LlmChatMessage {
-            role: m.role.clone(),
+            role: m.role.as_str().to_string(),
             content: m.content.clone(),
-            blocks: m.blocks.clone(),
+            blocks: m
+                .blocks
+                .iter()
+                .map(crate::llm::wire::content_part_to_provider_block)
+                .collect(),
         })
         .collect();
 

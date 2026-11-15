@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::app::agent_profile_catalog::agent_profile_catalog::{
@@ -44,7 +44,7 @@ pub struct SessionAgentProfileCatalogService {
     listeners: Arc<Mutex<Vec<(u64, Arc<dyn Fn(String) + Send + Sync>)>>>,
     next_listener_id: std::sync::atomic::AtomicU64,
     weak: Mutex<Weak<Self>>,
-    _subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    _subscription: Mutex<Option<DisposableRef>>,
 }
 
 impl SessionAgentProfileCatalogService {
@@ -253,7 +253,7 @@ impl ISessionAgentProfileCatalog for SessionAgentProfileCatalogService {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(String) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.listeners.lock().push((id, listener));
         let listeners = Arc::downgrade(&self.listeners);

@@ -5,9 +5,10 @@ use std::sync::{Arc, Mutex};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
+use crate::agent::media::image_format_policy;
 use crate::llm::files_upload::UploadError;
 use crate::llm::media_budget::Entry;
-use crate::rpc::types::{ContentBlock, MediaKind};
+use crate::rpc::types::{ContentPart, MediaKind};
 use crate::server::files::FileStore;
 use kimi_core::types::LLMMessage;
 
@@ -49,11 +50,56 @@ pub fn build_media_path_tag(kind: MediaKind, path: &str) -> String {
 
 pub use kimi_core::types::MediaTarget;
 
-pub fn media_ref_of(block: &ContentBlock) -> Option<(&str, MediaKind)> {
-    match block {
-        ContentBlock::MediaRef { file_id, kind } => Some((file_id.as_str(), *kind)),
-        _ => None,
+pub fn media_url_part(
+    kind: MediaKind,
+    url: String,
+    id: Option<String>,
+    name: Option<String>,
+) -> ContentPart {
+    match kind {
+        MediaKind::Image => ContentPart::ImageUrl {
+            image_url: kimi_core::types::ImageUrl {
+                url,
+                id,
+                name,
+                dimensions: None,
+                detail: None,
+            },
+        },
+        MediaKind::Video => ContentPart::VideoUrl {
+            video_url: kimi_core::types::VideoUrl { url, id, name },
+        },
+        MediaKind::Audio => ContentPart::AudioUrl {
+            audio_url: kimi_core::types::AudioUrl { url, id },
+        },
     }
+}
+
+pub fn inline_image_part(
+    media_type: String,
+    data: String,
+    name: Option<String>,
+) -> ContentPart {
+    media_url_part(
+        MediaKind::Image,
+        format!("data:{media_type};base64,{data}"),
+        None,
+        name,
+    )
+}
+
+pub fn file_media_part(file_id: String, kind: MediaKind) -> ContentPart {
+    media_url_part(kind, format!("{KIMI_FILE_SCHEME}{file_id}"), None, None)
+}
+
+pub fn media_ref_of(block: &ContentPart) -> Option<(&str, MediaKind)> {
+    let (url, kind) = match block {
+        ContentPart::ImageUrl { image_url } => (&image_url.url, MediaKind::Image),
+        ContentPart::VideoUrl { video_url } => (&video_url.url, MediaKind::Video),
+        ContentPart::AudioUrl { audio_url } => (&audio_url.url, MediaKind::Audio),
+        _ => return None,
+    };
+    parse_daemon_file_url(url).map(|file_id| (file_id, kind))
 }
 
 pub const KIMI_FILE_SCHEME: &str = "kimi-file://";
@@ -64,46 +110,22 @@ pub fn parse_daemon_file_url(url: &str) -> Option<&str> {
     (!file_id.is_empty()).then_some(file_id)
 }
 
-pub fn normalize_media_refs(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
-    blocks
-        .into_iter()
-        .map(|block| {
-            let (url, kind) = match &block {
-                ContentBlock::ImageUrl { url, .. } => (url, MediaKind::Image),
-                ContentBlock::VideoUrl { url, .. } => (url, MediaKind::Video),
-                ContentBlock::AudioUrl { url, .. } => (url, MediaKind::Audio),
-                _ => return block,
-            };
-            match parse_daemon_file_url(url) {
-                Some(file_id) => ContentBlock::MediaRef {
-                    file_id: file_id.to_string(),
-                    kind,
-                },
-                None => block,
-            }
-        })
-        .collect()
-}
-
 pub fn has_media_refs(messages: &[LLMMessage]) -> bool {
     messages
         .iter()
         .any(|message| message.blocks.iter().any(|b| media_ref_of(b).is_some()))
 }
 
-const DATA_URL_PREFIX_BYTES: usize = 13;
-
-fn inline_bytes(block: &ContentBlock) -> usize {
+fn inline_bytes(block: &ContentPart) -> usize {
     match block {
-        ContentBlock::Image {
-            media_type, data, ..
-        } => DATA_URL_PREFIX_BYTES + media_type.len() + data.len(),
-        ContentBlock::ImageUrl { url, .. }
-        | ContentBlock::AudioUrl { url, .. }
-        | ContentBlock::VideoUrl { url, .. }
-            if url.starts_with("data:") =>
-        {
-            url.len()
+        ContentPart::ImageUrl { image_url } if image_url.url.starts_with("data:") => {
+            image_url.url.len()
+        }
+        ContentPart::AudioUrl { audio_url } if audio_url.url.starts_with("data:") => {
+            audio_url.url.len()
+        }
+        ContentPart::VideoUrl { video_url } if video_url.url.starts_with("data:") => {
+            video_url.url.len()
         }
         _ => 0,
     }
@@ -162,23 +184,16 @@ pub fn inline_entries(messages: &[LLMMessage]) -> Vec<Entry> {
     entries
 }
 
-fn inline_budget(block: &ContentBlock) -> Option<(MediaKind, usize, String)> {
+fn inline_budget(block: &ContentPart) -> Option<(MediaKind, usize, String)> {
     let (kind, bytes, pieces): (MediaKind, usize, Vec<&str>) = match block {
-        ContentBlock::Image {
-            media_type, data, ..
-        } => (
-            MediaKind::Image,
-            DATA_URL_PREFIX_BYTES + media_type.len() + data.len(),
-            vec![media_type, data],
-        ),
-        ContentBlock::ImageUrl { url, .. } if url.starts_with("data:") => {
-            (MediaKind::Image, url.len(), vec![url])
+        ContentPart::ImageUrl { image_url } if image_url.url.starts_with("data:") => {
+            (MediaKind::Image, image_url.url.len(), vec![&image_url.url])
         }
-        ContentBlock::VideoUrl { url, .. } if url.starts_with("data:") => {
-            (MediaKind::Video, url.len(), vec![url])
+        ContentPart::VideoUrl { video_url } if video_url.url.starts_with("data:") => {
+            (MediaKind::Video, video_url.url.len(), vec![&video_url.url])
         }
-        ContentBlock::AudioUrl { url, .. } if url.starts_with("data:") => {
-            (MediaKind::Audio, url.len(), vec![url])
+        ContentPart::AudioUrl { audio_url } if audio_url.url.starts_with("data:") => {
+            (MediaKind::Audio, audio_url.url.len(), vec![&audio_url.url])
         }
         _ => return None,
     };
@@ -197,14 +212,14 @@ const INLINE_MEMO_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Default)]
 struct InlineMemo {
-    entries: HashMap<String, (ContentBlock, usize)>,
+    entries: HashMap<String, (ContentPart, usize)>,
 
     order: std::collections::VecDeque<String>,
     bytes: usize,
 }
 
 impl InlineMemo {
-    fn get(&mut self, key: &str) -> Option<ContentBlock> {
+    fn get(&mut self, key: &str) -> Option<ContentPart> {
         let block = self.entries.get(key)?.0.clone();
 
         if let Some(position) = self.order.iter().position(|existing| existing == key) {
@@ -214,7 +229,7 @@ impl InlineMemo {
         Some(block)
     }
 
-    fn insert(&mut self, key: String, block: ContentBlock, bytes: usize) {
+    fn insert(&mut self, key: String, block: ContentPart, bytes: usize) {
         if bytes > INLINE_MEMO_MAX_ENTRY_BYTES {
             return;
         }
@@ -241,7 +256,7 @@ impl InlineMemo {
 pub struct MediaResolver {
     store: FileStore,
 
-    resolved: Mutex<HashMap<String, ContentBlock>>,
+    resolved: Mutex<HashMap<String, ContentPart>>,
 
     inline_memo: Mutex<InlineMemo>,
 
@@ -318,7 +333,7 @@ impl MediaResolver {
         let mut entries = Vec::new();
         let mut out: Option<Vec<LLMMessage>> = None;
         for (message_index, message) in messages.iter().enumerate() {
-            let mut blocks: Option<Vec<ContentBlock>> = None;
+            let mut blocks: Option<Vec<ContentPart>> = None;
             for (block_index, block) in message.blocks.iter().enumerate() {
                 match media_ref_of(block) {
                     Some((file_id, kind)) => {
@@ -436,7 +451,7 @@ impl MediaResolver {
         kind: MediaKind,
         target: Option<&MediaTarget>,
         credential: Option<&str>,
-    ) -> Result<(ContentBlock, Option<String>), UploadError> {
+    ) -> Result<(ContentPart, Option<String>), UploadError> {
         let cache_key = Self::cache_key(file_id, kind, target, credential);
         if let Some(hit) = self
             .resolved
@@ -522,11 +537,11 @@ impl MediaResolver {
         kind: MediaKind,
         target: Option<&MediaTarget>,
         credential: Option<&str>,
-    ) -> Result<ContentBlock, UploadError> {
+    ) -> Result<ContentPart, UploadError> {
         let (meta, path) = match self.store.get(file_id) {
             Ok(found) => found,
             Err((404, _, _)) => {
-                return Ok(ContentBlock::Text {
+                return Ok(ContentPart::Text {
                     text: unavailable_text(kind).to_string(),
                     meta: None,
                 });
@@ -540,7 +555,7 @@ impl MediaResolver {
         let path = path.to_string_lossy().into_owned();
 
         if target.is_some_and(|t| !t.accepts(kind)) {
-            return Ok(ContentBlock::Text {
+            return Ok(ContentPart::Text {
                 text: build_media_path_tag(kind, &path),
                 meta: None,
             });
@@ -555,7 +570,7 @@ impl MediaResolver {
                     %error,
                     "failed to read the media blob; degrading to a path tag"
                 );
-                return Ok(ContentBlock::Text {
+                return Ok(ContentPart::Text {
                     text: build_media_path_tag(kind, &path),
                     meta: None,
                 });
@@ -570,23 +585,23 @@ impl MediaResolver {
         let media_type = match kind {
             MediaKind::Image => {
                 let Some(sniffed) = crate::native::file_type::sniff_media_from_magic(header) else {
-                    return Ok(ContentBlock::Text {
+                    return Ok(ContentPart::Text {
                         text: build_media_path_tag(kind, &path),
                         meta: None,
                     });
                 };
                 if sniffed.kind != crate::native::file_type::MediaSniffKind::Image {
-                    return Ok(ContentBlock::Text {
+                    return Ok(ContentPart::Text {
                         text: build_media_path_tag(kind, &path),
                         meta: None,
                     });
                 }
-                let effective = crate::llm::image_policy::normalize_image_mime(sniffed.mime_type);
+                let effective = image_format_policy::normalize_image_mime(sniffed.mime_type);
                 let provider = target
                     .map(|t| t.provider_type.as_str())
                     .filter(|value| !value.is_empty());
-                if !crate::llm::image_policy::is_model_accepted_image_mime(&effective, provider) {
-                    return Ok(ContentBlock::Text {
+                if !image_format_policy::is_model_accepted_image_mime(&effective, provider) {
+                    return Ok(ContentPart::Text {
                         text: build_media_path_tag(kind, &path),
                         meta: None,
                     });
@@ -597,13 +612,13 @@ impl MediaResolver {
                 let Some(sniffed) =
                     crate::native::file_type::detect_media_file_type(&sniff_name, header)
                 else {
-                    return Ok(ContentBlock::Text {
+                    return Ok(ContentPart::Text {
                         text: build_media_path_tag(kind, &path),
                         meta: None,
                     });
                 };
                 if sniffed.kind != crate::native::file_type::MediaSniffKind::Video {
-                    return Ok(ContentBlock::Text {
+                    return Ok(ContentPart::Text {
                         text: build_media_path_tag(kind, &path),
                         meta: None,
                     });
@@ -634,28 +649,26 @@ impl MediaResolver {
             return Ok(uploaded);
         }
         if kind == MediaKind::Video && target.is_some_and(|t| !t.inline_video) {
-            return Ok(ContentBlock::Text {
+            return Ok(ContentPart::Text {
                 text: build_media_path_tag(kind, &path),
                 meta: None,
             });
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(match kind {
-            MediaKind::Image => ContentBlock::Image {
-                media_type,
-                data: encoded,
+            MediaKind::Image => inline_image_part(media_type, encoded, name),
+            MediaKind::Video => media_url_part(
+                MediaKind::Video,
+                format!("data:{media_type};base64,{encoded}"),
+                None,
                 name,
-            },
-            MediaKind::Video => ContentBlock::VideoUrl {
-                url: format!("data:{media_type};base64,{encoded}"),
-                id: None,
+            ),
+            MediaKind::Audio => media_url_part(
+                MediaKind::Audio,
+                format!("data:{media_type};base64,{encoded}"),
+                None,
                 name,
-            },
-            MediaKind::Audio => ContentBlock::AudioUrl {
-                url: format!("data:{media_type};base64,{encoded}"),
-                id: None,
-                name,
-            },
+            ),
         })
     }
 
@@ -668,7 +681,7 @@ impl MediaResolver {
         media_type: &str,
         filename: &str,
         bytes: &[u8],
-    ) -> Result<Option<ContentBlock>, UploadError> {
+    ) -> Result<Option<ContentPart>, UploadError> {
         let Some(target) = target else {
             return Ok(None);
         };
@@ -727,25 +740,13 @@ impl MediaResolver {
     }
 }
 
-fn reference_block(kind: MediaKind, id: &str) -> ContentBlock {
-    let url = format!("ms://{id}");
-    match kind {
-        MediaKind::Image => ContentBlock::ImageUrl {
-            url,
-            id: Some(id.to_string()),
-            name: None,
-        },
-        MediaKind::Video => ContentBlock::VideoUrl {
-            url,
-            id: Some(id.to_string()),
-            name: None,
-        },
-        MediaKind::Audio => ContentBlock::AudioUrl {
-            url,
-            id: Some(id.to_string()),
-            name: None,
-        },
-    }
+fn reference_block(kind: MediaKind, id: &str) -> ContentPart {
+    media_url_part(
+        kind,
+        format!("ms://{id}"),
+        Some(id.to_string()),
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -764,12 +765,9 @@ mod tests {
 
     fn ref_message(file_id: &str, kind: MediaKind) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: String::new(),
-            blocks: vec![ContentBlock::MediaRef {
-                file_id: file_id.to_string(),
-                kind,
-            }],
+            blocks: vec![file_media_part(file_id.to_string(), kind)],
             tool_calls: Vec::new(),
             tool_call_id: None,
             tools: Vec::new(),
@@ -801,11 +799,11 @@ mod tests {
 
         assert_eq!(
             out.messages[0].blocks[0],
-            ContentBlock::Image {
-                media_type: "image/png".into(),
-                data: base64::engine::general_purpose::STANDARD.encode(PNG_BYTES),
-                name: Some("a.png".into()),
-            }
+            inline_image_part(
+                "image/png".into(),
+                base64::engine::general_purpose::STANDARD.encode(PNG_BYTES),
+                Some("a.png".into()),
+            )
         );
         assert_eq!(out.entries.len(), 1);
         assert_eq!(out.entries[0].key, file_id);
@@ -829,7 +827,7 @@ mod tests {
             .await
             .unwrap();
 
-        let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
+        let ContentPart::Text { text, .. } = &out.messages[0].blocks[0] else {
             panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
         };
         assert!(text.starts_with("<image path=\""), "{text}");
@@ -856,8 +854,8 @@ mod tests {
         assert!(
             matches!(
                 &out.messages[0].blocks[0],
-                ContentBlock::VideoUrl { url, .. }
-                    if url.starts_with("data:video/mp4;base64,")
+                ContentPart::VideoUrl { video_url, .. }
+                    if video_url.url.starts_with("data:video/mp4;base64,")
             ),
             "{:?}",
             out.messages[0].blocks[0]
@@ -872,7 +870,7 @@ mod tests {
             .resolve(&messages, Some(&openai), None)
             .await
             .unwrap();
-        let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
+        let ContentPart::Text { text, .. } = &out.messages[0].blocks[0] else {
             panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
         };
         assert!(text.starts_with("<video path=\""), "{text}");
@@ -892,7 +890,7 @@ mod tests {
             .await
             .unwrap();
 
-        let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
+        let ContentPart::Text { text, .. } = &out.messages[0].blocks[0] else {
             panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
         };
         assert!(text.starts_with("<image path=\""), "{text}");
@@ -915,7 +913,7 @@ mod tests {
             .resolve(&messages, Some(&openai), None)
             .await
             .unwrap();
-        let ContentBlock::Text { text, .. } = &out.messages[0].blocks[0] else {
+        let ContentPart::Text { text, .. } = &out.messages[0].blocks[0] else {
             panic!("expected a path tag, got {:?}", out.messages[0].blocks[0]);
         };
         assert!(text.starts_with("<image path=\""), "{text}");
@@ -931,11 +929,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             out.messages[0].blocks[0],
-            ContentBlock::Image {
-                media_type: "image/heic".into(),
-                data: base64::engine::general_purpose::STANDARD.encode(heic),
-                name: Some("a.heic".into()),
-            }
+            inline_image_part(
+                "image/heic".into(),
+                base64::engine::general_purpose::STANDARD.encode(heic),
+                Some("a.heic".into()),
+            )
         );
     }
 
@@ -1059,7 +1057,7 @@ mod tests {
     #[test]
     fn test_the_inline_memo_is_bounded() {
         let mut memo = InlineMemo::default();
-        let block = ContentBlock::Text {
+        let block = ContentPart::Text {
             text: "x".into(),
             meta: None,
         };
@@ -1100,7 +1098,7 @@ mod tests {
 
         assert_eq!(
             out.messages[0].blocks[0],
-            ContentBlock::Text {
+            ContentPart::Text {
                 text: VIDEO_UNAVAILABLE_TEXT.into(),
                 meta: None,
             }
@@ -1111,7 +1109,7 @@ mod tests {
     #[tokio::test]
     async fn test_a_history_without_media_is_returned_borrowed() {
         let resolver = MediaResolver::new();
-        let messages = vec![LLMMessage::new("user", "hello")];
+        let messages = vec![LLMMessage::new(kimi_core::types::Role::User, "hello")];
 
         let out = resolver
             .resolve(&messages, Some(&accepting()), None)
@@ -1126,13 +1124,9 @@ mod tests {
     async fn test_inline_media_is_budgeted_without_a_file_behind_it() {
         let resolver = MediaResolver::new();
         let messages = vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: String::new(),
-            blocks: vec![ContentBlock::Image {
-                media_type: "image/png".into(),
-                data: "AAAA".into(),
-                name: None,
-            }],
+            blocks: vec![inline_image_part("image/png".into(), "AAAA".into(), None)],
             tool_calls: Vec::new(),
             tool_call_id: None,
             tools: Vec::new(),
@@ -1149,20 +1143,21 @@ mod tests {
         assert_eq!(out.entries.len(), 1);
         assert!(out.entries[0].key.starts_with("inline\0"));
         assert_eq!(out.entries[0].file_id, None);
-        assert_eq!(out.entries[0].bytes, DATA_URL_PREFIX_BYTES + 9 + 4);
+        assert_eq!(out.entries[0].bytes, 26);
     }
 
     #[tokio::test]
     async fn test_a_remote_url_is_not_budgeted() {
         let resolver = MediaResolver::new();
         let messages = vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: String::new(),
-            blocks: vec![ContentBlock::ImageUrl {
-                url: "https://example.test/huge.png".into(),
-                id: None,
-                name: None,
-            }],
+            blocks: vec![media_url_part(
+                MediaKind::Image,
+                "https://example.test/huge.png".into(),
+                None,
+                None,
+            )],
             tool_calls: Vec::new(),
             tool_call_id: None,
             tools: Vec::new(),
@@ -1227,10 +1222,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             first.messages[0].blocks[0],
-            ContentBlock::ImageUrl {
-                url: "ms://file-abc".into(),
-                id: Some("file-abc".into()),
-                name: None,
+            ContentPart::ImageUrl {
+                image_url: kimi_core::types::ImageUrl {
+                    url: "ms://file-abc".into(),
+                    id: Some("file-abc".into()),
+                    name: None,
+                    dimensions: None,
+                    detail: None,
+                },
             }
         );
 
@@ -1312,10 +1311,14 @@ mod tests {
 
         assert_eq!(
             out.messages[0].blocks[0],
-            ContentBlock::ImageUrl {
-                url: "ms://file-abc".into(),
-                id: Some("file-abc".into()),
-                name: None,
+            ContentPart::ImageUrl {
+                image_url: kimi_core::types::ImageUrl {
+                    url: "ms://file-abc".into(),
+                    id: Some("file-abc".into()),
+                    name: None,
+                    dimensions: None,
+                    detail: None,
+                },
             }
         );
         assert_eq!(
@@ -1369,7 +1372,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(&out.messages[0].blocks[0], ContentBlock::Image { .. }),
+            matches!(&out.messages[0].blocks[0], ContentPart::ImageUrl { .. }),
             "no credential means no upload: {:?}",
             out.messages[0].blocks[0]
         );
@@ -1395,32 +1398,23 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_turns_a_daemon_url_into_a_reference() {
+    fn test_a_daemon_url_is_exposed_as_a_media_reference() {
         let blocks = vec![
-            ContentBlock::ImageUrl {
-                url: "kimi-file://f_abc".into(),
-                id: None,
-                name: None,
-            },
-            ContentBlock::VideoUrl {
-                url: "ms://provider-id".into(),
-                id: Some("provider-id".into()),
-                name: None,
-            },
+            media_url_part(
+                MediaKind::Image,
+                "kimi-file://f_abc".into(),
+                None,
+                None,
+            ),
+            media_url_part(
+                MediaKind::Video,
+                "ms://provider-id".into(),
+                Some("provider-id".into()),
+                None,
+            ),
         ];
 
-        let out = normalize_media_refs(blocks);
-
-        assert_eq!(
-            out[0],
-            ContentBlock::MediaRef {
-                file_id: "f_abc".into(),
-                kind: MediaKind::Image,
-            }
-        );
-        assert!(
-            matches!(&out[1], ContentBlock::VideoUrl { url, .. } if url == "ms://provider-id"),
-            "a provider reference is not a daemon file"
-        );
+        assert_eq!(media_ref_of(&blocks[0]), Some(("f_abc", MediaKind::Image)));
+        assert_eq!(media_ref_of(&blocks[1]), None);
     }
 }

@@ -2000,7 +2000,7 @@ async fn test_mcp_media_is_preserved_and_delivered_as_a_reference() {
         result
             .parts
             .iter()
-            .any(|part| matches!(part, crate::rpc::types::ContentBlock::MediaRef { .. })),
+            .any(|part| crate::llm::media_resolver::media_ref_of(part).is_some()),
         "the image must ride inside the result parts: {:?}",
         result.parts
     );

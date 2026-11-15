@@ -3,7 +3,7 @@
 use serde_json::Value;
 use std::io::{self, Write};
 
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 
 pub struct Colors;
 
@@ -188,12 +188,12 @@ pub fn render_status_panel(
     );
     println!(
         "  Tokens:     Prompt: {} | Completion: {} | Cache: {} | Total: {}{}{}{}",
-        usage.input_tokens,
-        usage.output_tokens,
+        usage.input_other,
+        usage.output,
         usage.input_cache_read,
         Colors::BOLD,
         Colors::BRIGHT_CYAN,
-        usage.total_tokens,
+        usage.measured_context_tokens(),
         Colors::RESET
     );
     if let Some(goal) = goal {

@@ -1,14 +1,23 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
+use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
+use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, IAgentToolRegistryService, ToolInfo, ToolInfoOrigin,
 };
+use crate::app::scopes::LifecycleScope;
 use crate::tools::registry::{
     RegistrationStatus, ToolDefinition, ToolDisclosure, ToolSource, version_signature,
 };
+
+pub static I_AGENT_TOOL_REGISTRY_SERVICE: Lazy<
+    ServiceIdentifier<Arc<dyn IAgentToolRegistryService>>,
+> = Lazy::new(|| create_decorator("agentToolRegistryService"));
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolRegistrationOptions {
@@ -250,4 +259,24 @@ impl IAgentToolRegistryService for AgentToolRegistryService {
     fn revision(&self) -> u64 {
         AgentToolRegistryService::revision(self)
     }
+}
+
+static TOOL_REGISTRY_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
+    let ctor: Constructor<DynamicValue> = Arc::new(|_| {
+        let service: Arc<dyn IAgentToolRegistryService> =
+            Arc::new(AgentToolRegistryService::new());
+        Arc::new(service) as DynamicValue
+    });
+    register_scoped_service(
+        LifecycleScope::Agent.as_str().to_string(),
+        create_decorator("agentToolRegistryService"),
+        SyncDescriptor::new(ctor, Vec::new()),
+        ScopeActivation::OnScopeCreated,
+        "toolRegistry",
+    )
+    .map_err(|error| error.to_string())
+});
+
+pub fn ensure_agent_tool_registry_service_registered() -> Result<(), String> {
+    Lazy::force(&TOOL_REGISTRY_SERVICE_REGISTRATION).clone()
 }

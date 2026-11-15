@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::features::externalHooks::internal::types::HookDef;
 use crate::features::skill::catalog::types::SkillRoot;
 use crate::mcp_core::config_schema::McpServerConfig;
@@ -85,6 +85,6 @@ pub trait IPluginService: Send + Sync {
     async fn enabled_hooks(&self) -> Result<Vec<HookDef>, WireAsyncError>;
     fn has_loaded_snapshot(&self) -> bool;
     fn enabled_plugin_ids(&self) -> Option<Vec<String>>;
-    fn on_did_reload(&self, listener: PluginReloadListener) -> Box<dyn IDisposable>;
-    fn on_did_mutate(&self, listener: PluginMutationListener) -> Box<dyn IDisposable>;
+    fn on_did_reload(&self, listener: PluginReloadListener) -> DisposableRef;
+    fn on_did_mutate(&self, listener: PluginMutationListener) -> DisposableRef;
 }

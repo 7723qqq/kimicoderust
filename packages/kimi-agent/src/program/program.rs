@@ -8,7 +8,7 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::app::environment::environment::IEnvironmentService;
 use crate::environment::environment::{EnvironmentBinding, LOCAL_ENVIRONMENT_ID, environment_binding_id};
 use crate::environment::environment_registry::{
@@ -48,7 +48,7 @@ use crate::workspace::workspace_trust::workspace_trust_service::WorkspaceTrustSe
 use super::program_dependencies::{ProgramDependencies, ProgramSessionControllerInput};
 use super::program_workdirs::{
     PROGRAM_CAPABILITIES, ProgramDisposable, ProgramHarness, ProgramWorkdirs,
-    SharedDisposables, own,
+    SharedDisposables, own, own_arc,
 };
 
 pub use super::program_workdirs::ProgramWorkdir;
@@ -151,7 +151,7 @@ struct ProgramInner {
     context: Arc<dyn IWorkspaceContext>,
     dependencies: Arc<ProgramDependencies>,
     state: Arc<Mutex<ProgramState>>,
-    registry_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    registry_subscription: Mutex<Option<DisposableRef>>,
     program_ready: std::sync::atomic::AtomicBool,
     ready_notify: tokio::sync::Notify,
 }
@@ -307,6 +307,7 @@ impl Program {
             user_agent_profiles: generation.user_agent_profiles.clone(),
             plugin_agent_profiles: generation.plugin_agent_profiles.clone(),
             mcp: generation.mcp.clone(),
+            trust: generation.trust.clone(),
             acquire_workdir: Arc::new(move |environment_id, cwd, follows_primary| {
                 let workdirs = workdirs.clone();
                 async move { workdirs.acquire(&environment_id, &cwd, follows_primary).await }.boxed()
@@ -442,7 +443,7 @@ impl Program {
         }
     }
 
-    pub fn on_did_change(&self, listener: Arc<dyn Fn(ProgramSnapshot) + Send + Sync>) -> Box<dyn IDisposable> {
+    pub fn on_did_change(&self, listener: Arc<dyn Fn(ProgramSnapshot) + Send + Sync>) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             let id = state.next_listener_id;
@@ -570,7 +571,7 @@ impl Program {
                 self.inner.dependencies.log.clone(),
                 host_fs.clone(),
             );
-            let explicit_skills = own(
+            let explicit_skills = own_arc(
                 ExplicitFileSkillSource::new(
                     skill_discovery.clone(),
                     self.inner.context.clone(),
@@ -580,7 +581,7 @@ impl Program {
                 ),
                 &disposables,
             );
-            let extra_skills = own(
+            let extra_skills = own_arc(
                 ExtraFileSkillSource::new(
                     skill_discovery.clone(),
                     self.inner.dependencies.config.clone(),

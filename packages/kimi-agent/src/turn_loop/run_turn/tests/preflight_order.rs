@@ -27,10 +27,9 @@ impl LLM for AgentAndBrokenBash {
         let step = self.step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
             let usage = TokenUsage {
-                input_tokens: 1,
-                output_tokens: 1,
-                total_tokens: 2,
-                ..Default::default()
+                input_other: 1,
+                output: 1,
+                                ..Default::default()
             };
             if step > 0 {
                 return Ok(LLMChatResponse {
@@ -49,19 +48,18 @@ impl LLM for AgentAndBrokenBash {
                     ToolCall {
                         id: "tc-agent".into(),
                         name: "Agent".into(),
-                        arguments: serde_json::json!({ "prompt": "look around" }),
+                        arguments: Some(serde_json::json!({ "prompt": "look around" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     },
                     ToolCall {
                         id: "tc-bash".into(),
                         name: "Bash".into(),
-                        arguments: serde_json::json!({}),
+                        arguments: Some("{\"command\":".into()),
                         extras: None,
-                        args_parse_error: Some(ArgsParseError {
-                            raw: "{\"command\":".into(),
-                            error: "EOF while parsing an object".into(),
-                        }),
+                        raw_id: None,
+                        _stream_index: None,
                     },
                 ],
                 finish_reason: Some("tool_calls".into()),
@@ -100,6 +98,17 @@ async fn a_removed_call_must_not_shift_the_refusals_of_the_surviving_calls() {
         });
     }
 
+    let mut tool_defs = crate::tools::core_tool_defs::core_tool_defs()
+        .into_iter()
+        .filter(|tool| matches!(tool.name.as_str(), "Agent" | "Bash"))
+        .collect::<Vec<_>>();
+    for tool in &mut tool_defs {
+        if tool.name == "Bash" {
+            tool.input_schema = serde_json::json!({ "type": "object" });
+        }
+    }
+    register_tool_defs(&server, tool_defs.clone());
+
     let registry = crate::swarm::mode::swarm_mode_registry();
     assert!(
         registry.enter(
@@ -119,12 +128,12 @@ async fn a_removed_call_must_not_shift_the_refusals_of_the_surviving_calls() {
         turn_id: "test-preflight-order".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],
         tools: &[],
-        tool_defs: vec![],
+        tool_defs,
         max_steps: 5,
         max_attempts: None,
         max_context_tokens: None,
@@ -146,8 +155,8 @@ async fn a_removed_call_must_not_shift_the_refusals_of_the_surviving_calls() {
 
     let dispatched = executed.lock().unwrap().clone();
     assert!(
-        !dispatched.iter().any(|name| name == "Bash"),
-        "Bash must not be dispatched with arguments that never parsed: {dispatched:?}"
+        dispatched.iter().any(|name| name == "Bash"),
+        "malformed JSON becomes an empty object and runs when the schema accepts it: {dispatched:?}"
     );
 
     let bash_result = result
@@ -156,12 +165,8 @@ async fn a_removed_call_must_not_shift_the_refusals_of_the_surviving_calls() {
         .find(|message| {
             message.role == "tool" && message.tool_call_id.as_deref() == Some("tc-bash")
         })
-        .expect("the refused call still gets a tool result");
-    assert!(
-        bash_result.content.contains("not valid JSON"),
-        "the refusal must land on the call it belongs to: {:?}",
-        bash_result.content
-    );
+        .expect("the executed call still gets a tool result");
+    assert_eq!(bash_result.content, "ran");
 }
 
 struct NumberPathWrite {
@@ -188,10 +193,9 @@ impl LLM for NumberPathWrite {
         let step = self.step.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async move {
             let usage = TokenUsage {
-                input_tokens: 1,
-                output_tokens: 1,
-                total_tokens: 2,
-                ..Default::default()
+                input_other: 1,
+                output: 1,
+                                ..Default::default()
             };
             if step > 0 {
                 return Ok(LLMChatResponse {
@@ -209,9 +213,10 @@ impl LLM for NumberPathWrite {
                 tool_calls: vec![ToolCall {
                     id: "tc-write".into(),
                     name: "Write".into(),
-                    arguments: serde_json::json!({ "path": 123, "content": "x" }),
+                    arguments: Some(serde_json::json!({ "path": 123, "content": "x" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
                 finish_reason: Some("tool_calls".into()),
                 usage,
@@ -264,7 +269,7 @@ async fn a_schema_violating_call_is_refused_before_the_tool_runs() {
         turn_id: "test-schema-preflight".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hi".into(),
             ..Default::default()
         }],

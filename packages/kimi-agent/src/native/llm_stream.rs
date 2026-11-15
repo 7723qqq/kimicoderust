@@ -247,10 +247,13 @@ pub async fn run_llm_stream_with(
 
     if let Some(accumulator) = google.take() {
         let final_response = accumulator.finish();
-        metadata.input_tokens = final_response.usage.input_tokens;
-        metadata.output_tokens = final_response.usage.output_tokens;
+        metadata.input_tokens = u32::try_from(final_response.usage.input_other)
+            .map_err(|error| error.to_string())?;
+        metadata.output_tokens = u32::try_from(final_response.usage.output)
+            .map_err(|error| error.to_string())?;
 
-        metadata.cached_tokens = final_response.usage.input_cache_read;
+        metadata.cached_tokens = u32::try_from(final_response.usage.input_cache_read)
+            .map_err(|error| error.to_string())?;
         metadata.finish_reason = final_response.finish_reason;
 
         for (index, call) in final_response.tool_calls.into_iter().enumerate() {
@@ -261,7 +264,7 @@ pub async fn run_llm_stream_with(
                 encrypted: None,
                 id: Some(call.id),
                 name: Some(call.name),
-                arguments: Some(call.arguments.to_string()),
+                arguments: call.arguments,
                 arguments_part: None,
                 stream_index: Some(index as u32),
             }));
@@ -838,10 +841,10 @@ mod tests {
 
         let final_response = accumulator.finish();
 
-        assert_eq!(final_response.usage.input_tokens, 8);
-        assert_eq!(final_response.usage.output_tokens, 5);
+        assert_eq!(final_response.usage.input_other, 8);
+        assert_eq!(final_response.usage.output, 5);
         assert_eq!(final_response.usage.input_cache_read, 3);
-        assert_eq!(final_response.usage.total_tokens, 16);
+        assert_eq!(final_response.usage.measured_context_tokens(), 16);
         assert_eq!(final_response.finish_reason.as_deref(), Some("stop"));
     }
 

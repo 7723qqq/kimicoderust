@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use crate::agent::agent_context::agent_context::AgentContext;
 use crate::agent::token_counting::token_counting::{
     ContextSize, TokenCountingRequest, TokenCountingStrategy,
@@ -38,3 +41,7 @@ pub trait ISessionTokenCountingService: Send + Sync {
     fn estimate_messages(&self, messages: &[Message], pricing: Option<&ImageTokenPricing>) -> usize;
     fn estimate_tools(&self, tools: &[Tool]) -> usize;
 }
+
+
+pub static I_SESSION_TOKEN_COUNTING_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn ISessionTokenCountingService>>> =
+    LazyLock::new(|| create_decorator("sessionTokenCountingService"));

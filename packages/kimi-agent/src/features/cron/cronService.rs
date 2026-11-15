@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use crate::_base::utils::timer::IntervalTimer;
 use crate::agent::actor_service::agent_actor_runtime::AgentActorHost;
 use crate::agent::actor_service::agent_actor_service::{
@@ -11,7 +12,9 @@ use crate::agent::actor_service::agent_actor_service::{
 };
 use crate::agent::actor_service::services::{AgentLoopService, ConfigService, TelemetryService};
 use crate::agent::agent_context::AgentContext;
-use crate::agent::context_memory::types::{ContextMessage, CronJobOrigin, CronMissedOrigin};
+use crate::agent::context_memory::types::{
+    ContextMessage, CronJobOrigin, CronMissedOrigin, PromptOrigin,
+};
 use crate::callbacks::MAIN_AGENT_ID;
 use crate::features::cron::config_section::{
     CRON_SECTION, CronConfig, DEFAULT_CRON_CONFIG, PollIntervalMs,
@@ -814,13 +817,10 @@ fn is_cron_fork_cleared_reminder(message: &ContextMessage) -> bool {
     message
         .origin
         .as_ref()
-        .and_then(|origin| origin.get("kind"))
-        .and_then(Value::as_str)
-        == Some("injection")
-        && message
-            .origin
-            .as_ref()
-            .and_then(|origin| origin.get("variant"))
-            .and_then(Value::as_str)
-            == Some(CRON_FORK_CLEARED_REMINDER_NAME)
+        .and_then(PromptOrigin::injection_variant)
+        == Some(CRON_FORK_CLEARED_REMINDER_NAME)
 }
+
+
+pub static I_AGENT_CRON_SERVICE: LazyLock<ServiceIdentifier<Arc<AgentCronService>>> =
+    LazyLock::new(|| create_decorator("agentCronService"));

@@ -1,3 +1,6 @@
+use std::sync::LazyLock;
+use std::sync::Arc;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -5,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::wire::record::WireAsyncError;
+use crate::_base::di::lifecycle::DisposableRef;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentMeta {
@@ -151,7 +155,7 @@ pub trait ISessionMetadata: Send + Sync {
     fn on_did_change_metadata(
         &self,
         listener: std::sync::Arc<dyn Fn(SessionMetadataChangedEvent) + Send + Sync>,
-    ) -> Box<dyn crate::_base::di::lifecycle::IDisposable>;
+    ) -> DisposableRef;
     async fn read(&self) -> Result<SessionMeta, WireAsyncError>;
     async fn update(
         &self,
@@ -168,3 +172,7 @@ pub trait ISessionMetadata: Send + Sync {
     async fn set_archived(&self, archived: bool) -> Result<(), WireAsyncError>;
     async fn register_agent(&self, agent_id: &str, meta: AgentMeta) -> Result<(), WireAsyncError>;
 }
+
+
+pub static I_SESSION_METADATA: LazyLock<ServiceIdentifier<Arc<dyn ISessionMetadata>>> =
+    LazyLock::new(|| create_decorator("sessionMetadata"));

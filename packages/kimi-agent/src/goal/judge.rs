@@ -419,7 +419,7 @@ mod tests {
                         thinking: vec![],
                         tool_calls: vec![],
                         finish_reason: Some("stop".into()),
-                        usage: crate::rpc::types::TokenUsage::default(),
+                        usage: kimi_core::types::TokenUsage::default(),
                         timing: None,
                     }),
                     Err(error) => Err(error.into()),

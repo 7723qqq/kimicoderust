@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::agent::agent_context::agent_context::AgentContext;
 use crate::agent::agent_context::agent_space::agent_space_of;
 use crate::agent::r#loop::turn_ops::TurnEnded;
@@ -25,7 +25,7 @@ use super::token_counting_agent_model::TOKEN_COUNTING_AGENT_MODEL_DEFINITION;
 
 pub struct SessionTokenCountingService {
     config: Arc<dyn IConfigService>,
-    _subscription: Box<dyn IDisposable>,
+    _subscription: DisposableRef,
 }
 
 impl SessionTokenCountingService {

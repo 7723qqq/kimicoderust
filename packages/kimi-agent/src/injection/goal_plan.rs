@@ -1068,7 +1068,7 @@ Plan file: PLAN.md"#
         };
         register_goal_plan_injections(&mut registry, Arc::new(store));
         let previous = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: crate::injection::wrap_system_reminder(&plan_mode_full_text(
                 &json!({ "path": "PLAN.md" }),
             )),

@@ -111,7 +111,7 @@ mod tests {
             "a session without a compaction summary is untouched"
         );
 
-        let mut summary = LLMMessage::new("user", "the conversation was compacted");
+        let mut summary = LLMMessage::new(kimi_core::types::Role::User, "the conversation was compacted");
         summary.origin = Some(json!({ "kind": "compaction_summary" }));
         engine.set_conversation_provider(std::sync::Arc::new(move || vec![summary.clone()]));
 

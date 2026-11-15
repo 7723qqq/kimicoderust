@@ -9,6 +9,7 @@ use serde_json::Value;
 
 use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
+use crate::_base::di::instantiation::refine_service_decorator;
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::errors::unexpected_error::on_unexpected_error;
 use crate::app::scopes::LifecycleScope;
@@ -421,7 +422,7 @@ static TELEMETRY_SERVICE_REGISTRATION: Lazy<Result<(), String>> = Lazy::new(|| {
     });
     register_scoped_service(
         LifecycleScope::App.as_str().to_string(),
-        super::telemetry::I_TELEMETRY_SERVICE.clone(),
+        refine_service_decorator(&super::telemetry::I_TELEMETRY_SERVICE),
         SyncDescriptor::new(ctor, Vec::new()),
         ScopeActivation::OnScopeCreated,
         "telemetry",

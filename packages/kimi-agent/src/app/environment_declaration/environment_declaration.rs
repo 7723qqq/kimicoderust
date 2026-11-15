@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{IWaitUntil, WaitUntil, WaitUntilFuture};
 use crate::_base::utils::abort::AbortSignal;
 use crate::remote::declaration::remote_environment_declaration::{
@@ -44,7 +44,7 @@ pub trait IEnvironmentDeclarationService: Send + Sync {
     fn on_did_change(
         &self,
         listener: EnvironmentDeclarationChangeListener,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     async fn declarations(&self) -> Result<EnvironmentDeclarationSet, WireAsyncError>;
     fn registration_error(&self, environment_id: &str) -> Option<WireAsyncError>;
     fn report_registration(&self, environment_id: &str, error: Option<String>);

@@ -21,7 +21,7 @@ async fn test_run_turn_no_tool_calls() {
         turn_id: "test-turn-1".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -63,16 +63,18 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
                     ToolCall {
                         id: "swarm-1".into(),
                         name: "AgentSwarm".into(),
-                        arguments: serde_json::json!({}),
+                        arguments: Some(serde_json::json!({}).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     },
                     ToolCall {
                         id: "bash-1".into(),
                         name: "Bash".into(),
-                        arguments: serde_json::json!({ "command": "echo hi" }),
+                        arguments: Some(serde_json::json!({ "command": "echo hi" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     },
                 ],
                 "tool_calls",
@@ -91,7 +93,7 @@ async fn a_vetoed_swarm_batch_is_refused_and_the_model_can_retry() {
         turn_id: "test-turn-swarm-veto".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Swarm and also run a command.".into(),
             ..Default::default()
         }],
@@ -151,19 +153,18 @@ async fn a_call_with_unusable_arguments_is_answered_not_executed() {
                     ToolCall {
                         id: "broken-json".into(),
                         name: "Bash".into(),
-                        arguments: serde_json::json!({}),
+                        arguments: Some(r#"{"command": "ech"#.into()),
                         extras: None,
-                        args_parse_error: Some(crate::turn_loop::types::ArgsParseError {
-                            raw: r#"{"command": "ech"#.into(),
-                            error: "EOF while parsing a string".into(),
-                        }),
+                        raw_id: None,
+                        _stream_index: None,
                     },
                     ToolCall {
                         id: "not-an-object".into(),
                         name: "Read".into(),
-                        arguments: serde_json::json!("a.txt"),
+                        arguments: Some(serde_json::json!("a.txt").to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     },
                 ],
                 "tool_calls",
@@ -174,6 +175,11 @@ async fn a_call_with_unusable_arguments_is_answered_not_executed() {
 
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
+    let tool_defs = crate::tools::core_tool_defs::core_tool_defs()
+        .into_iter()
+        .filter(|tool| matches!(tool.name.as_str(), "Bash" | "Read"))
+        .collect::<Vec<_>>();
+    register_tool_defs(&server, tool_defs.clone());
 
     let input = RunTurnInput {
         llm_request_byte_budget: u64::MAX,
@@ -182,12 +188,12 @@ async fn a_call_with_unusable_arguments_is_answered_not_executed() {
         turn_id: "test-turn-unusable-args".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Run those.".into(),
             ..Default::default()
         }],
         tools: &[],
-        tool_defs: vec![],
+        tool_defs,
         max_steps: 5,
         max_attempts: None,
         max_context_tokens: None,
@@ -237,16 +243,12 @@ async fn a_call_with_unusable_arguments_is_answered_not_executed() {
 
     let broken = answer_for("broken-json");
     assert!(
-        broken.contains("Invalid Bash arguments") && broken.contains("not valid JSON"),
-        "the answer names the real cause: {broken}"
+        broken.contains("Invalid args for tool \"Bash\": must have required property 'command'"),
+        "malformed JSON becomes an empty object before schema validation: {broken}"
     );
     assert!(
-        !broken.contains("{{"),
-        "both parameters are substituted: {broken}"
-    );
-    assert!(
-        broken.contains("EOF while parsing a string"),
-        "the decoder's reason reaches the model: {broken}"
+        !broken.contains("not valid JSON"),
+        "the decoder is not an unconditional refusal: {broken}"
     );
 
     let not_object = answer_for("not-an-object");
@@ -277,16 +279,18 @@ async fn a_mixed_batch_runs_other_tools_while_swarm_mode_is_off() {
                     ToolCall {
                         id: "swarm-off-1".into(),
                         name: "AgentSwarm".into(),
-                        arguments: serde_json::json!({}),
+                        arguments: Some(serde_json::json!({}).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     },
                     ToolCall {
                         id: "bash-off-1".into(),
                         name: "Bash".into(),
-                        arguments: serde_json::json!({ "command": "echo hi" }),
+                        arguments: Some(serde_json::json!({ "command": "echo hi" }).to_string()),
                         extras: None,
-                        args_parse_error: None,
+                        raw_id: None,
+                        _stream_index: None,
                     },
                 ],
                 "tool_calls",
@@ -321,7 +325,7 @@ async fn a_mixed_batch_runs_other_tools_while_swarm_mode_is_off() {
         turn_id: "test-turn-swarm-veto-inactive".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Try a swarm and run a command.".into(),
             ..Default::default()
         }],
@@ -381,16 +385,18 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
                 ToolCall {
                     id: "swarm-1".into(),
                     name: "AgentSwarm".into(),
-                    arguments: serde_json::json!({}),
+                    arguments: Some(serde_json::json!({}).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 },
                 ToolCall {
                     id: "bash-1".into(),
                     name: "Bash".into(),
-                    arguments: serde_json::json!({ "command": "echo hi" }),
+                    arguments: Some(serde_json::json!({ "command": "echo hi" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 },
             ],
             "tool_calls",
@@ -408,7 +414,7 @@ async fn a_model_that_never_complies_runs_out_of_steps() {
         turn_id: "test-turn-swarm-veto-loop".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Swarm and also run a command.".into(),
             ..Default::default()
         }],
@@ -489,7 +495,7 @@ async fn an_llm_error_closes_the_step_it_began() {
         turn_id: "test-turn-llm-error".into(),
         llm: &FailingLlm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "hello".into(),
             ..Default::default()
         }],
@@ -562,7 +568,7 @@ async fn test_previous_turn_aborted_reaches_the_interruption_reminder() {
         turn_id: "test-turn-interruption-reminder".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -624,24 +630,25 @@ async fn test_todo_stale_reminder_reaches_a_stale_main_agent_turn() {
         })
     });
 
-    let mut messages = vec![LLMMessage::new("user", "Start")];
+    let mut messages = vec![LLMMessage::new(kimi_core::types::Role::User, "Start")];
     messages.push(LLMMessage {
-        role: "assistant".into(),
+        role: kimi_core::types::Role::Assistant,
         tool_calls: vec![crate::turn_loop::types::ToolCall {
             id: "call_todo_write".into(),
             name: "TodoList".into(),
-            arguments: serde_json::json!({
+            arguments: Some(serde_json::json!({
                 "todos": [{ "title": "Ship it", "status": "in_progress" }]
-            }),
+            }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
         ..Default::default()
     });
     for _ in 0..10 {
-        messages.push(LLMMessage::new("assistant", "working"));
+        messages.push(LLMMessage::new(kimi_core::types::Role::Assistant, "working"));
     }
-    messages.push(LLMMessage::new("user", "Continue"));
+    messages.push(LLMMessage::new(kimi_core::types::Role::User, "Continue"));
 
     let input = RunTurnInput {
         llm_request_byte_budget: u64::MAX,
@@ -691,24 +698,25 @@ async fn test_todo_stale_reminder_is_main_agent_only() {
     let server = Arc::new(RpcServer::new());
     let callbacks = rpc_callbacks(server.clone());
 
-    let mut messages = vec![LLMMessage::new("user", "Start")];
+    let mut messages = vec![LLMMessage::new(kimi_core::types::Role::User, "Start")];
     messages.push(LLMMessage {
-        role: "assistant".into(),
+        role: kimi_core::types::Role::Assistant,
         tool_calls: vec![crate::turn_loop::types::ToolCall {
             id: "call_todo_write".into(),
             name: "TodoList".into(),
-            arguments: serde_json::json!({
+            arguments: Some(serde_json::json!({
                 "todos": [{ "title": "Ship it", "status": "in_progress" }]
-            }),
+            }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
         ..Default::default()
     });
     for _ in 0..10 {
-        messages.push(LLMMessage::new("assistant", "working"));
+        messages.push(LLMMessage::new(kimi_core::types::Role::Assistant, "working"));
     }
-    messages.push(LLMMessage::new("user", "Continue"));
+    messages.push(LLMMessage::new(kimi_core::types::Role::User, "Continue"));
 
     let input = RunTurnInput {
         llm_request_byte_budget: u64::MAX,
@@ -774,7 +782,7 @@ async fn test_turn_lifecycle_hooks_do_not_disturb_turn() {
         turn_id: "test-turn-hooks".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -844,7 +852,7 @@ impl LLM for PromptRecordingLlm {
                 thinking: vec![],
                 tool_calls: vec![],
                 finish_reason: Some("stop".into()),
-                usage: crate::rpc::types::TokenUsage::default(),
+                usage: kimi_core::types::TokenUsage::default(),
                 timing: None,
             })
         })
@@ -906,8 +914,8 @@ fn stdout_file_command(dir: &std::path::Path, name: &str, contents: &str) -> Str
     }
 }
 
-fn assert_prompt_hook_part(block: &ContentBlock, expected: &str) {
-    let ContentBlock::Text { text, meta } = block else {
+fn assert_prompt_hook_part(block: &ContentPart, expected: &str) {
+    let ContentPart::Text { text, meta } = block else {
         panic!("hook output must be a text part: {block:?}");
     };
     assert_eq!(
@@ -1050,7 +1058,7 @@ async fn user_prompt_submit_appends_plain_stdout_in_hook_order() {
     assert_prompt_hook_part(&prompt.blocks[1], "second note");
     assert_eq!(
         prompt.blocks[2],
-        ContentBlock::Text {
+        ContentPart::Text {
             text: "Hello!".into(),
             meta: None,
         }
@@ -1174,7 +1182,7 @@ async fn test_stop_hook_veto_surfaces_continuation() {
         turn_id: "test-turn-stop-veto".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -1229,7 +1237,7 @@ async fn test_stop_hook_allow_leaves_no_continuation() {
         turn_id: "test-turn-stop-allow".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -1271,7 +1279,7 @@ async fn stop_hook_outcome(
             turn_id: turn_id.to_string(),
             llm: &llm,
             messages: vec![LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "Hello!".into(),
                 ..Default::default()
             }],
@@ -1366,7 +1374,7 @@ async fn test_run_turn_continued_consumes_stop_veto() {
         turn_id: "test-turn-continued".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -1391,9 +1399,9 @@ async fn test_run_turn_continued_consumes_stop_veto() {
     assert_eq!(turn.stop_hook_continuation, None);
 
     assert_eq!(turn.steps, 2);
-    assert_eq!(turn.usage.input_tokens, 20);
-    assert_eq!(turn.usage.output_tokens, 10);
-    assert_eq!(turn.usage.total_tokens, 30);
+    assert_eq!(turn.usage.input_other, 20);
+    assert_eq!(turn.usage.output, 10);
+    assert_eq!(turn.usage.measured_context_tokens(), 30);
     let texts: Vec<&str> = turn.messages.iter().map(|m| m.content.as_str()).collect();
     assert!(texts.iter().any(|t| t.contains("keep going")));
 }
@@ -1407,9 +1415,10 @@ async fn test_max_steps_exhaustion_reports_max_steps() {
         tool_responses: vec![ToolCall {
             id: "tc-loop".into(),
             name: "WebSearch".into(),
-            arguments: serde_json::json!({ "query": "x" }),
+            arguments: Some(serde_json::json!({ "query": "x" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }],
     };
 
@@ -1435,7 +1444,7 @@ async fn test_max_steps_exhaustion_reports_max_steps() {
         turn_id: "test-max-steps-exhaustion".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "Hello!".into(),
             ..Default::default()
         }],
@@ -1466,9 +1475,10 @@ async fn a_zero_step_cap_does_not_limit_the_turn() {
         ToolCall {
             id: id.into(),
             name: "read".into(),
-            arguments: serde_json::json!({ "path": path }),
+            arguments: Some(serde_json::json!({ "path": path }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }
     }
     let llm = SequencedLlm {
@@ -1502,7 +1512,7 @@ async fn a_zero_step_cap_does_not_limit_the_turn() {
         turn_id: "test-zero-step-cap".into(),
         llm: &llm,
         messages: vec![LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "go".into(),
             ..Default::default()
         }],

@@ -1,3 +1,4 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
 use std::sync::Arc;
 
 use crate::_base::di::instantiation::LiveRef;

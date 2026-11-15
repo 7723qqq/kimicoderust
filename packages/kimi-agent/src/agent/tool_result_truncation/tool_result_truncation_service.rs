@@ -2,13 +2,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures_util::future::{BoxFuture, FutureExt};
+use once_cell::sync::Lazy;
 
+use crate::_base::di::descriptors::{Constructor, DynamicValue, SyncDescriptor};
+use crate::_base::di::instantiation::{
+    DependencyKind, ServiceDependency, refine_service_decorator,
+};
+use crate::_base::di::instantiation_service::register_descriptor_dependencies;
+use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::text::code_points::{code_point_boundary_start, slice_on_code_point_boundary};
-use crate::agent::scope_context::scope_context::IAgentScopeContext;
+use crate::app::scopes::LifecycleScope;
+use crate::agent::scope_context::scope_context::{
+    I_AGENT_SCOPE_CONTEXT, IAgentScopeContext,
+};
 use crate::agent::tool_executor::tool_executor::{ExecutableToolOutput, ToolResult};
-use crate::app::bootstrap::bootstrap::IBootstrapService;
+use crate::app::bootstrap::bootstrap::{I_BOOTSTRAP_SERVICE, IBootstrapService};
 use crate::human::llm::message::ContentPart;
-use crate::persistence::interface::storage::{IFileSystemStorageService, StorageWriteOptions};
+use crate::persistence::interface::storage::{
+    I_FILE_SYSTEM_STORAGE_SERVICE, IFileSystemStorageService, StorageWriteOptions,
+};
 use crate::tool::output_pointer::{
     AppendedPointerInput, OutputUnit, ReplacedPointerInput, UnpersistedPointerInput,
     render_appended_pointer, render_replaced_pointer, render_unpersisted_pointer,
@@ -16,7 +28,10 @@ use crate::tool::output_pointer::{
 use crate::tool::tool_contract::{DEFAULT_TOOL_RESULT_MAX_CHARS, DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS};
 use crate::wire::record::AGENT_WIRE_RECORD_KEY;
 
-use super::tool_result_truncation::{IAgentToolResultTruncationService, ToolResultTruncationInput};
+use super::tool_result_truncation::{
+    I_AGENT_TOOL_RESULT_TRUNCATION_SERVICE, IAgentToolResultTruncationService,
+    ToolResultTruncationInput,
+};
 
 const TOOL_RESULT_PREVIEW_HEAD_CHARS: usize = 4_096;
 const TOOL_RESULT_PREVIEW_TAIL_CHARS: usize = 1_024;
@@ -548,4 +563,63 @@ fn lexical_normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+fn dependency<T>(args: &[DynamicValue], index: usize) -> Arc<T>
+where
+    T: Send + Sync + 'static + ?Sized,
+{
+    Arc::downcast::<Arc<T>>(args[index].clone())
+        .unwrap_or_else(|_| {
+            panic!("toolResultTruncation dependency {index} has an incompatible type")
+        })
+        .as_ref()
+        .clone()
+}
+
+static AGENT_TOOL_RESULT_TRUNCATION_SERVICE_REGISTRATION: Lazy<Result<(), String>> =
+    Lazy::new(|| {
+        let ctor: Constructor<DynamicValue> = Arc::new(|args| {
+            let service: Arc<dyn IAgentToolResultTruncationService> = Arc::new(
+                ToolResultTruncationService::new(
+                    dependency::<dyn IBootstrapService>(&args, 0),
+                    dependency::<dyn IAgentScopeContext>(&args, 1),
+                    dependency::<dyn IFileSystemStorageService>(&args, 2),
+                ),
+            );
+            Arc::new(service) as DynamicValue
+        });
+        let descriptor = SyncDescriptor::new(ctor, Vec::new());
+        register_descriptor_dependencies(
+            &descriptor,
+            vec![
+                ServiceDependency {
+                    id: refine_service_decorator(&I_BOOTSTRAP_SERVICE),
+                    index: 0,
+                    kind: DependencyKind::Instance,
+                },
+                ServiceDependency {
+                    id: refine_service_decorator(&I_AGENT_SCOPE_CONTEXT),
+                    index: 1,
+                    kind: DependencyKind::Instance,
+                },
+                ServiceDependency {
+                    id: refine_service_decorator(&I_FILE_SYSTEM_STORAGE_SERVICE),
+                    index: 2,
+                    kind: DependencyKind::Instance,
+                },
+            ],
+        );
+        register_scoped_service(
+            LifecycleScope::Agent.as_str().to_string(),
+            refine_service_decorator(&I_AGENT_TOOL_RESULT_TRUNCATION_SERVICE),
+            descriptor,
+            ScopeActivation::OnScopeCreated,
+            "toolResultTruncation",
+        )
+        .map_err(|error| error.to_string())
+    });
+
+pub fn ensure_agent_tool_result_truncation_service_registered() -> Result<(), String> {
+    Lazy::force(&AGENT_TOOL_RESULT_TRUNCATION_SERVICE_REGISTRATION).clone()
 }

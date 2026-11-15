@@ -44,8 +44,12 @@ fn todo(items: &[(&str, &str)]) -> Vec<TodoListItem> {
     items
         .iter()
         .map(|(title, status)| TodoListItem {
+            id: None,
+            parent_id: None,
+            kind: None,
             title: (*title).to_string(),
             status: (*status).to_string(),
+            progress: None,
         })
         .collect()
 }
@@ -181,7 +185,10 @@ fn tool_kind_and_call_id_match_v2() {
 /// union produces, variant by variant — the `kind` tag is what hosts switch on.
 #[test]
 fn tool_input_display_wire_shape_matches_v2_variants() {
-    use crate::tool_input_display::{PlanReviewOption, SpecReviewDocument, ToolInputDisplay as D};
+    use crate::tool_input_display::{
+        CommandLanguage, FileIoOperation, GoalStartMode, PlanReviewOption, SpecReviewDocument,
+        ToolInputDisplay as D,
+    };
 
     let cases: Vec<(D, &str)> = vec![
         (
@@ -189,13 +196,13 @@ fn tool_input_display_wire_shape_matches_v2_variants() {
                 command: "ls".into(),
                 cwd: Some("/w".into()),
                 description: None,
-                language: Some("bash".into()),
+                language: Some(CommandLanguage::Bash),
             },
             "command",
         ),
         (
             D::FileIo {
-                operation: "read".into(),
+                operation: FileIoOperation::Read,
                 path: "a".into(),
                 detail: None,
                 content: None,
@@ -293,7 +300,7 @@ fn tool_input_display_wire_shape_matches_v2_variants() {
             D::GoalStart {
                 objective: "o".into(),
                 completion_criterion: Some("c".into()),
-                mode: "manual".into(),
+                mode: GoalStartMode::Manual,
             },
             "goal_start",
         ),

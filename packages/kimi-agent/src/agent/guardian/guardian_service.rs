@@ -197,12 +197,12 @@ fn build_review_messages(
     .join("\n");
     vec![
         LLMMessage {
-            role: "system".into(),
+            role: kimi_core::types::Role::System,
             content: GUARDIAN_SYSTEM_PROMPT.into(),
             ..Default::default()
         },
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: user_text,
             ..Default::default()
         },
@@ -374,7 +374,7 @@ mod tests {
     fn the_review_prompt_carries_the_tool_and_a_clipped_transcript() {
         let conversation: Vec<LLMMessage> = (0..10)
             .map(|index| LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: format!("message {index} {}", "x".repeat(500)),
                 ..Default::default()
             })

@@ -1,5 +1,5 @@
 use crate::rpc::types::BoxFuture;
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 use crate::turn_loop::types::ExecutableToolResult;
 
 pub trait FileMemoryProvider: Send + Sync {
@@ -26,7 +26,7 @@ pub async fn with_file_memory(
     if result.parts.is_empty() {
         result.content = format!("{}\n{}", result.content, block);
     } else {
-        result.parts.push(ContentBlock::Text {
+        result.parts.push(ContentPart::Text {
             text: format!("\n{block}"),
             meta: None,
         });
@@ -96,14 +96,14 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let provider = memory(Ok("memory"), seen);
         let mut base = result("Replaced 1 occurrence in a.rs");
-        base.parts.push(ContentBlock::Text {
+        base.parts.push(ContentPart::Text {
             text: "image".to_string(),
             meta: None,
         });
         let merged = with_file_memory(base, "a.rs", Some(&provider)).await;
         assert_eq!(merged.content, "Replaced 1 occurrence in a.rs");
         match merged.parts.last() {
-            Some(ContentBlock::Text { text, .. }) => assert_eq!(text, "\nmemory"),
+            Some(ContentPart::Text { text, .. }) => assert_eq!(text, "\nmemory"),
             other => panic!("expected an appended text part, got {other:?}"),
         }
     }

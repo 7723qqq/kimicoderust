@@ -860,7 +860,7 @@ impl IAgentMcpService for AgentMcpService {
         throw_if_aborted(signal.as_ref())
     }
 
-    fn on_status_change(&self, listener: McpStatusListener) -> Box<dyn IDisposable> {
+    fn on_status_change(&self, listener: McpStatusListener) -> DisposableRef {
         self.connection_manager().on_status_change(listener)
     }
 }

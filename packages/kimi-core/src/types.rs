@@ -27,68 +27,143 @@ impl MediaKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlock {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+        }
+    }
+}
+
+impl Default for Role {
+    fn default() -> Self {
+        Self::Assistant
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<str> for Role {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for Role {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for Role {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    #[serde(rename = "text")]
     Text {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<serde_json::Map<String, serde_json::Value>>,
     },
-    Image {
-        media_type: String,
-        data: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    MediaRef {
-        file_id: String,
-        kind: MediaKind,
-    },
-    ImageUrl {
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    AudioUrl {
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    VideoUrl {
-        url: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
+    #[serde(rename = "think", rename_all = "camelCase")]
     Think {
         think: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted: Option<String>,
-        #[serde(
-            rename = "detailsIndex",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
-        details_index: Option<u32>,
-        #[serde(
-            rename = "reasoningKey",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details_index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hidden: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_key: Option<String>,
-        #[serde(
-            rename = "detailsSummary",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
-        details_summary: Option<String>,
     },
+    #[serde(rename = "image_url")]
+    ImageUrl {
+        #[serde(rename = "imageUrl")]
+        image_url: ImageUrl,
+    },
+    #[serde(rename = "audio_url")]
+    AudioUrl {
+        #[serde(rename = "audioUrl")]
+        audio_url: AudioUrl,
+    },
+    #[serde(rename = "video_url")]
+    VideoUrl {
+        #[serde(rename = "videoUrl")]
+        video_url: VideoUrl,
+    },
+    #[serde(rename = "document_url")]
+    DocumentUrl {
+        #[serde(rename = "documentUrl")]
+        document_url: DocumentUrl,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageDimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<ImageDimensions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentUrl {
+    pub url: String,
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 // ── Native LLM configuration (Rust-side HTTP transport) ───────────────────
@@ -242,33 +317,27 @@ impl Default for AntigravityLimits {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
-    #[serde(default)]
-    pub input_tokens: u32,
-    #[serde(default)]
-    pub output_tokens: u32,
-    #[serde(default)]
-    pub total_tokens: u32,
-    #[serde(default)]
-    pub input_cache_read: u32,
-    #[serde(default)]
-    pub input_cache_creation: u32,
+    pub input_other: u64,
+    pub output: u64,
+    pub input_cache_read: u64,
+    pub input_cache_creation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl TokenUsage {
     pub fn accumulate(&mut self, other: &TokenUsage) {
-        self.input_tokens += other.input_tokens;
-        self.output_tokens += other.output_tokens;
-        self.total_tokens += other.total_tokens;
+        self.input_other += other.input_other;
+        self.output += other.output;
         self.input_cache_read += other.input_cache_read;
         self.input_cache_creation += other.input_cache_creation;
+        self.raw = None;
     }
 
     pub fn measured_context_tokens(&self) -> u64 {
-        u64::from(self.input_tokens)
-            + u64::from(self.input_cache_read)
-            + u64::from(self.input_cache_creation)
-            + u64::from(self.output_tokens)
+        self.input_other + self.input_cache_read + self.input_cache_creation + self.output
     }
 }
 
@@ -281,9 +350,9 @@ pub struct ToolInfo {
     pub input_schema: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDelivery {
-    pub blocks: Vec<ContentBlock>,
+    pub blocks: Vec<ContentPart>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<serde_json::Value>,
 }
@@ -507,21 +576,46 @@ impl LLMChatParams {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deferred;
+
+impl Serialize for Deferred {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for Deferred {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if bool::deserialize(deserializer)? {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom("expected true"))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDescription {
     pub name: String,
     pub description: String,
-    pub parameters: serde_json::Value,
+    pub parameters: serde_json::Map<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred: Option<bool>,
+    pub deferred: Option<Deferred>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct LLMMessage {
-    pub role: String,
+    pub role: Role,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocks: Vec<ContentBlock>,
+    pub blocks: Vec<ContentPart>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -535,9 +629,9 @@ pub struct LLMMessage {
 }
 
 impl LLMMessage {
-    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn new(role: Role, content: impl Into<String>) -> Self {
         Self {
-            role: role.into(),
+            role,
             content: content.into(),
             blocks: Vec::new(),
             tool_calls: Vec::new(),
@@ -549,20 +643,20 @@ impl LLMMessage {
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self::new("user", content)
+        Self::new(Role::User, content)
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self::new("assistant", content)
+        Self::new(Role::Assistant, content)
     }
 
     pub fn system(content: impl Into<String>) -> Self {
-        Self::new("system", content)
+        Self::new(Role::System, content)
     }
 
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
-            role: "tool".into(),
+            role: Role::Tool,
             content: content.into(),
             blocks: Vec::new(),
             tool_calls: Vec::new(),
@@ -577,28 +671,32 @@ impl LLMMessage {
 #[derive(Debug, Clone, Default)]
 pub struct LLMChatResponse {
     pub content: String,
-    pub thinking: Vec<ContentBlock>,
+    pub thinking: Vec<ContentPart>,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
     pub usage: TokenUsage,
     pub timing: Option<crate::timing::LlmTiming>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StreamIndex {
+    Number(u64),
+    String(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename = "function", rename_all = "camelCase")]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    pub arguments: serde_json::Value,
+    pub arguments: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extras: Option<serde_json::Value>,
-    #[serde(skip)]
-    pub args_parse_error: Option<ArgsParseError>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArgsParseError {
-    pub raw: String,
-    pub error: String,
+    pub extras: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _stream_index: Option<StreamIndex>,
 }
 
 pub type CredentialFuture<'a> = BoxFuture<'a, Result<String, String>>;

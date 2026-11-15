@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::agent::tool_executor::before_tool_execute_event::deny_tool_execution;
 use crate::agent::tool_executor::tool_executor::IAgentToolExecutorService;
 use crate::app::config::config::IConfigService;
@@ -11,7 +11,7 @@ use super::sandbox::{SandboxMode, resolve_sandbox_policy, sandbox_tool_veto};
 pub trait ISandboxPolicyService: Send + Sync {}
 
 pub struct SandboxPolicyService {
-    _subscription: Option<Box<dyn IDisposable>>,
+    _subscription: Option<DisposableRef>,
 }
 
 impl SandboxPolicyService {

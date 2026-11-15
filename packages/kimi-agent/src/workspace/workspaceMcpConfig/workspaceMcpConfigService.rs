@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::safely_call_listener;
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::paths::{dirname, subtree_watch_filter};
@@ -68,7 +68,7 @@ struct McpConfigState {
     change_listeners: IndexMap<u64, ChangeListener>,
     tunables_listeners: IndexMap<u64, TunablesListener>,
     next_listener_id: u64,
-    project_watcher: Option<Box<dyn IDisposable>>,
+    project_watcher: Option<DisposableRef>,
     watched_primary: Option<String>,
     watch_generation: u64,
     is_disposed: bool,
@@ -84,7 +84,7 @@ struct WorkspaceMcpConfigServiceInner {
     trust: Arc<dyn IWorkspaceTrust>,
     state: Arc<Mutex<McpConfigState>>,
     ready: Shared<BoxFuture<'static, ()>>,
-    _subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    _subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 #[derive(Clone)]
@@ -309,7 +309,7 @@ impl WorkspaceMcpConfigService {
         to_mcp_tunables(self.inner.config.get(MCP_SECTION).as_ref())
     }
 
-    pub fn on_did_change(&self, listener: ChangeListener) -> Box<dyn IDisposable> {
+    pub fn on_did_change(&self, listener: ChangeListener) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             if state.is_disposed {
@@ -327,7 +327,7 @@ impl WorkspaceMcpConfigService {
         })
     }
 
-    pub fn on_did_change_tunables(&self, listener: TunablesListener) -> Box<dyn IDisposable> {
+    pub fn on_did_change_tunables(&self, listener: TunablesListener) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             if state.is_disposed {
@@ -491,8 +491,8 @@ impl WorkspaceMcpConfigService {
                     Self { inner }.schedule_file_reload();
                 }
             });
-            self.inner._subscriptions.lock().push(handle);
-            self.inner._subscriptions.lock().push(subscription);
+            self.inner._subscriptions.lock().push(Arc::from(handle) as DisposableRef);
+            self.inner._subscriptions.lock().push(Arc::from(subscription) as DisposableRef);
         }
     }
 
@@ -630,11 +630,11 @@ impl IWorkspaceMcpConfigService for WorkspaceMcpConfigService {
         WorkspaceMcpConfigService::tunables(self)
     }
 
-    fn on_did_change(&self, listener: ChangeListener) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: ChangeListener) -> DisposableRef {
         WorkspaceMcpConfigService::on_did_change(self, listener)
     }
 
-    fn on_did_change_tunables(&self, listener: TunablesListener) -> Box<dyn IDisposable> {
+    fn on_did_change_tunables(&self, listener: TunablesListener) -> DisposableRef {
         WorkspaceMcpConfigService::on_did_change_tunables(self, listener)
     }
 }

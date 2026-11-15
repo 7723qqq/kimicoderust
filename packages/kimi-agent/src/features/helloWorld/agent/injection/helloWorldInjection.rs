@@ -109,12 +109,7 @@ impl HelloWorldInjectionInner {
             let Some(origin) = message.origin.as_ref() else {
                 continue;
             };
-            if origin.get("kind").and_then(Value::as_str) != Some("injection") {
-                continue;
-            }
-            if origin.get("variant").and_then(Value::as_str)
-                == Some(HELLO_WORLD_MODE_INJECTION_VARIANT)
-            {
+            if origin.injection_variant() == Some(HELLO_WORLD_MODE_INJECTION_VARIANT) {
                 return Some(HelloWorldModeInjectionDisclosure {
                     kind: HELLO_WORLD_MODE_INJECTION_VARIANT.to_string(),
                     state: "active".to_string(),

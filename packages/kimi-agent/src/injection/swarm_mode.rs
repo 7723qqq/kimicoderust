@@ -238,7 +238,7 @@ mod tests {
         // Injected reminders reach history already wrapped, so the scan sees the
         // `<system-reminder>` envelope the injection layer writes.
         let msg = |content: &str| LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(content),
             ..Default::default()
         };
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn scan_baseline_ignores_content_outside_an_injection() {
         let quoted = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: format!("why does the prompt say \"{ENTER_MARKER}\"?"),
             ..Default::default()
         };
@@ -279,7 +279,7 @@ mod tests {
 
         // …and a real disclosure behind it still wins.
         let injected = LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(SWARM_MODE_ENTER_REMINDER),
             ..Default::default()
         };

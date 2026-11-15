@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -95,3 +97,7 @@ pub fn make_session_context(input: SessionContextInput) -> SessionContext {
         session_scope: input.session_scope,
     }
 }
+
+
+pub static I_SESSION_CONTEXT: LazyLock<ServiceIdentifier<Arc<dyn ISessionContext>>> =
+    LazyLock::new(|| create_decorator("sessionContext"));

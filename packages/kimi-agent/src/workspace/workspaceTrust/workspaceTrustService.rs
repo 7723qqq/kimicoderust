@@ -1,3 +1,4 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +9,7 @@ use futures_util::future::{BoxFuture, Shared};
 use futures_util::FutureExt;
 use indexmap::IndexMap;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::safely_call_listener;
 use crate::app::config::config::IConfigService;
 use crate::state::state::{StateDefinition, define_state};
@@ -54,7 +55,7 @@ struct ServiceState {
     initialization: Option<SharedServiceFuture>,
     initialization_generation: u64,
     inner: Option<Arc<dyn IWorkspaceTrustEntry>>,
-    inner_subscription: Option<Box<dyn IDisposable>>,
+    inner_subscription: Option<DisposableRef>,
     listeners: IndexMap<u64, TrustListener>,
     next_listener_id: u64,
     is_disposed: bool,
@@ -66,7 +67,7 @@ struct WorkspaceTrustServiceInner {
     states: Arc<dyn IWorkspaceStateService>,
     config: Arc<dyn IConfigService>,
     state: Arc<parking_lot::Mutex<ServiceState>>,
-    _dirs_subscription: parking_lot::Mutex<Option<Box<dyn IDisposable>>>,
+    _dirs_subscription: parking_lot::Mutex<Option<DisposableRef>>,
 }
 
 #[derive(Clone)]
@@ -227,7 +228,7 @@ impl WorkspaceTrustService {
         self.trust_entry().untrust().await
     }
 
-    pub fn on_did_change(&self, listener: TrustListener) -> Box<dyn IDisposable> {
+    pub fn on_did_change(&self, listener: TrustListener) -> DisposableRef {
         let id = {
             let mut state = self.inner.state.lock();
             if state.is_disposed {
@@ -299,7 +300,7 @@ impl IWorkspaceTrust for WorkspaceTrustService {
         WorkspaceTrustService::untrust(self).await
     }
 
-    fn on_did_change(&self, listener: TrustListener) -> Box<dyn IDisposable> {
+    fn on_did_change(&self, listener: TrustListener) -> DisposableRef {
         WorkspaceTrustService::on_did_change(self, listener)
     }
 }

@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 
+use std::sync::{Arc, LazyLock};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use crate::persistence::interface::query_store::Page;
 use crate::session::session_metadata::session_metadata::SessionLastTurnReason;
 use crate::session::sqlite_store::decode_json_column;
@@ -162,3 +165,10 @@ pub(crate) fn session_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Res
     }
     Ok(summary)
 }
+
+
+pub static I_SESSION_INDEX: LazyLock<ServiceIdentifier<Arc<dyn ISessionIndex>>> =
+    LazyLock::new(|| create_decorator("sessionIndex"));
+
+pub static I_SESSION_INDEX_MIRROR: LazyLock<ServiceIdentifier<Arc<dyn ISessionIndexMirror>>> =
+    LazyLock::new(|| create_decorator("sessionIndexMirror"));

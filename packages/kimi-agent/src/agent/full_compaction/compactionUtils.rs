@@ -8,7 +8,7 @@ use crate::agent::context_memory::types::ContextMessage;
 use crate::agent::llm_requester::llm_requester::AgentLLMRequestFinish;
 use crate::human::llm::finish_reason::FinishReason;
 use crate::human::llm::message::{ContentPart, Role};
-use crate::human::llm::usage::TokenUsage;
+use crate::human::llm::usage::{TokenUsage, grand_total};
 use crate::llm_adapter::contract::errors::{
     APIContextOverflowError, APIEmptyResponseError, APIProviderOverloadedError,
     APIProviderQuotaExhaustedError, APIProviderRateLimitError, APIRequestTooLargeError,
@@ -23,6 +23,134 @@ pub const SNIPPED_TOOL_RESULT_MARKER: &str = "[snipped tool result — ";
 pub const DEFAULT_TOOL_RESULT_SNIP_MIN_BYTES: usize = 1024;
 pub const DEFAULT_TOOL_RESULT_SNIP_HEAD_LINES: usize = 40;
 pub const DEFAULT_TOOL_RESULT_SNIP_TAIL_LINES: usize = 40;
+
+#[derive(Clone)]
+pub struct HistoryTokenProfile {
+    pub overhead_tokens: u64,
+    pub estimate_message: Arc<dyn Fn(&Message) -> u64 + Send + Sync>,
+    pub estimate_request: Arc<dyn Fn(&[Message]) -> u64 + Send + Sync>,
+}
+
+pub fn assistant_usage_total(message: &ContextMessage) -> Option<u64> {
+    if message.role != Role::Assistant {
+        return None;
+    }
+    let total = grand_total(message.usage.as_ref()?);
+    (total > 0).then_some(total)
+}
+
+pub fn build_history_token_profile(
+    history: &[ContextMessage],
+    base_overhead_tokens: u64,
+    estimate_base: Arc<dyn Fn(&Message) -> u64 + Send + Sync>,
+) -> HistoryTokenProfile {
+    let history_messages = history
+        .iter()
+        .cloned()
+        .map(Message::from)
+        .collect::<Vec<_>>();
+    let mut weights = history_messages
+        .iter()
+        .map(|message| estimate_base(message))
+        .collect::<Vec<_>>();
+    let mut anchors = history
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            assistant_usage_total(message).map(|tokens| (index, tokens))
+        })
+        .collect::<Vec<_>>();
+    if anchors.is_empty() {
+        let fallback = estimate_base.clone();
+        return HistoryTokenProfile {
+            overhead_tokens: base_overhead_tokens,
+            estimate_message: estimate_base,
+            estimate_request: Arc::new(move |messages| {
+                messages.iter().fold(base_overhead_tokens, |total, message| {
+                    total.saturating_add(fallback(message))
+                })
+            }),
+        };
+    }
+
+    for index in (0..anchors.len() - 1).rev() {
+        if anchors[index].1 > anchors[index + 1].1 {
+            anchors[index].1 = anchors[index + 1].1;
+        }
+    }
+
+    let mut previous_index: Option<usize> = None;
+    let mut previous_tokens = base_overhead_tokens;
+    for (index, tokens) in anchors {
+        let start = previous_index.map_or(0, |previous| previous + 1);
+        let span_estimate = weights[start..=index]
+            .iter()
+            .fold(0u64, |total, weight| total.saturating_add(*weight));
+        let measured_delta = tokens.saturating_sub(previous_tokens);
+        if measured_delta > span_estimate {
+            distribute_excess_tokens(
+                &mut weights,
+                start,
+                index,
+                span_estimate,
+                measured_delta - span_estimate,
+            );
+        }
+        previous_index = Some(index);
+        previous_tokens = tokens;
+    }
+
+    let lookup = Arc::new((history_messages, weights));
+    let lookup_for_message = lookup.clone();
+    let base_for_message = estimate_base.clone();
+    let estimate_message: Arc<dyn Fn(&Message) -> u64 + Send + Sync> =
+        Arc::new(move |message| {
+            lookup_for_message
+                .0
+                .iter()
+                .position(|candidate| candidate == message)
+                .map_or_else(
+                    || base_for_message(message),
+                    |index| lookup_for_message.1[index],
+                )
+        });
+    let estimate_for_request = estimate_message.clone();
+    HistoryTokenProfile {
+        overhead_tokens: base_overhead_tokens,
+        estimate_message,
+        estimate_request: Arc::new(move |messages| {
+            messages.iter().fold(base_overhead_tokens, |total, message| {
+                total.saturating_add(estimate_for_request(message))
+            })
+        }),
+    }
+}
+
+fn distribute_excess_tokens(
+    weights: &mut [u64],
+    start: usize,
+    end: usize,
+    span_estimate: u64,
+    excess: u64,
+) {
+    if excess == 0 || start > end {
+        return;
+    }
+    if span_estimate == 0 {
+        weights[end] = weights[end].saturating_add(excess);
+        return;
+    }
+    let base_slice = weights[start..=end].to_vec();
+    let mut distributed = 0u64;
+    for index in start..=end {
+        let share = u128::from(excess) * u128::from(base_slice[index - start])
+            / u128::from(span_estimate);
+        let add = u64::try_from(share).unwrap_or(u64::MAX);
+        weights[index] = weights[index].saturating_add(add);
+        distributed = distributed.saturating_add(add);
+    }
+    weights[end] = weights[end].saturating_add(excess.saturating_sub(distributed));
+}
 
 #[derive(Debug, Clone)]
 pub struct CompactionAttemptResult {

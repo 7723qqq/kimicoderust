@@ -1,3 +1,8 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::session::agent_lifecycle::agent_lifecycle::I_AGENT_LIFECYCLE_SERVICE;
+use crate::_base::log::log::I_LOG_SERVICE;
+use crate::session::session_metadata::session_metadata::I_SESSION_METADATA;
+use crate::wire::wire::I_WIRE_SERVICE;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -96,7 +101,7 @@ impl SessionExportService {
         };
 
         let metadata_result = async {
-            let metadata = handle.accessor().get::<ISessionMetadata>();
+            let metadata = handle.accessor().get(&I_SESSION_METADATA);
             metadata.ready().await?;
             metadata.read().await
         }
@@ -114,7 +119,7 @@ impl SessionExportService {
             }
         }
 
-        let session_log = handle.accessor().get::<ILogService>();
+        let session_log = handle.accessor().get(&I_LOG_SERVICE);
         self.warn_if_fails(
             "export session log flush failed",
             move || {
@@ -128,12 +133,12 @@ impl SessionExportService {
             false,
         )
         .await;
-        let agents = handle.accessor().get::<IAgentLifecycleService>();
+        let agents = handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
         for agent in agents.list(None) {
             let Some(agent_handle) = agents.handle_of(&agent.agent_id) else {
                 continue;
             };
-            let wire = agent_handle.accessor().get::<IWireService>();
+            let wire = agent_handle.accessor().get(&I_WIRE_SERVICE);
             self.warn_if_fails(
                 "export agent wire flush failed",
                 move || {

@@ -913,7 +913,7 @@ impl EngineSession {
         }
     }
 
-    pub fn record_compaction_usage(&self, model: &str, usage: &crate::rpc::types::TokenUsage) {
+    pub fn record_compaction_usage(&self, model: &str, usage: &kimi_core::types::TokenUsage) {
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         core.usage.record_compaction(model, usage);
     }
@@ -2033,7 +2033,7 @@ fn enqueue_print_followup_turn(
         turn_id,
         prompt_id: None,
         prompt: LLMMessage {
-            role: "user".to_string(),
+            role: kimi_core::types::Role::User,
             content: text.clone(),
             ..LLMMessage::default()
         },

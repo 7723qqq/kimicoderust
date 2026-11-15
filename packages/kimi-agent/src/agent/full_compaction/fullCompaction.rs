@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use std::sync::Arc;
 
 use futures_util::future::{BoxFuture, Shared};
@@ -54,3 +56,7 @@ pub trait IAgentFullCompactionService: Send + Sync {
 
     fn on_did_finish_compaction(&self) -> Event<FullCompactionTask>;
 }
+
+
+pub static I_AGENT_FULL_COMPACTION_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentFullCompactionService>>> =
+    LazyLock::new(|| create_decorator("agentFullCompactionService"));

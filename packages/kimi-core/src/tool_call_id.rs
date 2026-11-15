@@ -279,15 +279,16 @@ mod tests {
         ToolCall {
             id: id.to_string(),
             name: "Bash".into(),
-            arguments: serde_json::json!({}),
+            arguments: Some("{}".to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }
     }
 
     fn history_with(ids: &[&str]) -> Vec<LLMMessage> {
         vec![LLMMessage {
-            role: "assistant".into(),
+            role: crate::types::Role::Assistant,
             content: String::new(),
             blocks: Vec::new(),
             tool_calls: ids.iter().map(|id| call(id)).collect(),
@@ -416,7 +417,7 @@ mod tests {
         let mut history = history_with(&[]);
         history[0].tool_calls.clear();
         history.push(LLMMessage {
-            role: "tool".into(),
+            role: crate::types::Role::Tool,
             content: String::new(),
             blocks: Vec::new(),
             tool_calls: Vec::new(),
@@ -554,7 +555,13 @@ mod tests {
 
     fn msg(role: &str, content: &str, calls: Vec<ToolCall>) -> LLMMessage {
         LLMMessage {
-            role: role.to_string(),
+            role: match role {
+                "system" => crate::types::Role::System,
+                "user" => crate::types::Role::User,
+                "assistant" => crate::types::Role::Assistant,
+                "tool" => crate::types::Role::Tool,
+                _ => panic!("unknown test role: {role}"),
+            },
             content: content.to_string(),
             tool_calls: calls,
             tool_call_id: None,
@@ -564,7 +571,7 @@ mod tests {
 
     fn tool_msg(id: &str, output: &str) -> LLMMessage {
         LLMMessage {
-            role: "tool".to_string(),
+            role: crate::types::Role::Tool,
             content: output.to_string(),
             tool_call_id: Some(id.to_string()),
             ..Default::default()

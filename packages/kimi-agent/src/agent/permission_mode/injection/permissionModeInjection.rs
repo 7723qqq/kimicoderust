@@ -112,7 +112,7 @@ mod tests {
 
     fn message(content: &str) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: content.to_string(),
             ..Default::default()
         }

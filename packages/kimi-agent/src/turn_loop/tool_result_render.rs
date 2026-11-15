@@ -1,4 +1,4 @@
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 
 const TOOL_ERROR_STATUS: &str = "<system>ERROR: Tool execution failed.</system>";
 
@@ -27,7 +27,7 @@ fn is_empty_output_text(content: &str) -> bool {
     trimmed.is_empty() || trimmed == TOOL_OUTPUT_EMPTY_TEXT
 }
 
-pub fn render_parts(parts: &[ContentBlock], is_error: bool) -> Vec<ContentBlock> {
+pub fn render_parts(parts: &[ContentPart], is_error: bool) -> Vec<ContentPart> {
     if parts.is_empty() {
         return vec![text_block(if is_error {
             TOOL_EMPTY_ERROR_STATUS
@@ -35,7 +35,7 @@ pub fn render_parts(parts: &[ContentBlock], is_error: bool) -> Vec<ContentBlock>
             TOOL_EMPTY_STATUS
         })];
     }
-    if let [ContentBlock::Text { text, .. }] = parts {
+    if let [ContentPart::Text { text, .. }] = parts {
         return vec![text_block(render_status(text, is_error))];
     }
     if is_error {
@@ -46,18 +46,18 @@ pub fn render_parts(parts: &[ContentBlock], is_error: bool) -> Vec<ContentBlock>
     parts.to_vec()
 }
 
-pub fn prepend_wall_time_parts(parts: &mut Vec<ContentBlock>, duration_ms: u64) {
+pub fn prepend_wall_time_parts(parts: &mut Vec<ContentPart>, duration_ms: u64) {
     let header = crate::turn_loop::wall_time::wall_time_header(duration_ms);
     match parts.first_mut() {
-        Some(ContentBlock::Text { text, .. }) => {
+        Some(ContentPart::Text { text, .. }) => {
             *text = format!("{header}\n{text}");
         }
         _ => parts.insert(0, text_block(header)),
     }
 }
 
-pub fn append_note_parts(parts: &mut Vec<ContentBlock>, note: &str) {
-    if let [ContentBlock::Text { text, .. }] = parts.as_mut_slice() {
+pub fn append_note_parts(parts: &mut Vec<ContentPart>, note: &str) {
+    if let [ContentPart::Text { text, .. }] = parts.as_mut_slice() {
         text.push('\n');
         text.push_str(note);
         return;
@@ -65,8 +65,8 @@ pub fn append_note_parts(parts: &mut Vec<ContentBlock>, note: &str) {
     parts.push(text_block(note));
 }
 
-fn text_block(text: impl Into<String>) -> ContentBlock {
-    ContentBlock::Text {
+fn text_block(text: impl Into<String>) -> ContentPart {
+    ContentPart::Text {
         text: text.into(),
         meta: None,
     }

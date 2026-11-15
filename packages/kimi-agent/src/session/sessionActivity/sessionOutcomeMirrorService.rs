@@ -1,3 +1,6 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::app::event::event_bus::I_EVENT_BUS;
+use crate::state::event_dispatcher::I_EVENT_DISPATCHER;
 use std::sync::{Arc, Weak};
 
 use futures_util::future::{BoxFuture, Shared};
@@ -5,7 +8,7 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde_json::json;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::agent::r#loop::turn_events::TurnStarted;
@@ -53,10 +56,10 @@ pub struct SessionOutcomeMirror {
     metadata: Arc<dyn ISessionMetadata>,
     log: Arc<dyn ILogService>,
     state: Arc<Mutex<OutcomeState>>,
-    main_subscription: Arc<Mutex<Option<Vec<Box<dyn IDisposable>>>>>,
+    main_subscription: Arc<Mutex<Option<Vec<DisposableRef>>>>,
     metadata_ready: Shared<BoxFuture<'static, ()>>,
     weak: Mutex<Weak<Self>>,
-    subscriptions: Mutex<Vec<Box<dyn IDisposable>>>,
+    subscriptions: Mutex<Vec<DisposableRef>>,
 }
 
 impl SessionOutcomeMirror {
@@ -118,8 +121,8 @@ impl SessionOutcomeMirror {
         let Some(handle) = self.agents.handle_of(MAIN_AGENT_ID) else {
             return;
         };
-        let bus = handle.accessor().get::<IEventBus>();
-        let dispatcher = handle.accessor().get::<IEventDispatcher>();
+        let bus = handle.accessor().get(&I_EVENT_BUS);
+        let dispatcher = handle.accessor().get(&I_EVENT_DISPATCHER);
         let agent_states = handle.accessor().get(&I_AGENT_STATE_SERVICE);
         let mut subscriptions = Vec::new();
         let weak = Arc::downgrade(self);
@@ -336,6 +339,6 @@ pub fn register_session_outcome_mirror_service() {
     register_scoped_service(
         LifecycleScope::Session,
         ScopeActivation::OnScopeCreated,
-        "sessionActivity",
+        "sessionOutcomeMirror",
     );
 }

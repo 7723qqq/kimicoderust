@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use crate::agent::actor_service::agent_actor_runtime::AgentActorHost;
+use crate::session::agent_lifecycle::agent_lifecycle::I_AGENT_LIFECYCLE_SERVICE;
 use crate::agent::actor_service::agent_actor_service::{
     AgentActorContext, AgentActorDurable, AgentActorOptions, AgentActorService, StateFold,
 };
@@ -2163,7 +2164,7 @@ fn goal_effects() -> ActorLogic {
         if runtime.agent.agent_id == MAIN_AGENT_ID {
             disposables.push(
                 runtime
-                    .service::<dyn AgentLifecycleService>("agentLifecycleService")
+                    .service::<dyn AgentLifecycleService>(I_AGENT_LIFECYCLE_SERVICE.name())
                     .on_will_close(handlers.closing.clone()),
             );
             let injection = GoalInjection::new(

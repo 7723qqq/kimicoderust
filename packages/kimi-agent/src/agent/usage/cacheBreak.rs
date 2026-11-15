@@ -2,7 +2,7 @@ pub use crate::session::cache_observation::{
     CacheBreakCause, CacheBreakObservation, CacheBreakSnapshot,
 };
 
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 
 use super::cache_observation::CacheObservation;
 

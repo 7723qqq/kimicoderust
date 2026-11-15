@@ -1,3 +1,8 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::agent::r#loop::r#loop::I_AGENT_LOOP_SERVICE;
+use crate::agent::permission_mode::permission_mode::I_AGENT_PERMISSION_MODE_SERVICE;
+use crate::agent::profile::profile::I_AGENT_PROFILE_SERVICE;
+use crate::state::event_dispatcher::I_EVENT_DISPATCHER;
 use std::any::Any;
 use std::collections::HashSet;
 use std::error::Error;
@@ -27,7 +32,7 @@ use super::agent::{
 use super::subagent_task::{
     NO_PARTIAL_OUTPUT, SharedSubagentError, SubagentCompletion, SubagentHandle, SubagentTask,
 };
-use crate::_base::di::instantiation::IInstantiationService;
+use crate::_base::di::instantiation::{IInstantiationService, IInstantiationServiceExt};
 use crate::_base::di::scope::IAgentScopeHandle;
 use crate::_base::errors::errors::SharedError;
 use crate::_base::log::log::ILogService;
@@ -616,7 +621,7 @@ impl SubagentTool {
 
     async fn resume_profile_name(&self, agent_id: &str) -> Result<Option<String>, WireAsyncError> {
         if let Some(target) = self.agent_lifecycle.handle_of(agent_id) {
-            return Ok(target.accessor().get::<IAgentProfileService>().data().base.profile_name);
+            return Ok(target.accessor().get(&I_AGENT_PROFILE_SERVICE).data().base.profile_name);
         }
         let mut agents = self.session_metadata.read().await?.agents.unwrap_or_default();
         Ok(subagent_profile_name(agents.remove(agent_id).as_ref()))
@@ -650,7 +655,7 @@ impl SubagentTool {
                 .resolve_resume_target(resume_agent_id.as_deref().unwrap(), &controller.signal())
                 .await?;
             agent_id = target.id().to_string();
-            let resumed = target.accessor().get::<IAgentProfileService>().data();
+            let resumed = target.accessor().get(&I_AGENT_PROFILE_SERVICE).data();
             profile_name = resumed
                 .base
                 .profile_name
@@ -727,7 +732,7 @@ impl SubagentTool {
             .map(|handle| {
                 handle
                     .accessor()
-                    .get::<IAgentProfileService>()
+                    .get(&I_AGENT_PROFILE_SERVICE)
                     .get_effective_thinking_level()
             });
         let completion = async move {
@@ -807,7 +812,7 @@ impl SubagentTool {
         };
         if target
             .accessor()
-            .get::<IAgentLoopService>()
+            .get(&I_AGENT_LOOP_SERVICE)
             .snapshot()
             .state
             == LoopState::Running
@@ -847,14 +852,14 @@ impl SubagentTool {
         };
         let profile_name = rebuilt
             .accessor()
-            .get::<IAgentProfileService>()
+            .get(&I_AGENT_PROFILE_SERVICE)
             .data()
             .base
             .profile_name;
         if !has_pinned_permission_mode(profile_name.as_deref()) {
             rebuilt
                 .accessor()
-                .get::<IAgentPermissionModeService>()
+                .get(&I_AGENT_PERMISSION_MODE_SERVICE)
                 .set_mode(self.permission_mode.mode());
         }
         self.log.info(
@@ -1048,7 +1053,7 @@ impl SubagentTool {
                         task_id: Some(task_id.clone()),
                     },
                 );
-                let dispatcher = requester.accessor().get::<IEventDispatcher>();
+                let dispatcher = requester.accessor().get(&I_EVENT_DISPATCHER);
                 let agent_id = handle.agent_id.clone();
                 tokio::spawn(async move {
                     let _ = dispatcher

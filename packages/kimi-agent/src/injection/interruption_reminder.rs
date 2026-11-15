@@ -14,7 +14,7 @@
 //! a resumed session from re-announcing a reminder already in the transcript.
 
 use crate::injection::InjectionRegistry;
-use crate::rpc::types::ContentBlock;
+use crate::rpc::types::ContentPart;
 use crate::turn_loop::types::LLMMessage;
 
 /// The injection variant v2 registers (`interruptionReminderOps.ts:7`).
@@ -49,30 +49,15 @@ fn is_comparable(message: &LLMMessage) -> bool {
     !message.blocks.iter().all(is_vacuous_block)
 }
 
-/// v2 `isVacuousContentPart` (`vacuousContent.ts:3-19`): empty text, and think
-/// parts that carry neither text, an encrypted payload, nor a
-/// `detailsSummary`. Media is never vacuous.
-///
-/// v2 keeps a details-derived summary in `think` behind `hidden: true`, so
-/// `isVacuousContentPart` sees non-empty text and never calls it vacuous. Rust
-/// parks the same payload in `details_summary` and leaves `think` empty, so the
-/// summary must be counted here or an interrupted, replay-only reasoning block
-/// is mistaken for an invisible partial message.
-fn is_vacuous_block(block: &ContentBlock) -> bool {
+fn is_vacuous_block(block: &ContentPart) -> bool {
     match block {
-        ContentBlock::Text { text, .. } => text.trim().is_empty(),
-        ContentBlock::Think {
+        ContentPart::Text { text, .. } => text.trim().is_empty(),
+        ContentPart::Think {
             think,
             encrypted,
-            details_summary,
+            hidden,
             ..
-        } => {
-            encrypted.is_none()
-                && think.trim().is_empty()
-                && details_summary
-                    .as_deref()
-                    .is_none_or(|summary| summary.trim().is_empty())
-        }
+        } => encrypted.is_none() && *hidden != Some(true) && think.trim().is_empty(),
         _ => false,
     }
 }
@@ -145,7 +130,7 @@ mod tests {
 
     fn message(content: &str) -> LLMMessage {
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: content.to_string(),
             ..Default::default()
         }
@@ -203,7 +188,7 @@ mod tests {
         let history = [
             message(&wrap_system_reminder(INTERRUPTION_REMINDER)),
             LLMMessage {
-                role: "assistant".into(),
+                role: kimi_core::types::Role::Assistant,
                 content: "   ".into(),
                 ..Default::default()
             },
@@ -213,21 +198,16 @@ mod tests {
 
     #[test]
     fn test_baseline_counts_a_replay_only_details_summary() {
-        // v2 `isVacuousContentPart`: a details-derived think part keeps its
-        // summary in `think` behind `hidden: true`, so it is not vacuous. Rust
-        // parks it in `details_summary`, which must likewise keep the message
-        // comparable; otherwise an interrupted, replay-only message is skipped
-        // and the reminder baseline looks at the wrong message.
         let history = [
             message(&wrap_system_reminder(INTERRUPTION_REMINDER)),
             LLMMessage {
-                role: "assistant".into(),
-                blocks: vec![ContentBlock::Think {
-                    think: String::new(),
+                role: kimi_core::types::Role::Assistant,
+                blocks: vec![ContentPart::Think {
+                    think: "the reasoning summary".into(),
                     encrypted: None,
                     details_index: Some(0),
-                    reasoning_key: None,
-                    details_summary: Some("the reasoning summary".into()),
+                    hidden: Some(true),
+                    reasoning_key: Some("reasoning_details".into()),
                 }],
                 ..Default::default()
             },
@@ -238,7 +218,7 @@ mod tests {
     #[test]
     fn test_baseline_matches_the_origin_variant() {
         let history = [LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: wrap_system_reminder(INTERRUPTION_REMINDER),
             origin: Some(serde_json::json!({
                 "kind": "injection",

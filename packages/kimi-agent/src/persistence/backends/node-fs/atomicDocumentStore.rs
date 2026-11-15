@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::persistence::interface::atomic_document_store::{
     DocumentCodec, IAtomicDocumentStore, IAtomicTomlDocumentStore,
 };
@@ -115,7 +115,7 @@ impl AtomicDocumentStoreBase {
         self.storage.list(scope, prefix, None).await
     }
 
-    fn acquire(&self) -> Box<dyn IDisposable> {
+    fn acquire(&self) -> DisposableRef {
         to_disposable(|| {})
     }
 }
@@ -150,7 +150,7 @@ impl IAtomicDocumentStore for JsonAtomicDocumentStore {
         self.base.list(scope, prefix).await
     }
 
-    fn acquire(&self, _scope: &str, _key: &str) -> Box<dyn IDisposable> {
+    fn acquire(&self, _scope: &str, _key: &str) -> DisposableRef {
         self.base.acquire()
     }
 }
@@ -185,7 +185,7 @@ impl IAtomicDocumentStore for TomlAtomicDocumentStore {
         self.base.list(scope, prefix).await
     }
 
-    fn acquire(&self, _scope: &str, _key: &str) -> Box<dyn IDisposable> {
+    fn acquire(&self, _scope: &str, _key: &str) -> DisposableRef {
         self.base.acquire()
     }
 }

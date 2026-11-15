@@ -149,6 +149,8 @@ fn test_stdio_wire_contract_roundtrip() {
                     url: "https://example.com/a.png".into(),
                     id: None,
                     name: None,
+                    dimensions: None,
+                    detail: None,
                 }],
             },
         ],
@@ -400,8 +402,8 @@ fn test_llm_chat_response_roundtrip() {
             think: "checking the path".to_string(),
             encrypted: None,
             details_index: None,
+            hidden: None,
             reasoning_key: None,
-            details_summary: None,
         }],
         finish_reason: Some("stop".to_string()),
         usage: TokenUsage {

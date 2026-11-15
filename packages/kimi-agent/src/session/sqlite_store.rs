@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::_base::utils::workdir_slug::workspace_root_key;
 use crate::app::session_index::session_index::session_summary_from_row;
 use crate::features::fileHistory::fileHistoryService::reclaim_file_history_space;
 pub use crate::features::fileHistory::fileHistoryService::{
@@ -16,7 +17,7 @@ use crate::native::event_store::{
     WIRE_PROTOCOL_VERSION, fold_wire_events, read_fold_rows_with_repair, refuse_newer_wire_version,
     wire_backup_path,
 };
-use crate::rpc::types::TokenUsage;
+use kimi_core::types::TokenUsage;
 pub use crate::session::session_metadata::prompt_metadata::{
     DEFAULT_SESSION_TITLE, is_untitled,
 };
@@ -236,23 +237,6 @@ fn wire_export_line(
 }
 
 pub use crate::_base::workdir_slug::encode_workdir_key;
-
-pub fn workspace_root_key(root: &str) -> String {
-    let slashed = root.replace('\\', "/");
-    let normalized = slashed.trim_end_matches('/');
-    if is_windows_shaped(&slashed) {
-        normalized.to_lowercase()
-    } else {
-        normalized.to_string()
-    }
-}
-
-fn is_windows_shaped(slashed: &str) -> bool {
-    let bytes = slashed.as_bytes();
-    let drive =
-        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
-    drive || slashed.starts_with("//")
-}
 
 pub const BLOB_AUDIT_MAX_ROWS: u64 = 10_000;
 
@@ -629,7 +613,7 @@ pub struct TurnRecord {
     pub status: String,
     pub started_at: i64,
     pub completed_at: Option<i64>,
-    pub usage: Option<crate::rpc::types::TokenUsage>,
+    pub usage: Option<kimi_core::types::TokenUsage>,
 
     pub origin: Option<Value>,
 }
@@ -1390,7 +1374,7 @@ impl SqliteSessionStore {
             messages
                 .iter()
                 .find(|m| m.turn_id == turn_id)
-                .is_some_and(|m| m.message.role == "user")
+                .is_some_and(|m| m.message.role == kimi_core::types::Role::User)
         };
 
         let visible: Vec<usize> = turns
@@ -1994,7 +1978,7 @@ impl SqliteSessionStore {
             tokens_after: crate::compaction::estimate_messages_tokens(&compacted),
             kept_user_message_count: compacted
                 .iter()
-                .filter(|message| message.role == "user")
+                .filter(|message| message.role == kimi_core::types::Role::User)
                 .count(),
         };
         self.save_checkpoint(
@@ -2449,9 +2433,17 @@ impl SqliteSessionStore {
             "SELECT role, content, tool_calls, tool_call_id, blocks, prompt_id, created_at, turn_id, tools FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
+            let role = row.get::<_, String>(0)?;
+            let role = serde_json::from_value(Value::String(role)).map_err(|source| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(source),
+                )
+            })?;
             Ok(StoredMessage {
                 message: LLMMessage {
-                    role: row.get(0)?,
+                    role,
                     content: row.get(1)?,
                     blocks: decode_json_column(
                         row.get::<_, Option<String>>(4)?,
@@ -2603,7 +2595,7 @@ impl SqliteSessionStore {
                 insert_message.execute(params![
                     session_id,
                     turn_id,
-                    m.role,
+                    m.role.as_str(),
                     m.content,
                     tool_calls_json,
                     m.tool_call_id,

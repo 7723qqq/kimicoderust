@@ -10,7 +10,8 @@ use kimi_core::primitives::errors::domains::storage::STORAGE_CORRUPTED;
 use kimi_core::primitives::errors::{Error2, Error2Options};
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
+use crate::_base::errors::errors::SharedError;
 use crate::wire::record::WireAsyncError;
 
 #[derive(Debug)]
@@ -63,15 +64,17 @@ pub struct AppendLogOptions {
     pub on_error: Option<Arc<dyn Fn(WireAsyncError) + Send + Sync>>,
 }
 
+#[derive(Clone)]
 pub enum AppendLogTruncationReason {
     Corrupted,
     Truncated,
 }
 
+#[derive(Clone)]
 pub struct AppendLogTruncation {
     pub line_number: usize,
     pub reason: AppendLogTruncationReason,
-    pub cause: Option<WireAsyncError>,
+    pub cause: Option<SharedError>,
 }
 
 pub struct AppendLogReadOptions {
@@ -97,7 +100,7 @@ pub trait IAppendLogStore: Send + Sync {
     fn on_did_write(
         &self,
         listener: Arc<dyn Fn(AppendLogWrite) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn append(
         &self,
         scope: &str,
@@ -117,7 +120,7 @@ pub trait IAppendLogStore: Send + Sync {
     async fn flush(&self) -> Result<(), WireAsyncError>;
     async fn flush_log(&self, scope: &str, key: &str) -> Result<(), WireAsyncError>;
     async fn close(&self) -> Result<(), WireAsyncError>;
-    fn acquire(&self, scope: &str, key: &str) -> Box<dyn IDisposable>;
+    fn acquire(&self, scope: &str, key: &str) -> DisposableRef;
     async fn drain_retirements(&self) -> Result<(), WireAsyncError>;
     fn externally_modified(&self, scope: &str, key: &str) -> bool;
     fn bind_write_guard(
@@ -125,5 +128,5 @@ pub trait IAppendLogStore: Send + Sync {
         scope: &str,
         key: &str,
         guard: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
 }

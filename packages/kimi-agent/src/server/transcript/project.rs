@@ -328,10 +328,10 @@ impl TranscriptProjector {
                     step.ended_at = Some(now_iso());
                     if let Some(usage) = usage {
                         step.usage = Some(StepUsage {
-                            input_other: i64::from(usage.input_tokens),
-                            output: i64::from(usage.output_tokens),
-                            input_cache_read: i64::from(usage.input_cache_read),
-                            input_cache_creation: i64::from(usage.input_cache_creation),
+                            input_other: usage.input_other,
+                            output: usage.output,
+                            input_cache_read: usage.input_cache_read,
+                            input_cache_creation: usage.input_cache_creation,
                         });
                     }
 
@@ -1533,12 +1533,12 @@ fn is_terminal_task_state(state: TaskState) -> bool {
     )
 }
 
-fn rpc_usage_as_step_usage(usage: crate::rpc::types::TokenUsage) -> StepUsage {
+fn rpc_usage_as_step_usage(usage: kimi_core::types::TokenUsage) -> StepUsage {
     StepUsage {
-        input_other: i64::from(usage.input_tokens),
-        output: i64::from(usage.output_tokens),
-        input_cache_read: i64::from(usage.input_cache_read),
-        input_cache_creation: i64::from(usage.input_cache_creation),
+        input_other: usage.input_other,
+        output: usage.output,
+        input_cache_read: usage.input_cache_read,
+        input_cache_creation: usage.input_cache_creation,
     }
 }
 

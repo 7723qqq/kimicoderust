@@ -7,7 +7,7 @@ use futures_util::future::{BoxFuture, Shared};
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::paths::subtree_watch_filter;
 use crate::app::agent_profile_catalog::agent_profile_contribution::AGENT_PROFILE_SOURCE_PRIORITY;
@@ -55,7 +55,7 @@ type WatchFuture = Shared<BoxFuture<'static, Result<(), SharedWatchError>>>;
 struct WatchState {
     watch_ready: Option<WatchFuture>,
     primary_reload_tail: Option<WatchFuture>,
-    watchers: Vec<Box<dyn IDisposable>>,
+    watchers: Vec<DisposableRef>,
     watched_primary: Option<String>,
     watch_generation: u64,
 }
@@ -67,7 +67,7 @@ struct WorkspaceAgentProfileLoaderServiceInner {
     log: Arc<dyn ILogService>,
     watch_enabled: bool,
     state: Arc<Mutex<WatchState>>,
-    _subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    _subscription: Mutex<Option<DisposableRef>>,
 }
 
 #[derive(Clone)]
@@ -251,8 +251,8 @@ impl WorkspaceAgentProfileLoaderService {
             watcher.dispose();
         }
         let mut state = self.inner.state.lock();
-        state.watchers.push(handle);
-        state.watchers.push(subscription);
+        state.watchers.push(Arc::from(handle) as DisposableRef);
+        state.watchers.push(Arc::from(subscription) as DisposableRef);
         state.watched_primary = Some(primary);
         Ok(())
     }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::app::scopes::LifecycleScope;
@@ -21,7 +21,7 @@ use super::contribution::get_agent_profile_contributions;
 pub struct BuiltinAgentProfileLoaderService {
     by_name: IndexMap<String, AgentProfile>,
     ordered: Vec<AgentProfile>,
-    _registration: Mutex<Option<Box<dyn IDisposable>>>,
+    _registration: Mutex<Option<DisposableRef>>,
 }
 
 impl BuiltinAgentProfileLoaderService {

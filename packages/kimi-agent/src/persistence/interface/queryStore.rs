@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::marker::PhantomData;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -148,37 +149,27 @@ pub struct ColumnPageQuery {
 
 #[async_trait]
 pub trait IQueryStore: Send + Sync {
-    async fn put<T>(
+    async fn put_value(
         &self,
         collection: &str,
         key: &str,
-        value: T,
+        value: Value,
         columns: Option<HashMap<String, f64>>,
-    ) -> Result<(), WireAsyncError>
-    where
-        T: Serialize + Send + Sync + 'static;
+    ) -> Result<(), WireAsyncError>;
     async fn batch(&self, ops: Vec<WriteOp>) -> Result<(), WireAsyncError>;
     async fn delete(&self, collection: &str, key: &str) -> Result<(), WireAsyncError>;
-    async fn get<T>(&self, collection: &str, key: &str) -> Result<Option<T>, WireAsyncError>
-    where
-        T: for<'de> Deserialize<'de> + Send + Sync + 'static;
-    async fn get_many<T>(
+    async fn get_value(&self, collection: &str, key: &str) -> Result<Option<Value>, WireAsyncError>;
+    async fn get_many_values(
         &self,
         collection: &str,
         keys: &[String],
-    ) -> Result<HashMap<String, T>, WireAsyncError>
-    where
-        T: for<'de> Deserialize<'de> + Send + Sync + 'static;
-    fn query<T>(&self, collection: &str) -> Box<dyn IQuery<T>>
-    where
-        T: for<'de> Deserialize<'de> + Send + Sync + 'static;
-    async fn page_by_column<T>(
+    ) -> Result<HashMap<String, Value>, WireAsyncError>;
+    fn query_values(&self, collection: &str) -> Box<dyn IQuery<Value>>;
+    async fn page_by_column_values(
         &self,
         collection: &str,
         query: ColumnPageQuery,
-    ) -> Result<Page<T>, WireAsyncError>
-    where
-        T: for<'de> Deserialize<'de> + Send + Sync + 'static;
+    ) -> Result<Page<Value>, WireAsyncError>;
     async fn ensure_index(&self, collection: &str, def: IndexDef) -> Result<(), WireAsyncError>;
     async fn list_keys(&self, collection: &str) -> Result<Vec<String>, WireAsyncError>;
     async fn drop_collection(&self, collection: &str) -> Result<(), WireAsyncError>;
@@ -191,4 +182,121 @@ pub trait IQueryStore: Send + Sync {
     ) -> Result<(), WireAsyncError>;
     fn store_epoch(&self) -> u64;
     async fn close(&self) -> Result<(), WireAsyncError>;
+}
+
+#[async_trait]
+pub trait IQueryStoreExt: IQueryStore {
+    async fn put<T>(
+        &self,
+        collection: &str,
+        key: &str,
+        value: T,
+        columns: Option<HashMap<String, f64>>,
+    ) -> Result<(), WireAsyncError>
+    where
+        T: Serialize + Send + Sync + 'static,
+    {
+        self.put_value(collection, key, serde_json::to_value(value)?, columns)
+            .await
+    }
+
+    async fn get<T>(&self, collection: &str, key: &str) -> Result<Option<T>, WireAsyncError>
+    where
+        T: for<'de> Deserialize<'de> + Send + Sync + 'static,
+    {
+        match self.get_value(collection, key).await? {
+            Some(value) => Ok(Some(serde_json::from_value(value)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_many<T>(
+        &self,
+        collection: &str,
+        keys: &[String],
+    ) -> Result<HashMap<String, T>, WireAsyncError>
+    where
+        T: for<'de> Deserialize<'de> + Send + Sync + 'static,
+    {
+        let values = self.get_many_values(collection, keys).await?;
+        let mut out = HashMap::with_capacity(values.len());
+        for (key, value) in values {
+            out.insert(key, serde_json::from_value(value)?);
+        }
+        Ok(out)
+    }
+
+    fn query<T>(&self, collection: &str) -> Box<dyn IQuery<T>>
+    where
+        T: for<'de> Deserialize<'de> + Send + Sync + 'static,
+    {
+        Box::new(TypedQuery {
+            inner: self.query_values(collection),
+            marker: PhantomData,
+        })
+    }
+
+    async fn page_by_column<T>(
+        &self,
+        collection: &str,
+        query: ColumnPageQuery,
+    ) -> Result<Page<T>, WireAsyncError>
+    where
+        T: for<'de> Deserialize<'de> + Send + Sync + 'static,
+    {
+        let page = self.page_by_column_values(collection, query).await?;
+        let mut items = Vec::with_capacity(page.items.len());
+        for value in page.items {
+            items.push(serde_json::from_value(value)?);
+        }
+        Ok(Page {
+            items,
+            next_cursor: page.next_cursor,
+        })
+    }
+}
+
+impl<T> IQueryStoreExt for T where T: IQueryStore + ?Sized {}
+
+struct TypedQuery<T> {
+    inner: Box<dyn IQuery<Value>>,
+    marker: PhantomData<fn() -> T>,
+}
+
+#[async_trait]
+impl<T> IQuery<T> for TypedQuery<T>
+where
+    T: for<'de> Deserialize<'de> + Send + Sync + 'static,
+{
+    fn where_(&mut self, filter: QueryFilter) {
+        self.inner.where_(filter);
+    }
+
+    fn where_column(&mut self, column: String, bounds: ColumnBounds) {
+        self.inner.where_column(column, bounds);
+    }
+
+    fn order_by(&mut self, field: String, dir: Option<SortDir>) {
+        self.inner.order_by(field, dir);
+    }
+
+    fn limit(&mut self, n: usize) {
+        self.inner.limit(n);
+    }
+
+    fn cursor(&mut self, cursor: Option<String>) {
+        self.inner.cursor(cursor);
+    }
+
+    async fn execute(&self) -> Result<Page<T>, WireAsyncError> {
+        let page = self.inner.execute().await?;
+        let mut items = Vec::with_capacity(page.items.len());
+        for value in page.items {
+            items.push(serde_json::from_value(value)?);
+        }
+        Ok(Page {
+            items,
+            next_cursor: page.next_cursor,
+        })
+    }
 }

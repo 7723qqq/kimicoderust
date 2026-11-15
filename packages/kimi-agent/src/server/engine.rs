@@ -7,10 +7,11 @@ use crate::mcp::manager::McpManager;
 use crate::pipeline::{PipelineHost, PipelineSpec, build_engine_pipeline};
 use crate::primitives::read::ReadOutcome;
 use crate::rpc::types::{
-    AskQuestionRequest, AskQuestionResponse, BoxFuture, ContentBlock, LlmChatRequest,
-    LlmChatResponse, PermissionCheckRequest, PermissionDecision, TokenUsage, ToolExecuteRequest,
+    AskQuestionRequest, AskQuestionResponse, BoxFuture, ContentPart, LlmChatRequest,
+    LlmChatResponse, PermissionCheckRequest, PermissionDecision, ToolExecuteRequest,
     ToolExecuteResponse,
 };
+use kimi_core::types::TokenUsage;
 use crate::server::hub::EventHub;
 use crate::server::interaction::InteractionManager;
 use crate::session::sqlite_store::SqliteSessionStore;
@@ -2352,7 +2353,11 @@ impl ServerEngine {
             .store
             .compact_session_with_summary(session_id, instruction, summary)
             .map_err(EngineError::Turn)?;
-        let summary_output_tokens = summary_usage.as_ref().map(|usage| usage.output_tokens);
+        let summary_output_tokens = summary_usage
+            .as_ref()
+            .map(|usage| u32::try_from(usage.output))
+            .transpose()
+            .map_err(|error| EngineError::Turn(error.to_string()))?;
 
         if let Some(usage) = &summary_usage
             && let Err(e) = crate::session::usage::record_compaction(
@@ -2600,7 +2605,7 @@ impl ServerEngine {
         turn_number: u32,
         history: Vec<LLMMessage>,
         prompt: &str,
-        media: Vec<ContentBlock>,
+        media: Vec<ContentPart>,
         origin: Option<Value>,
     ) -> Result<TurnReport, EngineError> {
         let mut history = history;
@@ -2847,7 +2852,7 @@ impl ServerEngine {
         turn_number: u32,
         history: Vec<LLMMessage>,
         prompt: &str,
-        media: Vec<ContentBlock>,
+        media: Vec<ContentPart>,
         secondary_llm: Option<Arc<dyn LLM>>,
         toolset: Option<Arc<crate::tools::NativeToolset>>,
         origin: Option<Value>,
@@ -2960,7 +2965,7 @@ impl ServerEngine {
 
         let mut messages = history;
         let user_message = LLMMessage {
-            role: "user".to_string(),
+            role: kimi_core::types::Role::User,
             content: prompt.to_string(),
             blocks: media,
             tool_calls: Vec::new(),
@@ -3152,7 +3157,7 @@ impl ServerEngine {
             callbacks.as_ref(),
             crate::session::goal_turn::GoalTurnEnd::Ran {
                 stop: &result.stop_reason,
-                output_tokens: result.usage.output_tokens.into(),
+                output_tokens: result.usage.output.into(),
             },
         )
         .await;
@@ -3167,16 +3172,16 @@ impl ServerEngine {
             .publish(&crate::events::EngineEvent::Custom(serde_json::json!({
                 "type": "event.session.usage_updated",
                 "usage": {
-                    "input_tokens": result.usage.input_tokens,
-                    "output_tokens": result.usage.output_tokens,
+                    "input_tokens": result.usage.input_other,
+                    "output_tokens": result.usage.output,
                     "cache_read_tokens": result.usage.input_cache_read,
                     "cache_creation_tokens": result.usage.input_cache_creation,
                     "context_tokens": context_tokens,
                     "turn_count": turn_number,
                 },
                 "delta": {
-                    "input_tokens": result.usage.input_tokens,
-                    "output_tokens": result.usage.output_tokens,
+                    "input_tokens": result.usage.input_other,
+                    "output_tokens": result.usage.output,
                     "cache_read_tokens": result.usage.input_cache_read,
                     "cache_creation_tokens": result.usage.input_cache_creation,
                 },

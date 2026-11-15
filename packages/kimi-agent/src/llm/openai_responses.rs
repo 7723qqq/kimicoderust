@@ -3,8 +3,9 @@ use serde_json::{Value, json};
 use crate::llm::request_options::RequestOptions;
 use crate::llm::usage::read_openai_cache_fields;
 use crate::llm::wire::{StreamDelta, WireMessage};
-use crate::rpc::types::TokenUsage;
-use kimi_core::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
+use kimi_core::types::TokenUsage;
+use crate::rpc::types::ContentBlock;
+use kimi_core::types::{ContentPart, LLMChatResponse, ToolCall, ToolInfo};
 
 const DEVELOPER_ROLE_MODELS: &[&str] = &[
     "gpt-4.1",
@@ -139,7 +140,7 @@ pub fn build_request_full_with_options(
                         "type": "function_call",
                         "call_id": tc.id,
                         "name": tc.name,
-                        "arguments": tc.arguments.to_string(),
+                        "arguments": tc.arguments.as_deref().unwrap_or(""),
                     }));
                 }
             }
@@ -314,6 +315,17 @@ fn function_output_items(blocks: &[ContentBlock]) -> Vec<Value> {
             ContentBlock::VideoUrl { .. } => {
                 items.push(json!({ "type": "input_text", "text": OMITTED_VIDEO_PLACEHOLDER }));
             }
+            ContentBlock::DocumentUrl { url, name, .. } => {
+                if url.starts_with("data:") {
+                    items.push(json!({
+                        "type": "input_file",
+                        "file_data": url,
+                        "filename": name.as_deref().unwrap_or("document.pdf"),
+                    }));
+                } else {
+                    items.push(json!({ "type": "input_file", "file_url": url }));
+                }
+            }
             ContentBlock::MediaRef { kind, .. } => items.push(json!({
                 "type": "input_text",
                 "text": crate::llm::media_resolver::unavailable_text(*kind),
@@ -375,19 +387,18 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let (arguments, args_parse_error) = match item.get("arguments") {
-                        None => (json!({}), None),
-                        Some(Value::String(raw)) => {
-                            crate::llm::tool_args::parse_tool_arguments(Some(raw.as_str()))
-                        }
-                        Some(other) => (other.clone(), None),
+                    let arguments = match item.get("arguments") {
+                        Some(Value::String(raw)) => Some(raw.clone()),
+                        Some(Value::Null) | None => None,
+                        Some(other) => Some(other.to_string()),
                     };
                     tool_calls.push(ToolCall {
                         id,
                         name,
                         arguments,
                         extras: None,
-                        args_parse_error,
+                        raw_id: None,
+                        _stream_index: None,
                     });
                 }
                 "reasoning" => {
@@ -398,12 +409,12 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                     if let Some(summary) = item.get("summary").and_then(|s| s.as_array()) {
                         for sp in summary {
                             if let Some(text) = sp.get("text").and_then(|t| t.as_str()) {
-                                thinking.push(ContentBlock::Think {
+                                thinking.push(ContentPart::Think {
                                     think: text.to_string(),
                                     encrypted: encrypted.clone(),
                                     details_index: None,
                                     reasoning_key: None,
-                                    details_summary: None,
+                                    hidden: None,
                                 });
                             }
                         }
@@ -436,43 +447,30 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
         return TokenUsage::default();
     };
 
-    let raw_input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-    let output_tokens = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let raw_input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+    let output_tokens = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
 
     let split = read_openai_cache_fields(
         None,
         None,
         u.get("input_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
-            .and_then(|x| x.as_u64())
-            .map(|x| x as u32),
+            .and_then(|x| x.as_u64()),
         u.get("prompt_cache_hit_tokens")
-            .and_then(|x| x.as_u64())
-            .map(|x| x as u32),
+            .and_then(|x| x.as_u64()),
         u.get("prompt_cache_miss_tokens")
-            .and_then(|x| x.as_u64())
-            .map(|x| x as u32),
+            .and_then(|x| x.as_u64()),
         raw_input,
     );
     let input_cache_read = split.cached();
     let input_tokens = split.input_other(raw_input);
 
-    let total_tokens = u
-        .get("total_tokens")
-        .and_then(|x| x.as_u64())
-        .map(|t| t as u32)
-        .unwrap_or_else(|| {
-            input_tokens
-                .saturating_add(input_cache_read)
-                .saturating_add(output_tokens)
-        });
-
     TokenUsage {
-        input_tokens,
-        output_tokens,
-        total_tokens,
+        input_other: input_tokens,
+        output: output_tokens,
         input_cache_read,
         input_cache_creation: 0,
+        raw: u.as_object().cloned(),
     }
 }
 
@@ -608,14 +606,14 @@ impl StreamAccumulator {
                 .current_call_id
                 .take()
                 .unwrap_or_else(|| format!("call_{}", self.tool_calls.len()));
-            let (arguments, args_parse_error) =
-                crate::llm::tool_args::parse_tool_arguments(Some(self.current_call_args.as_str()));
+            let arguments = std::mem::take(&mut self.current_call_args);
             self.tool_calls.push(ToolCall {
                 id,
                 name,
-                arguments,
+                arguments: Some(arguments),
                 extras: None,
-                args_parse_error,
+                raw_id: None,
+                _stream_index: None,
             });
             self.current_call_args.clear();
         }
@@ -641,12 +639,12 @@ impl StreamAccumulator {
 
         let mut thinking = Vec::new();
         if !self.thinking.is_empty() || self.reasoning_encrypted.is_some() {
-            thinking.push(ContentBlock::Think {
+            thinking.push(ContentPart::Think {
                 think: self.thinking,
                 encrypted: self.reasoning_encrypted,
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             });
         }
 
@@ -674,9 +672,10 @@ mod tests {
                 vec![ToolCall {
                     id: "call_1".into(),
                     name: "readMedia".into(),
-                    arguments: json!({ "path": "a.png" }),
+                    arguments: Some(json!({ "path": "a.png" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
             ),
             WireMessage {
@@ -787,7 +786,7 @@ mod tests {
         let response = acc.finish();
         assert_eq!(response.content, "the answer is 4");
         let (think, encrypted) = match &response.thinking[0] {
-            ContentBlock::Think {
+            ContentPart::Think {
                 think, encrypted, ..
             } => (think, encrypted),
             other => panic!("a reasoning turn must carry a Think block: {other:?}"),
@@ -834,7 +833,7 @@ mod tests {
         let response = acc.finish();
 
         let (think, encrypted) = match &response.thinking[0] {
-            ContentBlock::Think {
+            ContentPart::Think {
                 think, encrypted, ..
             } => (think, encrypted),
             other => panic!("an attestation alone is a Think block: {other:?}"),
@@ -901,7 +900,7 @@ mod tests {
         let parsed = parse_response(&resp_json).unwrap();
         assert_eq!(parsed.content, "4");
         assert_eq!(parsed.finish_reason.as_deref(), Some("completed"));
-        assert_eq!(parsed.usage.total_tokens, 12);
+        assert_eq!(parsed.usage.measured_context_tokens(), 12);
     }
 
     #[test]
@@ -953,9 +952,9 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.content, "Hello world!");
         assert_eq!(resp.finish_reason.as_deref(), Some("stop"));
-        assert_eq!(resp.usage.input_tokens, 15);
-        assert_eq!(resp.usage.output_tokens, 5);
-        assert_eq!(resp.usage.total_tokens, 20);
+        assert_eq!(resp.usage.input_other, 15);
+        assert_eq!(resp.usage.output, 5);
+        assert_eq!(resp.usage.measured_context_tokens(), 20);
         assert_eq!(resp.thinking.len(), 1);
     }
 
@@ -979,9 +978,9 @@ mod tests {
         }));
 
         let resp = acc.finish();
-        assert_eq!(resp.usage.input_tokens, 9);
-        assert_eq!(resp.usage.output_tokens, 2);
-        assert_eq!(resp.usage.total_tokens, 11);
+        assert_eq!(resp.usage.input_other, 9);
+        assert_eq!(resp.usage.output, 2);
+        assert_eq!(resp.usage.measured_context_tokens(), 11);
     }
 
     #[test]
@@ -1011,7 +1010,7 @@ mod tests {
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "search");
         assert_eq!(resp.tool_calls[0].id, "call_123");
-        assert_eq!(resp.tool_calls[0].arguments["query"], "rust");
+        assert_eq!(resp.tool_calls[0].arguments.as_deref(), Some("{\"query\":\"rust\"}"));
     }
 
     #[test]
@@ -1062,10 +1061,10 @@ mod tests {
             1,
             "the call is kept so the loop can answer it"
         );
-        assert_eq!(resp.tool_calls[0].arguments, json!({}));
-        assert!(
-            resp.tool_calls[0].args_parse_error.is_some(),
-            "the reason travels with the call (v2 `parseToolCallArguments`)"
+        assert_eq!(
+            resp.tool_calls[0].arguments.as_deref(),
+            Some("{\"command\": \"rm -rf /tmp/x"),
+            "the executor receives the original malformed text"
         );
         assert!(resp.content.is_empty());
     }
@@ -1087,7 +1086,7 @@ mod tests {
         assert!(acc2.take_error().is_none());
         let resp = acc2.finish();
         assert_eq!(resp.tool_calls.len(), 1);
-        assert_eq!(resp.tool_calls[0].arguments, json!({}));
+        assert_eq!(resp.tool_calls[0].arguments.as_deref(), Some(""));
     }
 
     #[test]
@@ -1105,10 +1104,10 @@ mod tests {
             "a corrupt call is not a parse failure — the call is kept so the loop can answer it",
         );
         assert_eq!(parsed.tool_calls.len(), 1);
-        assert_eq!(parsed.tool_calls[0].arguments, json!({}));
-        assert!(
-            parsed.tool_calls[0].args_parse_error.is_some(),
-            "the reason travels with the call (v2 `parseToolCallArguments`)"
+        assert_eq!(
+            parsed.tool_calls[0].arguments.as_deref(),
+            Some("{\"path\": \"/x"),
+            "the executor receives the original malformed text"
         );
 
         let no_args = json!({
@@ -1120,11 +1119,7 @@ mod tests {
             }]
         });
         let parsed = parse_response(&no_args).unwrap();
-        assert_eq!(parsed.tool_calls[0].arguments, json!({}));
-        assert!(
-            parsed.tool_calls[0].args_parse_error.is_none(),
-            "absent arguments are a valid no-args call, not a failure"
-        );
+        assert_eq!(parsed.tool_calls[0].arguments, None);
     }
 
     #[test]
@@ -1159,8 +1154,8 @@ mod tests {
         });
         let parsed = parse_usage(Some(&usage));
         assert_eq!(parsed.input_cache_read, 800);
-        assert_eq!(parsed.input_tokens, 200);
-        assert_eq!(parsed.output_tokens, 50);
+        assert_eq!(parsed.input_other, 200);
+        assert_eq!(parsed.output, 50);
     }
 
     #[test]
@@ -1173,8 +1168,8 @@ mod tests {
         });
         let parsed = parse_usage(Some(&usage));
         assert_eq!(parsed.input_cache_read, 800);
-        assert_eq!(parsed.input_tokens, 200);
-        assert_eq!(parsed.output_tokens, 50);
+        assert_eq!(parsed.input_other, 200);
+        assert_eq!(parsed.output, 50);
     }
 
     #[test]

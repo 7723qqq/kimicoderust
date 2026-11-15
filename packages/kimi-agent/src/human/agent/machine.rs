@@ -979,7 +979,7 @@ fn spawn_turn(max_steps_per_turn: Option<u64>) -> Action {
         request.tools = context.tools.as_ref().map(|tools| {
             tools
                 .iter()
-                .filter(|tool| tool.deferred != Some(true))
+                .filter(|tool| tool.deferred.is_none())
                 .map(ToolDefinition::description)
                 .collect()
         });

@@ -11,6 +11,8 @@ use std::time::{Duration, SystemTime};
 
 use parking_lot::{Condvar, Mutex};
 
+use crate::_base::di::lifecycle::IDisposable;
+
 pub const WATCH_ENV: &str = "KIMI_CODE_WATCH";
 const NATIVE_RETRY_BASE_MS: u64 = 1000;
 const NATIVE_RETRY_MAX_MS: u64 = 30000;
@@ -81,13 +83,13 @@ impl fmt::Display for WatchError {
 impl std::error::Error for WatchError {}
 
 pub struct WatchSubscription {
-    cleanup: Option<Box<dyn FnOnce() + Send>>,
+    cleanup: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl WatchSubscription {
     fn new(cleanup: impl FnOnce() + Send + 'static) -> Self {
         Self {
-            cleanup: Some(Box::new(cleanup)),
+            cleanup: Mutex::new(Some(Box::new(cleanup))),
         }
     }
 
@@ -95,10 +97,16 @@ impl WatchSubscription {
         Self::new(|| {})
     }
 
-    pub fn dispose(&mut self) {
-        if let Some(cleanup) = self.cleanup.take() {
+    pub fn dispose(&self) {
+        if let Some(cleanup) = self.cleanup.lock().take() {
             cleanup();
         }
+    }
+}
+
+impl IDisposable for WatchSubscription {
+    fn dispose(&self) {
+        WatchSubscription::dispose(self);
     }
 }
 
@@ -260,6 +268,12 @@ impl WatchHandle {
             cleanup();
         }
         self.inner.listeners.lock().clear();
+    }
+}
+
+impl IDisposable for WatchHandle {
+    fn dispose(&self) {
+        WatchHandle::dispose(self);
     }
 }
 

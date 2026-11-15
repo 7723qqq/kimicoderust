@@ -7,7 +7,7 @@ use futures_util::{FutureExt, future::BoxFuture};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::environment::environment::{
     Environment, EnvironmentBinding, EnvironmentCapability, EnvironmentLease,
     EnvironmentResource, EnvironmentStatus, StatusListener,
@@ -62,7 +62,7 @@ struct Entry {
     active_leases: Mutex<usize>,
     drain_notify: tokio::sync::Notify,
     closed: AtomicBool,
-    status_subscription: Mutex<Option<Box<dyn IDisposable>>>,
+    status_subscription: Mutex<Option<DisposableRef>>,
 }
 
 #[derive(Clone)]
@@ -137,7 +137,7 @@ impl EnvironmentRegistry {
     pub fn on_did_change(
         &self,
         listener: Arc<dyn Fn(EnvironmentRegistryChange) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.inner.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.inner.listeners.lock().insert(id, listener);
         let inner = Arc::downgrade(&self.inner);

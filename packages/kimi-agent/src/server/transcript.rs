@@ -188,7 +188,7 @@ pub fn build_items(history: &[LLMMessage]) -> Vec<Value> {
                         "toolCallId": call.id,
                         "name": call.name,
                         "state": "running",
-                        "input": call.arguments,
+                        "input": crate::llm::tool_args::parse_tool_arguments(call.arguments.as_deref()).data,
                     }));
                 }
                 turn.steps.push(StepDraft {
@@ -621,17 +621,17 @@ mod tests {
     use crate::turn_loop::types::ToolCall;
 
     fn user(text: &str) -> LLMMessage {
-        LLMMessage::new("user", text)
+        LLMMessage::new(kimi_core::types::Role::User, text)
     }
 
     fn assistant(text: &str, calls: Vec<ToolCall>) -> LLMMessage {
-        let mut message = LLMMessage::new("assistant", text);
+        let mut message = LLMMessage::new(kimi_core::types::Role::Assistant, text);
         message.tool_calls = calls;
         message
     }
 
     fn tool(call_id: &str, output: &str) -> LLMMessage {
-        let mut message = LLMMessage::new("tool", output);
+        let mut message = LLMMessage::new(kimi_core::types::Role::Tool, output);
         message.tool_call_id = Some(call_id.to_string());
         message
     }
@@ -640,14 +640,15 @@ mod tests {
         ToolCall {
             id: id.to_string(),
             name: name.to_string(),
-            arguments: json!({ "path": "a.txt" }),
+            arguments: Some(json!({ "path": "a.txt" }).to_string()),
             extras: None,
-            args_parse_error: None,
+            raw_id: None,
+            _stream_index: None,
         }
     }
 
     fn steer(text: &str, prompt_id: &str) -> LLMMessage {
-        let mut message = LLMMessage::new("user", text);
+        let mut message = LLMMessage::new(kimi_core::types::Role::User, text);
         message.prompt_id = Some(prompt_id.to_string());
         message
     }

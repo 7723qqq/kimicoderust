@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::session::workspace_info::workspace_info::ISessionWorkspaceInfo;
 use crate::wire::record::WireAsyncError;
 
@@ -27,7 +27,7 @@ pub trait IWorkspaceDirs: Send + Sync {
     fn additional_dirs(&self) -> Vec<String>;
     fn shared_additional_dirs(&self) -> Vec<String>;
     fn primary_by_workspace(&self) -> HashMap<String, String>;
-    fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Box<dyn IDisposable>;
+    fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef;
     fn add_dir(
         &self,
         input: WorkspaceAddDirInput,
@@ -36,7 +36,7 @@ pub trait IWorkspaceDirs: Send + Sync {
         &self,
         base_dir: &str,
         dirs: &[String],
-    ) -> BoxFuture<'static, Result<Box<dyn IDisposable>, WireAsyncError>>;
+    ) -> BoxFuture<'static, Result<DisposableRef, WireAsyncError>>;
     fn reload(&self) -> BoxFuture<'static, Result<(), WireAsyncError>>;
     fn session_info(&self) -> Arc<dyn ISessionWorkspaceInfo>;
 }

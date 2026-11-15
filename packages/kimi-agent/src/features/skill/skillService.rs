@@ -212,6 +212,7 @@ impl AgentSkillService {
             client_metadata: origin.client_metadata.clone(),
             skill_activations: None,
             attachments: parse_attachments(origin.attachments.clone()),
+            ..Default::default()
         };
         let result = self.deps.loop_service.submit(
             UserEntry {
@@ -426,6 +427,7 @@ impl IAgentSkillService for AgentSkillService {
                         client_metadata: input.client_metadata.clone(),
                         skill_activations: Some(entries),
                         attachments: parse_attachments(input.attachments.clone()),
+                        ..Default::default()
                     }),
                     tracked: Some(true),
                     ..UserMeta::default()

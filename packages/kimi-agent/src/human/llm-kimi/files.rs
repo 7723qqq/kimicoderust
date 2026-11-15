@@ -80,6 +80,134 @@ impl Display for KimiFilesApiError {
 
 impl std::error::Error for KimiFilesApiError {}
 
+const READY_FILE_OBJECT_STATUSES: [&str; 3] = ["ready", "ok", "processed"];
+
+fn read_non_empty_string(value: Option<&Value>) -> Option<String> {
+    let text = value?.as_str()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn read_upload_failure_detail(record: &serde_json::Map<String, Value>) -> Option<String> {
+    if let Some(detail) = read_non_empty_string(record.get("status_details")) {
+        return Some(detail);
+    }
+    if let Some(extract_error) = record.get("extract_error") {
+        if let Some(detail) = read_non_empty_string(Some(extract_error)) {
+            return Some(detail);
+        }
+        if let Ok(serialized) = serde_json::to_string(extract_error) {
+            return Some(serialized);
+        }
+    }
+    if let Some(raw_error) = record.get("error") {
+        if let Some(detail) = read_non_empty_string(Some(raw_error)) {
+            return Some(detail);
+        }
+        if let Some(nested) = raw_error
+            .as_object()
+            .and_then(|error| read_non_empty_string(error.get("message")))
+        {
+            return Some(nested);
+        }
+    }
+    read_non_empty_string(record.get("message"))
+}
+
+fn js_string(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                value.to_string()
+            } else if let Some(value) = value.as_u64() {
+                value.to_string()
+            } else {
+                value.as_f64().unwrap_or_default().to_string()
+            }
+        }
+        Value::String(value) => value.clone(),
+        Value::Array(values) => values
+            .iter()
+            .map(|value| match value {
+                Value::Null => String::new(),
+                value => js_string(value),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Object(_) => "[object Object]".to_string(),
+    }
+}
+
+fn upload_status_error(
+    id: &str,
+    field: &str,
+    value: &Value,
+    detail: Option<String>,
+) -> WireAsyncError {
+    let rendered = js_string(value);
+    let summary = if value.as_str() == Some("error") {
+        format!("Kimi file upload failed for file \"{id}\" ({field}={rendered})")
+    } else {
+        format!("Kimi file upload for file \"{id}\" is not ready ({field}={rendered})")
+    };
+    let message = match detail {
+        Some(detail) => format!("{summary}: {detail}"),
+        None => summary,
+    };
+    KimiFilesError(message).into()
+}
+
+fn parse_uploaded_kimi_file(value: &Value) -> Result<String, WireAsyncError> {
+    let Some(record) = value.as_object() else {
+        return Err(KimiFilesError(
+            "Kimi file upload returned an invalid response payload".to_string(),
+        )
+        .into());
+    };
+    let Some(id) = record
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+    else {
+        return Err(
+            KimiFilesError("Kimi file upload returned an empty file id".to_string()).into(),
+        );
+    };
+    let extract_status = record
+        .get("extract_status")
+        .filter(|value| !value.is_null());
+    if let Some(extract_status) = extract_status
+        && extract_status.as_str() != Some("ready")
+    {
+        return Err(upload_status_error(
+            &id,
+            "extract_status",
+            extract_status,
+            read_upload_failure_detail(record),
+        ));
+    }
+    let status = record.get("status").filter(|value| !value.is_null());
+    let allow_uploaded_with_ready_extract = extract_status.and_then(Value::as_str) == Some("ready")
+        && status.and_then(Value::as_str) == Some("uploaded");
+    if let Some(status) = status
+        && !allow_uploaded_with_ready_extract
+        && status
+            .as_str()
+            .is_none_or(|status| !READY_FILE_OBJECT_STATUSES.contains(&status))
+    {
+        return Err(upload_status_error(
+            &id,
+            "status",
+            status,
+            read_upload_failure_detail(record),
+        ));
+    }
+    Ok(id)
+}
+
 pub struct KimiFiles {
     options: KimiFilesOptions,
     client: Option<reqwest::Client>,
@@ -243,10 +371,7 @@ impl KimiFiles {
             .into());
         }
         let value: Value = serde_json::from_slice(&response.body)?;
-        Ok(value
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string))
+        Ok(Some(parse_uploaded_kimi_file(&value)?))
     }
 }
 

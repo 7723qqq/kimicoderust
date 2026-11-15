@@ -1,12 +1,12 @@
 use std::sync::OnceLock;
 
-use kimi_core::types::{ContentBlock, LLMMessage, MediaKind};
+use kimi_core::types::{ContentPart, LLMMessage, MediaKind};
 use serde_json::{Map, Value, json};
 
 const SKILL_ACTIVATION_PART_SOURCE: &str = "skill activation";
 
-fn skill_activation_part(text: String, activation_id: &str) -> ContentBlock {
-    ContentBlock::Text {
+fn skill_activation_part(text: String, activation_id: &str) -> ContentPart {
+    ContentPart::Text {
         text,
         meta: Some(Map::from_iter([
             (
@@ -18,10 +18,10 @@ fn skill_activation_part(text: String, activation_id: &str) -> ContentBlock {
     }
 }
 
-fn is_skill_activation_part(part: &ContentBlock) -> bool {
+fn is_skill_activation_part(part: &ContentPart) -> bool {
     matches!(
         part,
-        ContentBlock::Text {
+        ContentPart::Text {
             meta: Some(meta),
             ..
         } if meta.get("source").and_then(Value::as_str) == Some(SKILL_ACTIVATION_PART_SOURCE)
@@ -43,9 +43,9 @@ fn bundled_skill_activations_of(message: &LLMMessage) -> &[Value] {
         .unwrap_or(&[])
 }
 
-fn content_parts_of(message: &LLMMessage) -> Vec<ContentBlock> {
+fn content_parts_of(message: &LLMMessage) -> Vec<ContentPart> {
     if message.blocks.is_empty() {
-        return vec![ContentBlock::Text {
+        return vec![ContentPart::Text {
             text: message.content.clone(),
             meta: None,
         }];
@@ -54,9 +54,9 @@ fn content_parts_of(message: &LLMMessage) -> Vec<ContentBlock> {
 }
 
 fn annotate_bundled_skill_parts(
-    content: &[ContentBlock],
+    content: &[ContentPart],
     bundled_activations: &[Value],
-) -> Vec<ContentBlock> {
+) -> Vec<ContentPart> {
     if bundled_activations.is_empty() || content.iter().any(is_skill_activation_part) {
         return content.to_vec();
     }
@@ -64,7 +64,7 @@ fn annotate_bundled_skill_parts(
     content
         .iter()
         .map(|part| {
-            let ContentBlock::Text { text, meta } = part else {
+            let ContentPart::Text { text, meta } = part else {
                 return part.clone();
             };
             let has_source = meta
@@ -86,7 +86,7 @@ fn annotate_bundled_skill_parts(
         .collect()
 }
 
-fn strip_bundled_skill_blocks(message: &LLMMessage) -> Vec<ContentBlock> {
+fn strip_bundled_skill_blocks(message: &LLMMessage) -> Vec<ContentPart> {
     annotate_bundled_skill_parts(
         &content_parts_of(message),
         bundled_skill_activations_of(message),
@@ -129,28 +129,24 @@ fn without_image_compression_captions(text: &str) -> String {
     pattern.replace_all(text, "").into_owned()
 }
 
-fn prompt_part_text(part: &ContentBlock) -> Option<String> {
+fn prompt_part_text(part: &ContentPart) -> Option<String> {
     match part {
-        ContentBlock::Text { text, .. } => {
+        ContentPart::Text { text, .. } => {
             if single_media_path_tag(text) {
                 return None;
             }
             let text = without_image_compression_captions(text);
             (!text.trim().is_empty()).then_some(text)
         }
-        ContentBlock::Think { .. } => None,
-        ContentBlock::Image { .. } | ContentBlock::ImageUrl { .. } => Some("[image]".into()),
-        ContentBlock::AudioUrl { .. } => Some("[audio]".into()),
-        ContentBlock::VideoUrl { .. } => Some("[video]".into()),
-        ContentBlock::MediaRef { kind, .. } => match kind {
-            MediaKind::Image => Some("[image]".into()),
-            MediaKind::Audio => Some("[audio]".into()),
-            MediaKind::Video => Some("[video]".into()),
-        },
+        ContentPart::Think { .. } => None,
+        ContentPart::ImageUrl { .. } => Some("[image]".into()),
+        ContentPart::AudioUrl { .. } => Some("[audio]".into()),
+        ContentPart::VideoUrl { .. } => Some("[video]".into()),
+        ContentPart::DocumentUrl { .. } => Some("[document]".into()),
     }
 }
 
-fn prompt_display_text_from_content_parts(parts: &[ContentBlock]) -> String {
+fn prompt_display_text_from_content_parts(parts: &[ContentPart]) -> String {
     parts
         .iter()
         .filter_map(prompt_part_text)
@@ -223,12 +219,12 @@ pub(crate) fn merge_steer_messages(messages: &[LLMMessage]) -> LLMMessage {
     let legacy_content = content
         .iter()
         .filter_map(|part| match part {
-            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            ContentPart::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<String>();
     LLMMessage {
-        role: "user".into(),
+        role: kimi_core::types::Role::User,
         content: legacy_content,
         blocks: content,
         tool_calls: Vec::new(),

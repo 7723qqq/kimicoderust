@@ -1,8 +1,8 @@
+use crate::_base::utils::xml_escape as escape;
 use crate::native::bash::{DEFAULT_TIMEOUT_S, MAX_TIMEOUT_S};
 use crate::native::bash_spawn;
 use crate::native::compaction::{self, CompactionConfigMeta, CompactionMessageMeta};
 use crate::native::edit::{self, EditResult};
-use crate::native::escape;
 use crate::native::glob::{self, MAX_MATCHES};
 use crate::native::grep::{self, DEFAULT_HEAD_LIMIT, GrepConfig, GrepResult, OutputMode};
 use crate::native::image_compress;

@@ -104,6 +104,25 @@ impl IAgentStateService for AgentStateService {
 }
 
 impl IStateRegistry for AgentStateService {
+    fn contribute_state_dynamic(
+        &self,
+        key: StateKey<DynamicValue>,
+    ) -> Result<DisposableRef, BugIndicatingError> {
+        self.registry.contribute_state_dynamic(key)
+    }
+
+    fn has_dynamic(&self, key: &StateKey<DynamicValue>) -> bool {
+        self.registry.has_dynamic(key)
+    }
+
+    fn get_dynamic(&self, key: &StateKey<DynamicValue>) -> DynamicValue {
+        self.registry.get_dynamic(key)
+    }
+
+    fn set_dynamic(&self, key: &StateKey<DynamicValue>, value: DynamicValue) {
+        self.registry.set_dynamic(key, value)
+    }
+
     fn snapshot(&self) -> HashMap<String, Value> {
         IStateRegistry::snapshot(self.registry.as_ref())
     }

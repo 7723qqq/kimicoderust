@@ -10,6 +10,7 @@ use super::cascade_engine::UnitActivation;
 use super::descriptors::{DynamicValue, SyncDescriptor};
 use super::instantiation::{
     ProvideAllEntry, ProvideOptions, ServiceIdentifier, ServicesAccessor,
+    refine_service_decorator,
 };
 pub use super::instantiation::ScopeActivation;
 use super::instantiation_service::InstantiationService;
@@ -144,6 +145,19 @@ pub fn clear_scoped_registry_for_tests() {
 }
 
 pub type ScopeSeed = Vec<(ServiceIdentifier<DynamicValue>, ServiceValue)>;
+
+/// Build a single-entry seed from an explicit service identifier and an
+/// already-constructed instance. Mirrors the v2 `[[IX, value]]` seed tuple:
+/// DI lookup matches on the identifier name, not the trait type. Callers
+/// wrap the instance the same way a descriptor constructor produces it
+/// (`Arc::new(instance) as DynamicValue`) so constructor dependencies can
+/// downcast it with the shared `dependency::<dyn T>` helper.
+pub fn seed_instance<U>(
+    id: &ServiceIdentifier<U>,
+    instance: DynamicValue,
+) -> ScopeSeed {
+    vec![(refine_service_decorator(id), ServiceValue::Instance(instance))]
+}
 pub type ConfigureContainer = Arc<
     dyn Fn(Arc<InstantiationService>) -> Result<(), String> + Send + Sync,
 >;

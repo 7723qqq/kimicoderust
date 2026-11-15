@@ -84,6 +84,42 @@ impl AbortSignal {
         self.inner.reason.lock().clone()
     }
 
+    pub fn throw_if_aborted(&self) -> Result<(), crate::wire::record::WireAsyncError> {
+        if !self.aborted() {
+            return Ok(());
+        }
+        let reason = abort_reason(self);
+        if let Some(error) = reason.downcast_ref::<AbortError>() {
+            return Err(Box::new(error.clone()));
+        }
+        if let Some(error) = reason.downcast_ref::<UserCancellationError>() {
+            return Err(Box::new(error.clone()));
+        }
+        Err(reason.into())
+    }
+
+    pub fn add_event_listener(
+        &self,
+        type_: &str,
+        listener: Arc<dyn Fn() + Send + Sync>,
+        _once: bool,
+    ) {
+        if type_ != "abort" {
+            return;
+        }
+        self.listen(listener);
+    }
+
+    pub fn remove_event_listener(&self, type_: &str, listener: Arc<dyn Fn() + Send + Sync>) {
+        if type_ != "abort" {
+            return;
+        }
+        self.inner
+            .listeners
+            .lock()
+            .retain(|(_, current)| !Arc::ptr_eq(current, &listener));
+    }
+
     fn listen(&self, listener: Arc<dyn Fn() + Send + Sync>) -> u64 {
         let id = self.inner.next_listener.fetch_add(1, Ordering::Relaxed);
         self.inner.listeners.lock().push((id, listener));
@@ -95,6 +131,7 @@ impl AbortSignal {
     }
 }
 
+#[derive(Clone)]
 pub struct AbortController {
     signal: AbortSignal,
 }

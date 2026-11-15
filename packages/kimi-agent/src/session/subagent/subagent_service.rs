@@ -1,3 +1,10 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::agent::environment_binding::environment_binding::I_AGENT_ENVIRONMENT_BINDING_SERVICE;
+use crate::agent::environment_binding::agent_environment::I_AGENT_ENVIRONMENT_SERVICE;
+use crate::agent::permission_mode::permission_mode::I_AGENT_PERMISSION_MODE_SERVICE;
+use crate::agent::profile::profile::I_AGENT_PROFILE_SERVICE;
+use crate::features::reminder::reminder_service::I_AGENT_REMINDER_SERVICE;
+use crate::agent::user_tool::user_tool::I_AGENT_USER_TOOL_SERVICE;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -11,7 +18,7 @@ use kimi_core::primitives::errors::{Error2, Error2Options};
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::di::scope::{IAgentScopeHandle, ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::agent::agent_context::agent_context::AgentContext;
@@ -119,7 +126,7 @@ impl SessionSubagentService {
         let caller = self.require_caller(&input.caller_agent_id)?;
         let fork = input.fork == Some(true);
         self.catalog.ready().await?;
-        let own = caller.accessor().get::<IAgentProfileService>().data();
+        let own = caller.accessor().get(&I_AGENT_PROFILE_SERVICE).data();
         let requested = input
             .profile_name
             .as_deref()
@@ -242,7 +249,7 @@ impl SessionSubagentService {
         let plan = opts.plan.clone();
         let caller_binding = caller
             .accessor()
-            .get::<IAgentEnvironmentBindingService>()
+            .get(&I_AGENT_ENVIRONMENT_BINDING_SERVICE)
             .current();
         let lease = if plan.fork {
             None
@@ -250,7 +257,7 @@ impl SessionSubagentService {
             Some(
                 caller
                     .accessor()
-                    .get::<IAgentEnvironmentService>()
+                    .get(&I_AGENT_ENVIRONMENT_SERVICE)
                     .acquire_when_ready(&["process"])
                     .await?,
             )
@@ -277,6 +284,7 @@ impl SessionSubagentService {
             if plan.fork {
                 let forked = self
                     .agent_lifecycle
+                    .clone()
                     .fork(
                         agent_context_of(caller),
                         Some(ForkAgentOptions {
@@ -288,12 +296,13 @@ impl SessionSubagentService {
                 let created = self.agent_lifecycle.handle_of(&forked.agent_id).unwrap();
                 created
                     .accessor()
-                    .get::<IAgentReminderService>()
+                    .get(&I_AGENT_REMINDER_SERVICE)
                     .notify(FORK_CONTEXT_NOTICE, Some(json_variant("fork_context")));
                 Ok::<_, WireAsyncError>(created)
             } else {
                 let created_context = self
                     .agent_lifecycle
+                    .clone()
                     .create(Some(CreateAgentOptions {
                         binding: Some(BindAgentInput {
                             profile: plan.profile_name.clone(),
@@ -318,7 +327,7 @@ impl SessionSubagentService {
             Err(error) => {
                 let caller_model = caller
                     .accessor()
-                    .get::<IAgentProfileService>()
+                    .get(&I_AGENT_PROFILE_SERVICE)
                     .data()
                     .model_alias;
                 return Err(wrap_subagent_model_error(
@@ -328,17 +337,17 @@ impl SessionSubagentService {
                 ));
             }
         };
-        let permission_mode = caller.accessor().get::<IAgentPermissionModeService>().mode();
+        let permission_mode = caller.accessor().get(&I_AGENT_PERMISSION_MODE_SERVICE).mode();
         created
             .accessor()
-            .get::<IAgentPermissionModeService>()
+            .get(&I_AGENT_PERMISSION_MODE_SERVICE)
             .set_mode(permission_mode);
-        let created_user_tools = created.accessor().get::<IAgentUserToolService>();
-        let caller_user_tools = caller.accessor().get::<IAgentUserToolService>();
+        let created_user_tools = created.accessor().get(&I_AGENT_USER_TOOL_SERVICE);
+        let caller_user_tools = caller.accessor().get(&I_AGENT_USER_TOOL_SERVICE);
         if plan.fork {
             let active_tool_names = created
                 .accessor()
-                .get::<IAgentProfileService>()
+                .get(&I_AGENT_PROFILE_SERVICE)
                 .get_active_tool_names();
             created_user_tools.inherit_user_tools(&caller_user_tools, active_tool_names);
         } else {
@@ -375,7 +384,7 @@ impl SessionSubagentService {
         &self,
         profile_name: &str,
         prompt: &str,
-        environment: &Environment,
+        environment: &Arc<dyn Environment>,
         cwd: Option<&str>,
     ) -> Result<String, WireAsyncError> {
         let Some(profile) = self.catalog.get(profile_name) else {
@@ -421,7 +430,7 @@ impl ISessionSubagentService for SessionSubagentService {
     fn on_did_stop_agent_task(
         &self,
         listener: Arc<dyn Fn(AgentTaskStopHookContext) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, Ordering::Relaxed);
         self.stop_listeners.lock().push((id, listener));
         let listeners = Arc::downgrade(&self.stop_listeners);

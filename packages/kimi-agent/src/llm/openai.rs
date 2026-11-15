@@ -4,8 +4,9 @@ use crate::llm::model_family::{ignored_sampling_params_for_model, resolve_model_
 use crate::llm::request_options::{RequestOptions, strip_ignored_sampling};
 use crate::llm::usage::read_openai_cache_fields;
 use crate::llm::wire::{StreamDelta, WireMessage};
-use crate::rpc::types::TokenUsage;
-use kimi_core::types::{ContentBlock, LLMChatResponse, ToolCall, ToolInfo};
+use kimi_core::types::TokenUsage;
+use crate::rpc::types::ContentBlock;
+use kimi_core::types::{ContentPart, LLMChatResponse, ToolCall, ToolInfo};
 
 pub const TOOL_RESULT_MEDIA_PROMPT: &str = "Attached media from tool result:";
 pub const TOOL_RESULT_MEDIA_PLACEHOLDER: &str = "(see attached media)";
@@ -488,17 +489,17 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>, tool_keep_parts
             think,
             encrypted,
             details_index,
+            hidden,
             reasoning_key: part_key,
-            details_summary,
         } = block
         else {
             continue;
         };
-        all_thinking.push_str(think);
+        if *hidden != Some(true) {
+            all_thinking.push_str(think);
+        }
         if details_index.is_some() {
-            if let Some(summary) = details_summary {
-                details.push(json!({ "type": "summary", "summary": summary }));
-            } else if !think.is_empty() {
+            if !think.is_empty() {
                 details.push(json!({ "type": "summary", "summary": think }));
             }
             if let Some(encrypted) = encrypted {
@@ -510,10 +511,16 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>, tool_keep_parts
             .as_deref()
             .filter(|key| *key != REASONING_DETAILS_KEY)
         {
-            push_string_field(&mut string_fields, key, think);
+            push_string_field(
+                &mut string_fields,
+                key,
+                if *hidden == Some(true) { "" } else { think },
+            );
             continue;
         }
-        unstamped.push_str(think);
+        if *hidden != Some(true) {
+            unstamped.push_str(think);
+        }
     }
     let redirected = reasoning_key.is_some() || !details.is_empty() || !string_fields.is_empty();
     if redirected && !unstamped.is_empty() {
@@ -551,9 +558,10 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>, tool_keep_parts
             .tools
             .iter()
             .map(|tool| {
-                let parameters =
-                    crate::llm::kimi_schema::normalize_kimi_tool_schema(&tool.parameters)
-                        .unwrap_or_else(|_| tool.parameters.clone());
+                let parameters = crate::llm::kimi_schema::normalize_kimi_tool_schema(
+                    &Value::Object(tool.parameters.clone()),
+                )
+                .unwrap_or_else(|_| Value::Object(tool.parameters.clone()));
                 kimi_tool_definition(&tool.name, &tool.description, &parameters)
             })
             .collect();
@@ -588,8 +596,7 @@ fn project_message(m: &WireMessage, reasoning_key: Option<&str>, tool_keep_parts
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": serde_json::to_string(&tc.arguments)
-                            .unwrap_or_else(|_| "{}".to_string()),
+                        "arguments": tc.arguments.as_deref().unwrap_or(""),
                     }
                 })
             })
@@ -653,6 +660,14 @@ fn project_block(b: &ContentBlock) -> Value {
             }
             json!({ "type": "video_url", "video_url": video })
         }
+        ContentBlock::DocumentUrl {
+            url,
+            name,
+            ..
+        } => json!({
+            "type": "file",
+            "file": { "file_data": url, "filename": name },
+        }),
         ContentBlock::Think { think, .. } => json!({ "type": "text", "text": think }),
         ContentBlock::MediaRef { kind, .. } => json!({
             "type": "text",
@@ -698,19 +713,18 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            let (arguments, args_parse_error) = match func.get("arguments") {
-                Some(serde_json::Value::String(raw)) => {
-                    crate::llm::tool_args::parse_tool_arguments(Some(raw.as_str()))
-                }
-                Some(other) => (other.clone(), None),
-                None => crate::llm::tool_args::parse_tool_arguments(None),
+            let arguments = match func.get("arguments") {
+                Some(serde_json::Value::String(raw)) => Some(raw.clone()),
+                Some(serde_json::Value::Null) | None => None,
+                Some(other) => Some(other.to_string()),
             };
             tool_calls.push(ToolCall {
                 id,
                 name,
                 arguments,
                 extras: None,
-                args_parse_error,
+                raw_id: None,
+                _stream_index: None,
             });
         }
     }
@@ -723,12 +737,12 @@ pub fn parse_response(v: &Value) -> Result<LLMChatResponse, String> {
     if let Some(think) = reasoning
         && !think.is_empty()
     {
-        thinking.push(ContentBlock::Think {
+        thinking.push(ContentPart::Think {
             think: think.to_string(),
             encrypted: None,
             details_index: None,
             reasoning_key: None,
-            details_summary: None,
+            hidden: None,
         });
     }
 
@@ -747,51 +761,35 @@ fn parse_usage(usage: Option<&Value>) -> TokenUsage {
         return TokenUsage::default();
     };
 
-    let prompt_tokens = u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let prompt_tokens = u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
     let output_tokens = u
         .get("completion_tokens")
         .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0);
 
     let split = read_openai_cache_fields(
-        u.get("cached_tokens")
-            .and_then(|x| x.as_u64())
-            .map(|x| x as u32),
+        u.get("cached_tokens").and_then(|x| x.as_u64()),
         u.get("prompt_tokens_details")
             .and_then(|details| details.get("cached_tokens"))
-            .and_then(|x| x.as_u64())
-            .map(|x| x as u32),
+            .and_then(|x| x.as_u64()),
         u.get("input_tokens_details")
             .and_then(|details| details.get("cached_tokens"))
-            .and_then(|x| x.as_u64())
-            .map(|x| x as u32),
+            .and_then(|x| x.as_u64()),
         u.get("prompt_cache_hit_tokens")
-            .and_then(|x| x.as_u64())
-            .map(|x| x as u32),
+            .and_then(|x| x.as_u64()),
         u.get("prompt_cache_miss_tokens")
-            .and_then(|x| x.as_u64())
-            .map(|x| x as u32),
+            .and_then(|x| x.as_u64()),
         prompt_tokens,
     );
     let cached = split.cached();
     let input_tokens = split.input_other(prompt_tokens);
 
-    let total_tokens = u
-        .get("total_tokens")
-        .and_then(|x| x.as_u64())
-        .map(|t| t as u32)
-        .unwrap_or_else(|| {
-            input_tokens
-                .saturating_add(cached)
-                .saturating_add(output_tokens)
-        });
-
     TokenUsage {
-        input_tokens,
-        output_tokens,
-        total_tokens,
+        input_other: input_tokens,
+        output: output_tokens,
         input_cache_read: cached,
         input_cache_creation: 0,
+        raw: u.as_object().cloned(),
     }
 }
 
@@ -808,7 +806,7 @@ const MAX_STREAM_TOOL_CALLS: usize = 256;
 pub struct StreamAccumulator {
     content: String,
     thinking: String,
-    stamped: Vec<ContentBlock>,
+    stamped: Vec<ContentPart>,
     saw_reasoning_text: bool,
     tool_calls: Vec<PartialToolCall>,
     finish_reason: Option<String>,
@@ -954,46 +952,29 @@ impl StreamAccumulator {
             .tool_calls
             .into_iter()
             .filter(|tc| !tc.name.is_empty())
-            .map(|tc| {
-                let (arguments, args_parse_error) =
-                    crate::llm::tool_args::parse_tool_arguments(Some(tc.arguments.as_str()));
-                ToolCall {
-                    id: tc.id,
-                    name: tc.name,
-                    arguments,
-                    extras: None,
-                    args_parse_error,
-                }
+            .map(|tc| ToolCall {
+                id: tc.id,
+                name: tc.name,
+                arguments: (!tc.arguments.is_empty()).then_some(tc.arguments),
+                extras: None,
+                raw_id: None,
+                _stream_index: None,
             })
             .collect();
 
         let thinking = if self.thinking.is_empty() {
             Vec::new()
         } else {
-            vec![ContentBlock::Think {
+            vec![ContentPart::Think {
                 think: self.thinking,
                 encrypted: None,
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             }]
         };
         let mut thinking = thinking;
         thinking.extend(self.stamped);
-        if !self.saw_reasoning_text {
-            for block in &mut thinking {
-                if let ContentBlock::Think {
-                    think,
-                    details_summary,
-                    ..
-                } = block
-                    && think.is_empty()
-                    && let Some(summary) = details_summary.clone()
-                {
-                    *think = summary;
-                }
-            }
-        }
 
         LLMChatResponse {
             content: self.content,
@@ -1006,40 +987,42 @@ impl StreamAccumulator {
     }
 }
 
-fn reasoning_details_parts(delta: &Value, _string_dialect_seen: bool) -> Vec<ContentBlock> {
+fn reasoning_details_parts(delta: &Value, string_dialect_seen: bool) -> Vec<ContentPart> {
     let Some(array) = delta.get(REASONING_DETAILS_KEY).and_then(Value::as_array) else {
         return Vec::new();
     };
     let mut parts = Vec::new();
-    for (index, element) in array.iter().enumerate() {
-        let kind = element
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+    for (position, element) in array.iter().enumerate() {
+        let Some(element) = element.as_object() else {
+            continue;
+        };
+        let kind = element.get("type").and_then(Value::as_str);
+        if kind.is_some_and(|kind| kind != "summary" && kind != "encrypted") {
+            continue;
+        }
+        let details_index = element
+            .get("index")
+            .and_then(Value::as_u64)
+            .map_or(position, |index| index as usize);
         let summary = element.get("summary").and_then(Value::as_str);
         let encrypted = element.get("encrypted").and_then(Value::as_str);
-        let stamped = |think: String, encrypted: Option<String>, summary: Option<String>| {
-            ContentBlock::Think {
-                think,
-                encrypted,
-                details_index: Some(index as u32),
+        if kind != Some("encrypted") && summary.is_some_and(|text| !text.is_empty()) {
+            parts.push(ContentPart::Think {
+                think: summary.unwrap_or_default().to_string(),
+                encrypted: None,
+                details_index: Some(details_index),
+                hidden: string_dialect_seen.then_some(true),
                 reasoning_key: Some(REASONING_DETAILS_KEY.to_string()),
-                details_summary: summary,
-            }
-        };
-        if kind != "encrypted" && summary.is_some_and(|text| !text.is_empty()) {
-            parts.push(stamped(
-                String::new(),
-                None,
-                Some(summary.unwrap_or_default().to_string()),
-            ));
+            });
         }
-        if kind != "summary" && encrypted.is_some_and(|text| !text.is_empty()) {
-            parts.push(stamped(
-                String::new(),
-                Some(encrypted.unwrap_or_default().to_string()),
-                None,
-            ));
+        if kind != Some("summary") && encrypted.is_some_and(|text| !text.is_empty()) {
+            parts.push(ContentPart::Think {
+                think: String::new(),
+                encrypted: Some(encrypted.unwrap_or_default().to_string()),
+                details_index: Some(details_index),
+                hidden: None,
+                reasoning_key: Some(REASONING_DETAILS_KEY.to_string()),
+            });
         }
     }
     parts
@@ -1057,7 +1040,10 @@ mod tests {
         schema.tools = vec![kimi_core::types::ToolDescription {
             name: "mcp__s__alpha".into(),
             description: "alpha tool".into(),
-            parameters: json!({ "type": "object", "properties": {} }),
+            parameters: json!({ "type": "object", "properties": {} })
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
             deferred: None,
         }];
         let messages = vec![WireMessage::text("system", "sys"), schema];
@@ -1110,9 +1096,10 @@ mod tests {
                 vec![ToolCall {
                     id: "call_1".into(),
                     name: "Read".into(),
-                    arguments: json!({ "path": "a.txt" }),
+                    arguments: Some(json!({ "path": "a.txt" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
             ),
             WireMessage::tool_result("call_1", "file body"),
@@ -1169,9 +1156,10 @@ mod tests {
                 vec![ToolCall {
                     id: "call_1".into(),
                     name: "readMedia".into(),
-                    arguments: json!({ "path": "a.png" }),
+                    arguments: Some(json!({ "path": "a.png" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 }],
             ),
             WireMessage {
@@ -1385,10 +1373,10 @@ mod tests {
         assert_eq!(parsed.tool_calls.len(), 1);
         assert_eq!(parsed.tool_calls[0].id, "call_9");
         assert_eq!(parsed.tool_calls[0].name, "Grep");
-        assert_eq!(parsed.tool_calls[0].arguments, json!({ "q": "foo" }));
-        assert_eq!(parsed.usage.input_tokens, 12);
-        assert_eq!(parsed.usage.output_tokens, 7);
-        assert_eq!(parsed.usage.total_tokens, 19);
+        assert_eq!(parsed.tool_calls[0].arguments.as_deref(), Some("{\"q\":\"foo\"}"));
+        assert_eq!(parsed.usage.input_other, 12);
+        assert_eq!(parsed.usage.output, 7);
+        assert_eq!(parsed.usage.measured_context_tokens(), 19);
     }
 
     #[test]
@@ -1404,8 +1392,8 @@ mod tests {
         });
         let parsed = parse_response(&v).unwrap();
         assert_eq!(parsed.usage.input_cache_read, 30);
-        assert_eq!(parsed.usage.input_tokens, 10);
-        assert_eq!(parsed.usage.total_tokens, 45);
+        assert_eq!(parsed.usage.input_other, 10);
+        assert_eq!(parsed.usage.measured_context_tokens(), 45);
         assert_eq!(parsed.usage.input_cache_creation, 0);
     }
 
@@ -1429,7 +1417,7 @@ mod tests {
         let parsed = parse_response(&v).unwrap();
         assert!(parsed.tool_calls.is_empty());
         assert_eq!(parsed.finish_reason.as_deref(), Some("stop"));
-        assert_eq!(parsed.usage.total_tokens, 5);
+        assert_eq!(parsed.usage.measured_context_tokens(), 5);
     }
 
     #[test]
@@ -1455,7 +1443,7 @@ mod tests {
                     encrypted: None,
                     details_index: None,
                     reasoning_key: None,
-                    details_summary: None,
+                    hidden: None,
                 },
                 ContentBlock::Text {
                     text: "The answer is 7.".into(),
@@ -1502,7 +1490,7 @@ mod tests {
                 encrypted: None,
                 details_index: None,
                 reasoning_key: key.map(str::to_string),
-                details_summary: None,
+                hidden: None,
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -1585,21 +1573,21 @@ mod tests {
                     encrypted: None,
                     details_index: Some(0),
                     reasoning_key: Some("reasoning_details".into()),
-                    details_summary: None,
+                    hidden: None,
                 },
                 ContentBlock::Think {
                     think: String::new(),
                     encrypted: Some("sig-abc".into()),
                     details_index: Some(1),
                     reasoning_key: Some("reasoning_details".into()),
-                    details_summary: None,
+                    hidden: None,
                 },
                 ContentBlock::Think {
                     think: "and the plain rest".into(),
                     encrypted: None,
                     details_index: None,
                     reasoning_key: None,
-                    details_summary: None,
+                    hidden: None,
                 },
                 ContentBlock::Text {
                     text: "done".into(),
@@ -1638,14 +1626,14 @@ mod tests {
                     encrypted: None,
                     details_index: None,
                     reasoning_key: Some("reasoning".into()),
-                    details_summary: None,
+                    hidden: None,
                 },
                 ContentBlock::Think {
                     think: "second".into(),
                     encrypted: None,
                     details_index: None,
                     reasoning_key: Some("reasoning".into()),
-                    details_summary: None,
+                    hidden: None,
                 },
             ],
             tool_calls: Vec::new(),
@@ -1676,19 +1664,19 @@ mod tests {
         assert_eq!(
             response.thinking,
             vec![
-                ContentBlock::Think {
+                ContentPart::Think {
                     think: "step one".into(),
                     encrypted: None,
                     details_index: Some(0),
+                    hidden: None,
                     reasoning_key: Some("reasoning_details".into()),
-                    details_summary: Some("step one".into()),
                 },
-                ContentBlock::Think {
+                ContentPart::Think {
                     think: String::new(),
                     encrypted: Some("sig-1".into()),
                     details_index: Some(1),
                     reasoning_key: Some("reasoning_details".into()),
-                    details_summary: None,
+                    hidden: None,
                 },
             ],
             "an element that is neither summary nor encrypted is dropped"
@@ -1710,19 +1698,19 @@ mod tests {
         assert_eq!(
             response.thinking,
             vec![
-                ContentBlock::Think {
+                ContentPart::Think {
                     think: "the short form".into(),
                     encrypted: None,
                     details_index: None,
                     reasoning_key: None,
-                    details_summary: None,
+                    hidden: None,
                 },
-                ContentBlock::Think {
-                    think: String::new(),
+                ContentPart::Think {
+                    think: "the long form".into(),
                     encrypted: None,
                     details_index: Some(0),
+                    hidden: Some(true),
                     reasoning_key: Some("reasoning_details".into()),
-                    details_summary: Some("the long form".into()),
                 },
             ],
         );
@@ -1736,7 +1724,11 @@ mod tests {
             &[WireMessage {
                 role: "assistant".into(),
                 content: String::new(),
-                blocks: response.thinking,
+                blocks: response
+                    .thinking
+                    .iter()
+                    .map(crate::llm::wire::content_part_to_provider_block)
+                    .collect(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tools: Vec::new(),
@@ -1774,9 +1766,14 @@ mod tests {
         let visible: String = response
             .thinking
             .iter()
-            .map(|block| match block {
-                ContentBlock::Think { think, .. } => think.as_str(),
-                _ => "",
+            .filter_map(|block| match block {
+                ContentPart::Think {
+                    think,
+                    hidden: Some(true),
+                    ..
+                } => None,
+                ContentPart::Think { think, .. } => Some(think.as_str()),
+                _ => None,
             })
             .collect();
         assert_eq!(
@@ -1787,7 +1784,7 @@ mod tests {
         assert!(
             response.thinking.iter().any(|block| matches!(
                 block,
-                ContentBlock::Think { details_summary: Some(summary), .. } if summary == "the long form"
+                ContentPart::Think { think, hidden: Some(true), .. } if think == "the long form"
             )),
             "the array entry still round-trips"
         );
@@ -1807,9 +1804,14 @@ mod tests {
         let visible: String = response
             .thinking
             .iter()
-            .map(|b| match b {
-                ContentBlock::Think { think, .. } => think.as_str(),
-                _ => "",
+            .filter_map(|block| match block {
+                ContentPart::Think {
+                    think,
+                    hidden: Some(true),
+                    ..
+                } => None,
+                ContentPart::Think { think, .. } => Some(think.as_str()),
+                _ => None,
             })
             .collect();
         assert_eq!(
@@ -1819,7 +1821,7 @@ mod tests {
         assert!(
             response.thinking.iter().any(|b| matches!(
                 b,
-                ContentBlock::Think { details_summary: Some(s), .. } if s == "the summary"
+                ContentPart::Think { think, hidden: Some(true), .. } if think == "the summary"
             )),
             "the summary survives as replay payload"
         );
@@ -1836,12 +1838,12 @@ mod tests {
         let response = acc.finish();
         assert_eq!(
             response.thinking,
-            vec![ContentBlock::Think {
+            vec![ContentPart::Think {
                 think: "only reasoning".into(),
                 encrypted: None,
                 details_index: Some(0),
+                hidden: None,
                 reasoning_key: Some("reasoning_details".into()),
-                details_summary: Some("only reasoning".into()),
             }],
             "with no string dialect the summary is the user's only reasoning"
         );
@@ -1851,7 +1853,11 @@ mod tests {
             &[WireMessage {
                 role: "assistant".into(),
                 content: String::new(),
-                blocks: response.thinking,
+                blocks: response
+                    .thinking
+                    .iter()
+                    .map(crate::llm::wire::content_part_to_provider_block)
+                    .collect(),
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tools: Vec::new(),
@@ -1870,7 +1876,7 @@ mod tests {
 
     #[test]
     fn build_request_projects_image_blocks() {
-        use kimi_core::types::ContentBlock;
+        use crate::rpc::types::ContentBlock;
         let msg = WireMessage::with_blocks(
             "user",
             vec![
@@ -1887,6 +1893,8 @@ mod tests {
                     url: "https://example.com/x.png".into(),
                     id: None,
                     name: None,
+                    dimensions: None,
+                    detail: None,
                 },
             ],
         );
@@ -1902,7 +1910,7 @@ mod tests {
 
     #[test]
     fn build_request_projects_audio_and_video_blocks() {
-        use kimi_core::types::ContentBlock;
+        use crate::rpc::types::ContentBlock;
         let msg = WireMessage::with_blocks(
             "user",
             vec![
@@ -1965,10 +1973,10 @@ mod tests {
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].id, "call_1");
         assert_eq!(resp.tool_calls[0].name, "Grep");
-        assert_eq!(resp.tool_calls[0].arguments, json!({ "q": "foo" }));
-        assert_eq!(resp.usage.input_tokens, 7);
-        assert_eq!(resp.usage.output_tokens, 3);
-        assert_eq!(resp.usage.total_tokens, 10);
+        assert_eq!(resp.tool_calls[0].arguments.as_deref(), Some("{\"q\":\"foo\"}"));
+        assert_eq!(resp.usage.input_other, 7);
+        assert_eq!(resp.usage.output, 3);
+        assert_eq!(resp.usage.measured_context_tokens(), 10);
     }
 
     #[test]
@@ -2005,11 +2013,11 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.content, "hello");
         assert!(resp.finish_reason.is_none());
-        assert_eq!(resp.usage.output_tokens, 0);
+        assert_eq!(resp.usage.output, 0);
     }
 
     #[test]
-    fn truncated_tool_call_arguments_keep_the_call_and_its_reason() {
+    fn truncated_tool_call_arguments_keep_the_raw_call_for_the_executor() {
         let mut acc = StreamAccumulator::default();
         acc.feed(&json!({
             "choices": [{
@@ -2028,10 +2036,10 @@ mod tests {
             "the call survives its own parse failure"
         );
         assert_eq!(resp.tool_calls[0].name, "Bash");
-        assert_eq!(resp.tool_calls[0].arguments, json!({}));
-        assert!(
-            resp.tool_calls[0].args_parse_error.is_some(),
-            "the reason must travel with the call so the loop can report it"
+        assert_eq!(
+            resp.tool_calls[0].arguments.as_deref(),
+            Some("{\"command\": \"ech"),
+            "the executor receives the original malformed text"
         );
         assert!(resp.content.is_empty());
     }
@@ -2047,7 +2055,7 @@ mod tests {
         let resp = acc.finish();
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "Read");
-        assert_eq!(resp.tool_calls[0].arguments["path"], "a.txt");
+        assert_eq!(resp.tool_calls[0].arguments.as_deref(), Some("{\"path\": \"a.txt\"}"));
     }
 
     #[test]
@@ -2072,12 +2080,12 @@ mod tests {
         assert_eq!(resp.thinking.len(), 1);
         assert_eq!(
             resp.thinking[0],
-            ContentBlock::Think {
+            ContentPart::Think {
                 think: "Thinking about ".into(),
                 encrypted: None,
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             }
         );
     }
@@ -2145,12 +2153,12 @@ mod tests {
         assert_eq!(parsed.thinking.len(), 1);
         assert_eq!(
             parsed.thinking[0],
-            ContentBlock::Think {
+            ContentPart::Think {
                 think: "Let me calculate 6 * 7".into(),
                 encrypted: None,
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             }
         );
     }
@@ -2316,9 +2324,9 @@ mod tests {
         });
         let ds_res = parse_usage(Some(&ds_usage));
         assert_eq!(ds_res.input_cache_read, 80);
-        assert_eq!(ds_res.input_tokens, 20);
-        assert_eq!(ds_res.output_tokens, 20);
-        assert_eq!(ds_res.total_tokens, 120);
+        assert_eq!(ds_res.input_other, 20);
+        assert_eq!(ds_res.output, 20);
+        assert_eq!(ds_res.measured_context_tokens(), 120);
 
         let moonshot_usage = json!({
             "prompt_tokens": 1000,
@@ -2327,8 +2335,8 @@ mod tests {
         });
         let ms_res = parse_usage(Some(&moonshot_usage));
         assert_eq!(ms_res.input_cache_read, 900);
-        assert_eq!(ms_res.input_tokens, 100);
-        assert_eq!(ms_res.output_tokens, 50);
+        assert_eq!(ms_res.input_other, 100);
+        assert_eq!(ms_res.output, 50);
 
         let openai_usage = json!({
             "prompt_tokens": 500,
@@ -2339,8 +2347,8 @@ mod tests {
         });
         let oai_res = parse_usage(Some(&openai_usage));
         assert_eq!(oai_res.input_cache_read, 350);
-        assert_eq!(oai_res.input_tokens, 150);
-        assert_eq!(oai_res.output_tokens, 30);
+        assert_eq!(oai_res.input_other, 150);
+        assert_eq!(oai_res.output, 30);
     }
 
     fn read_tool() -> ToolInfo {
@@ -2548,8 +2556,8 @@ mod tests {
                 think: "weighing options".into(),
                 encrypted: None,
                 details_index: Some(0),
+                hidden: None,
                 reasoning_key: Some("reasoning_details".into()),
-                details_summary: None,
             }],
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -2581,7 +2589,7 @@ mod tests {
         });
         let res = parse_usage(Some(&nested));
         assert_eq!(res.input_cache_read, 350);
-        assert_eq!(res.input_tokens, 150);
+        assert_eq!(res.input_other, 150);
 
         let explicit_plus_nested = json!({
             "prompt_tokens": 500,
@@ -2604,7 +2612,7 @@ mod tests {
         let res = parse_usage(Some(&contradictory));
         assert_eq!(res.input_cache_read, 70);
         assert_eq!(
-            res.input_tokens, 30,
+            res.input_other, 30,
             "the contradiction collapses to prompt - cached"
         );
     }

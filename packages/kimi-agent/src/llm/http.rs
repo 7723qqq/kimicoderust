@@ -835,15 +835,15 @@ impl NativeHttpLlm {
             "tool_calls": response.tool_calls.iter().map(|tc| serde_json::json!({
                 "id": tc.id,
                 "name": tc.name,
-                "arguments": tc.arguments,
+                "arguments": crate::llm::tool_args::parse_tool_arguments(tc.arguments.as_deref()).data,
             })).collect::<Vec<_>>(),
             "finish_reason": response.finish_reason,
             "latency_ms": started_at.elapsed().as_millis().min(u64::MAX as u128) as u64,
             "timing": serde_json::to_value(&timing).unwrap_or(serde_json::Value::Null),
             "usage": {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "input_tokens": response.usage.input_other,
+                "output_tokens": response.usage.output,
+                "total_tokens": response.usage.measured_context_tokens(),
                 "input_cache_read": response.usage.input_cache_read,
                 "input_cache_creation": response.usage.input_cache_creation,
             },
@@ -1487,15 +1487,16 @@ mod tests {
 
         let ledger = Arc::new(kimi_core::tool_call_id::ToolCallIdNormalizer::new());
         ledger.seed_from(&[kimi_core::types::LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: String::new(),
             blocks: Vec::new(),
             tool_calls: vec![kimi_core::types::ToolCall {
                 id: "call_1".into(),
                 name: "Read".into(),
-                arguments: serde_json::json!({}),
+                arguments: Some(serde_json::json!({}).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             tool_call_id: None,
             tools: Vec::new(),
@@ -2087,14 +2088,14 @@ mod tests {
 
         let llm = NativeHttpLlm::new(cfg, String::new());
         let history = kimi_core::types::LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: String::new(),
-            blocks: vec![kimi_core::types::ContentBlock::Think {
+            blocks: vec![kimi_core::types::ContentPart::Think {
                 think: "earlier reasoning".into(),
                 encrypted: None,
                 details_index: None,
                 reasoning_key: None,
-                details_summary: None,
+                hidden: None,
             }],
             ..Default::default()
         };
@@ -2268,14 +2269,15 @@ mod tests {
     #[test]
     fn wire_history_normalises_tool_call_ids_per_protocol() {
         let call = |id: &str| LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: String::new(),
             tool_calls: vec![kimi_core::types::ToolCall {
                 id: id.into(),
                 name: "Read".into(),
-                arguments: serde_json::json!({}),
+                arguments: Some(serde_json::json!({}).to_string()),
                 extras: None,
-                args_parse_error: None,
+                raw_id: None,
+                _stream_index: None,
             }],
             ..LLMMessage::default()
         };
@@ -2665,7 +2667,7 @@ mod tests {
                 .chat(LLMChatParams {
                     cancel: Some(chat_token),
                     messages: Arc::from(vec![kimi_core::types::LLMMessage {
-                        role: "user".into(),
+                        role: kimi_core::types::Role::User,
                         content: "hi".into(),
                         ..Default::default()
                     }]),
@@ -2695,7 +2697,7 @@ mod tests {
         assert_eq!(partial.content, "hel");
         assert!(matches!(
             partial.thinking.as_slice(),
-            [kimi_core::types::ContentBlock::Think { think, .. }] if think == "why"
+            [kimi_core::types::ContentPart::Think { think, .. }] if think == "why"
         ));
         assert!(llm.take_interrupted_response().is_none());
 
@@ -2796,7 +2798,7 @@ mod tests {
             .chat(LLMChatParams {
                 cancel: None,
                 messages: Arc::from(vec![kimi_core::types::LLMMessage {
-                    role: "user".into(),
+                    role: kimi_core::types::Role::User,
                     content: "hi".into(),
                     ..Default::default()
                 }]),
@@ -3295,7 +3297,7 @@ mod tests {
         llm.chat(LLMChatParams {
             cancel: None,
             messages: Arc::from(vec![kimi_core::types::LLMMessage {
-                role: "user".into(),
+                role: kimi_core::types::Role::User,
                 content: "hi".into(),
                 ..Default::default()
             }]),

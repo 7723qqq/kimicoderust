@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 
 use super::agent_profile_contribution::AgentProfileContribution;
 
@@ -28,9 +28,9 @@ pub trait IAgentProfileRegistry: Send + Sync {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(AgentProfileRegistryChange) + Send + Sync>,
-    ) -> Box<dyn IDisposable>;
+    ) -> DisposableRef;
     fn entries(&self) -> Vec<AgentProfileRegistration>;
-    fn register(&self, registration: AgentProfileRegistration) -> Box<dyn IDisposable>;
+    fn register(&self, registration: AgentProfileRegistration) -> DisposableRef;
 }
 
 pub static I_AGENT_PROFILE_REGISTRY: Lazy<ServiceIdentifier<DynamicValue>> =

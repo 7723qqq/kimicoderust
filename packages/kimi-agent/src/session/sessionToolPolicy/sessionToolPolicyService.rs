@@ -1,3 +1,4 @@
+use crate::_base::state::state_registry::IStateRegistryExt;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -9,7 +10,7 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::lifecycle::{IDisposable, to_disposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::persistence::interface::atomic_document_store::IAtomicDocumentStore;
@@ -163,7 +164,7 @@ impl ISessionToolPolicy for SessionToolPolicyService {
     fn on_did_change(
         &self,
         listener: Arc<dyn Fn(SessionToolPolicyChangedEvent) + Send + Sync>,
-    ) -> Box<dyn IDisposable> {
+    ) -> DisposableRef {
         let id = self.next_listener_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.listeners.lock().push((id, listener));
         let listeners = Arc::downgrade(&self.listeners);

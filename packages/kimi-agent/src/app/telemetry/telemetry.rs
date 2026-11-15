@@ -133,5 +133,5 @@ pub fn noop_telemetry_service() -> Arc<dyn ITelemetryService> {
     NOOP_TELEMETRY_SERVICE.clone()
 }
 
-pub static I_TELEMETRY_SERVICE: Lazy<ServiceIdentifier<DynamicValue>> =
+pub static I_TELEMETRY_SERVICE: Lazy<ServiceIdentifier<Arc<dyn ITelemetryService>>> =
     Lazy::new(|| create_decorator("agentTelemetryService"));

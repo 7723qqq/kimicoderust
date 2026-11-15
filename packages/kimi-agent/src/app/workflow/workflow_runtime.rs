@@ -14,10 +14,12 @@ use serde_json::{Value, json};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::_base::di::descriptors::DynamicValue;
-use crate::_base::di::instantiation::{ServiceIdentifier, ServicesAccessorExt, create_decorator};
+use crate::_base::di::instantiation::ServicesAccessorExt;
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::abort::{AbortController, AbortError, AbortSignal, abortable, link_abort_signal};
-use crate::agent::profile::profile::{AgentProfileService, BindAgentInput};
+use crate::agent::profile::profile::{
+    AgentProfileService, BindAgentInput, I_AGENT_PROFILE_SERVICE,
+};
 use crate::app::auth::web_search::web_search::{WebSearchOptions, WebSearchProviderService};
 use crate::i18n::{LocalizedText, i18n_params};
 use crate::os::interface::hostTimers::{IHostTimerHandle, IHostTimers};
@@ -77,7 +79,6 @@ impl IHostTimers for SystemHostTimers {
 }
 
 static SYSTEM_HOST_TIMERS: LazyLock<Arc<SystemHostTimers>> = LazyLock::new(|| Arc::new(SystemHostTimers::default()));
-static I_AGENT_PROFILE_SERVICE: Lazy<ServiceIdentifier<Arc<dyn AgentProfileService>>> = Lazy::new(|| create_decorator("agentProfileService"));
 
 #[derive(Clone)]
 pub struct WorkflowRuntimeDeps {
@@ -435,7 +436,7 @@ async fn spawn_agent(
     if let Some(label) = opts.label.clone() {
         labels.insert("workflowLabel".to_string(), label);
     }
-    let handle = deps.lifecycle.create(Some(CreateAgentOptions {
+    let handle = deps.lifecycle.clone().create(Some(CreateAgentOptions {
         binding: Some(BindAgentInput {
             profile: opts.agent_type.clone().unwrap_or_else(|| "coder".to_string()),
             model: Some(model_alias),

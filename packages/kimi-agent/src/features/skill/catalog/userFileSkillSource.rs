@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
 use crate::_base::utils::paths::subtree_watch_filter;
 use crate::app::config::config_service::ConfigService;
@@ -35,7 +35,7 @@ pub struct UserFileSkillSource {
     on_did_change_emitter: Arc<Emitter<()>>,
     _watches: Mutex<Vec<UserWatchEntry>>,
     debounce_revision: Arc<AtomicU64>,
-    _config_subscription: Box<dyn IDisposable>,
+    _config_subscription: DisposableRef,
 }
 
 impl UserFileSkillSource {

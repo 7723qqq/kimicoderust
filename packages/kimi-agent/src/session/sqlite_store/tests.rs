@@ -288,11 +288,11 @@ fn test_sqlite_session_lifecycle() {
         LLMMessage::assistant("Hi there!"),
     ];
     let usage = TokenUsage {
-        input_tokens: 150,
-        output_tokens: 42,
-        total_tokens: 192,
+        input_other: 150,
+        output: 42,
         input_cache_creation: 10,
         input_cache_read: 5,
+        raw: None,
     };
     store
         .save_turn("sess-1", "turn-1", 1, &msgs, Some(&usage), None)
@@ -317,8 +317,8 @@ fn test_sqlite_session_lifecycle() {
         assert_eq!(status, "completed");
         let parsed_usage: TokenUsage =
             serde_json::from_str(&usage_json.expect("usage serialized")).unwrap();
-        assert_eq!(parsed_usage.input_tokens, 150);
-        assert_eq!(parsed_usage.output_tokens, 42);
+        assert_eq!(parsed_usage.input_other, 150);
+        assert_eq!(parsed_usage.output, 42);
         assert_eq!(parsed_usage.input_cache_creation, 10);
         assert_eq!(parsed_usage.input_cache_read, 5);
     }
@@ -418,24 +418,28 @@ fn test_sqlite_state_entries_and_checkpoints() {
 
 #[test]
 fn test_sqlite_structured_tool_calls_and_blocks() {
-    use crate::turn_loop::types::{ContentBlock, ToolCall};
+    use crate::turn_loop::types::{ContentPart, ToolCall};
 
     let store = SqliteSessionStore::in_memory().unwrap();
     store.create_session("sess-structured", None).unwrap();
 
     let msgs = vec![
         LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: "show me image".into(),
             blocks: vec![
-                ContentBlock::Text {
+                ContentPart::Text {
                     text: "show me image".into(),
                     meta: None,
                 },
-                ContentBlock::ImageUrl {
-                    url: "https://example.com/cat.png".into(),
-                    id: None,
-                    name: None,
+                ContentPart::ImageUrl {
+                    image_url: kimi_core::types::ImageUrl {
+                        url: "https://example.com/cat.png".into(),
+                        id: None,
+                        name: None,
+                        dimensions: None,
+                        detail: None,
+                    },
                 },
             ],
             tool_calls: vec![],
@@ -446,23 +450,25 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
             origin: None,
         },
         LLMMessage {
-            role: "assistant".into(),
+            role: kimi_core::types::Role::Assistant,
             content: "calling tools".into(),
             blocks: vec![],
             tool_calls: vec![
                 ToolCall {
                     id: "call_read_1".into(),
                     name: "Read".into(),
-                    arguments: serde_json::json!({ "path": "file.txt" }),
+                    arguments: Some(serde_json::json!({ "path": "file.txt" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 },
                 ToolCall {
                     id: "call_read_2".into(),
                     name: "Grep".into(),
-                    arguments: serde_json::json!({ "pattern": "TODO" }),
+                    arguments: Some(serde_json::json!({ "pattern": "TODO" }).to_string()),
                     extras: None,
-                    args_parse_error: None,
+                    raw_id: None,
+                    _stream_index: None,
                 },
             ],
             tool_call_id: None,
@@ -472,7 +478,7 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
             origin: None,
         },
         LLMMessage {
-            role: "tool".into(),
+            role: kimi_core::types::Role::Tool,
             content: "file contents".into(),
             blocks: vec![],
             tool_calls: vec![],
@@ -482,7 +488,7 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
             origin: None,
         },
         LLMMessage {
-            role: "tool".into(),
+            role: kimi_core::types::Role::Tool,
             content: "matches found".into(),
             blocks: vec![],
             tool_calls: vec![],
@@ -504,28 +510,35 @@ fn test_sqlite_structured_tool_calls_and_blocks() {
     assert_eq!(loaded[0].blocks.len(), 2);
     assert_eq!(
         loaded[0].blocks[0],
-        ContentBlock::Text {
+        ContentPart::Text {
             text: "show me image".into(),
             meta: None,
         }
     );
     assert_eq!(
         loaded[0].blocks[1],
-        ContentBlock::ImageUrl {
-            url: "https://example.com/cat.png".into(),
-            id: None,
-            name: None,
-        }
+        crate::llm::media_resolver::media_url_part(
+            kimi_core::types::MediaKind::Image,
+            "https://example.com/cat.png".into(),
+            None,
+            None,
+        )
     );
 
     assert_eq!(loaded[1].role, "assistant");
     assert_eq!(loaded[1].tool_calls.len(), 2);
     assert_eq!(loaded[1].tool_calls[0].id, "call_read_1");
     assert_eq!(loaded[1].tool_calls[0].name, "Read");
-    assert_eq!(loaded[1].tool_calls[0].arguments["path"], "file.txt");
+    assert_eq!(
+        loaded[1].tool_calls[0].arguments.as_deref(),
+        Some("{\"path\":\"file.txt\"}")
+    );
     assert_eq!(loaded[1].tool_calls[1].id, "call_read_2");
     assert_eq!(loaded[1].tool_calls[1].name, "Grep");
-    assert_eq!(loaded[1].tool_calls[1].arguments["pattern"], "TODO");
+    assert_eq!(
+        loaded[1].tool_calls[1].arguments.as_deref(),
+        Some("{\"pattern\":\"TODO\"}")
+    );
 
     assert_eq!(loaded[2].role, "tool");
     assert_eq!(loaded[2].content, "file contents");

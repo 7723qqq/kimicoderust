@@ -443,7 +443,7 @@ fn file_ref_from_store(
     store: &crate::server::files::FileStore,
     file_id: &str,
     kind_hint: &str,
-) -> Result<crate::rpc::types::ContentBlock, String> {
+) -> Result<crate::rpc::types::ContentPart, String> {
     let (meta, path) = store.get(file_id).map_err(|error| error.2.to_string())?;
     let media_type = if meta.media_type.is_empty() {
         infer_media_type(&path)
@@ -456,7 +456,7 @@ fn file_ref_from_store(
         None if !kind_hint.is_empty() => media_kind_of(kind_hint),
 
         None => {
-            return Ok(crate::rpc::types::ContentBlock::Text {
+            return Ok(crate::rpc::types::ContentPart::Text {
                 text: format!(
                     "[Attached file: {} ({media_type}, {} bytes)]",
                     meta.name, meta.size
@@ -465,10 +465,10 @@ fn file_ref_from_store(
             });
         }
     };
-    Ok(crate::rpc::types::ContentBlock::MediaRef {
-        file_id: file_id.to_string(),
+    Ok(crate::llm::media_resolver::file_media_part(
+        file_id.to_string(),
         kind,
-    })
+    ))
 }
 
 async fn apply_prompt_submission_options(
@@ -753,10 +753,10 @@ fn prompt_content_to_blocks(
     content: &[Value],
     files: &crate::server::files::FileStore,
     provider: Option<&str>,
-) -> Result<(String, Vec<crate::rpc::types::ContentBlock>), String> {
-    use crate::rpc::types::ContentBlock;
+) -> Result<(String, Vec<crate::rpc::types::ContentPart>), String> {
+    use crate::rpc::types::ContentPart;
     let mut texts: Vec<String> = Vec::new();
-    let mut blocks: Vec<ContentBlock> = Vec::new();
+    let mut blocks: Vec<ContentPart> = Vec::new();
     for part in content {
         match part
             .get("type")
@@ -790,10 +790,10 @@ fn prompt_content_to_blocks(
                             if let Some(file_id) =
                                 crate::llm::media_resolver::parse_daemon_file_url(url)
                             {
-                                blocks.push(ContentBlock::MediaRef {
-                                    file_id: file_id.to_string(),
-                                    kind: media_kind_of(kind),
-                                });
+                                blocks.push(crate::llm::media_resolver::file_media_part(
+                                    file_id.to_string(),
+                                    media_kind_of(kind),
+                                ));
                             } else if kind == "image" {
                                 blocks.extend(crate::llm::prompt_media::image_blocks_from_url(
                                     files,
@@ -802,18 +802,12 @@ fn prompt_content_to_blocks(
                                     name.as_deref(),
                                 ));
                             } else {
-                                blocks.push(match kind {
-                                    "audio" => ContentBlock::AudioUrl {
-                                        url: url.to_string(),
-                                        id: None,
-                                        name,
-                                    },
-                                    _ => ContentBlock::VideoUrl {
-                                        url: url.to_string(),
-                                        id: None,
-                                        name,
-                                    },
-                                });
+                                blocks.push(crate::llm::media_resolver::media_url_part(
+                                    media_kind_of(kind),
+                                    url.to_string(),
+                                    None,
+                                    name,
+                                ));
                             }
                         }
                     }
@@ -836,19 +830,12 @@ fn prompt_content_to_blocks(
                             ));
                         } else {
                             let url = format!("data:{media_type};base64,{data}");
-                            blocks.push(if kind == "audio" {
-                                ContentBlock::AudioUrl {
-                                    url,
-                                    id: None,
-                                    name,
-                                }
-                            } else {
-                                ContentBlock::VideoUrl {
-                                    url,
-                                    id: None,
-                                    name,
-                                }
-                            });
+                            blocks.push(crate::llm::media_resolver::media_url_part(
+                                media_kind_of(kind),
+                                url,
+                                None,
+                                name,
+                            ));
                         }
                     }
                     "file" | "session_media" => {
@@ -874,10 +861,10 @@ fn prompt_content_to_blocks(
                         let meta = files
                             .save(name, &media_type, None, &bytes)
                             .map_err(|error| error.2)?;
-                        blocks.push(ContentBlock::MediaRef {
-                            file_id: meta.id,
-                            kind: media_kind_of(kind),
-                        });
+                        blocks.push(crate::llm::media_resolver::file_media_part(
+                            meta.id,
+                            media_kind_of(kind),
+                        ));
                     }
                     _ => {}
                 }
@@ -893,7 +880,7 @@ fn prompt_content_to_blocks(
                         Ok(block) => blocks.push(block),
                         Err(error) => {
                             if let Some(name) = name {
-                                blocks.push(ContentBlock::Text {
+                                blocks.push(ContentPart::Text {
                                     text: format!("[Attached file: {name} ({media_type})]"),
                                     meta: None,
                                 });
@@ -920,12 +907,12 @@ fn prompt_content_to_blocks(
                             let meta = files
                                 .save(file_name, &resolved_type, None, &bytes)
                                 .map_err(|error| error.2)?;
-                            blocks.push(ContentBlock::MediaRef {
-                                file_id: meta.id,
+                            blocks.push(crate::llm::media_resolver::file_media_part(
+                                meta.id,
                                 kind,
-                            });
+                            ));
                         }
-                        None => blocks.push(ContentBlock::Text {
+                        None => blocks.push(ContentPart::Text {
                             text: format!(
                                 "[Attached file: {file_name} ({resolved_type}, {} bytes)]",
                                 bytes.len()
@@ -1068,7 +1055,7 @@ fn project_wire_message(
             "type": "tool_use",
             "tool_call_id": call.id,
             "tool_name": call.name,
-            "input": call.arguments,
+            "input": crate::llm::tool_args::parse_tool_arguments(call.arguments.as_deref()).data,
         }));
     }
     if message.role == "tool"

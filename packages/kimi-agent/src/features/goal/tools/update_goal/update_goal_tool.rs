@@ -8,10 +8,11 @@ pub(crate) async fn evaluate_goal_completion(
     turn_id: &str,
     agent_id: &str,
     tool_call: &mut ToolCall,
+    args: &mut serde_json::Value,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Option<ExecutableToolResult> {
     let name = tool_call.name.clone();
-    let arguments = tool_call.arguments.clone();
+    let arguments = args.clone();
     let call_id = tool_call.id.clone();
     if agent_id != crate::callbacks::MAIN_AGENT_ID
         || !name.eq_ignore_ascii_case("UpdateGoal")
@@ -55,10 +56,11 @@ pub(crate) async fn evaluate_goal_completion(
         return None;
     }
     if verdict.impossible {
-        tool_call.arguments = serde_json::json!({
+        *args = serde_json::json!({
             "status": "blocked",
             "reason": verdict.reason,
         });
+        tool_call.arguments = Some(args.to_string());
         return None;
     }
 

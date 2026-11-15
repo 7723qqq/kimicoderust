@@ -5,6 +5,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::_base::utils::workdir_slug::workspace_root_key;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectIdentityKind {
     #[serde(rename = "git-remote")]
@@ -158,14 +160,14 @@ pub fn resolve_project_identity(cwd: &str) -> ProjectIdentity {
                 detail: normalized,
             };
         }
-        let repo_key = crate::tools::project_identity::workspace_root_key(&location.root.to_string_lossy());
+        let repo_key = workspace_root_key(&location.root.to_string_lossy());
         return ProjectIdentity {
             kind: ProjectIdentityKind::GitRepo,
             id: digest(&format!("repo:{repo_key}")),
             detail: repo_key,
         };
     }
-    let path_key = crate::tools::project_identity::workspace_root_key(cwd);
+    let path_key = workspace_root_key(cwd);
     ProjectIdentity {
         kind: ProjectIdentityKind::Path,
         id: digest(&path_key),
@@ -174,5 +176,5 @@ pub fn resolve_project_identity(cwd: &str) -> ProjectIdentity {
 }
 
 pub fn legacy_project_id_from_cwd(cwd: &str) -> String {
-    digest(&crate::tools::project_identity::workspace_root_key(cwd))
+    digest(&workspace_root_key(cwd))
 }

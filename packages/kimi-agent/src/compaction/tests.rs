@@ -1,11 +1,17 @@
 use super::*;
 use crate::rpc::types::BoxFuture;
-use crate::rpc::types::TokenUsage;
-use crate::turn_loop::types::{ContentBlock, LLM, LLMChatParams, LLMChatResponse, ToolCall};
+use kimi_core::types::TokenUsage;
+use crate::turn_loop::types::{ContentPart, LLM, LLMChatParams, LLMChatResponse, ToolCall};
 
 fn msg(role: &str, content: &str) -> LLMMessage {
     LLMMessage {
-        role: role.into(),
+        role: match role {
+            "system" => kimi_core::types::Role::System,
+            "user" => kimi_core::types::Role::User,
+            "assistant" => kimi_core::types::Role::Assistant,
+            "tool" => kimi_core::types::Role::Tool,
+            _ => panic!("unknown test role: {role}"),
+        },
         content: content.into(),
         ..Default::default()
     }
@@ -15,9 +21,10 @@ fn tool_call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall {
         id: id.into(),
         name: name.into(),
-        arguments: args,
+        arguments: Some(args.to_string()),
         extras: None,
-        args_parse_error: None,
+        raw_id: None,
+        _stream_index: None,
     }
 }
 
@@ -372,91 +379,93 @@ fn test_estimate_message_tokens_multimodal_content_blocks() {
     let text_msg = msg("user", "12345678"); // role 1 + 2 tokens
     assert_eq!(estimate_message_tokens(&text_msg), 1 + 2);
 
-    // ContentBlock::Text
+    // ContentPart::Text
     let mut m_text = msg("user", "");
-    m_text.blocks.push(ContentBlock::Text {
+    m_text.blocks.push(ContentPart::Text {
         text: "123456789012".into(), // 12 chars -> 3 tokens
         meta: None,
     });
     assert_eq!(estimate_message_tokens(&m_text), 1 + 3);
 
-    // ContentBlock::Think
+    // ContentPart::Think
     let mut m_think = msg("assistant", "");
-    m_think.blocks.push(ContentBlock::Think {
+    m_think.blocks.push(ContentPart::Think {
         think: "reasoning step".into(), // 14 chars -> 4 tokens
         encrypted: None,
         details_index: None,
         reasoning_key: None,
-        details_summary: None,
+        hidden: None,
     });
     assert_eq!(estimate_message_tokens(&m_think), 3 + 4);
 
-    // A details-derived summary lives in `details_summary` with `think` empty
-    // in Rust; it is still replayed through `reasoning_details`, so it counts.
     let mut m_details = msg("assistant", "");
-    m_details.blocks.push(ContentBlock::Think {
-        think: String::new(),
+    m_details.blocks.push(ContentPart::Think {
+        think: "summarized reasoning".into(),
         encrypted: None,
         details_index: Some(0),
-        reasoning_key: None,
-        details_summary: Some("summarized reasoning".into()), // 20 chars -> 5
+        hidden: Some(true),
+        reasoning_key: Some("reasoning_details".into()),
     });
     assert_eq!(estimate_message_tokens(&m_details), 3 + 5);
 
     // Multimodal media blocks: all count MEDIA_TOKEN_ESTIMATE (2000)
     let mut m_img = msg("user", "");
-    m_img.blocks.push(ContentBlock::Image {
-        media_type: "image/png".into(),
-        data: "base64data".into(),
-        name: None,
-    });
+    m_img.blocks.push(crate::llm::media_resolver::inline_image_part(
+        "image/png".into(),
+        "base64data".into(),
+        None,
+    ));
     assert_eq!(estimate_message_tokens(&m_img), 1 + MEDIA_TOKEN_ESTIMATE);
 
     let mut m_img_url = msg("user", "");
-    m_img_url.blocks.push(ContentBlock::ImageUrl {
-        url: "http://example.com/pic.png".into(),
-        id: None,
-        name: None,
-    });
+    m_img_url.blocks.push(crate::llm::media_resolver::media_url_part(
+        kimi_core::types::MediaKind::Image,
+        "http://example.com/pic.png".into(),
+        None,
+        None,
+    ));
     assert_eq!(
         estimate_message_tokens(&m_img_url),
         1 + MEDIA_TOKEN_ESTIMATE
     );
 
     let mut m_audio = msg("user", "");
-    m_audio.blocks.push(ContentBlock::AudioUrl {
-        url: "http://example.com/audio.mp3".into(),
-        id: Some("a1".into()),
-        name: None,
-    });
+    m_audio.blocks.push(crate::llm::media_resolver::media_url_part(
+        kimi_core::types::MediaKind::Audio,
+        "http://example.com/audio.mp3".into(),
+        Some("a1".into()),
+        None,
+    ));
     assert_eq!(estimate_message_tokens(&m_audio), 1 + MEDIA_TOKEN_ESTIMATE);
 
     let mut m_video = msg("user", "");
-    m_video.blocks.push(ContentBlock::VideoUrl {
-        url: "http://example.com/video.mp4".into(),
-        id: None,
-        name: None,
-    });
+    m_video.blocks.push(crate::llm::media_resolver::media_url_part(
+        kimi_core::types::MediaKind::Video,
+        "http://example.com/video.mp4".into(),
+        None,
+        None,
+    ));
     assert_eq!(estimate_message_tokens(&m_video), 1 + MEDIA_TOKEN_ESTIMATE);
 
     // Additive combination: role + content + text block + think block + image block
     let mut m_combo = msg("user", "abcd"); // role 1 + content 1
-    m_combo.blocks.push(ContentBlock::Text {
+    m_combo.blocks.push(ContentPart::Text {
         text: "efgh".into(),
         meta: None,
     }); // 1 token
-    m_combo.blocks.push(ContentBlock::Think {
+    m_combo.blocks.push(ContentPart::Think {
         think: "ijkl".into(), // 1 token
         encrypted: None,
         details_index: None,
         reasoning_key: None,
-        details_summary: None,
+        hidden: None,
     });
-    m_combo.blocks.push(ContentBlock::ImageUrl {
-        url: "http://example.com/img.jpg".into(), // 2000 tokens
-        id: None,
-        name: None,
-    });
+    m_combo.blocks.push(crate::llm::media_resolver::media_url_part(
+        kimi_core::types::MediaKind::Image,
+        "http://example.com/img.jpg".into(),
+        None,
+        None,
+    ));
     assert_eq!(estimate_message_tokens(&m_combo), 1 + 1 + 1 + 1 + 2000);
 }
 
@@ -2148,7 +2157,7 @@ fn test_select_kept_user_messages_head_elision_tail_budget() {
     // between. 10 user messages x (role 1 + 3000) = 30010 > 20000.
     let user_messages: Vec<LLMMessage> = (0..10)
         .map(|i| LLMMessage {
-            role: "user".into(),
+            role: kimi_core::types::Role::User,
             content: format!("m{i:02}") + &"x".repeat(11_997), // 12000 chars = 3000 tokens
             ..Default::default()
         })

@@ -28,7 +28,8 @@ use crate::app::workspace::workspace_persistence::IWorkspacePersistence;
 use crate::persistence::config_section::database_base_enabled;
 use crate::persistence::interface::atomic_document_store::IAtomicDocumentStore;
 use crate::persistence::interface::query_store::{
-    Checkpoint, ColumnBounds, ColumnPageQuery, IQueryStore, IndexDef, Page, QueryFilter, SortDir,
+    Checkpoint, ColumnBounds, ColumnPageQuery, IQueryStore, IQueryStoreExt, IndexDef, Page,
+    QueryFilter, SortDir,
 };
 use crate::persistence::interface::storage::IFileSystemStorageService;
 use crate::wire::record::WireAsyncError;
@@ -114,8 +115,8 @@ pub struct FileSessionIndex {
     mirror: Arc<dyn ISessionIndexMirror>,
     telemetry: Arc<dyn ITelemetryService>,
     log: Arc<dyn ILogService>,
-    workspaces: LiveRef<IWorkspaceService>,
-    workspace_store: LiveRef<IWorkspacePersistence>,
+    workspaces: LiveRef<Arc<dyn IWorkspaceService>>,
+    workspace_store: LiveRef<Arc<dyn IWorkspacePersistence>>,
     state: Mutex<FileSessionIndexState>,
     prepare_flight: Mutex<Option<(u64, Shared<BoxFuture<'static, SessionIndexStatus>>)>>,
     project_flight: Mutex<Option<(u64, Shared<BoxFuture<'static, ()>>)>>,
@@ -141,8 +142,8 @@ impl FileSessionIndex {
         mirror: Arc<dyn ISessionIndexMirror>,
         telemetry: Arc<dyn ITelemetryService>,
         log: Arc<dyn ILogService>,
-        workspaces: LiveRef<IWorkspaceService>,
-        workspace_store: LiveRef<IWorkspacePersistence>,
+        workspaces: LiveRef<Arc<dyn IWorkspaceService>>,
+        workspace_store: LiveRef<Arc<dyn IWorkspacePersistence>>,
     ) -> Arc<Self> {
         let sessions_scope = bootstrap.scope("sessions");
         let this = Arc::new_cyclic(|weak| {

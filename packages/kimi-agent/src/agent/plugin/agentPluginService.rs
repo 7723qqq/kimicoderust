@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::json;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::xml_escape::escape_xml_attr;
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
@@ -54,7 +54,7 @@ pub struct AgentPluginService {
     refresh_pending: Arc<AtomicBool>,
     warned_missing_session_start_skills: Arc<Mutex<HashSet<String>>>,
     pending_mutation_catalog_changes: Arc<AtomicUsize>,
-    subscriptions: Arc<Mutex<Vec<Box<dyn IDisposable>>>>,
+    subscriptions: Arc<Mutex<Vec<DisposableRef>>>,
     unsubscribers: Arc<Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
@@ -125,7 +125,7 @@ impl AgentPluginService {
             }
             service.refresh_pending.store(true, Ordering::Relaxed);
         });
-        self.subscriptions.lock().push(Box::new(subscription));
+        self.subscriptions.lock().push(Arc::new(subscription));
         let service = self.clone();
         let subscription = self.plugins.on_did_mutate(Arc::new(move |summary| {
             service

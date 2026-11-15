@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
 use crate::_base::utils::paths::{SubtreeWatchFilterOptions, subtree_watch_filter};
 use crate::app::config::config_service::ConfigService;
@@ -47,8 +47,8 @@ pub struct WorkspaceRootSkillSource {
     on_did_change_emitter: Arc<Emitter<()>>,
     watch_state: Mutex<WatchState>,
     debounce_revision: Arc<AtomicU64>,
-    _config_subscription: Box<dyn IDisposable>,
-    _dirs_subscription: Box<dyn IDisposable>,
+    _config_subscription: DisposableRef,
+    _dirs_subscription: DisposableRef,
 }
 
 impl WorkspaceRootSkillSource {

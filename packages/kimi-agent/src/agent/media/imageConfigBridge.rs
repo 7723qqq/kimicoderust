@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::_base::di::lifecycle::IDisposable;
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::app::config::config::IConfigService;
 use crate::config::ImageConfig;
 
@@ -11,7 +11,7 @@ use super::image_compress::{
 };
 
 pub struct ImageConfigBridge {
-    subscription: Box<dyn IDisposable>,
+    subscription: DisposableRef,
 }
 
 impl ImageConfigBridge {

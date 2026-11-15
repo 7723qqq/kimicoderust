@@ -1,3 +1,5 @@
+use crate::_base::di::instantiation::ServicesAccessorExt;
+use crate::session::agent_lifecycle::agent_lifecycle::I_AGENT_LIFECYCLE_SERVICE;
 use std::sync::Arc;
 
 use crate::_base::di::scope::ISessionScopeHandle;
@@ -20,7 +22,7 @@ pub async fn ensure_main_agent_with_options(
     opts.agent_id = Some(MAIN_AGENT_ID.to_string());
     session
         .accessor()
-        .get::<IAgentLifecycleService>()
+        .get(&I_AGENT_LIFECYCLE_SERVICE)
         .create(Some(opts))
         .await
 }

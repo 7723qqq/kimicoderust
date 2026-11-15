@@ -1,16 +1,21 @@
+use std::collections::HashMap;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use kimi_core::primitives::errors::domains::config::CONFIG_INVALID;
 use kimi_core::primitives::errors::{Error2, Error2Options, unwrap_error_cause};
+use parking_lot::Mutex;
+use serde_json::Value;
+use tokio::sync::Mutex as AsyncMutex;
 use toml::map::Map as TomlMap;
 use toml::Value as TomlValue;
+use uuid::Uuid;
 
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::project_local_config::project_local_config::{
-    IProjectLocalConfigService, ProjectAdditionalDirsLoadResult,
+    IProjectLocalConfigService, ProjectAdditionalDirsLoadResult, ProjectPermissionRulesLoadResult,
 };
 use crate::os::interface::host_file_system::IHostFileSystem;
 use crate::os::interface::host_fs_errors::{
@@ -29,6 +34,17 @@ const POSIX_SYSTEM_DIRS: &[&str] = &[
 struct ProjectLocalTomlFile {
     raw: TomlMap<String, TomlValue>,
     additional_dirs: Option<Vec<String>>,
+}
+
+static PERMISSION_WRITE_LOCKS: LazyLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn permission_write_lock(config_path: &str) -> Arc<AsyncMutex<()>> {
+    let mut locks = PERMISSION_WRITE_LOCKS.lock();
+    locks
+        .entry(config_path.to_string())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
 }
 
 pub struct FileProjectLocalConfigService {
@@ -223,6 +239,28 @@ impl FileProjectLocalConfigService {
     async fn path_exists(&self, file_path: &str) -> bool {
         self.fs.lstat(file_path).await.is_ok()
     }
+
+    async fn assert_no_symlinks(
+        &self,
+        project_root: &str,
+        config_path: &str,
+    ) -> Result<(), WireAsyncError> {
+        let parent = dirname(config_path);
+        for path in [project_root.to_string(), parent, config_path.to_string()] {
+            let stat = match self.fs.lstat(&path).await {
+                Ok(stat) => stat,
+                Err(error) if is_path_missing(&error) => continue,
+                Err(error) => return Err(to_storage_io_error(error, &path, "stat")),
+            };
+            if stat.is_symbolic_link {
+                return Err(Box::new(Error2::new(
+                    CONFIG_INVALID,
+                    format!("Refusing to write project permission rules through symlink {path}"),
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -321,6 +359,77 @@ impl IProjectLocalConfigService for FileProjectLocalConfigService {
             additional_dirs: serialized_dirs,
         })
     }
+
+    async fn read_permission_rules(
+        &self,
+        work_dir: &str,
+    ) -> Result<ProjectPermissionRulesLoadResult, WireAsyncError> {
+        let project_root = self.find_project_root(work_dir).await;
+        let config_path = self.get_project_local_config_path(&project_root);
+        let file = self.read_project_local_toml(&config_path).await?;
+        let rules = read_raw_permission_rules(file.as_ref().map(|file| &file.raw))?;
+        Ok(ProjectPermissionRulesLoadResult {
+            project_root,
+            config_path,
+            rules,
+        })
+    }
+
+    async fn append_permission_rules(
+        &self,
+        work_dir: &str,
+        rules: &[Value],
+    ) -> Result<ProjectPermissionRulesLoadResult, WireAsyncError> {
+        let project_root = self.find_project_root(work_dir).await;
+        let config_path = self.get_project_local_config_path(&project_root);
+        let lock = permission_write_lock(&config_path);
+        let _guard = lock.lock().await;
+        self.assert_no_symlinks(&project_root, &config_path).await?;
+        let mut file = self
+            .read_project_local_toml(&config_path)
+            .await?
+            .unwrap_or_else(|| ProjectLocalTomlFile {
+                raw: TomlMap::new(),
+                additional_dirs: None,
+            });
+        let mut appended = read_raw_permission_rules(Some(&file.raw))?;
+        appended.extend_from_slice(rules);
+        let mut permission = file
+            .raw
+            .get("permission")
+            .and_then(TomlValue::as_table)
+            .cloned()
+            .unwrap_or_default();
+        permission.insert(
+            "rules".to_string(),
+            permission_rules_to_toml(&appended)?,
+        );
+        file.raw
+            .insert("permission".to_string(), TomlValue::Table(permission));
+        let encoded = toml::to_string(&TomlValue::Table(file.raw))?;
+        let temp_path = format!(
+            "{config_path}.tmp.{}.{}",
+            std::process::id(),
+            Uuid::new_v4()
+        );
+        let written = async {
+            self.fs.mkdir(&dirname(&config_path), true).await?;
+            self.fs
+                .write_text(&temp_path, &format!("{}\n", encoded.trim_end()))
+                .await?;
+            self.fs.rename(&temp_path, &config_path).await
+        }
+        .await;
+        if let Err(error) = written {
+            let _ = self.fs.remove(&temp_path).await;
+            return Err(to_storage_io_error(error, &config_path, "write"));
+        }
+        Ok(ProjectPermissionRulesLoadResult {
+            project_root,
+            config_path,
+            rules: appended,
+        })
+    }
 }
 
 fn normalize_additional_dirs(additional_dirs: &[String]) -> Vec<String> {
@@ -378,6 +487,45 @@ fn parse_project_local_toml(
         dirs.push(entry.to_string());
     }
     Ok(Some(dirs))
+}
+
+fn read_raw_permission_rules(
+    raw: Option<&TomlMap<String, TomlValue>>,
+) -> Result<Vec<Value>, WireAsyncError> {
+    let Some(permission) = raw.and_then(|raw| raw.get("permission")) else {
+        return Ok(Vec::new());
+    };
+    let Some(permission) = permission.as_table() else {
+        return Err(Box::new(Error2::new(
+            CONFIG_INVALID,
+            "permission must be a table",
+        )));
+    };
+    let Some(rules) = permission.get("rules") else {
+        return Ok(Vec::new());
+    };
+    let Some(rules) = rules.as_array() else {
+        return Err(Box::new(Error2::new(
+            CONFIG_INVALID,
+            "permission.rules must be an array",
+        )));
+    };
+    let mut out = Vec::with_capacity(rules.len());
+    for rule in rules {
+        out.push(serde_json::to_value(rule).map_err(|error| Box::new(error) as WireAsyncError)?);
+    }
+    Ok(out)
+}
+
+fn permission_rules_to_toml(rules: &[Value]) -> Result<TomlValue, WireAsyncError> {
+    let mut out = Vec::with_capacity(rules.len());
+    for rule in rules {
+        out.push(
+            serde_json::from_value::<TomlValue>(rule.clone())
+                .map_err(|error| Box::new(error) as WireAsyncError)?,
+        );
+    }
+    Ok(TomlValue::Array(out))
 }
 
 fn is_path_missing(error: &WireAsyncError) -> bool {

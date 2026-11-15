@@ -358,13 +358,14 @@ async fn test_http_transcript_routes() {
         .create_session(sid, Some("Transcript"))
         .unwrap();
 
-    let mut assistant = crate::turn_loop::types::LLMMessage::new("assistant", "hello");
+    let mut assistant = crate::turn_loop::types::LLMMessage::new(kimi_core::types::Role::Assistant, "hello");
     assistant.tool_calls = vec![crate::turn_loop::types::ToolCall {
         id: "c1".into(),
         name: "ExitPlanMode".into(),
-        arguments: json!({}),
+        arguments: Some(json!({}).to_string()),
         extras: None,
-        args_parse_error: None,
+        raw_id: None,
+        _stream_index: None,
     }];
     let mut tool = crate::turn_loop::types::LLMMessage::new(
         "tool",
@@ -372,7 +373,7 @@ async fn test_http_transcript_routes() {
     );
     tool.tool_call_id = Some("c1".into());
     let messages = vec![
-        crate::turn_loop::types::LLMMessage::new("user", "start the work"),
+        crate::turn_loop::types::LLMMessage::new(kimi_core::types::Role::User, "start the work"),
         assistant,
         tool,
     ];

@@ -7,14 +7,6 @@ use super::read_media_file::{
     MAX_MEDIA_BYTES, MAX_MEDIA_MEGABYTES, VideoUploadOptions, VideoUploader,
 };
 use crate::_base::utils::abort::AbortSignal;
-use crate::agent::tools::file_read_source::FileReadSource;
-use crate::human::llm::media::upload::VideoUploadInput;
-use crate::human::llm::message::{ContentPart, DocumentUrl, ImageDimensions, ImageUrl, VideoUrl};
-use crate::llm::image_policy::{
-    is_model_accepted_image_mime, normalize_image_mime, provider_image_policy,
-};
-use crate::llm_adapter::contract::capability::{ModelCapability, is_unknown_capability};
-use crate::llm_adapter::contract::errors::VideoUploadUnsupportedError;
 use crate::agent::media::file_type::{
     DetectFileTypeMode, FileKind, detect_file_type, sniff_image_dimensions,
 };
@@ -23,6 +15,14 @@ use crate::agent::media::image_compress::{
     compress_image_for_model, crop_image_for_model, is_recodable_image,
     resolve_max_image_edge_px, resolve_read_image_byte_budget,
 };
+use crate::agent::media::image_format_policy::{
+    is_model_accepted_image_mime, normalize_image_mime, provider_image_policy,
+};
+use crate::agent::tools::file_read_source::FileReadSource;
+use crate::human::llm::media::upload::VideoUploadInput;
+use crate::human::llm::message::{ContentPart, DocumentUrl, ImageDimensions, ImageUrl, VideoUrl};
+use crate::llm_adapter::contract::capability::{ModelCapability, is_unknown_capability};
+use crate::llm_adapter::contract::errors::VideoUploadUnsupportedError;
 use crate::native::file_type::MediaSniffKind;
 use crate::os::interface::host_environment::HostEnvironmentInfo;
 use crate::wire::record::WireAsyncError;
