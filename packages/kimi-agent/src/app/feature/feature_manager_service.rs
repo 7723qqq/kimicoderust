@@ -14,7 +14,6 @@ use crate::_base::di::fiber::{
 };
 use crate::_base::di::instantiation::ServiceIdentifier;
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::wire::record::WireAsyncError;
 
@@ -206,12 +205,4 @@ impl IFeatureManager for FeatureManagerService {
     fn on_did_change_units(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef {
         FeatureManagerService::on_did_change_units(self, listener)
     }
-}
-
-pub fn register_feature_manager_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "feature",
-    );
 }

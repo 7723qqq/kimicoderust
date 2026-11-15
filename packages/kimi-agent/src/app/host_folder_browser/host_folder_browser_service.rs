@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
 use crate::app::workspace::workspace::IWorkspaceService;
 use crate::wire::record::WireAsyncError;
 
@@ -154,12 +152,4 @@ fn ensure_drive_root(path: PathBuf) -> PathBuf {
     } else {
         path
     }
-}
-
-pub fn register_host_folder_browser_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "hostFolderBrowser",
-    );
 }

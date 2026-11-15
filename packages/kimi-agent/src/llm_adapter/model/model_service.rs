@@ -204,11 +204,3 @@ impl IModelService for ModelService {
         })
     }
 }
-
-pub fn register_model_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "model",
-    );
-}

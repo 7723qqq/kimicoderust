@@ -428,6 +428,106 @@ tree — the Rust CI jobs stay red until the migration lands.
 Pushed to `origin/main` as one checkpoint commit that carries all four
 batches; the tree does not compile yet (see the compile state above).
 
+## 2026-11-16 DI wiring cleanup batch
+
+Continuation of the type-vocabulary consolidation: the checkpoint pushed this
+morning does not compile, so this batch removes the dead half of the DI
+migration and re-wires the call sites that the migration changed underneath
+them.
+
+### Dead legacy registrations removed
+
+The DI migration replaced the old three-argument
+`register_scoped_service(scope, activation, domain)` with the v2-shaped
+five-argument form (scope, id, descriptor, activation, domain — v2
+`registerScopedService`, `agent-core-v2/src/_base/di/scope.ts:47`), and 28
+services were converted to the `ensure_*_registered()` + scoped-registry
+pattern. **63 registration functions were left behind**, still calling the
+removed three-argument API.
+
+A full-tree reference scan (`packages/kimi-agent/src`, `packages/kimi-agent/tests`
+and the other crates) found **exactly one reference each — the definition
+itself**. They were dead code that could not compile, and because they were
+never called the scoped registry never received their entries. Deleting them
+is behaviour-neutral; the equivalent services are provided through the seeds in
+`app/bootstrap/bootstrap.rs` or constructed directly.
+
+- 63 `register_*_service()` functions deleted across 65 files.
+- `os/backends/host/hostServices.rs` became empty and was deleted together
+  with its module declaration.
+- The imports the deletion left unused were removed (95 import lines:
+  `LifecycleScope`, `ScopeActivation`, `register_scoped_service`).
+
+### Wiring re-done against the v2 reference
+
+- `workspace/sessionLifecycle/sessionLifecycleService.rs`: the session metadata
+  write now goes through `ISessionMetadata::update(SessionMetaPatch,
+  touch_updated_at)` exactly the way v2 does it
+  (`agent-core-v2/src/workspace/sessionLifecycle/sessionLifecycleService.ts:233-242`).
+  The old `update_environment_cwd` / `update_environment` methods never existed
+  on the trait — v2 writes `environmentCwd` / `environmentId` / `cwd` through
+  the patch.
+- `features/plan`: `IAgentPlanService::enter(None, false)` matches v2's
+  `enter(id = this.createPlanId(), createFile = false)`
+  (`agent-core-v2/src/features/plan/planService.ts:159`); the Rust impl already
+  generates the id when it is `None`.
+- `session/sessionContext`: `ISessionContext::scope(Option<&str>)` now matches
+  v2's `scope(subKey?: string)`
+  (`agent-core-v2/src/session/sessionContext/sessionContext.ts:18,54`); the two
+  call sites (`agent/media/sessionMediaStoreService.rs`,
+  `session/sessionToolPolicy/sessionToolPolicyService.rs`) pass `Some(..)`.
+- Listener registries: `app/session_manager/session_manager_service.rs` and
+  `workspace/sessionLifecycle/sessionLifecycleService.rs` store
+  `Arc<Mutex<LifecycleListeners<T>>>` — the shape the `add_listener` /
+  `fire_listeners` / `dispose_listeners` helpers already take, because the
+  disposable closure has to keep the registry alive after the service is gone.
+- `features/fileHistory/fileHistoryRetention.rs`: the retention helpers take
+  `Arc<dyn IAtomicDocumentStore>` (the DI boundary) and convert through
+  `serde_json`, instead of the concrete `JsonAtomicDocumentStore` the
+  consolidation had left behind. v2 keeps the same typed access
+  (`agent-core-v2/src/features/fileHistory/fileHistoryRetention.ts:42,94`).
+- `workspace/sessionLifecycle/sessionLifecycleEvents.rs`: the session events
+  expose `to_event2()`, the convention every other event struct in the tree
+  already uses, so `IEventService::publish` receives the `Event2` it takes.
+- `mcp_core/oauth/service.rs`: `abort(None)` — v2 aborts without a reason on
+  those two paths.
+- `app/task/task_service.rs`: `abort(Some(TaskCancelledError))` — v2 aborts the
+  task with `new TaskCancelledError(this.id)`
+  (`agent-core-v2/src/app/task/taskService.ts:72`).
+- `workspace/workspaceFs/fsService.rs`: `ListCandidate` derives `Clone` and the
+  two `map_with_concurrency` closures return a boxed future, as the helper's
+  bounds require.
+- `features/externalHooks/agent/agentExternalHooksService.rs`: the duplicate
+  `ContentPart` import is gone — `human::llm::message` and `rpc::types` now
+  name the same type.
+
+### Compile state
+
+`cargo check --no-default-features --features cli` in `packages/kimi-agent`:
+**1521 → 1393 errors** (exit 101) against the checkpoint pushed earlier today;
+HEAD `2c47ec0cf` still measures 59 errors in a clean worktree. The remaining
+errors are concentrated in `workspace/sessionLifecycle/sessionLifecycleService.rs`
+(88), `workspace/workspaceFs/fsService.rs` (87),
+`session/agentLifecycle/agentLifecycleService.rs` (76),
+`app/auth/auth_service.rs` (50), `state/eventDispatcherService.rs` (43),
+`session/tokenCounting/tokenCountingAgentModel.rs` (37) and
+`mcp_core/client_stdio.rs` (33).
+
+### Gate evidence (real exit codes)
+
+- `bun run check:architecture` → 1 before the fingerprint refresh (the deleted
+  `hostServices.rs` was still in the fingerprint set), 0 after
+  `bun run check:architecture -- --update` (1 fingerprint refreshed).
+- `bun run check:rust-module-deps` → 0: 626 edges recorded, 0 new, 0 stale.
+- `bun run check:normify` → 1, the same pre-existing
+  `evidence/source-missing` for `kimi-code.engine.tools.web`.
+- `bun run check:agent-parity` → 0, `bun run check:v2-parity` → 1 (red 1329 vs
+  baseline 1352, structural 11 — unchanged), `bun run check:parity` → 1 (the
+  same `v2Github` gap), `bun run check:engine-i18n` → 1 (the 7 namespace
+  findings), `bun run check:locale-orphans` → 1, `check:no-legacy-engine` → 1,
+  `scan:hardcoded:rust` → 1, `check:upstream-v2-delta` → 1 — all unchanged
+  from the checkpoint.
+
 ## Upstream delta rulings (2026-11)
 
 All five previously `tracked` deltas were resolved on 2026-11-08 against the

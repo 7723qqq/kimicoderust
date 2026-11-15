@@ -13,12 +13,10 @@ use serde_json::{Value, json};
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::instantiation::{ServiceIdentifier, create_decorator};
 use crate::_base::di::lifecycle::IDisposable;
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::abort::AbortError;
 use crate::app::auth::web_search::web_search::WebSearchProviderService;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
-use crate::app::scopes::LifecycleScope;
 use crate::session::agent_lifecycle::agent_lifecycle::IAgentLifecycleService;
 use crate::session::session_context::session_context::ISessionContext;
 use crate::session::subagent::subagent::ISessionSubagentService;
@@ -238,8 +236,4 @@ fn to_result(entry: &WorkflowRunEntry) -> WorkflowRunResult {
         started_at: entry.started_at,
         finished_at: *entry.finished_at.lock(),
     }
-}
-
-pub fn register_workflow_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "workflow");
 }

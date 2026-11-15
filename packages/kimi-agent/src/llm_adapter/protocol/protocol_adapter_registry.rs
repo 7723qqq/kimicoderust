@@ -343,11 +343,3 @@ impl IProtocolAdapterRegistry for ProtocolAdapterRegistry {
         self.resolve_route(model)
     }
 }
-
-pub fn register_protocol_adapter_registry() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "provider",
-    );
-}

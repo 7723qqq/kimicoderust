@@ -59,11 +59,3 @@ impl McpOAuthStore for McpOAuthStoreAdapter {
 }
 
 impl IMcpOAuthStore for McpOAuthStoreAdapter {}
-
-pub fn register_mcp_oauth_store() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnDemand,
-        "mcpConfig",
-    );
-}

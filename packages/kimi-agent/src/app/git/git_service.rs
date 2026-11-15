@@ -11,9 +11,7 @@ use kimi_core::primitives::errors::{Error2, Error2Options};
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::environment::environment::EnvironmentResolver;
-use crate::app::scopes::LifecycleScope;
 use crate::environment::environment::LOCAL_ENVIRONMENT_ID;
 use crate::environment::program_path::resolve_program_path;
 use crate::os::interface::host_file_system::IHostFileSystem;
@@ -598,12 +596,4 @@ async fn collect(mut stream: HostOutputStream) -> Result<String, WireAsyncError>
         output.push_str(&chunk?);
     }
     Ok(output)
-}
-
-pub fn register_git_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "git",
-    );
 }

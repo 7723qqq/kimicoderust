@@ -6,9 +6,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::utils::workdir_slug::{encode_work_dir_key, workspace_root_key};
-use crate::app::scopes::LifecycleScope;
 use crate::app::workspace::workspace::Workspace;
 use crate::wire::record::WireAsyncError;
 
@@ -211,8 +209,4 @@ fn root_key_index<T>(items: &[T], root_of: impl Fn(&T) -> String, id_of: impl Fn
         }
     }
     map
-}
-
-pub fn register_workspace_aliases_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "workspaceAliases");
 }

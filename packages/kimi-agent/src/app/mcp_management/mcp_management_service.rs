@@ -5,12 +5,10 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use uuid::Uuid;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::app::agent_identity::agent_identity::IAgentIdentity;
 use crate::app::environment::environment::EnvironmentResolver;
 use crate::app::mcp_registry::mcp_registry::{IMcpRegistryService, McpRegistryEntry, McpRegistryQuery, McpServerSource};
-use crate::app::scopes::LifecycleScope;
 use crate::mcp_core::configView::to_mcp_server_config_view;
 use crate::mcp_core::config_schema::{McpAuth, McpServerConfig, McpTransport, validate_mcp_server_config};
 use crate::mcp_core::connection_manager::{McpConnectionManager, McpConnectionManagerOptions, McpDefaults, McpServerStatus};
@@ -642,8 +640,4 @@ fn encode_uri_component(value: &str) -> String {
 fn normalize_path(cwd: Option<&str>) -> String {
     let path = cwd.map(str::to_string).unwrap_or_else(|| std::env::current_dir().unwrap_or_default().to_string_lossy().into_owned());
     path.replace('\\', "/")
-}
-
-pub fn register_mcp_management_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnDemand, "mcpManagement");
 }

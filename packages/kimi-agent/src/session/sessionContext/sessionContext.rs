@@ -20,7 +20,7 @@ pub trait ISessionContext: Send + Sync {
     fn session_dir(&self) -> String;
     fn meta_scope(&self) -> String;
     fn cwd(&self) -> String;
-    fn scope(&self, sub_key: &str) -> String;
+    fn scope(&self, sub_key: Option<&str>) -> String;
 }
 
 pub fn snapshot_session_workspace_association(
@@ -78,11 +78,10 @@ impl ISessionContext for SessionContext {
         self.cwd.clone()
     }
 
-    fn scope(&self, sub_key: &str) -> String {
-        if sub_key.is_empty() {
-            self.session_scope.clone()
-        } else {
-            format!("{}/{sub_key}", self.session_scope)
+    fn scope(&self, sub_key: Option<&str>) -> String {
+        match sub_key.filter(|sub_key| !sub_key.is_empty()) {
+            Some(sub_key) => format!("{}/{}", self.session_scope, sub_key),
+            None => self.session_scope.clone(),
         }
     }
 }

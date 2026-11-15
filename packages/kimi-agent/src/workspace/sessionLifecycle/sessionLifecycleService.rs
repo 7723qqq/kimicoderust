@@ -49,7 +49,8 @@ use crate::environment::environment::{EnvironmentBinding, EnvironmentLease, LOCA
 use crate::environment::environment_registry::EnvironmentError;
 use crate::features::fileHistory::fileHistory::IAgentFileHistoryService;
 use crate::features::fileHistory::fileHistoryRetention::{
-    drop_file_history_session, touch_forked_file_history,
+    DropFileHistorySessionInput, FileHistoryRetentionInput, drop_file_history_session,
+    touch_forked_file_history,
 };
 use crate::features::fileHistory::fileHistory::FILE_HISTORY_BLOB_PREFIX;
 use crate::features::notify::session_notify::ISessionNotify;
@@ -80,7 +81,7 @@ use crate::session::session_context::session_context::{
 };
 use crate::session::session_instructions::instructions_provider::ISessionInstructionsProvider;
 use crate::session::session_metadata::session_metadata::{
-    AgentMeta, ISessionMetadata, SESSION_META_VERSION, SessionMeta,
+    AgentMeta, ISessionMetadata, SESSION_META_VERSION, SessionMeta, SessionMetaPatch,
 };
 use crate::session::session_metadata::session_metadata_service::{
     drain_session_metadata_writes, encode_session_meta, to_epoch_ms,
@@ -186,12 +187,12 @@ impl<T> Default for LifecycleListeners<T> {
 }
 
 struct LifecycleEvents {
-    will_create: Mutex<LifecycleListeners<SessionWillCreateEvent>>,
-    did_create: Mutex<LifecycleListeners<LifecycleWaitEvent<SessionCreatedEvent>>>,
-    will_close: Mutex<LifecycleListeners<LifecycleWaitEvent<SessionWillCloseEvent>>>,
-    did_close: Mutex<LifecycleListeners<SessionClosedEvent>>,
-    did_archive: Mutex<LifecycleListeners<SessionArchivedEvent>>,
-    did_fork: Mutex<LifecycleListeners<SessionForkedEvent>>,
+    will_create: Arc<Mutex<LifecycleListeners<SessionWillCreateEvent>>>,
+    did_create: Arc<Mutex<LifecycleListeners<LifecycleWaitEvent<SessionCreatedEvent>>>>,
+    will_close: Arc<Mutex<LifecycleListeners<LifecycleWaitEvent<SessionWillCloseEvent>>>>,
+    did_close: Arc<Mutex<LifecycleListeners<SessionClosedEvent>>>,
+    did_archive: Arc<Mutex<LifecycleListeners<SessionArchivedEvent>>>,
+    did_fork: Arc<Mutex<LifecycleListeners<SessionForkedEvent>>>,
 }
 
 struct LifecycleState {
@@ -217,12 +218,12 @@ impl SessionLifecycleService {
                 resume_failures: HashMap::new(),
             })),
             events: Arc::new(LifecycleEvents {
-                will_create: Mutex::new(LifecycleListeners::default()),
-                did_create: Mutex::new(LifecycleListeners::default()),
-                will_close: Mutex::new(LifecycleListeners::default()),
-                did_close: Mutex::new(LifecycleListeners::default()),
-                did_archive: Mutex::new(LifecycleListeners::default()),
-                did_fork: Mutex::new(LifecycleListeners::default()),
+                will_create: Arc::new(Mutex::new(LifecycleListeners::default())),
+                did_create: Arc::new(Mutex::new(LifecycleListeners::default())),
+                will_close: Arc::new(Mutex::new(LifecycleListeners::default())),
+                did_close: Arc::new(Mutex::new(LifecycleListeners::default())),
+                did_archive: Arc::new(Mutex::new(LifecycleListeners::default())),
+                did_fork: Arc::new(Mutex::new(LifecycleListeners::default())),
             }),
             _on_dispose: Mutex::new(on_dispose),
         }
@@ -249,11 +250,20 @@ impl SessionLifecycleService {
         let result = async {
             if let Some(environment) = &environment {
                 let metadata = handle.accessor().get(&I_SESSION_METADATA);
-                if environment.environment_id == LOCAL_ENVIRONMENT_ID {
-                    metadata.update_environment_cwd(&environment.cwd, false).await?;
+                let patch = if environment.environment_id == LOCAL_ENVIRONMENT_ID {
+                    SessionMetaPatch {
+                        environment_cwd: environment.cwd.clone(),
+                        ..Default::default()
+                    }
                 } else {
-                    metadata.update_environment(&environment.environment_id, &environment.cwd, &work_dir, false).await?;
-                }
+                    SessionMetaPatch {
+                        environment_id: Some(environment.environment_id.clone()),
+                        environment_cwd: environment.cwd.clone(),
+                        cwd: Some(opts.work_dir.clone()),
+                        ..Default::default()
+                    }
+                };
+                metadata.update(patch, Some(false)).await?;
             }
             let agents = handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
             let main = if opts.main_agent_binding.is_some() || opts.ensure_main_agent || environment.is_some() {
@@ -275,7 +285,11 @@ impl SessionLifecycleService {
                 let plan_handle = agents.handle_of(&plan_agent.agent_id).ok_or_else(|| -> WireAsyncError {
                     Box::new(Error2::new("agent.not_found", "Main agent was not found"))
                 })?;
-                plan_handle.accessor().get(&I_AGENT_PLAN_SERVICE).enter().await?;
+                plan_handle
+                    .accessor()
+                    .get(&I_AGENT_PLAN_SERVICE)
+                    .enter(None, false)
+                    .await?;
             }
             self.append_session_index_entry(&session_id, &work_dir).await
         }
@@ -646,8 +660,8 @@ impl SessionLifecycleService {
         drain_session_metadata_writes().await?;
         self.services.index_mirror.drain().await?;
         handle.dispose();
-        self.services.environments.drain_session(session_id).await?;
-        drain_log_closes().await?;
+        self.services.environments.drain_session(session_id).await;
+        drain_log_closes().await;
         fire_listeners(&self.events.did_close, SessionClosedEvent { session_id: session_id.to_string() });
         let mut properties = Map::new();
         properties.insert("reason".to_string(), format!("{reason:?}").to_lowercase().into());
@@ -662,7 +676,7 @@ impl SessionLifecycleService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        let lease = self.services.session_locks.lease(session_id);
+        let lease = self.services.session_locks.lease(session_id)?;
         let result = async {
             let meta = handle.accessor().get(&I_SESSION_METADATA);
             meta.set_archived(true).await?;
@@ -671,7 +685,7 @@ impl SessionLifecycleService {
             self.services.event.publish(SessionArchived::new(SessionArchivedPayload {
                 session_id: session_id.to_string(),
                 workspace_id: self.workspace_id(),
-            }));
+            }).to_event2());
             self.announce_will_close(SessionWillCloseEvent {
                 session_id: session_id.to_string(),
                 handle: handle.clone(),
@@ -681,8 +695,8 @@ impl SessionLifecycleService {
             drain_session_metadata_writes().await?;
             self.services.index_mirror.drain().await?;
             handle.dispose();
-            self.services.environments.drain_session(session_id).await?;
-            drain_log_closes().await?;
+            self.services.environments.drain_session(session_id).await;
+            drain_log_closes().await;
             fire_listeners(&self.events.did_archive, SessionArchivedEvent { session_id: session_id.to_string() });
             let mut properties = Map::new();
             properties.insert("reason".to_string(), "archive".into());
@@ -724,20 +738,24 @@ impl SessionLifecycleService {
         if handle.is_none() && !persisted_here {
             return Err(Box::new(Error2::new("session.not_found", format!("session {session_id} does not exist"))));
         }
-        let lease = self.services.session_locks.lease(session_id);
+        let lease = self.services.session_locks.lease(session_id)?;
         let result = async {
             if handle.is_some() {
                 self.close(session_id).await?;
             }
             self.services.host_fs.remove(&session_dir_of(&self.services.bootstrap.home_dir(), &self.handler_scope(), session_id)).await?;
             self.services.index.remove(session_id).await?;
-            drop_file_history_session(self.services.docs.as_ref(), &self.workspace_id(), session_id).await?;
+            drop_file_history_session(DropFileHistorySessionInput {
+                docs: self.services.docs.clone(),
+                workspace_id: self.workspace_id(),
+                session_id: session_id.to_string(),
+            }).await;
             self.services.append_log_store.append("", "session_index.jsonl", json!({ "sessionId": session_id, "deleted": true }), None)?;
             self.services.append_log_store.flush().await?;
             self.services.event.publish(SessionDeleted::new(SessionDeletedPayload {
                 session_id: session_id.to_string(),
                 workspace_id: self.workspace_id(),
-            }));
+            }).to_event2());
             Ok(())
         }
         .await;
@@ -751,8 +769,8 @@ impl SessionLifecycleService {
 
     async fn drain_agents(&self, handle: &Arc<ISessionScopeHandle>) -> Result<(), WireAsyncError> {
         let lifecycle = handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
-        for agent in lifecycle.list() {
-            lifecycle.remove(&agent).await?;
+        for agent in lifecycle.list(None) {
+            lifecycle.remove(agent).await?;
         }
         Ok(())
     }
@@ -920,13 +938,12 @@ impl SessionLifecycleService {
                 self.append_forked_marker(&target_id, agent_id).await?;
             }
             self.services.append_log_store.flush().await?;
-            touch_forked_file_history(
-                self.services.docs.as_ref(),
-                self.services.host_fs.as_ref(),
-                &self.workspace_id(),
-                &target_dir,
-                &target_id,
-            ).await?;
+            touch_forked_file_history(FileHistoryRetentionInput {
+                docs: self.services.docs.clone(),
+                workspace_id: self.workspace_id(),
+                session_dir: target_dir.clone(),
+                session_id: target_id.clone(),
+            }).await;
         }
         let title = opts.title.clone().unwrap_or_else(|| {
             format!("Fork: {}", source_meta.as_ref().and_then(|meta| meta.title.clone()).filter(|title| !title.is_empty()).unwrap_or_else(|| source_id.clone()))
@@ -1408,7 +1425,11 @@ async fn fire_wait_listeners<T: Clone + 'static>(
         wait_until: Arc::new(move |future| pending_sink.lock().push(future)),
     };
     fire_listeners(listeners, event);
-    for result in futures_util::future::join_all(pending.lock().drain(..).collect::<Vec<_>>()).await {
+    let waiters: Vec<_> = {
+        let mut pending = pending.lock();
+        pending.drain(..).collect()
+    };
+    for result in futures_util::future::join_all(waiters).await {
         result?;
     }
     Ok(())

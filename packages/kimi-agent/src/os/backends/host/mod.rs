@@ -6,8 +6,6 @@ pub mod host_environment_service;
 pub mod host_fs_service;
 #[path = "hostProcessService.rs"]
 pub mod host_process_service;
-#[path = "hostServices.rs"]
-pub mod host_services;
 #[path = "hostTimersService.rs"]
 pub mod host_timers_service;
 pub mod tools;

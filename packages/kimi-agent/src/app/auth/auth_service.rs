@@ -12,7 +12,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::config::config::IConfigService;
@@ -26,7 +25,6 @@ use crate::app::kosong_config::discovery::{
 };
 use crate::app::region::region::IRegionService;
 use crate::app::region::region_service::kimi_region_env;
-use crate::app::scopes::LifecycleScope;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::llm_adapter::model::model::{IModelService, ModelRecord};
 use crate::llm_adapter::model::model_auth::{
@@ -1717,22 +1715,4 @@ impl IOAuthToolkit for OAuthToolkitService {
     ) -> Result<AuthManagedUserInfoResult, WireAsyncError> {
         self.inner.get_managed_user_info(provider_name, options).await
     }
-}
-
-pub fn register_auth_services() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "auth",
-    );
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "auth",
-    );
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "auth",
-    );
 }

@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::agent_identity::agent_identity::IAgentIdentity;
 use crate::app::auth::auth::IOAuthService;
 use crate::app::auth::config_section::{SERVICES_SECTION, ServicesConfig};
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::config::config::IConfigService;
-use crate::app::scopes::LifecycleScope;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::llm_adapter::provider::provider::IProviderService;
 use crate::llm_adapter::provider::provider_definition::is_oauth_catalog_vendor;
@@ -134,13 +132,4 @@ fn kimi_code_base_url() -> String {
         })
         .trim_end_matches('/')
         .to_string()
-}
-
-pub fn register_web_fetch_service() {
-    register_web_errors();
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "web",
-    );
 }

@@ -79,25 +79,25 @@ impl<T> Default for LifecycleListeners<T> {
 }
 
 struct SessionManagerEvents {
-    will_create: Mutex<LifecycleListeners<SessionWillCreateEvent>>,
-    did_create: Mutex<LifecycleListeners<LifecycleWaitEvent<SessionCreatedEvent>>>,
-    will_close: Mutex<LifecycleListeners<LifecycleWaitEvent<SessionWillCloseEvent>>>,
-    did_close: Mutex<LifecycleListeners<SessionClosedEvent>>,
-    will_delete: Mutex<LifecycleListeners<LifecycleWaitEvent<SessionWillDeleteEvent>>>,
-    did_archive: Mutex<LifecycleListeners<SessionArchivedEvent>>,
-    did_fork: Mutex<LifecycleListeners<SessionForkedEvent>>,
+    will_create: Arc<Mutex<LifecycleListeners<SessionWillCreateEvent>>>,
+    did_create: Arc<Mutex<LifecycleListeners<LifecycleWaitEvent<SessionCreatedEvent>>>>,
+    will_close: Arc<Mutex<LifecycleListeners<LifecycleWaitEvent<SessionWillCloseEvent>>>>,
+    did_close: Arc<Mutex<LifecycleListeners<SessionClosedEvent>>>,
+    will_delete: Arc<Mutex<LifecycleListeners<LifecycleWaitEvent<SessionWillDeleteEvent>>>>,
+    did_archive: Arc<Mutex<LifecycleListeners<SessionArchivedEvent>>>,
+    did_fork: Arc<Mutex<LifecycleListeners<SessionForkedEvent>>>,
 }
 
 impl Default for SessionManagerEvents {
     fn default() -> Self {
         Self {
-            will_create: Mutex::new(LifecycleListeners::default()),
-            did_create: Mutex::new(LifecycleListeners::default()),
-            will_close: Mutex::new(LifecycleListeners::default()),
-            did_close: Mutex::new(LifecycleListeners::default()),
-            will_delete: Mutex::new(LifecycleListeners::default()),
-            did_archive: Mutex::new(LifecycleListeners::default()),
-            did_fork: Mutex::new(LifecycleListeners::default()),
+            will_create: Arc::new(Mutex::new(LifecycleListeners::default())),
+            did_create: Arc::new(Mutex::new(LifecycleListeners::default())),
+            will_close: Arc::new(Mutex::new(LifecycleListeners::default())),
+            did_close: Arc::new(Mutex::new(LifecycleListeners::default())),
+            will_delete: Arc::new(Mutex::new(LifecycleListeners::default())),
+            did_archive: Arc::new(Mutex::new(LifecycleListeners::default())),
+            did_fork: Arc::new(Mutex::new(LifecycleListeners::default())),
         }
     }
 }

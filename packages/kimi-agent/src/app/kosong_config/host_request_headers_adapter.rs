@@ -43,11 +43,3 @@ impl IHostRequestHeaders for HostRequestHeadersAdapter {
         self.identity.current().slug
     }
 }
-
-pub fn register_host_request_headers_adapter() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnDemand,
-        "kosongConfig",
-    );
-}

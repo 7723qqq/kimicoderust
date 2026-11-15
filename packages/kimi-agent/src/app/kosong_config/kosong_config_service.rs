@@ -343,11 +343,3 @@ fn retry_backoff_delays(max_attempts: usize) -> Vec<u64> {
         })
         .collect()
 }
-
-pub fn register_kosong_config_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "kosongConfig",
-    );
-}

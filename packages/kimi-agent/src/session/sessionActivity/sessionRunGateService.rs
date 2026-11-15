@@ -9,7 +9,6 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::persistence::interface::append_log_store::IAppendLogStore;
 use crate::persistence::interface::session_lock::ISessionLockService;
@@ -153,12 +152,4 @@ impl Drop for SessionRunGateService {
         self.cancel_timer();
         self.session_locks.release(&self.ctx.session_id());
     }
-}
-
-pub fn register_session_run_gate_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "sessionRunGate",
-    );
 }

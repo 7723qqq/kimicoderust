@@ -262,7 +262,7 @@ impl WorkspaceFsService {
             let stats = map_with_concurrency(&candidates, LIST_LSTAT_CONCURRENCY, |candidate| {
                 let path = abs_of(&candidate.child_rel);
                 let host_fs = self.host_fs.clone();
-                async move { host_fs.lstat(&path).await.ok() }
+                Box::pin(async move { host_fs.lstat(&path).await.ok() })
             }).await;
             let mut visible = Vec::new();
             for (index, candidate) in candidates.into_iter().enumerate() {
@@ -453,7 +453,7 @@ impl WorkspaceFsService {
                 let stats = map_with_concurrency(&candidates, LIST_LSTAT_CONCURRENCY, |child_rel| {
                     let path = abs_of(child_rel);
                     let host_fs = service.host_fs.clone();
-                    async move { host_fs.lstat(&path).await.ok() }
+                    Box::pin(async move { host_fs.lstat(&path).await.ok() })
                 }).await;
                 for (index, child_rel) in candidates.into_iter().enumerate() {
                     let stat = &stats[index];
@@ -1863,6 +1863,7 @@ struct ListQueueEntry {
     via_symlink: bool,
 }
 
+#[derive(Clone)]
 struct ListCandidate {
     name: String,
     child_rel: String,

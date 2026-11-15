@@ -13,12 +13,10 @@ use serde_json::{Map, Value, json};
 
 use crate::_base::di::instantiation::LiveRef;
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::timer::IntervalTimer;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::config::config::IConfigService;
-use crate::app::scopes::LifecycleScope;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::app::workspace::workspace::{IWorkspaceService, Workspace};
 use crate::app::workspace::workspace_alias::{
@@ -1558,12 +1556,4 @@ fn same_primary_by_workspace(
         && left
             .iter()
             .all(|(id, root)| right.get(id) == Some(root))
-}
-
-pub fn register_session_index_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "sessionIndex",
-    );
 }

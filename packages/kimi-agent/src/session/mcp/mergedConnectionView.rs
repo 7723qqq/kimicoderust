@@ -106,7 +106,7 @@ impl McpConnectionView for MergedMcpConnectionView {
             Ok(())
         };
         match signal {
-            Some(signal) => abortable(both, &signal).await,
+            Some(signal) => abortable(both, signal).await,
             None => both.await,
         }
     }

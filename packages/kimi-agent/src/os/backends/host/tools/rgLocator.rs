@@ -123,14 +123,14 @@ pub async fn ensure_rg_path(
             result.map_err(SharedRgError::boxed)
         };
         return match signal {
-            Some(signal) => abortable(wait, &signal).await,
+            Some(signal) => abortable(wait, signal).await,
             None => wait.await,
         };
     }
     let share_dir = options.share_dir.clone().unwrap_or_else(get_share_dir);
     let resolution = resolve_rg_path(probe, share_dir, &options);
     match signal {
-        Some(signal) => abortable(resolution, &signal).await,
+        Some(signal) => abortable(resolution, signal).await,
         None => resolution.await,
     }
 }

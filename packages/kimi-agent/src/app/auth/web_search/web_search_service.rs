@@ -2,13 +2,11 @@ use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::utils::fetch_like::FetchError;
 use crate::app::agent_identity::agent_identity::IAgentIdentity;
 use crate::app::auth::auth::{BearerTokenProvider, IOAuthService};
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::config::config::IConfigService;
-use crate::app::scopes::LifecycleScope;
 use crate::llm_adapter::provider::provider::{IProviderService, ProviderConfig};
 use crate::llm_adapter::provider::provider_definition::is_oauth_catalog_vendor;
 use crate::region::{KIMI_CODE_PROVIDER_NAME, KimiRegion, kimi_region_profile};
@@ -205,8 +203,4 @@ impl WebSearchProvider for FailoverWebSearchProvider {
             None => Ok(Vec::new()),
         }
     }
-}
-
-pub fn register_web_search_provider_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "auth");
 }

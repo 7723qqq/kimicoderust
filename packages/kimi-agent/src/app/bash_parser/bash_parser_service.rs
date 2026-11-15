@@ -4,8 +4,6 @@ use std::time::Instant;
 
 use tree_sitter::{Node, ParseOptions, ParseState, Parser, Point};
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
 
 use super::bash_parser::{
     BashParseFailureReason, BashParseOptions, BashParseResult, BashSyntaxNode, IBashParserService,
@@ -165,8 +163,4 @@ fn utf16_index(source: &str, byte_index: usize) -> usize {
         .expect("tree-sitter node ranges are UTF-8 boundaries")
         .encode_utf16()
         .count()
-}
-
-pub fn register_bash_parser_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnDemand, "bashParser");
 }

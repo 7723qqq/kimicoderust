@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use futures_util::future::{BoxFuture, FutureExt};
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
 use crate::agent::environment_binding::agent_environment::IAgentEnvironmentService;
 use crate::agent::permission_mode::permission_mode::IAgentPermissionModeService;
@@ -29,7 +28,6 @@ use crate::agent::permission_rules::permission_rules::IAgentPermissionRulesServi
 use crate::agent::tool_executor::tool_hooks::ResolvedToolExecutionHookContext;
 use crate::app::bash_parser::bash_parser::IBashParserService;
 use crate::app::config::config::IConfigService;
-use crate::app::scopes::LifecycleScope;
 use crate::session::workspace_context::workspace_context::ISessionWorkspaceContext;
 use crate::wire::record::WireAsyncError;
 
@@ -125,12 +123,4 @@ impl IAgentPermissionPolicyService for AgentPermissionPolicyService {
         }
         .boxed()
     }
-}
-
-pub fn register_agent_permission_policy_service() {
-    register_scoped_service(
-        LifecycleScope::Agent,
-        ScopeActivation::OnScopeCreated,
-        "permissionPolicy",
-    );
 }

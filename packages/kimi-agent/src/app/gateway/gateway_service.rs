@@ -10,10 +10,9 @@ use kimi_core::primitives::errors::{Error2, Error2Options};
 use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
-use crate::_base::di::scope::{IAgentScopeHandle, ScopeActivation, register_scoped_service};
+use crate::_base::di::scope::IAgentScopeHandle;
 use crate::_base::log::log::ILogService;
 use crate::agent::r#loop::r#loop::{IAgentLoopService, LoopSubmitOptions};
-use crate::app::scopes::LifecycleScope;
 use crate::app::session_manager::session_manager::ISessionManager;
 use crate::human::agent::origin::USER_PROMPT_ORIGIN;
 use crate::human::agent::turn::{UserMeta, create_user_entry};
@@ -232,17 +231,4 @@ impl IWSGateway for WSGateway {
     fn broadcast(&self, session_id: &str, event: Value) {
         WSGateway::broadcast(self, session_id, event)
     }
-}
-
-pub fn register_gateway_services() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "gateway",
-    );
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "gateway",
-    );
 }

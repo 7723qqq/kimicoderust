@@ -8,7 +8,8 @@ use tokio::fs;
 use tokio::sync::Mutex;
 
 use crate::_base::errors::unexpected_error::on_unexpected_error;
-use crate::persistence::JsonAtomicDocumentStore;
+use crate::persistence::interface::atomicDocumentStore::IAtomicDocumentStore;
+use crate::wire::record::WireAsyncError;
 
 use super::fileHistory::FILE_HISTORY_BLOB_PREFIX;
 
@@ -29,7 +30,7 @@ pub struct RetentionDoc {
 
 #[derive(Clone)]
 pub struct FileHistoryRetentionInput {
-    pub docs: JsonAtomicDocumentStore,
+    pub docs: Arc<dyn IAtomicDocumentStore>,
     pub workspace_id: String,
     pub session_dir: PathBuf,
     pub session_id: String,
@@ -37,9 +38,32 @@ pub struct FileHistoryRetentionInput {
 
 #[derive(Clone)]
 pub struct DropFileHistorySessionInput {
-    pub docs: JsonAtomicDocumentStore,
+    pub docs: Arc<dyn IAtomicDocumentStore>,
     pub workspace_id: String,
     pub session_id: String,
+}
+
+async fn read_retention_doc(
+    docs: &dyn IAtomicDocumentStore,
+    workspace_id: &str,
+) -> Result<Option<RetentionDoc>, WireAsyncError> {
+    let Some(value) = docs.get(RETENTION_DOC_SCOPE, workspace_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_value(value)?))
+}
+
+async fn write_retention_doc(
+    docs: &dyn IAtomicDocumentStore,
+    workspace_id: &str,
+    doc: &RetentionDoc,
+) -> Result<(), WireAsyncError> {
+    docs.set(
+        RETENTION_DOC_SCOPE,
+        workspace_id,
+        serde_json::to_value(doc)?,
+    )
+    .await
 }
 
 static TOUCH_QUEUES: LazyLock<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
@@ -61,10 +85,7 @@ pub async fn touch_file_history_session(input: FileHistoryRetentionInput) {
 }
 
 async fn apply_touch(input: FileHistoryRetentionInput) {
-    let mut doc = match input
-        .docs
-        .get::<RetentionDoc>(RETENTION_DOC_SCOPE, &input.workspace_id)
-    {
+    let mut doc = match read_retention_doc(input.docs.as_ref(), &input.workspace_id).await {
         Ok(doc) => doc.unwrap_or_default(),
         Err(error) => {
             on_unexpected_error(error);
@@ -92,10 +113,7 @@ async fn apply_touch(input: FileHistoryRetentionInput) {
     if !stuck.is_empty() {
         doc.sessions.splice(0..0, stuck);
     }
-    if let Err(error) = input
-        .docs
-        .set(RETENTION_DOC_SCOPE, &input.workspace_id, &doc)
-    {
+    if let Err(error) = write_retention_doc(input.docs.as_ref(), &input.workspace_id, &doc).await {
         on_unexpected_error(error);
     }
 }
@@ -155,10 +173,7 @@ async fn remove_session_blobs(agents_dir: &Path) -> bool {
 pub async fn drop_file_history_session(input: DropFileHistorySessionInput) {
     let queue = touch_queue(&input.workspace_id);
     let _guard = queue.lock().await;
-    let Some(mut doc) = (match input
-        .docs
-        .get::<RetentionDoc>(RETENTION_DOC_SCOPE, &input.workspace_id)
-    {
+    let Some(mut doc) = (match read_retention_doc(input.docs.as_ref(), &input.workspace_id).await {
         Ok(doc) => doc,
         Err(error) => {
             on_unexpected_error(error);
@@ -172,10 +187,7 @@ pub async fn drop_file_history_session(input: DropFileHistorySessionInput) {
     if doc.sessions.len() == previous_len {
         return;
     }
-    if let Err(error) = input
-        .docs
-        .set(RETENTION_DOC_SCOPE, &input.workspace_id, &doc)
-    {
+    if let Err(error) = write_retention_doc(input.docs.as_ref(), &input.workspace_id, &doc).await {
         on_unexpected_error(error);
     }
 }

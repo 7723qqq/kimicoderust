@@ -3,14 +3,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::auth::auth::IOAuthService;
 use crate::app::config::config::IConfigService;
 use crate::app::kosong_config::config_section::{
     DEFAULT_MODEL_SECTION, DEFAULT_PROVIDER_SECTION, MODELS_SECTION, ModelsSection,
     PROVIDERS_SECTION, ProvidersSection,
 };
-use crate::app::scopes::LifecycleScope;
 use crate::llm_adapter::model::model_auth::{ModelReadyResolution, resolve_model_for_ready};
 use crate::region::KIMI_CODE_PROVIDER_NAME;
 use crate::wire::record::WireAsyncError;
@@ -88,12 +86,4 @@ impl IAuthLegacyService for AuthLegacyService {
             managed_provider,
         })
     }
-}
-
-pub fn register_auth_legacy_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "authLegacy",
-    );
 }

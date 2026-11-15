@@ -5,7 +5,6 @@ use async_trait::async_trait;
 
 use serde_json::Value;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
 use crate::agent::context_memory::hook_parts::is_user_prompt_submit_hook_part;
 use crate::agent::context_memory::types::{ContextMessage, PromptOrigin};
@@ -13,7 +12,6 @@ use crate::agent::r#loop::r#loop::IAgentLoopService;
 use crate::agent::prompt::prompt_metadata_text::{
     prompt_metadata_text_from_content_parts, prompt_metadata_text_from_text,
 };
-use crate::app::scopes::LifecycleScope;
 use crate::human::agent::origin::{
     BundledSkillActivation, SkillSource, annotate_bundled_skill_parts, is_skill_activation_part,
 };
@@ -221,12 +219,4 @@ fn assistant_text_from_content_parts(parts: &[ContentPart]) -> Option<String> {
         return None;
     }
     Some(prompt_metadata_text_from_text(&texts.join("\n")))
-}
-
-pub fn register_agent_title_prompt_source_service() {
-    register_scoped_service(
-        LifecycleScope::Agent,
-        ScopeActivation::OnDemand,
-        "sessionTitle",
-    );
 }

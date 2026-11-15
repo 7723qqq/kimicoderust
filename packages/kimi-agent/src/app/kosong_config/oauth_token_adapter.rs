@@ -87,11 +87,3 @@ fn login_required(provider_key: &str) -> Error2 {
         format!("OAuth provider \"{provider_key}\" requires login before it can be used."),
     )
 }
-
-pub fn register_model_oauth_token_adapter() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "kosongConfig",
-    );
-}

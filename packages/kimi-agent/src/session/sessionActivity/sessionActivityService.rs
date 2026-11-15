@@ -13,7 +13,7 @@ use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
-use crate::_base::di::scope::{IAgentScopeHandle, ScopeActivation, register_scoped_service};
+use crate::_base::di::scope::IAgentScopeHandle;
 use crate::agent::full_compaction::compaction_ops::{
     CompactionCancelled, CompactionCompleted, CompactionStarted,
 };
@@ -25,7 +25,6 @@ use crate::agent::state::agent_state::{I_AGENT_STATE_SERVICE, IAgentStateService
 use crate::agent::task::task::IAgentTaskService;
 use crate::agent::task::task_ops::{TaskStarted, TaskTerminatedNotice};
 use crate::app::event::event_bus::IEventBus;
-use crate::app::scopes::LifecycleScope;
 use crate::human::interaction::facade::interactions;
 use crate::human::interaction::interaction::{
     INTERACTION_TAG_SESSION_ID, Interaction, InteractionQuery,
@@ -409,12 +408,4 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
-}
-
-pub fn register_session_activity_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "sessionActivity",
-    );
 }

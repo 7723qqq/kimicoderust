@@ -14,13 +14,12 @@ use kimi_core::primitives::errors::domains::session::SESSION_NOT_FOUND;
 use kimi_core::primitives::errors::{Error2, Error2Options};
 use serde_json::{Map, Value, json};
 
-use crate::_base::di::scope::{ISessionScopeHandle, ScopeActivation, register_scoped_service};
+use crate::_base::di::scope::ISessionScopeHandle;
 use crate::_base::log::log::ILogService;
 use crate::_base::log::log_config::resolve_global_log_path;
 use crate::_base::utils::abort::{AbortError, AbortSignal};
 use crate::_base::utils::paths::canonical_path;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
-use crate::app::scopes::LifecycleScope;
 use crate::app::session_index::session_index::{ISessionIndex, SessionSummary};
 use crate::app::session_manager::session_manager::ISessionManager;
 use crate::app::workspace::workspace::IWorkspaceService;
@@ -495,12 +494,4 @@ fn throw_if_aborted(signal: Option<&AbortSignal>) -> Result<(), WireAsyncError> 
         return Err(Box::new(AbortError::new(message)));
     }
     Ok(())
-}
-
-pub fn register_session_export_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "sessionExport",
-    );
 }

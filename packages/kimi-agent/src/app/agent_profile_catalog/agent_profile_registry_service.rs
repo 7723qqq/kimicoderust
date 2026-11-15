@@ -6,8 +6,6 @@ use parking_lot::Mutex;
 
 use crate::_base::di::collection::{CollectionChange, CollectionViewImpl};
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
 
 use super::agent_profile_catalog::AgentProfile;
 use super::agent_profile_contribution::{
@@ -312,12 +310,4 @@ fn same_profile(previous: &AgentProfile, next: &AgentProfile) -> bool {
             &next.render_system_prompt,
         )
         && same_prefix
-}
-
-pub fn register_agent_profile_registry_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "agentProfileCatalog",
-    );
 }

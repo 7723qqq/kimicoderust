@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::os::interface::host_timers::{IHostTimerHandle, IHostTimers};
 
@@ -69,12 +68,4 @@ impl IHostTimers for HostTimersService {
             task.abort();
         }
     }
-}
-
-pub fn register_host_timers_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "hostTimers",
-    );
 }

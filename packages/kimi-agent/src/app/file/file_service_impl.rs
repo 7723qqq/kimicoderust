@@ -10,7 +10,6 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::persistence::interface::blobStore::{BlobByteStream, IBlobStore};
 use crate::wire::record::WireAsyncError;
@@ -278,12 +277,4 @@ fn is_file_meta(value: &Value) -> Option<FileMeta> {
         created_at,
         expires_at,
     })
-}
-
-pub fn register_file_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "file",
-    );
 }

@@ -4,12 +4,10 @@ use std::sync::Arc;
 
 use crate::_base::di::descriptors::DynamicValue;
 use crate::_base::di::lifecycle::DisposableRef;
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::_base::state::state_registry::{
     IStateRegistry, StateInspection, StateKey, StateRegistry,
 };
-use crate::app::scopes::LifecycleScope;
 
 use super::app_state::IAppStateService;
 
@@ -73,7 +71,3 @@ impl IStateRegistry for AppStateService {
 }
 
 impl IAppStateService for AppStateService {}
-
-pub fn register_app_state_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "state");
-}

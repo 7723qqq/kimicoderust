@@ -8,8 +8,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
 use crate::wire::record::WireAsyncError;
 
 use super::memory_paths::memory_dir;
@@ -190,8 +188,4 @@ impl IMemoryRepo for MemoryRepo {
         }
         Ok(true)
     }
-}
-
-pub fn register_memory_repo_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "memoryRepo");
 }

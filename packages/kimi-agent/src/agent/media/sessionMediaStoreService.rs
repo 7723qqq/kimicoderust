@@ -43,7 +43,7 @@ impl SessionMediaStoreService {
         documents: Arc<dyn IAtomicDocumentStore>,
     ) -> Self {
         Self {
-            scope: session_context.scope("media"),
+            scope: session_context.scope(Some("media")),
             storage,
             documents,
         }

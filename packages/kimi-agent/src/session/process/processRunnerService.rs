@@ -3,8 +3,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
 use crate::errors::BugIndicatingError;
 use crate::os::interface::host_process::{IHostProcess, IHostProcessService};
 use crate::session::session_context::session_context::ISessionContext;
@@ -105,12 +103,4 @@ fn build_exec_env(invocation_env: Option<HashMap<String, String>>) -> Option<Has
     let mut env = std::env::vars().collect::<HashMap<_, _>>();
     env.extend(invocation_env);
     Some(env)
-}
-
-pub fn register_session_process_runner() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "process",
-    );
 }

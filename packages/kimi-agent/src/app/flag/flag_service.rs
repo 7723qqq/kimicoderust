@@ -4,12 +4,10 @@ use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::env::parse_boolean_env;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::config::config::IConfigService;
-use crate::app::scopes::LifecycleScope;
 
 use super::flag::{
     EXPERIMENTAL_SECTION, ExperimentalFeatureState, ExperimentalFlagConfig, ExperimentalFlagMap,
@@ -260,12 +258,4 @@ fn canonical_flag_id(key: &str, registry: &dyn IFlagRegistry) -> String {
     } else {
         key.to_string()
     }
-}
-
-pub fn register_flag_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "flag",
-    );
 }

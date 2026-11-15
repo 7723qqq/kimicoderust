@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::utils::paths::{canonical_path, canonical_workspace_root};
 use crate::app::mcp_management::mcp_management::GlobalMcpServerConfig;
 use crate::app::scopes::LifecycleScope;
@@ -154,8 +153,4 @@ impl IMcpRegistryService for McpRegistryService {
         }
         Ok(matches.into_iter().find(|entry| entry.source == McpServerSource::Plugin && entry.config.enabled != Some(false)))
     }
-}
-
-pub fn register_mcp_registry_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnDemand, "mcpRegistry");
 }

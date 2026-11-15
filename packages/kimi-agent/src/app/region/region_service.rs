@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::future::BoxFuture;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::kosong_config::config_section::OAuthRef;
-use crate::app::scopes::LifecycleScope;
 use crate::llm_adapter::provider::provider::IProviderService;
 use crate::region::KIMI_CODE_PROVIDER_NAME;
 
@@ -109,8 +107,4 @@ impl IRegionService for RegionService {
             self.resolver.current().region
         })
     }
-}
-
-pub fn register_region_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "region");
 }

@@ -50,7 +50,6 @@ use crate::features::externalHooks::internal::userPrompt::{
 use crate::hooks::{HookNext, HookRegisterOptions};
 use crate::human::llm::finish_reason::FinishReason;
 use crate::human::llm::message::{ContentPart, Role};
-use crate::rpc::types::ContentPart;
 use crate::session::agent_lifecycle::agent_lifecycle::MAIN_AGENT_ID;
 use crate::session::session_context::session_context::ISessionContext;
 use crate::session::sessionMetadata::session_metadata::{

@@ -906,11 +906,3 @@ fn has_configured_api_key(provider: &ProviderConfig, provider_id: Option<&str>) 
     .api_key
     .is_some()
 }
-
-pub fn register_model_catalog_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "modelCatalog",
-    );
-}

@@ -7,9 +7,8 @@ use futures_util::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
+use crate::_base::errors::errors::SharedError;
 use crate::_base::utils::abort::AbortController;
-use crate::app::scopes::LifecycleScope;
 
 use super::task::{IDeferredHandle, ITaskHandle, ITaskService, TERMINAL_TASK_STATES, TaskCancelledError, TaskError, TaskFn, TaskResult, TaskState};
 
@@ -148,7 +147,8 @@ where
         if TERMINAL_TASK_STATES.contains(&self.state()) {
             return;
         }
-        self.abort_controller.abort();
+        self.abort_controller
+            .abort(Some(Arc::new(TaskCancelledError::new(self.id.clone())) as SharedError));
         self.transition(TaskState::Cancelled);
     }
 
@@ -330,7 +330,3 @@ impl fmt::Display for TaskRunnerError {
 }
 
 impl Error for TaskRunnerError {}
-
-pub fn register_task_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "task");
-}

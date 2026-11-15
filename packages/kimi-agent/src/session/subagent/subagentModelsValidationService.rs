@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::config::config::IConfigService;
 use crate::app::scopes::LifecycleScope;
 use crate::llm_adapter::model::catalog::IModelCatalog;
@@ -22,11 +21,3 @@ impl SessionSubagentModelsValidationService {
 }
 
 impl ISessionSubagentModelsValidationService for SessionSubagentModelsValidationService {}
-
-pub fn register_subagent_models_validation_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "subagent",
-    );
-}

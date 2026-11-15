@@ -4,7 +4,6 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::app::scopes::LifecycleScope;
 
@@ -78,12 +77,4 @@ impl IBuiltinAgentProfileLoader for BuiltinAgentProfileLoaderService {
     fn list(&self) -> Vec<AgentProfile> {
         BuiltinAgentProfileLoaderService::list(self)
     }
-}
-
-pub fn register_builtin_agent_profile_loader_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "agentProfileCatalog",
-    );
 }

@@ -553,11 +553,3 @@ fn is_within_depth(entry: &str, base: Option<&str>, depth: usize) -> bool {
         .strip_prefix(&prefix)
         .is_some_and(|relative| relative.split('/').count() <= depth)
 }
-
-pub fn register_git_memory_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::Agent,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "gitMemory",
-    );
-}

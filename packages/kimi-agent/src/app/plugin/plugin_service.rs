@@ -12,7 +12,6 @@ use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex as AsyncMutex, OnceCell};
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::errors::errors::BugIndicatingError;
 use crate::_base::log::log::ILogService;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
@@ -767,8 +766,4 @@ fn plugin_info_into_summary(info: PluginInfo) -> PluginSummary {
         original_source: info.original_source,
         github: info.github,
     }
-}
-
-pub fn register_plugin_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "plugin");
 }

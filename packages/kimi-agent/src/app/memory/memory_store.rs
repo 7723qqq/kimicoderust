@@ -10,8 +10,6 @@ use futures_util::FutureExt;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
 use crate::wire::record::WireAsyncError;
 
 use super::memory_paths::{MemoryEntry, MemoryScope, MemorySearchResult, build_snippet, detect_type, extract_title, parse_memory_path};
@@ -394,9 +392,5 @@ fn mtime_ms(metadata: &std::fs::Metadata) -> f64 {
 
 fn memory_error(message: impl Into<String>) -> WireAsyncError {
     Box::new(std::io::Error::other(message.into()))
-}
-
-pub fn register_memory_store_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "memory");
 }
 

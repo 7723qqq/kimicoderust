@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::config::config::IConfigService;
 use crate::app::scopes::LifecycleScope;
 use crate::i18n::{LocalizedText, i18n_params};
@@ -97,12 +96,4 @@ impl ISubagentBackendService for SubagentBackendService {
     ) -> Result<SubagentBackendRun, WireAsyncError> {
         SubagentBackendService::start(self, name, request).await
     }
-}
-
-pub fn register_subagent_backend_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "subagent",
-    );
 }

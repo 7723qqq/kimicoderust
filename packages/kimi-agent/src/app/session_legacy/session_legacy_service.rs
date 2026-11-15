@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::scope::{IAgentScopeHandle, ISessionScopeHandle, ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
+use crate::_base::di::scope::{IAgentScopeHandle, ISessionScopeHandle};
 use crate::features::goal::types::{GoalSnapshot, GoalToolResult};
 use crate::session::agentLifecycle::agentLifecycle::IAgentLifecycleService;
 use crate::session::agentLifecycle::errors::AGENT_NOT_FOUND;
@@ -47,8 +46,4 @@ impl ISessionLegacyService for SessionLegacyService {
         let agent = self.resolve_main_agent(session_id).await?;
         Ok(self.runtime.goal(agent)?.goal)
     }
-}
-
-pub fn register_session_legacy_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "sessionLegacy");
 }

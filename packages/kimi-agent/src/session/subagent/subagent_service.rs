@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
-use crate::_base::di::scope::{IAgentScopeHandle, ScopeActivation, register_scoped_service};
+use crate::_base::di::scope::IAgentScopeHandle;
 use crate::_base::log::log::ILogService;
 use crate::agent::agent_context::agent_context::AgentContext;
 use crate::agent::environment_binding::agent_environment::IAgentEnvironmentService;
@@ -34,7 +34,6 @@ use crate::app::agent_profile_catalog::profile_shared::{
 };
 use crate::app::agent_profile_catalog::prompt_prefix::apply_profile_prompt_prefix;
 use crate::app::config::config::IConfigService;
-use crate::app::scopes::LifecycleScope;
 use crate::environment::environment::Environment;
 use crate::environment::environment_workspace_view::EnvironmentWorkspaceView;
 use crate::features::reminder::reminder_service::IAgentReminderService;
@@ -497,12 +496,4 @@ fn json_variant(variant: &str) -> Value {
         "variant".to_string(),
         Value::String(variant.to_string()),
     )]))
-}
-
-pub fn register_subagent_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "subagent",
-    );
 }

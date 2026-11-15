@@ -11,8 +11,6 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
 use crate::persistence::interface::atomic_document_store::IAtomicDocumentStore;
 use crate::session::session_context::session_context::ISessionContext;
 use crate::session::state::session_state::ISessionStateService;
@@ -79,7 +77,7 @@ impl SessionToolPolicyService {
         store: Arc<dyn IAtomicDocumentStore>,
     ) -> Self {
         states.contribute_state(&SESSION_TOOL_POLICY_STATE_KEY);
-        let scope = session_context.scope("tool-policy");
+        let scope = session_context.scope(Some("tool-policy"));
         let ready_states = states.clone();
         let ready_store = store.clone();
         let ready_scope = scope.clone();
@@ -234,12 +232,4 @@ fn dedup(names: Vec<String>) -> Vec<String> {
         .into_iter()
         .filter(|name| seen.insert(name.clone()))
         .collect()
-}
-
-pub fn register_session_tool_policy_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "sessionToolPolicy",
-    );
 }

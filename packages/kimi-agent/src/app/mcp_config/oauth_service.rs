@@ -74,11 +74,3 @@ impl Drop for AppMcpOAuthService {
         }
     }
 }
-
-pub fn register_app_mcp_oauth_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnDemand,
-        "mcpConfig",
-    );
-}

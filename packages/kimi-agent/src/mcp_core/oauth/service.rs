@@ -846,7 +846,7 @@ impl McpOAuthService {
                             if attached_handles.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) == 1
                                 && !settled.load(std::sync::atomic::Ordering::Relaxed)
                             {
-                                controller.abort();
+                                controller.abort(None);
                                 settle().await;
                             }
                             Ok(())
@@ -861,7 +861,7 @@ impl McpOAuthService {
                         let waiter = waiter.clone();
                         let detach = detach.clone();
                         async move {
-                            waiter.abort();
+                            waiter.abort(None);
                             detach().await
                         }
                         .boxed()

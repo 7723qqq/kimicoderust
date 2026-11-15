@@ -215,11 +215,3 @@ impl IProviderService for ProviderService {
         })
     }
 }
-
-pub fn register_provider_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "provider",
-    );
-}

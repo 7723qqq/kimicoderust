@@ -69,7 +69,6 @@ use crate::agent::tool_activation::tool_activation::IAgentToolActivationService;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
 use crate::app::config::config::IConfigService;
 use crate::app::event::event_bus::ISessionEventBus;
-use crate::app::scopes::LifecycleScope as AppLifecycleScope;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::app::telemetry::telemetry_service::bind_telemetry_scope;
 use crate::environment::environment::LOCAL_ENVIRONMENT_ID;
@@ -1242,12 +1241,4 @@ fn error_name(error: &WireAsyncError) -> String {
         .downcast_ref::<Error2>()
         .map(|error| error.name().to_string())
         .unwrap_or_else(|| "Unknown".to_string())
-}
-
-pub fn register_agent_lifecycle_service() {
-    register_scoped_service(
-        AppLifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "agentLifecycle",
-    );
 }

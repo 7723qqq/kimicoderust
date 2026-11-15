@@ -409,11 +409,3 @@ impl IDisposable for ProviderCatalogRuntimeService {
         }
     }
 }
-
-pub fn register_provider_catalog_runtime_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "providerCatalogRuntime",
-    );
-}

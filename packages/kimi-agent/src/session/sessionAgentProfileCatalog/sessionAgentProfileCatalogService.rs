@@ -5,7 +5,6 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::app::agent_profile_catalog::agent_profile_catalog::{
     AgentProfile, DEFAULT_AGENT_PROFILE_NAME,
@@ -289,12 +288,4 @@ impl ISessionAgentProfileCatalog for SessionAgentProfileCatalogService {
         SessionAgentProfileCatalogService::reload(self);
         Ok(())
     }
-}
-
-pub fn register_session_agent_profile_catalog_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "sessionAgentProfileCatalog",
-    );
 }

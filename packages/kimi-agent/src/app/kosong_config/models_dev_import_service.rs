@@ -558,11 +558,3 @@ fn config_inspect_string(config: &dyn KosongConfigStore, domain: &str) -> Option
 fn thinking_value(value: &Option<ThinkingConfig>) -> Option<Value> {
     value.as_ref().map(|value| serde_json::to_value(value).unwrap_or(Value::Null))
 }
-
-pub fn register_models_dev_import_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "kosongConfig",
-    );
-}

@@ -13,13 +13,12 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{IAgentScopeHandle, ScopeActivation, register_scoped_service};
+use crate::_base::di::scope::IAgentScopeHandle;
 use crate::_base::errors::unexpected_error::on_unexpected_error;
 use crate::_base::log::log::ILogService;
 use crate::agent::r#loop::r#loop::IAgentLoopService;
 use crate::agent::task::task::IAgentTaskService;
 use crate::app::event::event_bus::ISessionEventBus;
-use crate::app::scopes::LifecycleScope;
 use crate::features::swarm::session::session_swarm_service::SubagentSuspended;
 use crate::os::interface::host_timers::{IHostTimerHandle, IHostTimers};
 use crate::session::agent_lifecycle::agent_lifecycle::IAgentLifecycleService;
@@ -354,12 +353,4 @@ fn removal_outcome(
         Ok(Err(error)) => RemovalRace::Failed(error.to_string()),
         Err(error) => RemovalRace::Failed(error.to_string()),
     }
-}
-
-pub fn register_subagent_scope_cache_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "subagent",
-    );
 }

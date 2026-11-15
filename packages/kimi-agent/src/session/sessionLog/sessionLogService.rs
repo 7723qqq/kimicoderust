@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::_base::di::lifecycle::IDisposable;
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::file_log::{FileLogWriter, FileLogWriterOptions, create_file_log_writer};
 use crate::_base::log::log::{I_LOG_SERVICE, ILogService, ILogger, LogLevel, LogPayload};
 use crate::_base::log::log_config::{ILogOptions, resolve_session_log_path};
@@ -128,12 +127,4 @@ impl ILogService for SessionLogService {
         }
         .boxed()
     }
-}
-
-pub fn register_session_log_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        I_LOG_SERVICE.name(),
-    );
 }

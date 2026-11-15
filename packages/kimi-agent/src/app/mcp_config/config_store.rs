@@ -346,11 +346,3 @@ fn config_error(message: String, cause: Option<WireAsyncError>) -> WireAsyncErro
         },
     ))
 }
-
-pub fn register_mcp_config_store() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnDemand,
-        "mcpConfig",
-    );
-}

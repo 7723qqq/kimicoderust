@@ -617,11 +617,3 @@ fn map_refresh_result(result: RefreshResult) -> RefreshProviderModelsResponse {
         }),
     }
 }
-
-pub fn register_provider_discovery_service() {
-    crate::_base::di::scope::register_scoped_service(
-        crate::app::scopes::LifecycleScope::App,
-        crate::_base::di::scope::ScopeActivation::OnScopeCreated,
-        "kosongConfig",
-    );
-}

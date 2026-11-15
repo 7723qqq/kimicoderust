@@ -11,12 +11,10 @@ use kimi_core::primitives::errors::domains::fs::FS_PATH_NOT_FOUND;
 use parking_lot::Mutex;
 use serde_json::json;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::paths::is_windows_absolute_path;
 use crate::_base::utils::workdir_slug::{encode_work_dir_key, is_work_dir_key, workspace_root_key};
 use crate::app::event::event::IEventService;
-use crate::app::scopes::LifecycleScope;
 use crate::os::interface::host_file_system::IHostFileSystem;
 use crate::os::interface::host_fs_errors::{is_host_fs_not_directory, is_host_fs_not_found};
 use crate::persistence::interface::append_log_store::IAppendLogStore;
@@ -682,13 +680,4 @@ fn basename(root: &str) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-pub fn register_workspace_service() {
-    register_workspace_errors();
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "workspace",
-    );
 }

@@ -2,8 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
-use crate::app::scopes::LifecycleScope;
 use crate::app::session_index::session_index::{ISessionIndex, SessionCountQuery, SessionListQuery, SessionSummary};
 use crate::app::workspace_aliases::workspace_aliases::IWorkspaceAliases;
 use crate::wire::record::WireAsyncError;
@@ -40,8 +38,4 @@ impl IWorkspaceSessions for WorkspaceSessionsService {
             include_archived: Some(true),
         }).await
     }
-}
-
-pub fn register_workspace_sessions_service() {
-    register_scoped_service(LifecycleScope::App, ScopeActivation::OnScopeCreated, "workspaceSessions");
 }

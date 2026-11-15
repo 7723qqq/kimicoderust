@@ -10,7 +10,6 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::event::Emitter;
 use crate::_base::log::log::ILogService;
 use crate::_base::utils::paths::canonical_path;
@@ -447,12 +446,4 @@ fn system_time_ns(value: SystemTime) -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
-}
-
-pub fn register_file_workspace_persistence() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "workspace",
-    );
 }

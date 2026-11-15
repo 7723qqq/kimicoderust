@@ -4,7 +4,6 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::app::scopes::LifecycleScope;
 use crate::errors::BugIndicatingError;
 
@@ -77,12 +76,4 @@ impl IFlagRegistry for FlagRegistryService {
     fn list(&self) -> Vec<FlagDefinitionInput> {
         FlagRegistryService::list(self)
     }
-}
-
-pub fn register_flag_registry_service() {
-    register_scoped_service(
-        LifecycleScope::App,
-        ScopeActivation::OnScopeCreated,
-        "flag",
-    );
 }

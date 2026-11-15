@@ -9,7 +9,6 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::{ScopeActivation, register_scoped_service};
 use crate::_base::log::log::ILogService;
 use crate::agent::r#loop::turn_events::TurnStarted;
 use crate::agent::r#loop::turn_ops::{
@@ -18,7 +17,6 @@ use crate::agent::r#loop::turn_ops::{
 use crate::agent::state::agent_state::{I_AGENT_STATE_SERVICE, IAgentStateService};
 use crate::agent::undo::undo_service::ContextUndone;
 use crate::app::event::event_bus::IEventBus;
-use crate::app::scopes::LifecycleScope;
 use crate::session::agent_lifecycle::agent_lifecycle::{IAgentLifecycleService, MAIN_AGENT_ID};
 use crate::session::session_metadata::session_metadata::{
     ISessionMetadata, SessionLastTurnReason, SessionMetaPatch,
@@ -333,12 +331,4 @@ fn to_metadata_outcome(outcome: SessionTurnOutcome) -> SessionLastTurnReason {
         SessionTurnOutcome::Cancelled => SessionLastTurnReason::Cancelled,
         SessionTurnOutcome::Failed => SessionLastTurnReason::Failed,
     }
-}
-
-pub fn register_session_outcome_mirror_service() {
-    register_scoped_service(
-        LifecycleScope::Session,
-        ScopeActivation::OnScopeCreated,
-        "sessionOutcomeMirror",
-    );
 }

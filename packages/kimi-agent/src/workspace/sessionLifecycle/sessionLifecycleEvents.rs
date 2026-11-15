@@ -38,6 +38,10 @@ macro_rules! session_event {
                 );
                 Self { event, payload }
             }
+
+            pub fn to_event2(&self) -> Event2 {
+                self.event.clone()
+            }
         }
 
         impl Deref for $name {
