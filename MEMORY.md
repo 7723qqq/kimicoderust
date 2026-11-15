@@ -59,6 +59,11 @@ blast radius" is the normative rule; this file is where the specific names live.
   `git clone https://github.com/...` hangs ~20s then fails. SSH to github works and needs
   no extra env (key is in the default agent). So an HTTPS GitHub URL is not merely
   inelegant, it is broken on this box.
+- **Correction (2026-11-16):** HTTPS to github.com works again for this workspace's
+  `origin` (`https://github.com/7723qqq/kimicoderust.git`): `git ls-remote` answered in
+  1.6 s and `git push origin main` completed. The 2026-10-01 note above was taken against
+  a different remote (`7723qqq/kimi-code.git`) and a different network state — verify
+  with one `git ls-remote origin` before assuming HTTPS is broken.
 - Consequence: the upstream-v2-delta ratchet can be refreshed with the command the root
   `AGENTS.md` documents — `git fetch upstream main:refs/remotes/upstream/main --force`.
   Push target for everyday work is `origin` (per AGENTS.md, push every commit there).
@@ -338,3 +343,21 @@ observable and are asserted there.
   version `1.4.4`，git describe `bun-v1.4.4-5-g5c6d4e24cd1`，HEAD `5c6d4e24cd1`，
   `origin` 为 `https://github.com/oven-sh/bun.git`。涉及 Bun 运行时语义时读这个
   checkout，不再询问源码位置。
+
+## 重新生成 locale JSON 不是一个免费动作（2026-11-16）
+
+`packages/kimi-agent/src/locales/{en,zh}.json` 由 `packages/i18n-catalog` 生成，
+但**目录与 JSON 早已不同步**：目录把编辑工具的键改名为 `engine.tools.edit.*`
+（`oldStringNotFound` / `oldStringMatchedMultiple` / `edited`），JSON 里仍是旧的
+`engine.toolsV2.*`，而 Rust 调用点只改了一半——`tools/file_ops.rs:955` 已经用
+`engine.tools.edit.cannotWrite`，`:921`、`:932`、`:941`、`:971` 还在用旧键。
+
+**因此在改完调用点之前跑 `bun run generate:locale-json` 会让三条 Edit 工具消息在运行时
+渲染成裸键**（`LocalizedText` 对不存在的键回落到键名本身）。新模板的占位符也不同：
+`{{occurrence_count}}` / `{{occurrence_word}}`，不再是 `{{count}}` / `{{occurrences}}`。
+
+- 先改调用点并重新绑定占位符，再重新生成 JSON，然后跑 `bun run check:engine-i18n`。
+- 现状下 `check:engine-i18n` 只报 7 条命名空间越界（旧 JSON 把 MISSING/ORPHAN 都藏起来了）；
+  重新生成后条目会涨到 16 条，那才是真相。
+- 判断「是不是我这次改动弄坏的」的方法：在 `.tmp/` 里建一个 HEAD 的干净 worktree，
+  同一个门禁各跑一遍再对比——`git stash` 对 400+ 文件的脏树风险太高。
