@@ -26,6 +26,16 @@ pub fn count_lines(text: &str) -> usize {
     lines
 }
 
+impl From<&crate::os::interface::host_file_system::HostFileStat> for FileMetaStat {
+    fn from(stat: &crate::os::interface::host_file_system::HostFileStat) -> Self {
+        Self {
+            size: stat.size,
+            mtime_ms: stat.mtime_ms,
+            ino: stat.ino,
+        }
+    }
+}
+
 pub fn build_etag(stat: &FileMetaStat) -> String {
     let mtime = stat.mtime_ms.unwrap_or(0.0).floor() as i128;
     let ino = stat.ino.unwrap_or(0) as i128;

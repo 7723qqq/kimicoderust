@@ -13,8 +13,8 @@ use crate::wire::record::WireAsyncError;
 use kimi_core::primitives::errors::Error2;
 
 use super::debug_cascade::{
-    DebugCascadeEntry, DebugFailedUnit, DebugPendingGroup, DebugPendingUnit, DiUnitChanged,
-    DiUnitChangedPayload, IDebugCascadeService,
+    DebugCascadeChange, DebugCascadeEntry, DebugFailedUnit, DebugPendingGroup, DebugPendingUnit,
+    DiUnitChanged, DiUnitChangedPayload, IDebugCascadeService,
 };
 use super::errors::{DEBUG_SCOPE_NOT_FOUND, DEBUG_TOKEN_NOT_FOUND};
 use super::scope_tree::{resolve_scope_container, scope_path_of_engine, walk_scope_containers};
@@ -28,8 +28,8 @@ pub struct DebugCascadeService {
 }
 
 impl DebugCascadeService {
-    pub fn new(instantiation: Arc<dyn IInstantiationService>, events: Arc<dyn IEventService>) -> Self {
-        let root = instantiation.as_concrete();
+    pub fn new(instantiation: Arc<InstantiationService>, events: Arc<dyn IEventService>) -> Self {
+        let root = instantiation;
         let this = Self {
             root: root.clone(),
             events,
@@ -37,31 +37,48 @@ impl DebugCascadeService {
             engine_subscriptions: Arc::new(Mutex::new(HashMap::new())),
             torn_down: std::sync::atomic::AtomicBool::new(false),
         };
-        let tree = root.cascade_tree.clone();
+        let tree = root.cascade_tree();
         for engine in tree.engines() {
             this.watch_engine(engine);
         }
         let subscriptions = this.engine_subscriptions.clone();
-        this.store.lock().add(tree.on_did_add_engine(Arc::new(move |engine| {
+        let events = this.events.clone();
+        this.store.lock().add(Arc::new(tree.on_did_add_engine_event.subscribe_arc(Arc::new(move |engine| {
             let subscriptions = subscriptions.clone();
             let root = root.clone();
-            let events = this.events.clone();
+            let events = events.clone();
             watch_engine(&root, &events, &subscriptions, engine);
-        })));
+        }))) as DisposableRef);
         let subscriptions = this.engine_subscriptions.clone();
-        this.store.lock().add(tree.on_did_remove_engine(Arc::new(move |engine| {
+        this.store.lock().add(Arc::new(tree.on_did_remove_engine_event.subscribe_arc(Arc::new(move |engine| {
             unwatch_engine(&subscriptions, &engine);
-        })));
+        }))) as DisposableRef);
         this
     }
 
     pub fn history(&self) -> Vec<DebugCascadeEntry> {
         let mut entries = Vec::new();
         for info in walk_scope_containers(&self.root) {
-            for entry in info.container.cascade.history() {
+            for entry in info.container.cascade().history() {
                 entries.push(DebugCascadeEntry {
-                    scope_path: info.path,
-                    ..entry
+                    scope_path: info.path.clone(),
+                    seq: entry.seq,
+                    reason: entry.reason,
+                    changes: entry
+                        .changes
+                        .into_iter()
+                        .map(|change| DebugCascadeChange {
+                            token: change.token,
+                            action: change.action,
+                        })
+                        .collect(),
+                    affected: entry.affected,
+                    torn_down: entry.torn_down,
+                    rebuilt: entry.rebuilt,
+                    failed: entry.failed,
+                    abort_waited: entry.abort_waited,
+                    abort_timed_out: entry.abort_timed_out,
+                    duration_ms: entry.duration_ms,
                 });
             }
         }
@@ -74,14 +91,14 @@ impl DebugCascadeService {
         for info in walk_scope_containers(&self.root) {
             let waiting = info
                 .container
-                .cascade
+                .cascade()
                 .pending_snapshot()
                 .into_iter()
                 .map(|(token, missing)| DebugPendingUnit { token, missing })
                 .collect::<Vec<_>>();
             let failed = info
                 .container
-                .cascade
+                .cascade()
                 .units_snapshot()
                 .into_iter()
                 .filter(|unit| unit.state == crate::_base::di::cascade_engine::UnitState::Failed)
@@ -104,14 +121,22 @@ impl DebugCascadeService {
     pub async fn unprovide(&self, scope_path: &str, token: &str) -> Result<(), WireAsyncError> {
         let (container, id) = self.resolve(scope_path, token)?;
         container.unprovide(id);
-        container.cascade.when_idle().await
+        Ok(container.cascade().when_idle().await)
     }
 
     pub async fn update(&self, scope_path: &str, token: &str, config: Option<serde_json::Value>) -> Result<(), WireAsyncError> {
         let (container, id) = self.resolve(scope_path, token)?;
         match config {
-            Some(config) => container.fiber_host.update_token(id, config, true).await,
-            None => container.cascade.update(id, &format!("debug update {token}")).await,
+            Some(config) => container
+                .fiber_host()
+                .update_token(id, Some(Arc::new(config) as crate::_base::di::descriptors::DynamicValue), true)
+                .await
+                .map_err(|message| -> WireAsyncError { message.into() }),
+            None => container
+                .cascade()
+                .update(id, Some(format!("debug update {token}")))
+                .await
+                .map_err(|message| -> WireAsyncError { message.into() }),
         }
     }
 
@@ -139,7 +164,7 @@ impl DebugCascadeService {
         };
         let (container, id) = self.resolve(scope_path, token)?;
         container
-            .cascade
+            .cascade()
             .submit(crate::_base::di::cascade_engine::CascadeChange {
                 action: crate::_base::di::cascade_engine::CascadeAction::Unprovide,
                 token: id,
@@ -150,6 +175,7 @@ impl DebugCascadeService {
                 reason: format!("debug dispose {token}"),
             })
             .await
+            .map_err(|message| -> WireAsyncError { message.into() })
     }
 
     fn resolve(&self, scope_path: &str, token: &str) -> Result<(Arc<InstantiationService>, ServiceIdentifier), WireAsyncError> {
@@ -208,16 +234,17 @@ fn watch_engine(
     }
     let root = root.clone();
     let events = events.clone();
-    let subscription = engine.on_did_change_unit_state(Arc::new(move |change| {
+    let scope_engine = engine.clone();
+    let subscription = engine.on_did_change_unit_state_event.subscribe_arc(Arc::new(move |change| {
         let payload = DiUnitChangedPayload {
-            scope: scope_path_of_engine(&root, &engine).unwrap_or_else(|| "#unknown".to_string()),
+            scope: scope_path_of_engine(&root, &scope_engine).unwrap_or_else(|| "#unknown".to_string()),
             token: change.token,
             state: change.state,
             error: change.error,
         };
-        events.publish(DiUnitChanged::new(payload));
+        events.publish(DiUnitChanged::new(payload).to_event2());
     }));
-    subscriptions.lock().insert(address, subscription);
+    subscriptions.lock().insert(address, Arc::new(subscription) as DisposableRef);
 }
 
 fn unwatch_engine(subscriptions: &Arc<Mutex<HashMap<usize, DisposableRef>>>, engine: &Arc<CascadeEngine>) {

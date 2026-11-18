@@ -327,10 +327,11 @@ impl AgentMcpService {
     fn enqueue_failure_write(&self, work: DiscoveryWork) {
         let inner = self.inner.clone();
         let previous = inner.failure_write_tail.lock().clone();
+        let run_inner = inner.clone();
         let run = async move {
             previous.await;
-            if !inner.discovery_writes_ready.load(Ordering::Relaxed) {
-                inner.pending_discoveries.lock().push(work);
+            if !run_inner.discovery_writes_ready.load(Ordering::Relaxed) {
+                run_inner.pending_discoveries.lock().push(work);
                 return;
             }
             work().await;
@@ -412,7 +413,7 @@ impl AgentMcpService {
                 ToolDisclosure::Inline
             },
         );
-        self.inner.mcp_tools.insert(
+        self.inner.mcp_tools.lock().insert(
             tool_name.clone(),
             McpToolRegistration {
                 disposable: registration.disposable,
@@ -530,7 +531,7 @@ impl AgentMcpService {
                 if let Some(pending) = pending_entry {
                     pending.disposable.dispose();
                 }
-                self.inner.mcp_tools.insert(
+                self.inner.mcp_tools.lock().insert(
                     qualified.clone(),
                     McpToolRegistration {
                         disposable: registration.disposable,
@@ -542,7 +543,7 @@ impl AgentMcpService {
                 if let Some(pending) = pending_entry {
                     pending.disposable.dispose();
                 }
-                self.inner.pending_mcp_tools.insert(
+                self.inner.pending_mcp_tools.lock().insert(
                     qualified.clone(),
                     McpToolRegistration {
                         disposable: registration.disposable,

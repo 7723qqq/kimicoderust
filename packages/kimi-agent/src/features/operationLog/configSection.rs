@@ -68,17 +68,17 @@ pub fn operation_log_env_bindings() -> EnvBindings {
             (
                 "maxOperations",
                 OPERATION_LOG_MAX_OPERATIONS_ENV,
-                parse_positive_int,
+                parse_positive_int as fn(&str) -> Option<u64>,
             ),
             (
                 "maxAgeMs",
                 OPERATION_LOG_MAX_AGE_MS_ENV,
-                parse_non_negative_int,
+                parse_non_negative_int as fn(&str) -> Option<u64>,
             ),
             (
                 "maxTotalBytes",
                 OPERATION_LOG_MAX_TOTAL_BYTES_ENV,
-                parse_positive_int,
+                parse_positive_int as fn(&str) -> Option<u64>,
             ),
         ],
     )

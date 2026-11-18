@@ -18,6 +18,9 @@ use crate::agent::media::image_compress::{
 use crate::agent::media::image_format_policy::{
     is_model_accepted_image_mime, normalize_image_mime, provider_image_policy,
 };
+use crate::app::telemetry::context::{TelemetryContextPatch, TelemetryProperties};
+use crate::app::telemetry::telemetry::{ITelemetryAppender, ITelemetryService};
+use crate::_base::di::lifecycle::{DISPOSABLE_NONE, DisposableRef};
 use crate::agent::tools::file_read_source::FileReadSource;
 use crate::human::llm::media::upload::VideoUploadInput;
 use crate::human::llm::message::{ContentPart, DocumentUrl, ImageDimensions, ImageUrl, VideoUrl};
@@ -48,6 +51,64 @@ pub struct MediaReadArgs {
 }
 
 pub type MediaTelemetry = Arc<dyn Fn(&str, Value) + Send + Sync>;
+
+struct MediaTelemetryService {
+    emit: MediaTelemetry,
+}
+
+#[async_trait::async_trait]
+impl ITelemetryService for MediaTelemetryService {
+    fn track(&self, event: &str, properties: Option<TelemetryProperties>) {
+        (self.emit)(event, properties.map(Value::Object).unwrap_or(Value::Null));
+    }
+
+    fn track2(&self, event: &str, properties: Option<TelemetryProperties>) {
+        (self.emit)(event, properties.map(Value::Object).unwrap_or(Value::Null));
+    }
+
+    fn with_context(&self, _patch: TelemetryContextPatch) -> Arc<dyn ITelemetryService> {
+        Arc::new(MediaTelemetryService {
+            emit: self.emit.clone(),
+        })
+    }
+
+    fn set_context(&self, _patch: TelemetryContextPatch) {}
+
+    fn get_context(&self) -> TelemetryContextPatch {
+        TelemetryContextPatch::new()
+    }
+
+    fn add_appender(&self, _appender: Arc<dyn ITelemetryAppender>) -> DisposableRef {
+        DISPOSABLE_NONE.clone()
+    }
+
+    fn remove_appender(&self, _appender: &Arc<dyn ITelemetryAppender>) {}
+
+    fn set_enabled(&self, _enabled: bool) {}
+
+    async fn flush(&self) {}
+
+    async fn shutdown(&self) {}
+}
+
+fn media_telemetry_service(
+    ctx: &MediaReadContext,
+) -> Option<(Arc<dyn ITelemetryService>, &'static str)> {
+    let telemetry = ctx.telemetry.as_ref()?;
+    Some((
+        Arc::new(MediaTelemetryService {
+            emit: telemetry.clone(),
+        }),
+        "read_media",
+    ))
+}
+
+fn media_telemetry_parts(ctx: &MediaReadContext) -> (Option<Arc<dyn ITelemetryService>>, &str) {
+    match media_telemetry_service(ctx) {
+        Some((telemetry, source)) => (Some(telemetry), source),
+        None => (None, "read_media"),
+    }
+}
 
 #[derive(Clone)]
 pub struct MediaReadContext {
@@ -255,6 +316,7 @@ async fn execute_inner(
     let media_part = match detected.kind {
         MediaSniffKind::Image => {
             if let Some(region) = args.region {
+                let (telemetry, telemetry_source) = media_telemetry_parts(ctx);
                 let outcome = crop_image_for_model(
                     &data,
                     &detected.mime_type,
@@ -266,8 +328,10 @@ async fn execute_inner(
                     },
                     &CropImageOptions {
                         max_edge: Some(max_edge),
-                        byte_budget: Some(read_byte_budget as usize),
+                        byte_budget: None,
                         skip_resize: args.full_resolution == Some(true),
+                        telemetry: telemetry.as_deref(),
+                        telemetry_source: Some(telemetry_source),
                         ..CropImageOptions::default()
                     },
                 )
@@ -330,12 +394,15 @@ async fn execute_inner(
                 )
             } else {
                 let inline_only = !is_recodable_image(&data, &detected.mime_type);
+                let (telemetry, telemetry_source) = media_telemetry_parts(ctx);
                 let compressed = compress_image_for_model(
                     &data,
                     &detected.mime_type,
                     &CompressImageOptions {
                         max_edge: Some(max_edge),
                         byte_budget: Some(read_byte_budget as usize),
+                        telemetry: telemetry.as_deref(),
+                        telemetry_source: Some(telemetry_source),
                         ..CompressImageOptions::default()
                     },
                 )

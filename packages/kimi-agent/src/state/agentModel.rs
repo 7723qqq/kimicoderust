@@ -38,7 +38,6 @@ pub struct AgentModelContext {
 #[derive(Clone)]
 struct ModelWindow {
     draft: Value,
-    ctx: Arc<Mutex<dyn FoldContext>>,
     replaced: bool,
     replacement: Option<Value>,
 }
@@ -110,10 +109,6 @@ impl AgentModel {
     }
 
     pub async fn emit(&mut self, event: Event2) -> Result<(), WireAsyncError> {
-        if let Some(window) = &self.window {
-            window.ctx.lock().emit(event);
-            return Ok(());
-        }
         self.bridge.dispatch(event).await
     }
 
@@ -143,10 +138,9 @@ impl AgentModel {
         self.committed_state = next;
     }
 
-    pub fn enter_window(&mut self, draft: Value, ctx: Arc<Mutex<dyn FoldContext>>) {
+    pub fn enter_window(&mut self, draft: Value) {
         self.window = Some(ModelWindow {
             draft,
-            ctx,
             replaced: false,
             replacement: None,
         });
@@ -164,11 +158,13 @@ impl AgentModel {
 #[async_trait]
 impl DomainResourceRuntime for AgentModel {}
 
+#[derive(Clone)]
 pub struct AgentModelStateSpec {
     pub initial: Arc<dyn Fn() -> Value + Send + Sync>,
     pub schema: Value,
 }
 
+#[derive(Clone)]
 pub struct AgentModelDefinition {
     pub id: String,
     pub model: Arc<dyn Fn(AgentModelContext) -> AgentModel + Send + Sync>,
@@ -202,7 +198,7 @@ pub fn define_agent_model(input: AgentModelDefinitionInput) -> Result<Arc<AgentM
                 format!("Agent model '{}' cannot apply non-durable event '{}'", input.id, cls.type_),
             ));
         }
-        register_event2_class(cls)?;
+        register_event2_class(cls).map_err(|error| StateError::new("internal", error))?;
     }
     let definition = Arc::new(AgentModelDefinition {
         id: input.id,
@@ -222,7 +218,7 @@ pub fn agent_model_definitions() -> Vec<Arc<AgentModelDefinition>> {
 }
 
 pub fn agent_model_contribution() -> CollectionDescriptor<Arc<AgentModelDefinition>> {
-    collection("agent-model", |value, existing| {
+    collection::<Arc<AgentModelDefinition>>("agent-model", |value, existing| {
         if existing.iter().any(|definition| definition.id == value.id) {
             return Err(format!("Agent model '{}' already has an active provider", value.id));
         }
@@ -230,6 +226,7 @@ pub fn agent_model_contribution() -> CollectionDescriptor<Arc<AgentModelDefiniti
     })
 }
 
+#[derive(Clone)]
 pub struct SessionModelDefinition {
     pub id: String,
     pub state: AgentModelStateSpec,
@@ -238,7 +235,7 @@ pub struct SessionModelDefinition {
 }
 
 pub fn session_model_contribution() -> CollectionDescriptor<SessionModelDefinition> {
-    collection("session-model", |value, existing| {
+    collection::<SessionModelDefinition>("session-model", |value, existing| {
         if existing.iter().any(|definition| definition.id == value.id) {
             return Err(format!("Session model '{}' already has an active provider", value.id));
         }

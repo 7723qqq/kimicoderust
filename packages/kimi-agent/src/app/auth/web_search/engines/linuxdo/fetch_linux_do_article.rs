@@ -125,7 +125,7 @@ pub fn fetch_linux_do_article(url: String, options: SearchEngineOptions) -> Arti
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "Invalid URL: Cannot extract topic ID.",
-            )));
+            )) as FetchError);
         };
         let body = fetch_topic_json(&topic_id, &options).await?;
         let parsed: Value = match serde_json::from_str(&body) {

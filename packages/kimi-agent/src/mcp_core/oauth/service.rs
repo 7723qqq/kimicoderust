@@ -193,6 +193,7 @@ struct ActiveAuthorization {
     server_ref: Arc<Mutex<Option<Arc<CallbackServer>>>>,
 }
 
+#[derive(Clone)]
 struct SharedAuthorizationFlow {
     attach: Arc<dyn Fn() -> BeginAuthorizationResult + Send + Sync>,
     cancel_underlying: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>,
@@ -405,7 +406,7 @@ impl McpOAuthService {
 
     pub fn shutdown(&self) -> BoxFuture<'static, ()> {
         if let Some(shutdown) = self.state.lock().shutdown.clone() {
-            return shutdown;
+            return async move { shutdown.await }.boxed();
         }
         self.state.lock().shutting_down = true;
         self.stop_proactive_refresh();
@@ -427,11 +428,13 @@ impl McpOAuthService {
                 async {}.boxed()
             }),
         );
+        let drain_this = this.clone();
         let shutdown = async move {
-            let drain = async {
+            let drain = async move {
                 let authorization_drain = futures_util::future::join_all(authorizations.into_iter().map(|active| async move {
-                    active.controller.abort();
-                    if let Some(server) = active.server_ref.lock().clone() {
+                    active.controller.abort(None);
+                    let server = active.server_ref.lock().clone();
+                    if let Some(server) = server {
                         server.close().await;
                     }
                     if let Ok(flow) = active.started.await {
@@ -439,7 +442,7 @@ impl McpOAuthService {
                     }
                 }));
                 let refresh_drain = futures_util::future::join_all(refreshes);
-                let background_drain = this.drain_background_tasks();
+                let background_drain = drain_this.drain_background_tasks();
                 let _ = tokio::join!(authorization_drain, refresh_drain, background_drain);
             };
             let drain_task = tokio::spawn(drain);
@@ -459,7 +462,7 @@ impl McpOAuthService {
         .shared();
         self.state.lock().shutdown = Some(shutdown.clone());
         tokio::spawn(shutdown.clone());
-        shutdown
+        async move { shutdown.await }.boxed()
     }
 
     async fn drain_background_tasks(&self) {
@@ -542,6 +545,8 @@ impl McpOAuthService {
         if self.state.lock().shutting_down {
             return Err(Box::new(Error2::new(MCP_OAUTH_FAILED, "MCP OAuth service is shutting down")));
         }
+        let owned_server_name = server_name.to_string();
+        let owned_server_url = server_url.to_string();
         let store_key = mcp_oauth_store_key(server_name, server_url).unwrap();
         if let Some(refresh) = self.state.lock().refreshes.get(&store_key).cloned() {
             let _ = refresh.await;
@@ -557,8 +562,12 @@ impl McpOAuthService {
                 let controller = AbortController::new();
                 let server_ref = Arc::new(Mutex::new(None));
                 let this = self.clone_handle();
+                let flow_controller = controller.clone();
+                let flow_server_ref = server_ref.clone();
                 let started = async move {
-                    this.start_authorization_flow(server_name, server_url, options, controller, server_ref).await
+                    this.start_authorization_flow(owned_server_name.clone(), owned_server_url.clone(), options, flow_controller, flow_server_ref)
+                        .await
+                        .map_err(SharedOAuthError::new)
                 }
                 .boxed()
                 .shared();
@@ -576,7 +585,7 @@ impl McpOAuthService {
                 if created {
                     self.state.lock().active_authorizations.remove(&store_key);
                 }
-                return Err(SharedOAuthError::new(error).boxed());
+                return Err(error.boxed());
             }
         };
         Ok((flow.attach)())
@@ -610,6 +619,7 @@ impl McpOAuthService {
         let callback_server = start_callback_server().await.map_err(|error| {
             wrap_auth_error("failed to start OAuth callback listener", error)
         })?;
+        let callback_server = Arc::new(callback_server);
         *server_ref.lock() = Some(callback_server.clone());
         let signal = controller.signal();
         let mut authorization_url = None;
@@ -618,15 +628,16 @@ impl McpOAuthService {
             provider.ready().await?;
             provider.invalidate_stale_registration(&callback_server.redirect_uri).await?;
             let scope = self.resolve_request_scope(provider.clone(), &server_url, signal.clone()).await?;
-            let mut tokens_saved = false;
+            let tokens_saved = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let listener_server_name = server_name.clone();
             let listener_server_url = canonical_mcp_oauth_resource(&server_url)?;
+            let tokens_saved_listener = tokens_saved.clone();
             let subscription = self.on_event(Arc::new(move |event| {
                 if event.type_ == McpOAuthEventType::TokensSaved
                     && event.server_name == listener_server_name
                     && event.server_url == listener_server_url
                 {
-                    tokens_saved = true;
+                    tokens_saved_listener.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             }));
             let result = oauth_authorize(
@@ -643,7 +654,7 @@ impl McpOAuthService {
             match result? {
                 OAuthAuthorizeOutcome::Authorized => {
                     callback_server.close().await;
-                    if !tokens_saved {
+                    if !tokens_saved.load(std::sync::atomic::Ordering::SeqCst) {
                         self.emit(McpOAuthEvent {
                             type_: McpOAuthEventType::TokensSaved,
                             server_name: server_name.clone(),
@@ -798,8 +809,10 @@ impl McpOAuthService {
                 .boxed()
                 .shared();
                 *completion_guard = Some(future.clone());
-                this.track_background_task(future.clone());
-                async move { future.await.map_err(SharedOAuthError::boxed) }.boxed()
+                let completion_future = future.clone();
+                let tracked = async move { let _ = future.await; }.boxed().shared();
+                this.track_background_task(tracked);
+                async move { completion_future.await.map_err(SharedOAuthError::boxed) }.boxed()
             })
         };
         let attach = {
@@ -879,7 +892,7 @@ impl McpOAuthService {
                     let start_completion = start_completion.clone();
                     let detach = detach.clone();
                     let server_name = server_name.clone();
-                    Arc::new(move |options| {
+                    Arc::new(move |options: crate::mcp_core::oauth::service::CompleteAuthorizationOptions| {
                         let this = this.clone();
                         let detached = detached.clone();
                         let waiting = waiting.clone();
@@ -896,8 +909,9 @@ impl McpOAuthService {
                                     "OAuth flow already completed or cancelled",
                                 )) as WireAsyncError);
                             }
+                            let future = {
                             let mut waiting_guard = waiting.lock();
-                            let future = match waiting_guard.clone() {
+                            match waiting_guard.clone() {
                                 Some(future) => future,
                                 None => {
                                     let deadline = if options.timeout_ms.is_some() && !callback_settled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -913,9 +927,9 @@ impl McpOAuthService {
                                         None => waiter.signal(),
                                     };
                                     let future = async move {
-                                        let completion = start_completion();
+                                        let completion = (start_completion.clone())();
                                         let completion_signal = match &deadline {
-                                            Some(deadline) => AbortSignal::any(&[wait_signal, deadline.signal.clone()]),
+                                            Some(deadline) => AbortSignal::any(&[wait_signal.clone(), deadline.signal.clone()]),
                                             None => wait_signal,
                                         };
                                         let result = tokio::select! {
@@ -935,7 +949,7 @@ impl McpOAuthService {
                                             callback_deadlines.lock().retain(|clear| !Arc::ptr_eq(clear, &deadline.clear));
                                         }
                                         result.map_err(|error| {
-                                            wrap_auth_error(&format!("OAuth flow for \"{server_name}\" failed"), error)
+                                            SharedOAuthError::new(wrap_auth_error(&format!("OAuth flow for \"{server_name}\" failed"), error))
                                         })
                                     }
                                     .boxed()
@@ -943,8 +957,8 @@ impl McpOAuthService {
                                     *waiting_guard = Some(future.clone());
                                     future
                                 }
+                            }
                             };
-                            drop(waiting_guard);
                             let result = future.await.map_err(SharedOAuthError::boxed);
                             detach().await?;
                             result
@@ -1123,6 +1137,7 @@ impl McpOAuthService {
                 let this = this.clone();
                 let server_name = server_name.clone();
                 let canonical_url = canonical_url.clone();
+                let timer_key = timer_key.clone();
                 async move {
                     this.state.lock().refresh_timers.remove(&timer_key);
                     if let Err(error) = this.refresh(&server_name, &canonical_url).await {
@@ -1993,13 +2008,13 @@ impl FetchLike for TimeoutFetch {
             let timeout = self.timeout;
             async move {
                 tokio::time::sleep(std::time::Duration::from_millis(timeout)).await;
-                controller.abort();
+                controller.abort(None);
             }
         });
         let mut signals = self.signals.clone();
         signals.push(controller.signal());
-        if let Some(signal) = init.signal.take() {
-            signals.push(signal);
+        if let Some(token) = init.signal.take() {
+            signals.push(AbortSignal::from_cancellation_token(token));
         }
         init.signal = Some(AbortSignal::any(&signals).cancellation_token());
         let result = self.inner.fetch(url, init).await;
@@ -2025,7 +2040,7 @@ impl TimeoutDeadline {
             if let Some(task) = clear_timer.lock().take() {
                 task.abort();
             }
-            clear_controller.abort();
+            clear_controller.abort(None);
         });
         let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let timed_out_for_timer = timed_out.clone();
@@ -2108,7 +2123,7 @@ mod service_log {
         fn debug(&self, _message: &str, _payload: Option<serde_json::Value>) {}
         fn child(
             &self,
-            _context: serde_json::Map<String, serde_json::Value>,
+            _context: indexmap::IndexMap<String, serde_json::Value>,
         ) -> std::sync::Arc<dyn crate::_base::log::log::ILogger> {
             std::sync::Arc::new(Self)
         }

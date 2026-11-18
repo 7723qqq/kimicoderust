@@ -213,7 +213,7 @@ pub fn ref_dependency<T>(
     }
 }
 
-pub trait ServicesAccessor {
+pub trait ServicesAccessor: Send + Sync {
     fn get_dynamic(&self, id: &ServiceIdentifier<DynamicValue>) -> DynamicValue;
 }
 
@@ -260,6 +260,9 @@ pub trait ProvideHandle: IDisposable {
 
 pub trait IInstantiationService: Send + Sync {
     fn cascade(&self) -> Arc<CascadeEngine>;
+    fn concrete(&self) -> Option<Arc<super::instantiation_service::InstantiationService>> {
+        None
+    }
     fn invoke_function_dyn(&self, callback: &mut dyn FnMut(&dyn ServicesAccessor));
     fn create_instance<T>(&self, descriptor: &SyncDescriptor0<T>) -> T
     where

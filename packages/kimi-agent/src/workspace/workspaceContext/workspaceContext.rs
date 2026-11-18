@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::scope::ScopeSeed;
+use std::sync::Arc;
+
+use crate::_base::di::instantiation::create_decorator;
+use crate::_base::di::scope::{ScopeSeed, seed_instance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -32,5 +35,6 @@ pub trait IWorkspaceContext: Send + Sync {
 }
 
 pub fn workspace_context_seed(ctx: impl IWorkspaceContext + Clone + 'static) -> ScopeSeed {
-    ScopeSeed::new::<dyn IWorkspaceContext>(ctx)
+    let id = create_decorator::<Arc<dyn IWorkspaceContext>>("workspaceContext");
+    seed_instance(&id, Arc::new(ctx))
 }

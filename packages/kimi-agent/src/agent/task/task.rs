@@ -23,8 +23,10 @@ pub struct AgentTaskLoadOptions {
     pub replace: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentTaskOutputSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
     pub output_size_bytes: u64,
     pub preview_bytes: u64,
@@ -143,3 +145,47 @@ pub trait IAgentTaskService: Send + Sync {
 
 pub static I_AGENT_TASK_SERVICE: LazyLock<ServiceIdentifier<Arc<dyn IAgentTaskService>>> =
     LazyLock::new(|| create_decorator("agentTaskService"));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn output_snapshot_preserves_the_shell_wire_contract() {
+        let snapshot = AgentTaskOutputSnapshot {
+            output_path: Some("task-output.log".to_string()),
+            output_size_bytes: 70_000,
+            preview_bytes: 0,
+            truncated: true,
+            full_output_available: true,
+            preview: String::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            json!({
+                "outputPath": "task-output.log",
+                "outputSizeBytes": 70_000,
+                "previewBytes": 0,
+                "truncated": true,
+                "fullOutputAvailable": true,
+                "preview": ""
+            })
+        );
+    }
+
+    #[test]
+    fn output_snapshot_omits_an_unavailable_output_path() {
+        let snapshot = AgentTaskOutputSnapshot {
+            output_path: None,
+            output_size_bytes: 0,
+            preview_bytes: 0,
+            truncated: false,
+            full_output_available: false,
+            preview: String::new(),
+        };
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert!(value.get("outputPath").is_none());
+        assert_eq!(value["fullOutputAvailable"], false);
+    }
+}

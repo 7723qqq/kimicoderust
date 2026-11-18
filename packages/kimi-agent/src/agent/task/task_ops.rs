@@ -244,7 +244,7 @@ fn task_id_of(info: &AgentTaskInfo) -> String {
 pub static TASK_REPLAYABLE_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::new(|| {
     let mut key = ReplayableStateKey::new(
         "task".to_string(),
-        Arc::new(|| serde_json::to_value(TaskModelState::default).unwrap_or(Value::Null)),
+        Arc::new(|| serde_json::to_value(TaskModelState::default()).unwrap_or(Value::Null)),
         ReplayableOptions {
             schema: json!({}),
             durable: None,

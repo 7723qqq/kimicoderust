@@ -1,9 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use kimi_core::primitives::errors::Error2;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+
+use crate::app::event::event2::{Event2, Event2Class};
 
 use super::config_section::ConfigSchema;
 use crate::llm_adapter::contract::errors::CONFIG_INVALID_ERROR_CODE;
@@ -60,6 +62,16 @@ pub struct RetiredModel {
     pub to: String,
 }
 
+pub static MODEL_CATALOG_CHANGED_CLASS: LazyLock<Arc<Event2Class>> = LazyLock::new(|| {
+    Arc::new(Event2Class {
+        type_: ModelCatalogChanged::TYPE.to_string(),
+        durable: false,
+        observable: false,
+        agent_domain: false,
+        schema: None,
+    })
+});
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCatalogChanged {
     pub payload: RefreshProviderModelsResponse,
@@ -70,6 +82,20 @@ impl ModelCatalogChanged {
 
     pub fn new(payload: RefreshProviderModelsResponse) -> Self {
         Self { payload }
+    }
+
+    pub fn to_event2(&self) -> Event2 {
+        Event2::new(
+            &MODEL_CATALOG_CHANGED_CLASS,
+            serde_json::to_value(self).expect("model catalog changed event is serializable"),
+            None,
+        )
+    }
+}
+
+impl From<ModelCatalogChanged> for Event2 {
+    fn from(event: ModelCatalogChanged) -> Self {
+        event.to_event2()
     }
 }
 

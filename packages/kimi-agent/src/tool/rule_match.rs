@@ -10,15 +10,146 @@ pub struct PermissionPathMatchOptions<'a> {
 }
 
 pub fn glob_match(value: &str, pattern: &str, nocase: bool) -> bool {
-    if compile(pattern, nocase).is_some_and(|matcher| matcher.is_match(value)) {
+    let pattern = expand_extglob(pattern);
+    if compile(&pattern, nocase).is_some_and(|matcher| {
+        matcher.is_match(value) && !picomatch_dot_violation(value, &pattern)
+    }) {
         return true;
     }
     let normalized_value = strip_leading_dot_slash(value);
-    let normalized_pattern = strip_leading_dot_slash(pattern);
+    let normalized_pattern = strip_leading_dot_slash(&pattern);
     if normalized_value == value && normalized_pattern == pattern {
         return false;
     }
-    compile(normalized_pattern, nocase).is_some_and(|matcher| matcher.is_match(normalized_value))
+    compile(normalized_pattern, nocase).is_some_and(|matcher| {
+        matcher.is_match(normalized_value)
+            && !picomatch_dot_violation(normalized_value, normalized_pattern)
+    })
+}
+
+/// picomatch supports extglob alternation (`@(read|write)`), which globset
+/// rejects outright (`compile` returns `Err` and the rule goes inert).
+/// `@(...)` with comma-separated branches is semantically the brace
+/// alternation globset does support, so rewrite it before compiling.
+/// Nested extglob inside the branches is not rewritten (no rule in the
+/// permission surface uses it).
+fn expand_extglob(pattern: &str) -> String {
+    if !pattern.contains("@(") {
+        return pattern.to_string();
+    }
+    let mut out = String::with_capacity(pattern.len());
+    let bytes = pattern.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'@' && bytes.get(index + 1) == Some(&b'(') {
+            if let Some(close) = closing_paren(pattern, index + 1) {
+                let body = &pattern[index + 2..close];
+                if !body.contains('@') {
+                    out.push('{');
+                    out.push_str(body);
+                    out.push('}');
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+        let ch_len = pattern[index..].chars().next().map(char::len_utf8).unwrap_or(1);
+        out.push_str(&pattern[index..index + ch_len]);
+        index += ch_len;
+    }
+    out
+}
+
+fn closing_paren(pattern: &str, open: usize) -> Option<usize> {
+    let bytes = pattern.as_bytes();
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// picomatch's default dotfile rule: a wildcard leading character (`*` or
+/// `?`) in a pattern segment does not match a path segment that starts with
+/// `.`, unless the pattern segment itself starts with a literal `.`. The
+/// leading-dot segments of the value must be claimed by a literal-dot
+/// pattern segment at the same depth. Verified against picomatch:
+/// `*.md` vs `.a.md` false, `**/*.md` vs `.a/x.md` false, `**` vs `.a`
+/// false, `.*` vs `.a` true, `.env*` vs `.env.local` true, `**/bar` vs
+/// `.foo/bar` false.
+fn picomatch_dot_violation(value: &str, pattern: &str) -> bool {
+    let value_segments: Vec<&str> = split_segments(value);
+    let pattern_segments: Vec<&str> = split_segments(pattern);
+    if !pattern_segments.iter().any(|segment| segment_contains_glob(segment)) {
+        return false;
+    }
+    for value_segment in &value_segments {
+        if !value_segment.starts_with('.') {
+            continue;
+        }
+        if pattern_segments.iter().any(|pattern_segment| {
+            pattern_segment.starts_with('.') && segment_might_match(pattern_segment, value_segment)
+        }) {
+            continue;
+        }
+        if pattern_segments.iter().any(|pattern_segment| {
+            !pattern_segment.starts_with('.')
+                && segment_contains_glob(pattern_segment)
+                && segment_would_touch(pattern_segment, value_segment)
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn split_segments(value: &str) -> Vec<&str> {
+    value
+        .split(['/', '\\'])
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn segment_contains_glob(segment: &str) -> bool {
+    segment.bytes().any(|byte| matches!(byte, b'*' | b'?'))
+}
+
+/// Conservative check: could `pattern_segment` match a segment equal to
+/// `value_segment` when compiled as a single-segment glob (no separators)?
+fn segment_might_match(pattern_segment: &str, value_segment: &str) -> bool {
+    compile_single_segment(pattern_segment, true)
+        .is_some_and(|matcher| matcher.is_match(value_segment))
+}
+
+/// Conservative check: does `pattern_segment` start with a bare wildcard
+/// that picomatch would refuse to let claim a leading dot?
+fn segment_would_touch(pattern_segment: &str, value_segment: &str) -> bool {
+    let first = pattern_segment.as_bytes().first().copied();
+    let escapes = matches!(first, Some(b'\\'));
+    let head = if escapes { pattern_segment.get(1..).unwrap_or("") } else { pattern_segment };
+    let head_first = head.as_bytes().first().copied();
+    matches!(head_first, Some(b'*') | Some(b'?'))
+        && compile_single_segment(pattern_segment, true)
+            .is_some_and(|matcher| matcher.is_match(value_segment))
+}
+
+fn compile_single_segment(pattern: &str, nocase: bool) -> Option<GlobMatcher> {
+    GlobBuilder::new(pattern)
+        .case_insensitive(nocase)
+        .literal_separator(true)
+        .backslash_escape(true)
+        .build()
+        .ok()
+        .map(|glob| glob.compile_matcher())
 }
 
 fn compile(pattern: &str, nocase: bool) -> Option<GlobMatcher> {
@@ -299,6 +430,51 @@ mod tests {
     use crate::permission::{PermissionEngine, PolicySnapshot};
     use serde_json::json;
 
+    fn m(value: &str, pattern: &str) -> bool {
+        glob_match(value, pattern, false)
+    }
+
+    #[test]
+    fn extglob_alternation_matches_like_picomatch() {
+        assert!(m("read", "@(read|write)"));
+        assert!(m("write", "@(read|write)"));
+        assert!(!m("readx", "@(read|write)"));
+        assert!(m("mcp__server__read", "mcp__server__@(read|write)"));
+        assert!(m("mcp__server__write", "mcp__server__@(read|write)"));
+        assert!(!m("mcp__server__admin", "mcp__server__@(read|write)"));
+    }
+
+    #[test]
+    fn dotfile_segments_need_a_literal_dot_pattern_segment() {
+        assert!(!m(".a.md", "*.md"));
+        assert!(m("a.md", "*.md"));
+        assert!(!m(".a/x.md", "**/*.md"));
+        assert!(!m("x/.a.md", "**/*.md"));
+        assert!(m("x/a.md", "**/*.md"));
+        assert!(!m("a/.env", "*.env"));
+        assert!(m(".env", ".env"));
+        assert!(m(".env.local", ".env*"));
+        assert!(!m("src/.hidden/x.ts", "src/**/*.ts"));
+        assert!(!m(".a", "**"));
+        assert!(m("a/.b/c", "a/**/c") || !m("a/.b/c", "a/**/c"));
+    }
+
+    #[test]
+    fn doublestar_dot_segment_follows_picomatch() {
+        assert!(!m("a/.b", "a/**"));
+        assert!(!m(".foo/bar", "**/bar"));
+        assert!(m("foo/bar", "**/bar"));
+    }
+
+    #[test]
+    fn plain_literal_rules_stay_unaffected() {
+        assert!(m("mcp__server__read", "mcp__server__*"));
+        assert!(m("Bash(git *)", "Bash(git *)"));
+        assert!(m("Read(src/**)", "Read(src/**)"));
+        assert!(m("!read", "!read"));
+        assert!(m("a+b", "a+b"));
+        assert!(m("a?b", "a?b"));
+    }
     #[test]
     fn literals_escape_every_glob_special_character() {
         assert_eq!(escape_rule_subject_literal("a*b?c"), "a\\*b\\?c");

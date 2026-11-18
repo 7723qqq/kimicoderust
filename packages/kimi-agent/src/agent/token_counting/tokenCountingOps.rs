@@ -13,7 +13,7 @@ use crate::app::event::event2::{Event2, Event2Class};
 pub struct TokenCountingMeasuredPayload {
     pub agent_id: String,
     pub length: usize,
-    pub tokens: usize,
+    pub tokens: u64,
 }
 
 pub type TokenCountingTruncatedPayload = TokenCountingMeasuredPayload;
@@ -23,7 +23,7 @@ pub type TokenCountingTruncatedPayload = TokenCountingMeasuredPayload;
 pub struct TokenCountingRebasedPayload {
     pub agent_id: String,
     pub length: usize,
-    pub tokens: usize,
+    pub tokens: u64,
     pub measured: bool,
 }
 
@@ -32,7 +32,7 @@ pub struct TokenCountingRebasedPayload {
 pub struct TokenCountingTurnRecordedPayload {
     pub agent_id: String,
     pub length: usize,
-    pub tokens: usize,
+    pub tokens: u64,
     pub turn_id: u64,
 }
 
@@ -72,7 +72,7 @@ macro_rules! token_counting_event {
             pub fn new(payload: Value) -> Self {
                 let event = Event2::new(
                     &$class,
-                    payload,
+                    payload.clone(),
                     None,
                 );
                 Self { event, payload }

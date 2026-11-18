@@ -46,7 +46,7 @@ pub struct DebugPendingGroup {
     pub failed: Vec<DebugFailedUnit>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize)]
 pub struct DiUnitChangedPayload {
     pub scope: String,
     pub token: String,
@@ -83,6 +83,12 @@ impl Deref for DiUnitChanged {
 
     fn deref(&self) -> &Self::Target {
         &self.event
+    }
+}
+
+impl DiUnitChanged {
+    pub fn to_event2(&self) -> Event2 {
+        self.event.clone()
     }
 }
 

@@ -15,6 +15,7 @@ use crate::app::auth::auth::IOAuthService;
 use crate::app::event::event::IEventService;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::mcp_core::client_shared::ReqwestFetch;
+use crate::_base::utils::fetch_like::FetchLike;
 use crate::mcp_core::client_http::OAuthClientProvider;
 use crate::session::agent_lifecycle::agent_lifecycle::{IAgentLifecycleService, MAIN_AGENT_ID};
 use crate::session::session_context::session_context::ISessionContext;
@@ -210,14 +211,14 @@ impl SessionTitleService {
     }
 
     fn kimi_title_provider(&self) -> Option<crate::llm_adapter::provider::provider::ProviderConfig> {
-        let provider = self.providers.get("kimi-code");
-        if provider.is_none()
-            || !crate::llm_adapter::provider::provider_definition::is_oauth_catalog_vendor(&provider.as_ref().unwrap().type_)
-            || provider.as_ref().unwrap().oauth.is_none()
+        let provider = self.providers.get("kimi-code")?;
+        if !crate::llm_adapter::provider::provider_definition::is_oauth_catalog_vendor(
+            provider.type_.as_deref(),
+        ) || provider.oauth.is_none()
         {
             return None;
         }
-        provider
+        Some(provider.clone())
     }
 
     async fn request_hosted_title(&self, chat_content: &str, force: bool) -> TitleGenerationResult {
@@ -226,9 +227,12 @@ impl SessionTitleService {
         };
         let runtime_auth = crate::app::auth::auth::KimiCodeRuntimeAuth {
             base_url: provider.base_url.clone(),
-            oauth_ref: provider.oauth.clone().unwrap(),
+            oauth_ref: provider.oauth.clone(),
         };
-        let Some(token_provider) = self.oauth.resolve_token_provider("kimi-code", &runtime_auth.oauth_ref) else {
+        let Some(token_provider) = self
+            .oauth
+            .resolve_token_provider_optional("kimi-code", runtime_auth.oauth_ref.as_ref())
+        else {
             return TitleGenerationResult::Failure { reason: "token_unavailable" };
         };
         let mut token = match token_provider.get_access_token(false).await {
@@ -242,7 +246,8 @@ impl SessionTitleService {
                 return TitleGenerationResult::Failure { reason: "unexpected" };
             }
         };
-        let mut result = self.fetch_hosted_title(&runtime_auth.base_url, &provider, &token, chat_content).await;
+        let base_url = runtime_auth.base_url.clone().unwrap_or_default();
+        let mut result = self.fetch_hosted_title(&base_url, &provider, &token, chat_content).await;
         if result.status == Some(401) {
             token = match token_provider.get_access_token(true).await {
                 Ok(token) => token,
@@ -255,7 +260,7 @@ impl SessionTitleService {
                     return TitleGenerationResult::Failure { reason: "unexpected" };
                 }
             };
-            result = self.fetch_hosted_title(&runtime_auth.base_url, &provider, &token, chat_content).await;
+            result = self.fetch_hosted_title(&base_url, &provider, &token, chat_content).await;
         }
         if result.kind != ChatTitleKind::Ok {
             self.log.debug(&format!("chat_title request failed: {}", result.message), None);
@@ -296,28 +301,31 @@ impl SessionTitleService {
             )
             .await;
         match response {
-            Ok(response) if response.ok => match response.text().await {
+            Ok(response) if response.ok => {
+                let status = response.status;
+                match response.text().await {
                 Ok(text) => match serde_json::from_str::<Value>(&text) {
                     Ok(value) => ChatTitleResult {
                         kind: ChatTitleKind::Ok,
                         title: value.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
-                        status: Some(response.status),
+                        status: Some(status),
                         message: String::new(),
                     },
                     Err(error) => ChatTitleResult {
                         kind: ChatTitleKind::Error,
                         title: String::new(),
-                        status: Some(response.status),
+                        status: Some(status),
                         message: error.to_string(),
                     },
                 },
                 Err(error) => ChatTitleResult {
                     kind: ChatTitleKind::Error,
                     title: String::new(),
-                    status: Some(response.status),
+                    status: Some(status),
                     message: error.to_string(),
                 },
-            },
+                }
+            }
             Ok(response) => ChatTitleResult {
                 kind: ChatTitleKind::Error,
                 title: String::new(),
@@ -412,10 +420,10 @@ impl SessionTitleService {
             crate::session::session_metadata::session_meta_events::SessionMetaUpdatedPayload {
                 agent_id: "main".to_string(),
                 session_id: self.ctx.session_id(),
-                title: title.to_string(),
+                title: Some(title.to_string()),
                 patch: json!({"title": title, "isCustomTitle": false}),
             },
-        ));
+        ).into());
         TitleGenerationResult::Title {
             title: title.to_string(),
             outcome,
@@ -470,14 +478,14 @@ fn title_input_from_prompts(prompts: &[String]) -> Option<String> {
     if prompts.is_empty() {
         return None;
     }
-    Some(
+    Some(pipe_take_utf16(
         prompts
             .iter()
             .map(|prompt| format!("user: {}", take_utf16(prompt, MAX_TITLE_USER_SEGMENT)))
             .collect::<Vec<_>>()
-            .join("\n")
-            .pipe_take_utf16(MAX_TITLE_INPUT_LENGTH),
-    )
+            .join("\n"),
+        MAX_TITLE_INPUT_LENGTH,
+    ))
 }
 
 async fn compose_title_input(

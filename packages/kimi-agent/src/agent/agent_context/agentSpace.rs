@@ -3,15 +3,17 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use async_trait::async_trait;
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::agent::agent_context::AgentContext;
-use crate::agent::state::agent_model::{
+use crate::app::event::event2::Event2;
+use crate::state::agent_model::{
     AgentModel, AgentModelBridge, AgentModelContext, AgentModelDefinition, DomainResourceRuntime,
-    validate_applier_coverage,
 };
+use crate::wire::record::WireAsyncError;
 use crate::state::state::ReplayableStateKey;
 
 pub trait AgentSpaceHost: Send + Sync {
@@ -21,8 +23,8 @@ pub trait AgentSpaceHost: Send + Sync {
 
     fn dispatch_model_event(
         &self,
-        event: Value,
-    ) -> crate::rpc::types::BoxFuture<'static, Result<(), String>>;
+        event: Event2,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<(), WireAsyncError>>;
 
     fn read_legacy_state(&self, key: &Arc<ReplayableStateKey>) -> Value;
 }
@@ -31,13 +33,18 @@ struct SpaceBridge {
     host: Arc<dyn AgentSpaceHost>,
 }
 
+#[async_trait]
 impl AgentModelBridge for SpaceBridge {
-    fn dispatch(&self, event: Value) -> crate::rpc::types::BoxFuture<'static, Result<(), String>> {
-        self.host.dispatch_model_event(event)
+    async fn dispatch(&self, event: Event2) -> Result<(), WireAsyncError> {
+        self.host.dispatch_model_event(event).await
     }
 
     fn read_legacy(&self, key: &Arc<ReplayableStateKey>) -> Value {
         self.host.read_legacy_state(key)
+    }
+
+    fn initial_state(&self) -> Value {
+        Value::Null
     }
 }
 
@@ -53,7 +60,7 @@ pub struct AgentSpaceImpl {
     agent_id: String,
     instances: Mutex<HashMap<String, Arc<ModelEntry>>>,
     host: Mutex<Option<Arc<dyn AgentSpaceHost>>>,
-    context: Mutex<Option<AgentContext>>,
+    context: Mutex<Option<Arc<AgentContext>>>,
     dead: AtomicBool,
 }
 
@@ -68,7 +75,7 @@ impl AgentSpaceImpl {
         }
     }
 
-    pub fn bind_context(&self, context: AgentContext) {
+    pub fn bind_context(&self, context: Arc<AgentContext>) {
         *self.context.lock() = Some(context);
     }
 
@@ -111,7 +118,7 @@ impl AgentSpaceImpl {
         }
     }
 
-    fn ensure_model(&self, definition: &AgentModelDefinition) -> Result<Arc<ModelEntry>, String> {
+    pub fn ensure_model(&self, definition: &AgentModelDefinition) -> Result<Arc<ModelEntry>, String> {
         if let Some(existing) = self.instances.lock().get(&definition.id) {
             return Ok(existing.clone());
         }
@@ -136,16 +143,13 @@ impl AgentSpaceImpl {
             ));
         };
         let bridge = Arc::new(SpaceBridge { host: host.clone() });
-        let initial = (definition.state.initial)();
         let mut model = (definition.model)(AgentModelContext {
             agent: context,
             bridge,
-            initial,
         });
         model.seal();
-        validate_applier_coverage(definition, &model)?;
         let entry = Arc::new(ModelEntry {
-            definition: definition.clone(),
+            definition: (*definition).clone(),
             model,
             leases: AtomicU32::new(0),
             retired: AtomicBool::new(false),
@@ -198,7 +202,7 @@ impl AgentSpaceImpl {
         if entry.disposed.swap(true, Ordering::SeqCst) {
             return;
         }
-        entry.model.dispose().await;
+        let _ = entry.model.dispose().await;
     }
 }
 

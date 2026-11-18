@@ -280,7 +280,7 @@ pub static FULL_COMPACTION_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::ne
         blobs: None,
         mutable_replay: None,
     });
-    key.on(&begin, Arc::new(|state, event, ctx| {
+    Arc::get_mut(&mut key).expect("fresh state key").on(&begin, Arc::new(|state, event, ctx| {
         let mut next = state;
         if next.get("phase").and_then(Value::as_str) != Some("running") {
             next.as_object_mut()?.insert("phase".to_string(), json!("running"));
@@ -307,7 +307,7 @@ pub static FULL_COMPACTION_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::ne
     }))
     .expect("full compaction begin fold can be registered");
     for class in [cancel, complete] {
-        key.on(&class, Arc::new(|state, _event, _ctx| {
+        Arc::get_mut(&mut key).expect("fresh state key").on(&class, Arc::new(|state, _event, _ctx| {
             if state.get("phase").and_then(Value::as_str) == Some("idle") {
                 return None;
             }
@@ -333,7 +333,7 @@ pub static FULL_COMPACTION_WIRE_RANGES_KEY: LazyLock<Arc<ReplayableStateKey>> =
                 blobs: None,
                 mutable_replay: None,
             });
-        key.on(&CONTEXT_APPLY_COMPACTION_CLASS, Arc::new(|state, event, _ctx| {
+        Arc::get_mut(&mut key).expect("fresh state key").on(&CONTEXT_APPLY_COMPACTION_CLASS, Arc::new(|state, event, _ctx| {
             let range = event.payload.get("wireLines")?;
             let start = range.get("start").and_then(Value::as_u64)?;
             let end = range.get("end").and_then(Value::as_u64)?;
@@ -342,7 +342,7 @@ pub static FULL_COMPACTION_WIRE_RANGES_KEY: LazyLock<Arc<ReplayableStateKey>> =
             Some(Value::Array(ranges))
         }))
         .expect("compaction wire range fold can be registered");
-        key.on(&CONTEXT_CLEAR_CLASS, Arc::new(|state, _event, _ctx| {
+        Arc::get_mut(&mut key).expect("fresh state key").on(&CONTEXT_CLEAR_CLASS, Arc::new(|state, _event, _ctx| {
             let ranges = state.as_array()?;
             if ranges.is_empty() {
                 None

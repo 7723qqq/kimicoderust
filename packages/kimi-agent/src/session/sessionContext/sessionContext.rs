@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::_base::di::scope::ScopeSeed;
+use crate::_base::di::scope::{ScopeSeed, seed_instance};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,8 +33,8 @@ pub fn snapshot_session_workspace_association(
     }
 }
 
-pub fn session_context_seed(ctx: Arc<dyn ISessionContext>) -> Vec<ScopeSeed> {
-    vec![ScopeSeed::new::<ISessionContext>(ctx)]
+pub fn session_context_seed(ctx: Arc<dyn ISessionContext>) -> ScopeSeed {
+    seed_instance(&I_SESSION_CONTEXT, Arc::new(ctx))
 }
 
 #[derive(Debug, Clone)]

@@ -16,7 +16,7 @@ use super::instantiation::ServiceIdentifier;
 use crate::_base::errors::unexpected_error::on_unexpected_error;
 use crate::_base::event::{Emitter, Event};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum UnitState {
     Pending,
     Activating,
@@ -223,6 +223,10 @@ pub struct CascadeTree {
 }
 
 impl CascadeTree {
+    pub fn engines(&self) -> Vec<Arc<CascadeEngine>> {
+        self.engines.lock().values().cloned().collect()
+    }
+
     pub fn new(graph: DependencyGraph) -> Arc<Self> {
         let on_did_add_engine = Emitter::new();
         let on_did_remove_engine = Emitter::new();

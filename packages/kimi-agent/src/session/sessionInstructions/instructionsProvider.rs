@@ -3,7 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::ScopeSeed;
+use crate::_base::di::instantiation::create_decorator;
+use crate::_base::di::scope::{ScopeSeed, seed_instance};
 use crate::human::utils::watch::WatchChange;
 use crate::wire::record::WireAsyncError;
 
@@ -21,6 +22,7 @@ pub trait ISessionInstructionsProvider: Send + Sync {
 
 pub fn session_instructions_provider_seed(
     provider: Arc<dyn ISessionInstructionsProvider>,
-) -> Vec<ScopeSeed> {
-    vec![ScopeSeed::new::<ISessionInstructionsProvider>(provider)]
+) -> ScopeSeed {
+    let id = create_decorator::<Arc<dyn ISessionInstructionsProvider>>("sessionInstructionsProvider");
+    seed_instance(&id, provider)
 }

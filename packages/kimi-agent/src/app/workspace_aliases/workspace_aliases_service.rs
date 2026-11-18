@@ -46,6 +46,7 @@ struct SessionIndexSnapshot {
     ids_by_root_key: HashMap<String, Vec<String>>,
 }
 
+#[derive(Clone)]
 struct SessionIndexCache {
     snapshot: SessionIndexSnapshot,
     size: Option<u64>,
@@ -99,13 +100,15 @@ impl WorkspaceAliasesService {
 
     async fn catalog_snapshot(&self) -> Result<CatalogSnapshot, WireAsyncError> {
         loop {
-            if let Some(cache) = self.catalog_cache.lock().clone()
+            let cached = self.catalog_cache.lock().clone();
+            if let Some(cache) = cached
                 && self.catalog.stamp().await? == cache.stamp
             {
                 return Ok(cache);
             }
             let _load = self.catalog_load.lock().await;
-            if let Some(cache) = self.catalog_cache.lock().clone()
+            let cached = self.catalog_cache.lock().clone();
+            if let Some(cache) = cached
                 && self.catalog.stamp().await? == cache.stamp
             {
                 return Ok(cache);
@@ -131,13 +134,15 @@ impl WorkspaceAliasesService {
 
     async fn session_index_snapshot(&self) -> Result<SessionIndexSnapshot, WireAsyncError> {
         loop {
-            if let Some(cache) = self.session_index_cache.lock().as_ref().clone()
+            let cached = self.session_index_cache.lock().clone();
+            if let Some(cache) = cached
                 && self.session_index.size().await? == cache.size
             {
                 return Ok(cache.snapshot);
             }
             let _load = self.session_index_load.lock().await;
-            if let Some(cache) = self.session_index_cache.lock().as_ref().clone()
+            let cached = self.session_index_cache.lock().clone();
+            if let Some(cache) = cached
                 && self.session_index.size().await? == cache.size
             {
                 return Ok(cache.snapshot);

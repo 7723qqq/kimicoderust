@@ -23,6 +23,7 @@ use crate::tool::path_access::{
     normalize_path, resolve_path_access,
 };
 use crate::tool::tool_contract::DEFAULT_TOOL_RESULT_MAX_RETAINED_CHARS;
+use crate::tool::tool_input_display::{FileIoOperation, ToolInputDisplay};
 use crate::turn_loop::types::ExecutableToolResult;
 use crate::wire::record::WireAsyncError;
 
@@ -87,11 +88,16 @@ impl GlobTool {
         let search_root = match args.path.as_deref() {
             Some(path) => {
                 let roots = [self.workspace_dir.clone()];
+                let home_dir = self
+                    .environment
+                    .as_ref()
+                    .and_then(|environment| environment.host())
+                    .map(|host| host.home_dir);
                 match resolve_path_access(
                     path,
                     &self.workspace_dir,
                     &roots,
-                    None,
+                    home_dir.as_deref(),
                     self.path_class,
                     PathAccessOperation::Search,
                     &WorkspaceAccessPolicy::SEARCH,
@@ -244,6 +250,22 @@ impl GlobTool {
                 }
             })
             .collect();
+
+        let mut detail_parts = vec![format!("pattern: {}", args.pattern)];
+        if let Some(path) = args.path.as_deref() {
+            detail_parts.push(format!("path: {path}"));
+        }
+        if args.include_ignored == Some(true) {
+            detail_parts.push("include_ignored: true".to_string());
+        }
+        let display = ToolInputDisplay::FileIo {
+            operation: FileIoOperation::Glob,
+            path: search_root.clone(),
+            detail: Some(detail_parts.join(", ")),
+            content: None,
+            before: None,
+            after: None,
+        };
         let mut warnings = Vec::new();
         if timed_out {
             warnings.push(format!(
@@ -272,7 +294,7 @@ impl GlobTool {
                     filtered_sensitive,
                     head_limit,
                 );
-                utf16_len(&format!("{}\n\n", [&notices.lines, &notices.footer].concat().join("\n")))
+                utf16_len(&[notices.lines, notices.footer].concat().join("\n")) + 2
             })
             .max()
             .unwrap_or(0);
@@ -302,11 +324,12 @@ impl GlobTool {
             filtered_sensitive,
             head_limit,
         );
-        tool_result(
+        tool_result_with_display(
             [notices.lines, display_lines, notices.footer]
                 .concat()
                 .join("\n"),
             false,
+            Some(display),
         )
     }
 
@@ -326,6 +349,14 @@ impl GlobTool {
 }
 
 fn tool_result(content: impl Into<String>, is_error: bool) -> ExecutableToolResult {
+    tool_result_with_display(content, is_error, None)
+}
+
+fn tool_result_with_display(
+    content: impl Into<String>,
+    is_error: bool,
+    display: Option<ToolInputDisplay>,
+) -> ExecutableToolResult {
     ExecutableToolResult {
         spill: None,
         parts: Vec::new(),
@@ -334,9 +365,11 @@ fn tool_result(content: impl Into<String>, is_error: bool) -> ExecutableToolResu
         content: content.into(),
         is_error,
         note: None,
-        display: None,
+        display: display.map(Box::new),
     }
 }
+
+
 
 fn create_rg_probe(process_service: Arc<dyn IHostProcessService>, cwd: String) -> RgProbe {
     Arc::new(move |args| {

@@ -709,21 +709,20 @@ impl SubagentTool {
         let partial_output = run.partial_output.clone();
         let turn = run.turn.clone();
         let mirror_controller = controller.clone();
-        let mirrored = mirror_agent_run(
-            &requester,
-            run,
-            MirrorAgentRunOptions {
-                profile_name: profile_name.clone(),
-                prompt: Some(prompt_text),
-                suppress_rate_limit_failure_event: None,
-                signal: controller.signal(),
-                cancel: Some(Arc::new(move |reason| {
-                    mirror_controller.abort(reason.map(|error| Arc::from(error) as SharedError));
-                })),
-                defer_started: Some(true),
-                terminalize: None,
-            },
-        );
+        let mirror_options = MirrorAgentRunOptions {
+            profile_name: profile_name.clone(),
+            prompt: Some(prompt_text),
+            suppress_rate_limit_failure_event: None,
+            signal: controller.signal(),
+            cancel: Some(Arc::new(move |reason| {
+                mirror_controller.abort(reason.map(|error| Arc::from(error) as SharedError));
+            })),
+            defer_started: Some(true),
+            terminalize: None,
+        };
+        let mirrored = async move {
+            mirror_agent_run(&requester, run, mirror_options).await
+        };
         let completion_partial_output = partial_output.clone();
         let completion_signal = controller.signal();
         let thinking_effort = self
@@ -1004,7 +1003,7 @@ impl SubagentTool {
                     timeout_ms: Some(timeout_ms),
                     detach_timeout_ms: None,
                     auto_background_on_timeout: None,
-                    signal: (!run_in_background).then(|| signal.clone()),
+                    signal: (!run_in_background).then(|| signal.cancellation_token()),
                 },
             ) {
                 Ok(task_id) => task_id,

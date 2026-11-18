@@ -164,14 +164,33 @@ enum InternalState {
     Removed,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 enum RuntimeMcpClient {
     Stdio(Arc<StdioMcpClient>),
     Http(Arc<HttpMcpClient>),
     Sse(Arc<SseMcpClient>),
 }
 
+impl PartialEq for RuntimeMcpClient {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stdio(a), Self::Stdio(b)) => Arc::ptr_eq(a, b),
+            (Self::Http(a), Self::Http(b)) => Arc::ptr_eq(a, b),
+            (Self::Sse(a), Self::Sse(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
 impl RuntimeMcpClient {
+    async fn connect(&self) -> Result<(), WireAsyncError> {
+        match self {
+            Self::Stdio(client) => client.connect().await,
+            Self::Http(client) => client.connect().await,
+            Self::Sse(client) => client.connect().await,
+        }
+    }
+
     fn as_mcp_client(&self) -> &dyn MCPClient {
         match self {
             Self::Stdio(client) => client.as_ref(),
@@ -486,7 +505,8 @@ impl McpConnectionManager {
             return Ok(false);
         };
         self.transition(&entry, McpEntryEvent::Remove);
-        if let Some(closing) = self.state.lock().operation_tails.get(name).cloned() {
+        let closing = self.state.lock().operation_tails.get(name).cloned();
+        if let Some(closing) = closing {
             closing.await;
         }
         Ok(true)
@@ -615,10 +635,15 @@ impl McpConnectionManager {
                 return Ok(true);
             }
         }
-        if state != InternalState::NeedsAuth
-            && client.is_some()
-            && entry.lock().client.as_ref().map(|client| client.as_mcp_client_arc()) != client.as_ref()
-        {
+        let same_client = entry
+            .lock()
+            .client
+            .as_ref()
+            .map(|entry_client| entry_client.as_mcp_client_arc())
+            .as_ref()
+            .zip(client.as_ref())
+            .is_some_and(|(current, requested)| Arc::ptr_eq(current, requested));
+        if state != InternalState::NeedsAuth && client.is_some() && !same_client {
             return Ok(false);
         }
         let transition_id = {
@@ -632,9 +657,10 @@ impl McpConnectionManager {
             promise: None,
         };
         let this = self.clone_handle();
+        let owned_name = name.to_string();
         let work = async move {
             let result = this
-                .perform_mark_needs_auth(name, error, client, redrive, transition_id)
+                .perform_mark_needs_auth(owned_name, error, client, redrive, transition_id)
                 .await;
             let mut state = this.state.lock();
             if state
@@ -679,10 +705,15 @@ impl McpConnectionManager {
         if state == InternalState::NeedsAuth && !redrive {
             return Ok(true);
         }
-        if state != InternalState::NeedsAuth
-            && client.is_some()
-            && entry.lock().client.as_ref().map(|client| client.as_mcp_client_arc()) != client.as_ref()
-        {
+        let same_client = entry
+            .lock()
+            .client
+            .as_ref()
+            .map(|entry_client| entry_client.as_mcp_client_arc())
+            .as_ref()
+            .zip(client.as_ref())
+            .is_some_and(|(current, requested)| Arc::ptr_eq(current, requested));
+        if state != InternalState::NeedsAuth && client.is_some() && !same_client {
             return Ok(false);
         }
         let guard = entry.lock().attempt_id;
@@ -749,7 +780,7 @@ impl McpConnectionManager {
             .state
             .lock()
             .entries
-            .drain()
+            .drain(..)
             .map(|(_, entry)| entry)
             .collect::<Vec<_>>();
         for entry in &entries {
@@ -859,6 +890,7 @@ impl McpConnectionManager {
     }
 
     fn transition(&self, entry: &Arc<Mutex<InternalEntry>>, event: McpEntryEvent) {
+        let event_type = event.event_type();
         let Some(plan) = self.plan_transition(entry, event) else {
             return;
         };
@@ -978,7 +1010,7 @@ impl McpConnectionManager {
             InternalState::Disabled | InternalState::Removed => {}
         }
         let after = to_public_entry(&entry.lock());
-        let suppress_retry_status = event.event_type() == Some(McpEntryEventType::RetryDue)
+        let suppress_retry_status = event_type == Some(McpEntryEventType::RetryDue)
             || (automatic_retry && plan.target == InternalState::RetryWaiting);
         if !suppress_retry_status && (plan.force_emit || !public_entries_equal(&before, &after)) {
             self.emit(entry);
@@ -1196,8 +1228,12 @@ impl McpConnectionManager {
             if !self.is_current(&entry, attempt_id) {
                 return Ok(());
             }
+            let (client_config, client_name) = {
+                let entry = entry.lock();
+                (entry.config.clone(), entry.name.clone())
+            };
             let startup_client = self
-                .create_client(&entry.lock().config, &entry.lock().name, timeout_ms)
+                .create_client(&client_config, &client_name, timeout_ms)
                 .await?;
             client = Some(startup_client.clone());
             if !self.is_current(&entry, attempt_id) {
@@ -1258,11 +1294,12 @@ impl McpConnectionManager {
     fn attach_session_evidence(&self, entry: &Arc<Mutex<InternalEntry>>, client: RuntimeMcpClient, attempt_id: u64) {
         let this = self.clone_handle();
         let entry = entry.clone();
+        let evidence_client = client.clone();
         client.on_session_evidence(Arc::new(move |evidence| {
             if !this.is_current(&entry, attempt_id) {
                 return;
             }
-            if entry.lock().client.as_ref() != Some(&client) {
+            if entry.lock().client.as_ref() != Some(&evidence_client) {
                 return;
             }
             this.transition(&entry, McpEntryEvent::SessionEvidence { evidence });
@@ -1436,7 +1473,7 @@ impl McpConnectionManager {
         &self,
         config: &McpServerConfig,
         name: &str,
-    ) -> Result<Option<Arc<crate::mcp_core::oauth::provider::McpOAuthClientProvider>>, WireAsyncError> {
+    ) -> Result<Option<Arc<dyn crate::mcp_core::client_http::OAuthClientProvider>>, WireAsyncError> {
         let Some(oauth_service) = &self.options.oauth_service else {
             return Ok(None);
         };
@@ -1446,7 +1483,7 @@ impl McpConnectionManager {
         if !oauth_service.has_tokens(name, config.url.as_ref().unwrap()).await? {
             return Ok(None);
         }
-        Ok(Some(oauth_service.get_provider(name, config.url.as_ref().unwrap())))
+        Ok(Some(oauth_service.get_provider(name, config.url.as_ref().unwrap()) as Arc<dyn crate::mcp_core::client_http::OAuthClientProvider>))
     }
 
     fn should_mark_needs_auth(&self, entry: &Arc<Mutex<InternalEntry>>, error: &(dyn Error + 'static)) -> bool {
@@ -1467,7 +1504,7 @@ impl McpConnectionManager {
         client: &RuntimeMcpClient,
         config: &McpServerConfig,
     ) -> Result<DiscoveredTools, WireAsyncError> {
-        client.as_mcp_client().connect().await?;
+        client.connect().await?;
         let mcp_tools = match client.as_mcp_client().list_tools().await {
             Ok(tools) => tools,
             Err(error) => {
@@ -1783,7 +1820,7 @@ fn classify_startup_failure(error: &(dyn Error + 'static)) -> McpFailureKind {
         return error.failure_kind;
     }
     if let Some(error) = error.downcast_ref::<EnvironmentError>() {
-        return if error.code() == "environment.unavailable" {
+        return if error.code == "environment.unavailable" {
             McpFailureKind::Transport
         } else {
             McpFailureKind::Config

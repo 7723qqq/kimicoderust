@@ -8,7 +8,9 @@ use parking_lot::Mutex;
 use crate::_base::di::instantiation::LiveRef;
 use crate::app::environment::environment::IEnvironmentService;
 use crate::app::git::git::{GitService, IGitService};
-use crate::environment::environment::{LOCAL_ENVIRONMENT_ID, environment_binding_id};
+use crate::environment::environment::{
+    LOCAL_ENVIRONMENT_ID, EnvironmentBinding, EnvironmentCapability, environment_binding_id,
+};
 use crate::features::skill::workspace::environment_skill_discovery::EnvironmentSkillDiscovery;
 use crate::features::skill::workspace::explicit_file_skill_source::{
     ExplicitFileSkillSource, IExplicitFileSkillSource,
@@ -41,7 +43,8 @@ use crate::workspace::workspace_instructions::workspace_instructions_service::Wo
 
 use super::program_dependencies::ProgramDependencies;
 
-pub const PROGRAM_CAPABILITIES: &[&str] = &["fs", "process"];
+pub const PROGRAM_CAPABILITIES: &[EnvironmentCapability] =
+    &[EnvironmentCapability::Fs, EnvironmentCapability::Process];
 
 pub trait ProgramDisposable: Send + Sync {
     fn dispose(&self) -> BoxFuture<'static, Result<(), WireAsyncError>>;
@@ -122,7 +125,7 @@ impl ProgramWorkdirs {
         dependencies: Arc<ProgramDependencies>,
         harness: ProgramHarness,
         own_root: &SharedDisposables,
-    ) -> Self {
+    ) -> Result<Self, WireAsyncError> {
         let harness = Arc::new(harness);
         let root_disposables = Arc::new(Mutex::new(Vec::new()));
         let root = Self::build_parts(
@@ -135,7 +138,7 @@ impl ProgramWorkdirs {
             &context.cwd(),
             true,
             own_root,
-        );
+        )?;
         let entries = Arc::new(Mutex::new(IndexMap::new()));
         entries.lock().insert(
             workdir_context_key(LOCAL_ENVIRONMENT_ID, &context.cwd(), true),
@@ -145,14 +148,15 @@ impl ProgramWorkdirs {
                 references: std::sync::atomic::AtomicUsize::new(1),
             }),
         );
-        Self {
-            root: entries.lock().values().next().unwrap().view.clone(),
+        let root_view = entries.lock().values().next().unwrap().view.clone();
+        Ok(Self {
+            root: root_view,
             environments,
             context,
             dependencies,
             harness,
             entries,
-        }
+        })
     }
 
     pub async fn acquire(
@@ -262,20 +266,33 @@ impl ProgramWorkdirs {
         follows_primary: bool,
         own_root: &SharedDisposables,
     ) -> Result<ProgramView, WireAsyncError> {
-        let lease = environments.acquire(environment_id, PROGRAM_CAPABILITIES);
+        let binding = EnvironmentBinding {
+            environment_id: environment_id.to_string(),
+            cwd: Some(cwd.to_string()),
+        };
+        let lease = environments.acquire(&binding, PROGRAM_CAPABILITIES)?;
+        let resolver: Arc<dyn crate::app::environment::environment::EnvironmentResolver> =
+            environments.clone();
         let result = (|| {
-            let host_fs = lease.environment.fs.clone().unwrap();
-            let local = environments.inspect(LOCAL_ENVIRONMENT_ID);
+            let host_fs = lease.environment.fs().clone();
+            let local_binding = EnvironmentBinding {
+                environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+                cwd: None,
+            };
+            let local = environments.inspect(&local_binding)?;
             let in_process = watchable(environment_id);
             let trust_covered = environment_id == LOCAL_ENVIRONMENT_ID;
             let git: LiveRef<Arc<dyn IGitService>> = if in_process {
                 dependencies.git.clone()
             } else {
-                LiveRef::constant(Arc::new(GitService::new(
-                    environments.clone(),
-                    host_fs.clone(),
-                    environment_id.to_string(),
-                )) as Arc<dyn IGitService>)
+                LiveRef {
+                    current: Some(Arc::new(GitService::new(
+                        resolver.clone(),
+                        host_fs.clone(),
+                        environment_id.to_string(),
+                    )) as Arc<dyn IGitService>),
+                    on_did_change: crate::_base::event::Event::none(),
+                }
             };
             let context = Arc::new(ContextWithCwd {
                 base: context,
@@ -288,7 +305,7 @@ impl ProgramWorkdirs {
             let local_config = Arc::new(FileProjectLocalConfigService::new(
                 dependencies.bootstrap.clone(),
                 host_fs.clone(),
-                lease.environment.host.as_ref().and_then(|host| host.home_dir.clone()).unwrap_or_default(),
+                lease.environment.host().map(|host| host.home_dir).unwrap_or_default(),
             ));
             let dirs = own(
                 WorkspaceDirsService::new(
@@ -317,11 +334,11 @@ impl ProgramWorkdirs {
                 WorkspaceInstructionsService::new(
                     dirs.clone(),
                     host_fs.clone(),
-                    local.host.clone().unwrap(),
+                    local.host().unwrap(),
                     dependencies.bootstrap.clone(),
                     dependencies.log.clone(),
                     state.clone(),
-                    local.fs.clone(),
+                    Some(local.fs().clone()),
                     in_process,
                 ),
                 own_root,
@@ -337,37 +354,45 @@ impl ProgramWorkdirs {
                         Some(dependencies.agent_profiles.clone()),
                         Some(workdir_context_key(environment_id, cwd, follows_primary)),
                         in_process,
-                        Arc::new(|registration| {
-                            dependencies.agent_profiles.register(registration)
-                        }),
+                        {
+                            let agent_profiles = dependencies.agent_profiles.clone();
+                            Arc::new(move |registration| {
+                                agent_profiles.register(registration)
+                            })
+                        },
                     ),
                     own_root,
                 )
             } else {
                 Arc::new(NoopWorkspaceAgentProfileLoader)
             };
+            let explicit_dirs = dependencies
+                .bootstrap
+                .args()
+                .skill_dirs
+                .clone()
+                .unwrap_or_default();
             let workspace_skills = own_arc(
                 WorkspaceRootSkillSource::new(
-                    EnvironmentSkillDiscovery::new(dependencies.log.clone(), host_fs.clone()),
-                    context.clone(),
+                    Arc::new(EnvironmentSkillDiscovery),
+                    context.workspace_id(),
+                    cwd.to_string(),
                     dependencies.config.clone(),
-                    dependencies.bootstrap.clone(),
+                    explicit_dirs,
                     dirs.clone(),
-                    host_fs.clone(),
                     in_process,
                 ),
                 own_root,
             );
             let skills = own_arc(
-                WorkspaceSkillCatalogService::new(
-                    dependencies.builtin_skills.clone(),
-                    dependencies.user_skills.clone(),
-                    harness.explicit_skills.clone(),
-                    harness.extra_skills.clone(),
-                    workspace_skills,
-                    harness.plugin_skills.clone(),
-                    state.clone(),
-                ),
+                WorkspaceSkillCatalogService::new(vec![
+                    dependencies.builtin_skills.clone() as Arc<dyn crate::features::skill::catalog::skillSource::ISkillSource>,
+                    dependencies.user_skills.clone() as Arc<dyn crate::features::skill::catalog::skillSource::ISkillSource>,
+                    harness.explicit_skills.clone() as Arc<dyn crate::features::skill::catalog::skillSource::ISkillSource>,
+                    harness.extra_skills.clone() as Arc<dyn crate::features::skill::catalog::skillSource::ISkillSource>,
+                    workspace_skills as Arc<dyn crate::features::skill::catalog::skillSource::ISkillSource>,
+                    harness.plugin_skills.clone() as Arc<dyn crate::features::skill::catalog::skillSource::ISkillSource>,
+                ]),
                 own_root,
             );
             Ok(ProgramView {
@@ -437,7 +462,7 @@ impl IWorkspaceAgentProfileLoader for NoopWorkspaceAgentProfileLoader {
 }
 
 fn workdir_context_key(environment_id: &str, cwd: &str, follows_primary: bool) -> String {
-    let base = environment_binding_id(environment_id, cwd);
+    let base = environment_binding_id(environment_id, Some(cwd));
     if environment_id == LOCAL_ENVIRONMENT_ID && !follows_primary {
         format!("{base}\0pinned")
     } else {

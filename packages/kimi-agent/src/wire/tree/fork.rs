@@ -72,7 +72,7 @@ struct NumberedMessage {
 }
 
 fn origin_kind(message: &ContextMessage) -> Option<&str> {
-    message.get("origin")?.get("kind")?.as_str()
+    message.origin.as_ref().map(|origin| origin.kind())
 }
 
 fn fold_unpaired_undo(messages: &mut Vec<NumberedMessage>, count: u64) {

@@ -5,10 +5,18 @@ use crate::wire::record::WireAsyncError;
 
 pub async fn probe_executor_environment() -> Result<RemoteEnvironmentInfo, WireAsyncError> {
     let (info, shell) = tokio::join!(probe_host_environment_from_node(), apply_login_shell_path_from_node());
-    let mut info = info?;
-    let _ = shell?;
-    info.cwd = std::env::current_dir()?.to_string_lossy().into_owned();
-    info.temp_dir = std::env::temp_dir().to_string_lossy().into_owned();
-    info.windows_process_lifecycle = cfg!(windows).then_some(true);
-    Ok(info)
+    let info = info?;
+    shell.await;
+    Ok(RemoteEnvironmentInfo {
+        os_kind: info.os_kind,
+        os_arch: info.os_arch,
+        os_version: info.os_version,
+        shell_name: info.shell_name,
+        shell_path: info.shell_path,
+        path_class: info.path_class,
+        home_dir: info.home_dir,
+        cwd: std::env::current_dir()?.to_string_lossy().into_owned(),
+        temp_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+        windows_process_lifecycle: cfg!(windows).then_some(true),
+    })
 }

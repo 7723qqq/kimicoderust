@@ -43,7 +43,6 @@ impl HostProcessService {
                     format!(
                         "Failed to spawn \"{command}\": cwd {cwd} does not exist or is not a directory"
                     ),
-                    None,
                     Some(serde_json::json!({ "command": command, "args": args, "cwd": cwd })),
                 )));
             }

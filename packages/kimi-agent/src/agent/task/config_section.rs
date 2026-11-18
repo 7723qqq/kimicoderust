@@ -142,7 +142,7 @@ pub fn parse_print_background_mode(raw: &str) -> Option<String> {
 }
 
 fn parse_bool_value(raw: &str) -> Option<Value> {
-    parse_boolean_env(raw).map(Value::Bool)
+    parse_boolean_env(Some(raw)).map(Value::Bool)
 }
 
 fn parse_positive_int_value(raw: &str) -> Option<Value> {
@@ -161,12 +161,12 @@ pub fn task_env_bindings() -> EnvBindings {
     env_bindings(
         &AGENT_TASK_CONFIG_SCHEMA,
         &[
-            ("keepAliveOnExit", KEEP_ALIVE_ON_EXIT_ENV, parse_bool_value),
-            ("maxRunningTasks", MAX_RUNNING_TASKS_ENV, parse_positive_int_value),
-            ("bashTaskTimeoutS", BASH_TASK_TIMEOUT_S_ENV, parse_non_negative_int_value),
-            ("printWaitCeilingS", PRINT_WAIT_CEILING_S_ENV, parse_positive_int_value),
-            ("printBackgroundMode", PRINT_BACKGROUND_MODE_ENV, parse_print_background_mode_value),
-            ("printMaxTurns", PRINT_MAX_TURNS_ENV, parse_positive_int_value),
+            ("keepAliveOnExit", KEEP_ALIVE_ON_EXIT_ENV, parse_bool_value as fn(&str) -> Option<Value>),
+            ("maxRunningTasks", MAX_RUNNING_TASKS_ENV, parse_positive_int_value as fn(&str) -> Option<Value>),
+            ("bashTaskTimeoutS", BASH_TASK_TIMEOUT_S_ENV, parse_non_negative_int_value as fn(&str) -> Option<Value>),
+            ("printWaitCeilingS", PRINT_WAIT_CEILING_S_ENV, parse_positive_int_value as fn(&str) -> Option<Value>),
+            ("printBackgroundMode", PRINT_BACKGROUND_MODE_ENV, parse_print_background_mode_value as fn(&str) -> Option<Value>),
+            ("printMaxTurns", PRINT_MAX_TURNS_ENV, parse_positive_int_value as fn(&str) -> Option<Value>),
         ],
     )
 }

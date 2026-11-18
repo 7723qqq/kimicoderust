@@ -167,7 +167,7 @@ impl WorkspaceMcpConfigService {
 
     fn register_plugins(&self) {
         let weak = Arc::downgrade(&self.inner);
-        let subscription = self.inner.plugins.on_did_reload(move |event| {
+        let subscription = self.inner.plugins.on_did_reload(Arc::new(move |event: crate::app::plugin::types::PluginReloadEvent| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
@@ -181,13 +181,13 @@ impl WorkspaceMcpConfigService {
                 }
                 Ok(())
             }));
-        });
+        }));
         self.inner._subscriptions.lock().push(subscription);
     }
 
     fn register_trust(&self) {
         let weak = Arc::downgrade(&self.inner);
-        let subscription = self.inner.trust.on_did_change(move |_| {
+        let subscription = self.inner.trust.on_did_change(Arc::new(move |_: crate::workspace::workspace_trust::workspace_trust::WorkspaceTrustChange| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
@@ -200,13 +200,13 @@ impl WorkspaceMcpConfigService {
                     );
                 }
             });
-        });
+        }));
         self.inner._subscriptions.lock().push(subscription);
     }
 
     fn register_store(&self, store: Arc<dyn IMcpConfigStore>) {
         let weak = Arc::downgrade(&self.inner);
-        let subscription = store.on_did_write(move |event| {
+        let subscription = store.on_did_write(Arc::new(move |event: crate::app::mcp_config::config_store::McpConfigWriteEvent| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
@@ -220,13 +220,13 @@ impl WorkspaceMcpConfigService {
                 }
                 Ok(())
             }));
-        });
+        }));
         self.inner._subscriptions.lock().push(subscription);
     }
 
     fn register_config(&self) {
         let weak = Arc::downgrade(&self.inner);
-        let subscription = self.inner.config.on_did_section_change(move |event| {
+        let subscription = self.inner.config.on_did_section_change(Box::new(move |event: crate::app::config::config::ConfigSectionChangedEvent| {
             if event.domain != MCP_SECTION {
                 return;
             }
@@ -249,18 +249,19 @@ impl WorkspaceMcpConfigService {
                     safely_call_listener(|| listener(value.clone()));
                 }
             }
-        });
+        }));
         self.inner._subscriptions.lock().push(subscription);
     }
 
     fn register_dirs(&self) {
         let weak = Arc::downgrade(&self.inner);
-        let subscription = self.inner.dirs.on_did_change(move || {
+        let subscription = self.inner.dirs.on_did_change(Arc::new(move || {
             if let Some(inner) = weak.upgrade() {
                 let this = Self { inner };
+                let reload_this = this.clone();
                 let future = async move {
-                    if let Err(error) = this.refresh_primary().await {
-                        this.inner.log.warn(
+                    if let Err(error) = reload_this.refresh_primary().await {
+                        reload_this.inner.log.warn(
                             &format!("mcp primary reload failed: {error}"),
                             None,
                         );
@@ -271,7 +272,7 @@ impl WorkspaceMcpConfigService {
                 };
                 this.set_primary_tail(future);
             }
-        });
+        }));
         self.inner._subscriptions.lock().push(subscription);
     }
 
@@ -458,13 +459,14 @@ impl WorkspaceMcpConfigService {
         let handle = watch_candidates(
             &project_root,
             &[paths.project_root.clone(), paths.project.clone()],
-            Some(subtree_watch_filter(
+            Some(Arc::from(subtree_watch_filter(
                 &project_root,
                 &[paths.project_root, paths.project],
-            )),
+                None,
+            ))),
         );
         let weak = Arc::downgrade(&self.inner);
-        let subscription = handle.on_did_change(move || {
+        let subscription = handle.on_did_change(move |_change| {
             if let Some(inner) = weak.upgrade() {
                 Self { inner }.schedule_file_reload();
             }
@@ -486,13 +488,13 @@ impl WorkspaceMcpConfigService {
         for path in paths {
             let handle = watch(path);
             let weak = Arc::downgrade(&self.inner);
-            let subscription = handle.on_did_change(move || {
+            let subscription = handle.on_did_change(move |_change| {
                 if let Some(inner) = weak.upgrade() {
                     Self { inner }.schedule_file_reload();
                 }
             });
-            self.inner._subscriptions.lock().push(Arc::from(handle) as DisposableRef);
-            self.inner._subscriptions.lock().push(Arc::from(subscription) as DisposableRef);
+            self.inner._subscriptions.lock().push(Arc::new(*handle) as DisposableRef);
+            self.inner._subscriptions.lock().push(Arc::new(*subscription) as DisposableRef);
         }
     }
 

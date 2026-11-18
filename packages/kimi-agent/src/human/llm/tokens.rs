@@ -78,6 +78,16 @@ pub struct EstimableMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
+impl From<&crate::llm_adapter::contract::message::Message> for EstimableMessage {
+    fn from(message: &crate::llm_adapter::contract::message::Message) -> Self {
+        Self {
+            role: message.role.as_str().to_string(),
+            content: message.content.clone(),
+            tool_calls: (!message.tool_calls.is_empty()).then(|| message.tool_calls.clone()),
+        }
+    }
+}
+
 pub fn estimate_tokens_for_messages(
     messages: &[EstimableMessage],
     pricing: Option<&ImageTokenPricing>,

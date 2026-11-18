@@ -13,17 +13,20 @@ use kimi_core::primitives::errors::domains::os_fs::OS_FS_DIRECTORY_TOO_LARGE;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use parking_lot::Mutex;
 
-use crate::_base::text::encoding::{classify_text_sample, decode_utf_text};
+use crate::_base::text::encoding::{UtfTextEncoding, classify_text_sample, decode_utf_text};
 use crate::_base::utils::abort::{AbortController, AbortSignal};
 use crate::_base::utils::file_meta::{
-    FS_BINARY_SAMPLE_BYTES, build_etag, count_lines, guess_language_id, guess_mime,
+    FS_BINARY_SAMPLE_BYTES, FileMetaStat, build_etag, count_lines, guess_language_id, guess_mime,
 };
 use crate::app::environment::environment::EnvironmentResolver;
 use crate::app::git::git::GitStatusOptions;
 use crate::app::telemetry::telemetry::ITelemetryService;
-use crate::environment::environment::{EnvironmentError, EnvironmentPath};
+use crate::environment::environment::{
+    EnvironmentBinding, EnvironmentCapability, EnvironmentError, EnvironmentPath,
+};
 use crate::environment::environment_defaults::POSIX_ENVIRONMENT_PATH;
-use crate::os::interface::host_file_system::{HostDirEntry, HostFileStat, IHostFileSystem};
+use crate::os::interface::host_file_system::{HostDirEntry, HostFileStat, HostWalkEntry, HostWalkVisitor, IHostFileSystem};
+use crate::os::interface::host_process::IHostProcess;
 use crate::os::interface::host_fs_errors::{is_host_fs_not_directory, is_host_fs_not_found};
 use crate::wire::record::WireAsyncError;
 use crate::workspace::workspace_context::workspace_context::IWorkspaceContext;
@@ -116,9 +119,14 @@ impl WorkspaceFsService {
         environment_id: Option<String>,
     ) -> Self {
         let environment_id = environment_id.unwrap_or_else(|| "local".to_string());
+        let binding = EnvironmentBinding {
+            environment_id: environment_id.clone(),
+            cwd: None,
+        };
         let path = resolver
-            .inspect(&environment_id)
-            .path
+            .inspect(&binding)
+            .ok()
+            .and_then(|environment| environment.path())
             .unwrap_or_else(|| POSIX_ENVIRONMENT_PATH.clone());
         Self {
             workspace_dirs,
@@ -135,6 +143,13 @@ impl WorkspaceFsService {
                 fd_resolution: None,
                 real_roots: None,
             })),
+        }
+    }
+
+    fn environment_binding(&self) -> EnvironmentBinding {
+        EnvironmentBinding {
+            environment_id: self.environment_id.clone(),
+            cwd: None,
         }
     }
 
@@ -186,13 +201,15 @@ impl WorkspaceFsService {
         };
         let base = if anchored { self.anchor_root(&abs) } else { self.work_dir() };
         let rel = if anchored { self.to_rel_from(&base, &abs) } else { self.to_rel(&abs) };
-        let abs_of = |rel_path: &str| {
+        let base_for_closure = base.clone();
+        let path_for_closure = self.path.clone();
+        let abs_of: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(move |rel_path: &str| {
             if rel_path.is_empty() || rel_path == "." {
-                base.clone()
+                base_for_closure.clone()
             } else {
-                self.path.join(&base, &[rel_path])
+                path_for_closure.join(&base_for_closure, &[rel_path])
             }
-        };
+        });
         let top_stat = self.host_fs.stat(&abs).await.map_err(|error| map_fs_error(error, &req.path))?;
         if !top_stat.is_directory {
             return Err(fs_error(FS_PATH_NOT_FOUND, &format!("path not found: {}", req.path), &[("path", req.path.clone().into())]));
@@ -275,7 +292,7 @@ impl WorkspaceFsService {
                     let target = self.symlink_directory_target(
                         &candidate.child_rel,
                         req.allow_external_symlinks == Some(true),
-                        &abs_of,
+                        &*abs_of,
                     ).await;
                     is_directory = target.0;
                     real_path = target.1;
@@ -386,7 +403,7 @@ impl WorkspaceFsService {
         allow_external: bool,
         abs_of: &dyn Fn(&str) -> String,
     ) -> (bool, Option<String>) {
-        let result = async {
+        let result: FsResult<(bool, Option<String>)> = async {
             let target = self.host_fs.stat(&abs_of(rel_path)).await?;
             if !target.is_directory {
                 return Ok((false, None));
@@ -412,7 +429,7 @@ impl WorkspaceFsService {
         show_hidden: bool,
         allow_external_symlinks: bool,
         budget: &AtomicUsize,
-        abs_of: &dyn Fn(&str) -> String,
+        abs_of: &Arc<dyn Fn(&str) -> String + Send + Sync>,
     ) -> bool {
         fn walk<'a>(
             service: &'a WorkspaceFsService,
@@ -423,7 +440,7 @@ impl WorkspaceFsService {
             show_hidden: bool,
             allow_external_symlinks: bool,
             budget: &'a AtomicUsize,
-            abs_of: &'a dyn Fn(&str) -> String,
+            abs_of: &'a Arc<dyn Fn(&str) -> String + Send + Sync>,
         ) -> BoxFuture<'a, bool> {
             async move {
                 if depth > PROBE_MAX_DEPTH || budget.load(Ordering::Relaxed) >= PROBE_MAX_ENTRIES {
@@ -451,14 +468,14 @@ impl WorkspaceFsService {
                     candidates.push(child_rel);
                 }
                 let stats = map_with_concurrency(&candidates, LIST_LSTAT_CONCURRENCY, |child_rel| {
-                    let path = abs_of(child_rel);
+                    let path = abs_of(&child_rel);
                     let host_fs = service.host_fs.clone();
                     Box::pin(async move { host_fs.lstat(&path).await.ok() })
                 }).await;
                 for (index, child_rel) in candidates.into_iter().enumerate() {
                     let stat = &stats[index];
                     let is_directory = if stat.as_ref().is_some_and(|stat| stat.is_symbolic_link) {
-                        service.symlink_directory_target(&child_rel, allow_external_symlinks, abs_of).await.0
+                        service.symlink_directory_target(&child_rel, allow_external_symlinks, &**abs_of).await.0
                     } else {
                         stat.as_ref().is_some_and(|stat| stat.is_directory)
                     };
@@ -505,11 +522,11 @@ impl WorkspaceFsService {
         };
         let classification = classify_text_sample(&sample);
         let transcode_encoding = (!classification.is_binary
-            && classification.encoding != "utf-8"
+            && classification.encoding != UtfTextEncoding::Utf8
             && req.encoding != FsReadEncodingRequest::Base64)
-            .then_some(classification.encoding.as_str());
+            .then_some(classification.encoding);
         let is_binary = classification.is_binary
-            || (classification.encoding != "utf-8" && transcode_encoding.is_none());
+            || (classification.encoding != UtfTextEncoding::Utf8 && transcode_encoding.is_none());
         if is_binary && req.encoding == FsReadEncodingRequest::Utf8 {
             return Err(fs_error(FS_IS_BINARY, &format!("file is binary: {}", req.path), &[("path", req.path.clone().into())]));
         }
@@ -549,9 +566,9 @@ impl WorkspaceFsService {
             encoding,
             size: stat.size,
             truncated,
-            etag: build_etag(&stat),
+            etag: build_etag(&FileMetaStat::from(&stat)),
             mime: guess_mime(&rel, is_binary),
-            language_id,
+            language_id: language_id.map(str::to_string),
             line_count,
             is_binary,
         })
@@ -637,7 +654,7 @@ impl WorkspaceFsService {
             if errno_code(error.as_ref()) == Some("EEXIST") {
                 return Err(fs_error(FS_ALREADY_EXISTS, &format!("path already exists: {}", req.path), &[("path", req.path.clone().into())]));
             }
-            if is_host_fs_not_found(error.as_ref()) || is_host_fs_not_directory(error.as_ref()) {
+            if is_host_fs_not_found(&error) || is_host_fs_not_directory(&error) {
                 return Err(fs_error(FS_PATH_NOT_FOUND, &format!("parent not found: {}", req.path), &[("path", req.path.clone().into())]));
             }
             return Err(error);
@@ -667,14 +684,14 @@ impl WorkspaceFsService {
         let sample_size = (FS_BINARY_SAMPLE_BYTES as u64).min(stat.size);
         let sample = if sample_size == 0 { Vec::new() } else { self.host_fs.read_bytes(&abs, sample_size, None).await? };
         let classification = classify_text_sample(&sample);
-        let is_binary = classification.is_binary || classification.encoding != "utf-8";
+        let is_binary = classification.is_binary || classification.encoding != UtfTextEncoding::Utf8;
         Ok(FsDownloadResolved {
             absolute: abs,
             relative: rel.clone(),
             size: stat.size,
-            etag: build_etag(&stat),
+            etag: build_etag(&FileMetaStat::from(&stat)),
             mime: guess_mime(&rel, is_binary),
-            modified_at: chrono::DateTime::from_timestamp_millis(stat.mtime_ms.unwrap_or(0)).unwrap(),
+            modified_at: chrono::DateTime::from_timestamp_millis((stat.mtime_ms.unwrap_or(0.0)) as i64).unwrap(),
         })
     }
 
@@ -714,12 +731,14 @@ impl WorkspaceFsService {
                 let candidates_sink = candidates.clone();
                 let candidate_paths_sink = candidate_paths.clone();
                 let seen_paths_sink = seen_paths.clone();
+                let root_for_dir = root.clone();
                 let root = root.clone();
                 let query_lower = query_lower.clone();
                 let include_globs = req.include_globs.clone();
                 let exclude_globs = req.exclude_globs.clone();
                 let path = self.path.clone();
-                let truncated = self.walk(&root.dir, ignore_rules.as_deref(), move |rel_path, name, kind| {
+                let walk_dir = root_for_dir.dir.clone();
+                let truncated = self.walk(&walk_dir, ignore_rules.as_deref(), move |rel_path, name, kind| {
                     let candidates = candidates_sink.clone();
                     let candidate_paths = candidate_paths_sink.clone();
                     let seen_paths = seen_paths_sink.clone();
@@ -831,7 +850,7 @@ impl WorkspaceFsService {
             return Ok(FsSuggestResponse { items: Vec::new(), truncated: false });
         }
         if let Some(fd) = self.resolve_fd(&signal).await? {
-            let lease = self.resolver.acquire(&self.environment_id, &["process"]);
+            let lease = self.resolver.acquire(&self.environment_binding(), &[EnvironmentCapability::Process])?;
             let result = suggest_with_fd(FdSuggestOptions {
                 fd_binary: fd.path,
                 query: req.query.clone(),
@@ -842,9 +861,9 @@ impl WorkspaceFsService {
                 roots: roots.iter().cloned().map(|root| FdRoot { dir: root.dir, real: root.real, primary: root.primary }).collect(),
                 path: self.path.clone(),
                 host_fs: self.host_fs.clone(),
-                process: lease.environment.process.clone().unwrap(),
+                process: lease.environment.process().clone(),
                 work_dir: self.work_dir(),
-                home_dir: lease.environment.host.as_ref().and_then(|host| host.home_dir.clone()),
+                home_dir: lease.environment.host().and_then(|host| Some(host.home_dir.clone())),
                 signal: signal.clone(),
             }).await;
             drop(lease);
@@ -888,7 +907,7 @@ impl WorkspaceFsService {
                     return Ok(());
                 }
                 if let Some(fd) = this.resolve_fd(&signal).await? {
-                    let lease = this.resolver.acquire(&this.environment_id, &["process"]);
+                    let lease = this.resolver.acquire(&this.environment_binding(), &[EnvironmentCapability::Process])?;
                     let events = suggest_with_fd_events(FdSuggestOptions {
                         fd_binary: fd.path,
                         query: req.query.clone(),
@@ -899,9 +918,9 @@ impl WorkspaceFsService {
                         roots: roots.iter().cloned().map(|root| FdRoot { dir: root.dir, real: root.real, primary: root.primary }).collect(),
                         path: this.path.clone(),
                         host_fs: this.host_fs.clone(),
-                        process: lease.environment.process.clone().unwrap(),
+                        process: lease.environment.process().clone(),
                         work_dir: this.work_dir(),
-                        home_dir: lease.environment.host.as_ref().and_then(|host| host.home_dir.clone()),
+                        home_dir: lease.environment.host().and_then(|host| Some(host.home_dir.clone())),
                         signal: signal.clone(),
                     });
                     futures_util::pin_mut!(events);
@@ -1218,14 +1237,16 @@ impl WorkspaceFsService {
                 let query = query.clone();
                 let path = self.path.clone();
                 let signal = signal.clone();
-                let truncated = self.walk(&root.dir, Some(&ignore_rules), move |rel_path, _, kind| {
+                let walk_dir = root.dir.clone();
+                let signal_sink = signal.clone();
+                let truncated = self.walk(&walk_dir, Some(&ignore_rules), move |rel_path, _, kind| {
                     let top = top_sink.clone();
                     let seen_paths = seen_paths_sink.clone();
                     let matched = matched_sink.clone();
                     let root = root.clone();
                     let query = query.clone();
                     let path = path.clone();
-                    let signal = signal.clone();
+                    let signal = signal_sink.clone();
                     async move {
                         if signal.aborted() || now_ms() >= deadline {
                             return Ok(true);
@@ -1285,8 +1306,8 @@ impl WorkspaceFsService {
         signal: &AbortSignal,
         on_line: impl Fn(String) + Send + Sync + 'static,
     ) -> FsResult<(i32, bool)> {
-        let lease = self.resolver.acquire(&self.environment_id, &["process"]);
-        let proc = lease.environment.process.clone().unwrap().spawn(rg_binary, args, Some(&self.work_dir()), None).await?;
+        let lease = self.resolver.acquire(&self.environment_binding(), &[EnvironmentCapability::Process])?;
+        let proc = lease.environment.process().clone().spawn(rg_binary, args, Some(&self.work_dir()), None).await?;
         let killed = Arc::new(AtomicBool::new(false));
         let kill = {
             let killed = killed.clone();
@@ -1301,10 +1322,11 @@ impl WorkspaceFsService {
                 });
             }
         };
+        let kill_for_removal = Arc::new(kill.clone());
         if signal.aborted() {
             kill();
         } else {
-            signal.add_event_listener("abort", kill.clone(), true);
+            signal.add_event_listener("abort", Arc::new(kill), true);
         }
         let drain = async {
             let mut buffer = String::new();
@@ -1336,7 +1358,7 @@ impl WorkspaceFsService {
             Ok::<_, WireAsyncError>((exit_code, killed.load(Ordering::Relaxed)))
         }
         .await;
-        signal.remove_event_listener("abort", kill);
+        signal.remove_event_listener("abort", kill_for_removal);
         let _ = proc.dispose().await;
         drop(lease);
         result
@@ -1390,12 +1412,12 @@ impl WorkspaceFsService {
 
     async fn grep_with_node(&self, req: &FsGrepRequest, signal: &AbortSignal, started_at: i64) -> FsResult<FsGrepResponse> {
         let mut pattern = compile_grep_pattern(req).map_err(|error| -> WireAsyncError { Box::new(error) })?;
-        let mut files = Vec::new();
+        let mut files: Vec<FsGrepFileHit> = Vec::new();
         let mut files_scanned = 0;
         let mut total_matches = 0;
         let mut truncated = false;
         let mut file_paths = Vec::new();
-        let mut seen_paths = HashSet::new();
+        let mut seen_paths: HashSet<String> = HashSet::new();
         let roots = self.suggest_roots().await?;
         let deadline = started_at + GREP_TIMEOUT_MS as i64;
         for root in &roots {
@@ -1404,11 +1426,12 @@ impl WorkspaceFsService {
             let include_globs = req.include_globs.clone();
             let exclude_globs = req.exclude_globs.clone();
             let path = self.path.clone();
-            let seen_paths = Arc::new(Mutex::new(std::mem::take(&mut seen_paths)));
+            let seen_paths_arc = Arc::new(Mutex::new(std::mem::take(&mut seen_paths)));
             let file_paths_shared = Arc::new(Mutex::new(Vec::new()));
-            let seen_sink = seen_paths.clone();
+            let seen_sink = seen_paths_arc.clone();
             let files_sink = file_paths_shared.clone();
-            let truncated_walk = self.walk(&root.dir, Some(&ignore_rules), move |rel, _, kind| {
+            let walk_dir = root.dir.clone();
+            let truncated_walk = self.walk(&walk_dir, Some(&ignore_rules), move |rel, _, kind| {
                 let seen = seen_sink.clone();
                 let files = files_sink.clone();
                 let root = root.clone();
@@ -1433,7 +1456,7 @@ impl WorkspaceFsService {
                 }
                 .boxed()
             }, Some(deadline)).await?;
-            seen_paths = Arc::try_unwrap(seen_paths).unwrap().into_inner();
+            seen_paths = Arc::try_unwrap(seen_paths_arc).unwrap().into_inner();
             file_paths.extend(Arc::try_unwrap(file_paths_shared).unwrap().into_inner());
             truncated |= truncated_walk;
             if signal.aborted() || now_ms() >= deadline {
@@ -1456,7 +1479,7 @@ impl WorkspaceFsService {
                 break;
             }
             files_scanned += 1;
-            let Ok(content) = self.host_fs.read_text(&absolute).await else {
+            let Ok(content) = self.host_fs.read_text(&absolute, None).await else {
                 continue;
             };
             let lines = content.split('\n').map(|line| line.strip_suffix('\r').unwrap_or(line)).collect::<Vec<_>>();
@@ -1554,7 +1577,7 @@ impl WorkspaceFsService {
 
     async fn batch_git_values<'a, T, F>(&'a self, input_roots: &[String], read: F) -> FsResult<(HashMap<String, T>, HashMap<String, FsBatchError>)>
     where
-        T: Send + 'a,
+        T: Send + std::fmt::Debug + 'a,
         F: Fn(String) -> BoxFuture<'a, Result<T, WireAsyncError>> + Send + Sync + 'a,
     {
         let mut roots = input_roots.to_vec();
@@ -1643,10 +1666,21 @@ impl WorkspaceFsService {
         visit: impl Fn(String, String, FsKind) -> BoxFuture<'static, FsResult<bool>> + Send + Sync + 'static,
         deadline_ms: Option<i64>,
     ) -> FsResult<bool> {
-        match self.host_fs.walk(base_abs, ignore_rules, deadline_ms, move |entry| {
+        let visit = Arc::new(visit);
+        let visit_entry: HostWalkVisitor = Arc::new(move |entry: HostWalkEntry| {
+            let visit = visit.clone();
+            let kind = match entry.kind {
+                crate::os::interface::host_file_system::HostWalkKind::File => FsKind::File,
+                crate::os::interface::host_file_system::HostWalkKind::Directory => FsKind::Directory,
+                crate::os::interface::host_file_system::HostWalkKind::Symlink => FsKind::Symlink,
+            };
             let name = entry.path.rsplit('/').next().unwrap_or(&entry.path).to_string();
-            visit(entry.path, name, entry.kind)
-        }).await {
+            async move {
+                visit(entry.path, name, kind).await.unwrap_or(true)
+            }
+            .boxed()
+        });
+        match self.host_fs.walk(base_abs, ignore_rules, deadline_ms, visit_entry).await {
             Ok(result) => Ok(result.truncated),
             Err(error) if error_code(error.as_ref()) == Some(OS_FS_DIRECTORY_TOO_LARGE) => Err(map_fs_error(error, base_abs)),
             Err(error) => Err(error),
@@ -1665,7 +1699,7 @@ impl WorkspaceFsService {
         if let Some(cached) = self.caches.lock().gitignore.get(root_dir).cloned() {
             return Ok(Some(cached));
         }
-        let contents = self.host_fs.read_text(&self.path.join(root_dir, &[".gitignore"])).await.unwrap_or_default();
+        let contents = self.host_fs.read_text(&self.path.join(root_dir, &[".gitignore"]), None).await.unwrap_or_default();
         let mut builder = GitignoreBuilder::new(root_dir);
         for dir in VCS_METADATA_DIRS.iter() {
             builder.add_line(None, &format!("{dir}/")).unwrap();
@@ -1687,8 +1721,8 @@ impl WorkspaceFsService {
         if let Some(cached) = self.caches.lock().fd_resolution.clone() {
             return Ok(cached);
         }
-        let lease = self.resolver.acquire(&self.environment_id, &["process"]);
-        let process = lease.environment.process.clone().unwrap();
+        let lease = self.resolver.acquire(&self.environment_binding(), &[EnvironmentCapability::Process])?;
+        let process = lease.environment.process().clone();
         let work_dir = self.work_dir();
         let signal_for_exec = signal.clone();
         let probe = super::internal::fd_suggest::FdProbe {
@@ -1722,8 +1756,8 @@ impl WorkspaceFsService {
         if let Some(cached) = self.caches.lock().rg_resolution.clone() {
             return Ok(cached);
         }
-        let lease = self.resolver.acquire(&self.environment_id, &["process"]);
-        let process = lease.environment.process.clone().unwrap();
+        let lease = self.resolver.acquire(&self.environment_binding(), &[EnvironmentCapability::Process])?;
+        let process = lease.environment.process().clone();
         let work_dir = self.work_dir();
         let probe = RgProbe {
             exec: Arc::new(move |args| {
@@ -1782,7 +1816,7 @@ impl WorkspaceFsService {
                         return Ok(real);
                     }
                     tail.reverse();
-                    return Ok(self.path.join(&real, &tail));
+                    return Ok(self.path.join(&real, &tail.iter().map(String::as_str).collect::<Vec<_>>()));
                 }
                 Err(error) => {
                     if !is_missing_path_error(&error) {
@@ -1878,6 +1912,7 @@ struct ListChild {
     real_path: Option<String>,
 }
 
+#[derive(Debug)]
 struct SearchCandidate {
     hit: FsSearchHit,
     ignored: bool,
@@ -1898,6 +1933,7 @@ struct TopDisplayEntry {
     ignored: bool,
 }
 
+#[derive(Debug)]
 struct RgJsonAccumulator {
     req: FsGrepRequest,
     file_buf: IndexMap<String, RgFileBuffer>,
@@ -1910,6 +1946,7 @@ struct RgJsonAccumulator {
     truncated: bool,
 }
 
+#[derive(Debug)]
 struct RgFileBuffer {
     matches: Vec<FsGrepMatch>,
     pending: Vec<String>,
@@ -2128,7 +2165,7 @@ fn sort_children(children: &mut [ListChild], sort: FsListSort) {
             FsListSort::TypeFirst => a.is_directory.cmp(&b.is_directory).reverse().then_with(|| locale_compare(&a.name, &b.name)),
             FsListSort::NameAsc => locale_compare(&a.name, &b.name),
             FsListSort::NameDesc => locale_compare(&b.name, &a.name),
-            FsListSort::MtimeDesc => b.stat.mtime_ms.unwrap_or(0).cmp(&a.stat.mtime_ms.unwrap_or(0)),
+            FsListSort::MtimeDesc => (b.stat.mtime_ms.unwrap_or(0.0) as i64).cmp(&(a.stat.mtime_ms.unwrap_or(0.0) as i64)),
             FsListSort::SizeDesc => b.stat.size.cmp(&a.stat.size),
         }
     });
@@ -2136,7 +2173,7 @@ fn sort_children(children: &mut [ListChild], sort: FsListSort) {
 
 fn build_fs_entry(rel_path: &str, name: &str, stat: &HostFileStat, with_mime: bool) -> FsEntry {
     let kind = if stat.is_symbolic_link { FsKind::Symlink } else if stat.is_directory { FsKind::Directory } else { FsKind::File };
-    let modified_at = chrono::DateTime::from_timestamp_millis(stat.mtime_ms.unwrap_or(0))
+    let modified_at = chrono::DateTime::from_timestamp_millis(stat.mtime_ms.unwrap_or(0.0) as i64)
         .unwrap()
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     FsEntry {
@@ -2145,9 +2182,9 @@ fn build_fs_entry(rel_path: &str, name: &str, stat: &HostFileStat, with_mime: bo
         kind,
         size: (kind == FsKind::File).then_some(stat.size),
         modified_at,
-        etag: Some(build_etag(stat)),
-        mime: (with_mime && kind == FsKind::File).then(|| guess_mime(rel_path, false)),
-        language_id: (with_mime && kind == FsKind::File).then(|| guess_language_id(rel_path)).flatten(),
+        etag: Some(build_etag(&FileMetaStat::from(stat))),
+        mime: (with_mime && kind == FsKind::File).then(|| guess_mime(rel_path, false).to_string()),
+        language_id: (with_mime && kind == FsKind::File).then(|| guess_language_id(rel_path).map(str::to_string)).flatten(),
         is_binary: None,
         is_symlink_to: None,
         is_directory: None,
@@ -2242,7 +2279,7 @@ fn errno_code<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a st
     while let Some(error) = current {
         if let Some(code) = error
             .downcast_ref::<crate::os::interface::host_fs_errors::HostFsError>()
-            .and_then(|error| error.errno())
+            .and_then(|error| Some(error.code().as_str()))
         {
             return Some(code);
         }
@@ -2252,7 +2289,7 @@ fn errno_code<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a st
 }
 
 fn is_missing_path_error(error: &WireAsyncError) -> bool {
-    is_host_fs_not_found(error.as_ref()) || is_host_fs_not_directory(error.as_ref())
+    is_host_fs_not_found(error) || is_host_fs_not_directory(error)
 }
 
 fn map_fs_error(error: WireAsyncError, input_path: &str) -> WireAsyncError {
@@ -2285,7 +2322,7 @@ fn to_wire_error(error: &(dyn std::error::Error + 'static)) -> FsListManyPartial
 
 fn to_git_batch_error(error: &(dyn std::error::Error + 'static)) -> FsBatchError {
     if let Some(environment) = error.downcast_ref::<EnvironmentError>() {
-        let code = match environment.code() {
+        let code = match environment.code {
             "environment.not_found" => FS_ENVIRONMENT_NOT_FOUND,
             "environment.invalid_cwd" => FS_VALIDATION_FAILED,
             "environment.conflict" => FS_SESSION_BUSY,
@@ -2322,7 +2359,7 @@ fn timeout_signal(external: Option<AbortSignal>, timeout_ms: u64) -> (AbortSigna
     let controller_for_timer = controller.clone();
     let timer = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
-        controller_for_timer.abort();
+        controller_for_timer.abort(None);
     });
     (signal, TimeoutTimerGuard(timer))
 }

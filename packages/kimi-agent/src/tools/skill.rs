@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use super::{arg_error, err_result};
 use crate::_base::utils::xml_escape::{escape_xml, escape_xml_attr, escape_xml_tags};
 use crate::callbacks::HostCallbacks;
-use crate::rpc::types::{ContentPart, StateReadRequest, ToolDelivery};
+use crate::rpc::types::StateReadRequest;
+use crate::tool::tool_contract::ToolDelivery;
+use kimi_core::types::ContentPart;
 use crate::turn_loop::types::ExecutableToolResult;
 
 const SKILL_NOT_FOUND_MESSAGE: &str = "not found in the current skill listing.";

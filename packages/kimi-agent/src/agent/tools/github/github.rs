@@ -12,6 +12,7 @@ pub struct GitHubToolSpec {
     pub query: Option<Arc<dyn Fn(&Value) -> Map<String, Value> + Send + Sync>>,
     pub body: Option<Arc<dyn Fn(&Value) -> Value + Send + Sync>>,
     pub accept: Option<String>,
+    pub max_bytes: Option<usize>,
     pub mutating: Option<bool>,
     pub subject: Arc<dyn Fn(&Value) -> String + Send + Sync>,
 }

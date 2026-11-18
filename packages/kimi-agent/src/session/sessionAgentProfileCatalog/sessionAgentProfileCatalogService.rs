@@ -123,22 +123,22 @@ impl SessionAgentProfileCatalogService {
     }
 
     fn reproject(&self) {
-        let mut merged = IndexMap::new();
-        let mut inspections = IndexMap::new();
+        let mut merged: IndexMap<String, Arc<AgentProfile>> = IndexMap::new();
+        let mut inspections: IndexMap<String, AgentProfileInspection> = IndexMap::new();
         let entries = self.relevant_entries();
         if let Some(builtin_entry) = entries
             .iter()
             .find(|entry| entry.source_id == BUILTIN_AGENT_PROFILE_SOURCE_ID)
         {
             for profile in &builtin_entry.contribution.profiles {
-                merged.insert(profile.name.clone(), profile.clone());
+                merged.insert(profile.name.clone(), Arc::new(profile.clone()));
                 inspections.insert(
                     profile.name.clone(),
                     AgentProfileInspection {
                         name: profile.name.clone(),
-                        profile: profile.clone(),
+                        profile: Arc::new(profile.clone()),
                         source_id: builtin_entry.source_id.clone(),
-                        priority: builtin_entry.priority,
+                        priority: builtin_entry.priority as i32,
                         suppressed: Vec::new(),
                     },
                 );
@@ -162,9 +162,9 @@ impl SessionAgentProfileCatalogService {
                     .entry(profile.name.clone())
                     .or_default()
                     .push(ProfileCandidate {
-                        profile,
+                        profile: Arc::new(profile),
                         source_id: entry.source_id.clone(),
-                        priority: entry.priority,
+                        priority: entry.priority as i32,
                     });
             }
         }

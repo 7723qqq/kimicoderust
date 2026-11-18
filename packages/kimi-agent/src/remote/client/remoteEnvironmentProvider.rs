@@ -49,7 +49,14 @@ impl LazyCapabilities {
     }
 
     fn values(&self) -> HashSet<EnvironmentCapability> {
-        self.0.iter().map(|value| (*value).to_string()).collect()
+        self.0
+            .iter()
+            .filter_map(|value| match *value {
+                "fs" => Some(EnvironmentCapability::Fs),
+                "process" => Some(EnvironmentCapability::Process),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -137,6 +144,7 @@ impl DeclaredRemoteEnvironment {
     fn identity(&self) -> EnvironmentIdentity {
         EnvironmentIdentity {
             environment_id: self.inner.environment_id.clone(),
+            cwd: None,
             generation: self.inner.state.lock().generation.clone(),
         }
     }
@@ -186,7 +194,7 @@ impl DeclaredRemoteEnvironment {
     fn shell_path_bridge(&self) -> Option<crate::environment::environment::ShellPathBridge> {
         let state = self.inner.state.lock();
         let host = state.session.as_ref()?.host.host_environment_info();
-        (host.os_kind == "Windows" && host.shell_name == "bash").then_some(REMOTE_SHELL_PATH_BRIDGE.clone())
+        (host.os_kind == "Windows" && host.shell_name == "bash").then_some(Arc::new(REMOTE_SHELL_PATH_BRIDGE.clone()))
     }
 
     fn connected(&self) -> Result<Arc<RemoteSession>, WireAsyncError> {
@@ -466,8 +474,12 @@ impl IHostFileSystem for DeclaredFs {
         self.environment.connected()?.fs.read_bytes(path, max_bytes, offset).await
     }
 
-    async fn read_file_head(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, WireAsyncError> {
-        self.environment.connected()?.fs.read_file_head(path, max_bytes).await
+    async fn read_file_head(&self, path: &str, max_bytes: u64) -> Result<crate::os::interface::host_file_system::HostFileHead, WireAsyncError> {
+        let fs = self.environment.connected()?.fs.clone();
+        Ok(crate::os::interface::host_file_system::HostFileHead {
+            stat: fs.stat(path).await?,
+            bytes: fs.read_bytes(path, max_bytes, None).await?,
+        })
     }
 
     async fn write_bytes(&self, path: &str, data: &[u8]) -> Result<(), WireAsyncError> {
@@ -751,7 +763,7 @@ impl RemoteEnvironmentProviderFactory {
             open,
             host.get::<dyn ITelemetryService>(),
         );
-        match host.register_environment(environment.clone()) {
+        match host.register_environment(Arc::new(environment.clone()) as Arc<dyn crate::environment::environment::Environment>) {
             Ok(handle) => Ok(DeclaredEnvironmentRecord {
                 handle,
                 environment,
@@ -759,7 +771,8 @@ impl RemoteEnvironmentProviderFactory {
                 fingerprint,
             }),
             Err(error) => {
-                tokio::spawn(environment.dispose());
+                let dispose_env = environment.clone();
+                tokio::spawn(async move { dispose_env.dispose().await });
                 Err(error)
             }
         }
@@ -784,6 +797,7 @@ impl RemoteEnvironmentProviderFactory {
                     let connect = connect.clone();
                     let cache_launcher = cache_launcher.clone();
                     let ssh_password = ssh_password.clone();
+                    let closure_password = ssh_password.clone();
                     async move {
                         let connect_with_password = {
                             let this = this.clone();
@@ -791,7 +805,7 @@ impl RemoteEnvironmentProviderFactory {
                             let connect = connect.clone();
                             let spec = spec.clone();
                             move |password: Option<String>| {
-                                let ssh_auth = match (&password, &ssh_password) {
+                                let ssh_auth = match (&password, &closure_password) {
                                     (Some(password), Some(options)) => Some(SshAuthOptions {
                                         password: password.clone(),
                                         command: options.askpass_command.clone(),
@@ -824,11 +838,8 @@ impl RemoteEnvironmentProviderFactory {
                                     return Err(error);
                                 }
                                 this.ssh_passwords.lock().remove(&environment_id);
-                                let password = ssh_password
-                                    .as_ref()
-                                    .unwrap()
-                                    .prompt(environment_id.clone())
-                                    .await?;
+                                let prompt = &ssh_password.as_ref().unwrap().prompt;
+                                let password = prompt(environment_id.clone()).await?;
                                 let Some(password) = password else {
                                     return Err(error);
                                 };

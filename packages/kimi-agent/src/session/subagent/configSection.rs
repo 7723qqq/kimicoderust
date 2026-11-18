@@ -223,7 +223,7 @@ fn assert_valid_subagent_default_effort(
     let Some(effort) = section
         .and_then(|section| section.get("defaultEffort"))
         .and_then(Value::as_str)
-        .map(normalize_requested_thinking_effort)
+        .map(|effort| normalize_requested_thinking_effort(Some(effort)))
     else {
         return Ok(());
     };
@@ -510,12 +510,15 @@ pub fn wrap_subagent_model_error(
         "subagentModelConfig".to_string(),
         json!({"section": "secondary_model.models"}),
     );
+    let code = coded.code().clone();
+    let name = coded.name().map(str::to_string);
+    let message = format!("{} (subagent model \"{bound_model}\" comes from [secondary_model.models] — check that it names a valid [models] entry)", coded);
     Box::new(Error2::with_options(
-        coded.code().clone(),
-        format!("{} (subagent model \"{bound_model}\" comes from [secondary_model.models] — check that it names a valid [models] entry)", coded.to_string()),
+        code,
+        message,
         Error2Options {
             cause: Some(error),
-            name: Some(coded.name().to_string()),
+            name,
             details: Some(details),
             ..Default::default()
         },

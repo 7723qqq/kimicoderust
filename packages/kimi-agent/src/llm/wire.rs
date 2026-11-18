@@ -599,7 +599,7 @@ mod wire_tests {
 
         let wire = to_wire(&messages);
         assert_eq!(wire.len(), 3);
-        assert_eq!(wire[0].tool_calls.is_empty());
+        assert!(wire[0].tool_calls.is_empty());
         assert_eq!(wire[1].tool_calls.len(), 1);
         assert_eq!(wire[1].tool_calls[0].id, "c1");
         assert_eq!(wire[2].tool_call_id.as_deref(), Some("c1"));

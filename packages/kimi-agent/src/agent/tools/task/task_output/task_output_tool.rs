@@ -4,7 +4,8 @@ use super::task_output::task_output_input_schema;
 use crate::callbacks::HostCallbacks;
 use crate::rpc::types::StateReadRequest;
 use crate::tools::task_tools::{
-    map_state_error, output_preview, parse_task_id, render_task_entry, truncated_line,
+    is_terminal_status, map_state_error, output_preview, parse_task_id, render_task_entry,
+    truncated_line,
 };
 use crate::tools::{err_result, ok_result};
 use crate::turn_loop::types::ExecutableToolResult;
@@ -41,7 +42,80 @@ fn render_task_output(value: &Value) -> ExecutableToolResult {
     if !value.is_object() {
         return err_result("Invalid task state from host: expected a task output snapshot.".into());
     }
-    let mut lines = vec![render_task_entry(value), String::new()];
+    // v2 enriches the record before rendering (taskOutputTool.ts:78-93):
+    // retrievalStatus / terminalReason from the current status, the output
+    // snapshot's size and truncation fields, and the fullOutputTool /
+    // fullOutputHint pointer to the Read paging flow.
+    const OUTPUT_PREVIEW_BYTES: u64 = 32 * 1024;
+    const PAGING_HINT_LINES: usize = 300;
+    let mut record = serde_json::Map::new();
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let terminal = is_terminal_status(&status);
+    record.insert(
+        "retrievalStatus".into(),
+        Value::String(if terminal { "success" } else { "not_ready" }.into()),
+    );
+    for (key, field) in value.as_object().expect("checked above") {
+        if key == "truncated" {
+            continue;
+        }
+        record.insert(key.clone(), field.clone());
+    }
+    let stop_reason = value
+        .get("stopReason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let terminal_reason = match (status.as_str(), stop_reason.as_deref()) {
+        ("timed_out", _) => Some("timed_out"),
+        ("killed", Some(_)) => Some("stopped"),
+        ("failed", Some(_)) => Some("failed"),
+        _ => None,
+    };
+    if let Some(terminal_reason) = terminal_reason {
+        record.insert("terminalReason".into(), Value::String(terminal_reason.into()));
+    }
+    let output_path = value
+        .get("outputPath")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(output_path) = &output_path {
+        record.insert("outputPath".into(), Value::String(output_path.clone()));
+    }
+    if let Some(size) = value.get("outputSizeBytes") {
+        record.insert("outputSizeBytes".into(), size.clone());
+    }
+    if let Some(preview_bytes) = value.get("previewBytes") {
+        record.insert("outputPreviewBytes".into(), preview_bytes.clone());
+    }
+    let truncated = value.get("truncated").and_then(Value::as_bool) == Some(true);
+    record.insert("outputTruncated".into(), Value::Bool(truncated));
+    let full_available =
+        value.get("fullOutputAvailable").and_then(Value::as_bool) == Some(true);
+    record.insert("fullOutputAvailable".into(), Value::Bool(full_available));
+    if full_available && output_path.is_some() {
+        record.insert("fullOutputTool".into(), Value::String("Read".into()));
+    }
+    if full_available && output_path.is_some() {
+        let hint = if truncated {
+            format!(
+                "Only the last {OUTPUT_PREVIEW_BYTES} bytes are shown above. \
+Use the Read tool with the output_path to page through the full log \
+(parameters: path, line_offset, n_lines; read about {PAGING_HINT_LINES} lines per page)."
+            )
+        } else {
+            format!(
+                "The preview above is the complete output. Use the Read tool with the output_path \
+if you need to re-read the full log later \
+(parameters: path, line_offset, n_lines; read about {PAGING_HINT_LINES} lines per page)."
+            )
+        };
+        record.insert("fullOutputHint".into(), Value::String(hint));
+    }
+    let mut lines = vec![render_task_entry(&Value::Object(record)), String::new()];
     if let Some(truncated) = truncated_line(value) {
         lines.push(truncated);
     }

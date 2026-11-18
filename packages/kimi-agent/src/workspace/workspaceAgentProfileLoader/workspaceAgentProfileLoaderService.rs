@@ -134,14 +134,15 @@ impl WorkspaceAgentProfileLoaderService {
                         let discovery = discover_agent_files(
                             fs.as_ref(),
                             &roots,
-                            Some(&|message| log.warn(message, None)),
+                            Some(&|message, _error| log.warn(message, None)),
                         )
                         .await?;
                         Ok(profiles_from_discovery(
                             discovery,
-                            Arc::new(move |context| {
-                                user.get_default_profile().render_system_prompt(context)
-                            }),
+                            {
+                                let render = user.get_default_profile().render_system_prompt.clone();
+                                Arc::new(move |context| render(context))
+                            },
                         ))
                     }
                     .boxed()
@@ -161,11 +162,11 @@ impl WorkspaceAgentProfileLoaderService {
         };
         this.set_primary_tail(false);
         let weak = Arc::downgrade(&this.inner);
-        let subscription = this.inner.dirs.on_did_change(move || {
+        let subscription = this.inner.dirs.on_did_change(Arc::new(move || {
             if let Some(inner) = weak.upgrade() {
                 Self { inner }.set_primary_tail(true);
             }
-        });
+        }));
         *this.inner._subscription.lock() = Some(subscription);
         this.inner.base.start();
         this
@@ -234,13 +235,14 @@ impl WorkspaceAgentProfileLoaderService {
         let handle = watch_candidates(
             &candidates.project_root,
             &candidates.candidates,
-            Some(subtree_watch_filter(
+            Some(Arc::from(subtree_watch_filter(
                 &candidates.project_root,
                 &candidates.candidates,
-            )),
+                None,
+            ))),
         );
         let this = self.clone();
-        let subscription = handle.on_did_change(move || {
+        let subscription = handle.on_did_change(move |_change| {
             this.schedule_reload();
         });
         let previous = {
@@ -251,8 +253,8 @@ impl WorkspaceAgentProfileLoaderService {
             watcher.dispose();
         }
         let mut state = self.inner.state.lock();
-        state.watchers.push(Arc::from(handle) as DisposableRef);
-        state.watchers.push(Arc::from(subscription) as DisposableRef);
+        state.watchers.push(Arc::new(*handle) as DisposableRef);
+        state.watchers.push(Arc::new(*subscription) as DisposableRef);
         state.watched_primary = Some(primary);
         Ok(())
     }
@@ -302,7 +304,8 @@ impl IWorkspaceAgentProfileLoader for WorkspaceAgentProfileLoaderService {
     }
 
     fn reload(&self) -> BoxFuture<'static, Result<(), WireAsyncError>> {
-        self.inner.base.reload().boxed()
+        let base = self.inner.base.clone();
+        async move { base.reload().await }.boxed()
     }
 }
 

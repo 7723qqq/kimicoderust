@@ -205,6 +205,18 @@ where
     pub debug_name: Option<String>,
 }
 
+impl<T> Clone for Emitter<T>
+where
+    T: Clone + Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            debug_name: self.debug_name.clone(),
+        }
+    }
+}
+
 impl<T> Emitter<T>
 where
     T: Clone + Send + Sync + 'static,

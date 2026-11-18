@@ -108,7 +108,7 @@ impl WireService {
         session_locks: Arc<dyn ISessionLockService>,
         session_context: Arc<dyn ISessionContext>,
     ) -> Self {
-        let wire_scope = scope_context.scope();
+        let wire_scope = scope_context.scope(None);
         let agent_id = scope_context.agent_id();
         let mut registrations = Vec::new();
         registrations.push(log.acquire(&wire_scope, AGENT_WIRE_RECORD_KEY));
@@ -117,7 +117,7 @@ impl WireService {
         registrations.push(log.bind_write_guard(
             &wire_scope,
             AGENT_WIRE_RECORD_KEY,
-            Arc::new(move || guard_locks.try_hold(&guard_context.session_id())),
+            Arc::new(move || guard_locks.try_hold(&guard_context.session_id()).unwrap_or(false)),
         ));
         Self {
             inner: Arc::new(WireServiceInner {
@@ -151,6 +151,14 @@ impl WireService {
         self.append_record_low(create_wire_metadata_record(None))
     }
 
+    /// Releases the log lease and write guard acquired in `new`. `IDisposable`
+    /// is not Drop-based, so kernel-entry cleanup must call this explicitly.
+    pub fn dispose(&self) {
+        for registration in &self.inner._registrations {
+            registration.dispose();
+        }
+    }
+
     pub fn append_record(&self, record: WireRecord, dehydrate: Option<RecordDehydrator>) {
         let fast = {
             let state = self.inner.state.lock();
@@ -170,7 +178,19 @@ impl WireService {
         let blob_service = self.inner.blob_service.clone();
         let transform: PartsTransformer = Arc::new(move |parts| {
             let blob_service = blob_service.clone();
-            async move { blob_service.offload_parts(parts).await }.boxed()
+            async move {
+                let parts = parts
+                    .into_iter()
+                    .map(|part| serde_json::from_value::<kimi_core::types::ContentPart>(part))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| Box::new(error) as WireAsyncError)?;
+                let parts = blob_service.offload_parts(&parts).await?;
+                parts
+                    .into_iter()
+                    .map(|part| serde_json::to_value(part).map_err(|error| Box::new(error) as WireAsyncError))
+                    .collect()
+            }
+            .boxed()
         });
         let (previous, generation) = {
             let mut state = self.inner.state.lock();
@@ -792,7 +812,7 @@ impl WireService {
             .rewrite(
                 &self.inner.wire_scope,
                 AGENT_WIRE_RECORD_KEY,
-                &values,
+                values.clone(),
                 None,
             )
             .await?;
@@ -1088,7 +1108,7 @@ impl WireService {
                 listener(&record);
             }));
             if let Err(error) = result {
-                on_unexpected_error(format!("{error:?}").into());
+                on_unexpected_error(format!("{error:?}"));
             }
         }
         Ok(())

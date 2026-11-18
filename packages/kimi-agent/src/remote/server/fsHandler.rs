@@ -3,7 +3,7 @@ use futures_util::FutureExt;
 use serde_json::{Map, Value};
 
 use crate::os::backends::host::host_fs_service::{HostFileSystem, walk_directory_tree};
-use crate::os::interface::host_file_system::HostFileStat;
+use crate::os::interface::host_file_system::{HostFileStat, HostWalkOptions, IHostFileSystem};
 use crate::os::interface::host_fs_errors::{
     HostFsError, OS_FS_ALREADY_EXISTS, OS_FS_DIRECTORY_TOO_LARGE, OS_FS_NOT_FOUND,
     OS_FS_PERMISSION_DENIED, to_host_fs_error,
@@ -132,26 +132,29 @@ fn to_metadata(stat: &HostFileStat) -> FsGetMetadataResult {
         is_file: stat.is_file,
         is_symlink: stat.is_symbolic_link,
         size: stat.size,
-        modified_at_ms: stat.mtime_ms.unwrap_or(0),
+        modified_at_ms: stat.mtime_ms.unwrap_or(0.0) as i64,
         mode: stat.mode,
     }
 }
 
 fn fs_domain_error(error: WireAsyncError, path: &str, op: &str) -> RpcError {
     let host_error = to_host_fs_error(error, path, op);
-    let code = if host_error.code().as_str() == OS_FS_NOT_FOUND {
+    let message = host_error.to_string();
+    let host = host_error.downcast_ref::<HostFsError>();
+    let domain_code = host.map(|error| error.code().as_str()).unwrap_or("");
+    let code = if domain_code == OS_FS_NOT_FOUND {
         RPC_NOT_FOUND
-    } else if host_error.code().as_str() == OS_FS_PERMISSION_DENIED {
+    } else if domain_code == OS_FS_PERMISSION_DENIED {
         RPC_INVALID_REQUEST
     } else {
         RPC_INTERNAL_ERROR
     };
     let mut data = Map::new();
-    data.insert("domainCode".to_string(), host_error.code().as_str().into());
-    if let Some(details) = host_error.details() {
+    data.insert("domainCode".to_string(), domain_code.into());
+    if let Some(details) = host.and_then(|error| error.details()) {
         data.extend(details.clone());
     }
-    RpcError::new(code, host_error.to_string(), Some(Value::Object(data)))
+    RpcError::new(code, message, Some(Value::Object(data)))
 }
 
 pub struct FsHandler {
@@ -314,45 +317,33 @@ impl FsHandler {
         let ignore = optional_string_array(&params, "ignore")?;
         let timeout_ms = optional_integer(&params, "timeoutMs", 1, FS_WALK_MAX_TIMEOUT_MS)?
             .unwrap_or(FS_WALK_DEFAULT_TIMEOUT_MS);
-        let entries = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let entries: std::sync::Arc<parking_lot::Mutex<Vec<FsWalkEntry>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let response_bytes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let readdir = {
-            let fs = self.fs.clone();
-            move |directory: String| {
-                let fs = fs.clone();
-                async move {
-                    let children = fs.readdir(&directory).await?;
-                    if children.len() > FS_READ_DIRECTORY_MAX_ENTRIES {
-                        return Err(Box::new(HostFsError::new(
-                            OS_FS_DIRECTORY_TOO_LARGE,
-                            format!("readdir {directory} exceeds the {FS_READ_DIRECTORY_MAX_ENTRIES}-entry limit"),
-                            Some(serde_json::json!({
-                                "path": directory,
-                                "op": "readdir",
-                                "limit": FS_READ_DIRECTORY_MAX_ENTRIES,
-                            })),
-                        )) as WireAsyncError);
-                    }
-                    Ok(children)
-                }
-                .boxed()
-            }
-        };
         let entries_sink = entries.clone();
         let response_bytes_sink = response_bytes.clone();
+        let fs: std::sync::Arc<dyn IHostFileSystem> = std::sync::Arc::new(self.fs.clone());
         let result = walk_directory_tree(
-            readdir,
+            fs,
             &path,
-            ignore.as_deref(),
-            Some(chrono::Utc::now().timestamp_millis() + timeout_ms as i64),
-            move |entry| {
+            HostWalkOptions {
+                ignore,
+                matcher: None,
+                deadline_ms: Some(chrono::Utc::now().timestamp_millis() + timeout_ms as i64),
+            },
+            std::sync::Arc::new(move |entry| {
                 let added = entry.path.len() + FS_WALK_ENTRY_OVERHEAD_BYTES;
                 if response_bytes_sink.fetch_add(added, std::sync::atomic::Ordering::Relaxed) + added > FS_WALK_MAX_RESPONSE_BYTES {
-                    return false;
+                    return async { false }.boxed();
                 }
-                entries_sink.lock().push(entry);
-                true
-            },
+                let kind = match entry.kind {
+                    crate::os::interface::host_file_system::HostWalkKind::File => FsWalkKind::File,
+                    crate::os::interface::host_file_system::HostWalkKind::Directory => FsWalkKind::Directory,
+                    crate::os::interface::host_file_system::HostWalkKind::Symlink => FsWalkKind::Symlink,
+                };
+                entries_sink.lock().push(FsWalkEntry { path: entry.path, kind });
+                async { true }.boxed()
+            }),
         )
         .await;
         match result {

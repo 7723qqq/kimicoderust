@@ -145,7 +145,7 @@ pub fn lower_message(message: &Message, lower: &OpenAILowerContext) -> Vec<OpenA
         content = Some(OpenAIContent::Parts(
             non_think_parts
                 .iter()
-                .filter_map(convert_content_part)
+                .filter_map(|part| convert_content_part(part))
                 .collect(),
         ));
     }
@@ -189,7 +189,7 @@ pub fn lower_message(message: &Message, lower: &OpenAILowerContext) -> Vec<OpenA
         },
     };
     let mut reasoning_details = Vec::new();
-    let mut string_fields = Map::<String, String>::new();
+    let mut string_fields = std::collections::HashMap::<String, String>::new();
     let mut unstamped = String::new();
     let mut has_unstamped = false;
     for part in content_parts {

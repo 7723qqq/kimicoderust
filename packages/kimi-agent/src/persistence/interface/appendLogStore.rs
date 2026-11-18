@@ -70,6 +70,15 @@ pub enum AppendLogTruncationReason {
     Truncated,
 }
 
+impl AppendLogTruncationReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Corrupted => "corrupted",
+            Self::Truncated => "truncated",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppendLogTruncation {
     pub line_number: usize,
@@ -77,6 +86,7 @@ pub struct AppendLogTruncation {
     pub cause: Option<SharedError>,
 }
 
+#[derive(Clone)]
 pub struct AppendLogReadOptions {
     pub on_truncate: Option<Arc<dyn Fn(AppendLogTruncation) + Send + Sync>>,
 }

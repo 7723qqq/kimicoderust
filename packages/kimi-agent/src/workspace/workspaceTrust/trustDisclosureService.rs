@@ -15,6 +15,7 @@ use crate::app::config::config::IConfigService;
 use crate::app::git::work_tree::find_git_work_tree;
 use crate::app::mcp_config::config_loader::{load_mcp_servers_detailed, resolve_mcp_json_paths};
 use crate::app::project_local_config::project_local_config::IProjectLocalConfigService;
+use crate::features::skill::catalog::types::SkillCatalog;
 use crate::features::skill::catalog::config_section::MERGE_ALL_AVAILABLE_SKILLS_SECTION;
 use crate::features::skill::catalog::skill_roots::project_roots_for_dirs;
 use crate::features::skill::workspace::workspace_skill_catalog::IWorkspaceSkillCatalog;
@@ -109,7 +110,7 @@ impl WorkspaceTrustDisclosureService {
         } else {
             self.inner
                 .local_config
-                .resolve_additional_dirs(&base_dir, pending_additional_dirs)
+                .resolve_additional_dirs(&base_dir, pending_additional_dirs, Some(crate::app::project_local_config::project_local_config::AdditionalDirSource::Session))
                 .await?
         };
         let mut work_dirs = self.inner.workspace_dirs.shared_additional_dirs();
@@ -290,7 +291,7 @@ impl WorkspaceTrustDisclosureService {
         let mut dirs = vec![self.inner.workspace_dirs.primary()];
         dirs.extend(work_dirs.iter().cloned());
         let (roots, real_root) = tokio::join!(
-            project_roots_for_dirs(&dirs, merge_all_available_skills),
+            project_roots_for_dirs(&dirs, crate::features::skill::catalog::skill_roots::SkillRootsOptions { merge_all_available_skills }),
             realpath_or_self(self.inner.fs.as_ref(), &project_root)
         );
         let roots = roots?;
@@ -307,8 +308,18 @@ impl WorkspaceTrustDisclosureService {
     ) -> Result<TrustGatedInstructionSources, WorkspaceTrustAsyncError> {
         let (skills_ready, profiles_ready, instructions_ready) = tokio::join!(
             wait_for_ready(
-                self.inner.skills.ready(),
-                SKILL_DISCLOSURE_TIMEOUT_MS
+                {
+                    let skills = self.inner.skills.clone();
+                    Box::pin(async move {
+                        skills
+                            .ready()
+                            .await
+                            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+                                Box::new(std::io::Error::other(error))
+                            })
+                    }) as BoxFuture<'static, Result<(), Box<dyn std::error::Error + Send + Sync>>>
+                },
+                SKILL_DISCLOSURE_TIMEOUT_MS,
             ),
             self.inner.agent_profiles_loader.ready(),
             self.inner.instructions.ready()
@@ -337,7 +348,7 @@ impl WorkspaceTrustDisclosureService {
             .catalog()
             .list_skills()
             .into_iter()
-            .filter(|skill| skill.source == "project")
+            .filter(|skill| skill.source == crate::features::skill::catalog::types::SkillSource::Project)
             .collect::<Vec<_>>();
         let profiles = self.effective_workspace_profiles();
         let mut agents_md_paths = Vec::new();
@@ -376,7 +387,7 @@ impl WorkspaceTrustDisclosureService {
             {
                 profile_paths.push(format!(
                     "{}/",
-                    realpath_or_self(self.inner.fs.as_ref(), &root).await
+                    realpath_or_self(self.inner.fs.as_ref(), &root.join("/")).await
                 ));
             }
         }
@@ -440,7 +451,7 @@ impl WorkspaceTrustDisclosureService {
             .unwrap_or(true);
         let mut dirs = vec![self.inner.workspace_dirs.primary()];
         dirs.extend(self.inner.workspace_dirs.shared_additional_dirs());
-        let mut roots = project_roots_for_dirs(&dirs, merge_all_available_skills)
+        let mut roots = project_roots_for_dirs(&dirs, crate::features::skill::catalog::skill_roots::SkillRootsOptions { merge_all_available_skills })
             .await?
             .into_iter()
             .map(|root| root.path)

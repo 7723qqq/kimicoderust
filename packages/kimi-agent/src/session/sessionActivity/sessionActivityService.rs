@@ -132,13 +132,14 @@ impl SessionActivityView {
             }),
         ));
         let weak = Arc::downgrade(&this);
-        this.subscriptions.lock().push(interactions().on_did_change_pending(
-            Arc::new(move || {
-                if let Some(this) = weak.upgrade() {
-                    this.recompute(SessionActivityCause::Interaction);
-                }
-            }),
-        ));
+        let unsubscribe = interactions().on_did_change_pending(Arc::new(move |_event| {
+            if let Some(this) = weak.upgrade() {
+                this.recompute(SessionActivityCause::Interaction);
+            }
+        }));
+        this.subscriptions
+            .lock()
+            .push(crate::_base::di::lifecycle::to_disposable(move || unsubscribe()));
         this
     }
 
@@ -194,7 +195,7 @@ impl SessionActivityView {
         subscriptions.push(bus.subscribe_task_started(Arc::new(move |event: TaskStarted| {
             if let Some(this) = weak.upgrade() {
                 this.patch_fold(&id, |fold| {
-                    fold.background.insert(event.info.task_id.clone());
+                    fold.background.insert(event.info.task_id().to_string());
                 });
             }
         })));
@@ -204,7 +205,7 @@ impl SessionActivityView {
             Arc::new(move |event: TaskTerminatedNotice| {
                 if let Some(this) = weak.upgrade() {
                     this.patch_fold(&id, |fold| {
-                        fold.background.remove(&event.info.task_id);
+                        fold.background.remove(event.info.task_id());
                     });
                 }
             }),
@@ -239,7 +240,7 @@ impl SessionActivityView {
         let dispatcher = handle.accessor().get(&I_EVENT_DISPATCHER);
         let weak = Arc::downgrade(self);
         let restore_handle = handle.clone();
-        subscriptions.push(dispatcher.hooks.on_did_restore.register(
+        subscriptions.push(dispatcher.hooks().on_did_restore.register(
             "sessionActivity",
             Arc::new(move |_ctx, next| {
                 let weak = weak.clone();
@@ -311,10 +312,12 @@ impl SessionActivityView {
         });
         let main = folds.get(MAIN_AGENT_ID);
         let pending = interactions().find_all(InteractionQuery {
+            id: None,
+            kind: None,
             resolved: Some(false),
             tags: Some(HashMap::from([(
                 INTERACTION_TAG_SESSION_ID.to_string(),
-                self.ctx.session_id(),
+                crate::human::interaction::interaction::InteractionTagValue::String(self.ctx.session_id()),
             )])),
         });
         SessionActivityState {
@@ -361,7 +364,7 @@ fn seed_fold(handle: &Arc<IAgentScopeHandle>) -> AgentWorkFold {
     let tasks = handle.accessor().get(&I_AGENT_TASK_SERVICE);
     let compaction = handle.accessor().get(&I_AGENT_FULL_COMPACTION_SERVICE);
     let states = handle.accessor().get(&I_AGENT_STATE_SERVICE);
-    let running = loop_.snapshot().state == "running";
+    let running = matches!(loop_.snapshot().state, crate::agent::r#loop::r#loop::LoopState::Running);
     let last_ended = (handle.id() == MAIN_AGENT_ID
         && states.has(&turn_replayable_key().state_key()))
     .then(|| {
@@ -374,12 +377,16 @@ fn seed_fold(handle: &Arc<IAgentScopeHandle>) -> AgentWorkFold {
     .flatten();
     AgentWorkFold {
         turn_active: running,
-        background: tasks.list(true).into_iter().map(|task| task.task_id).collect(),
+        background: tasks.list(Some(true), None).into_iter().map(|task| task.task_id().to_string()).collect(),
         compacting: compaction.compacting().is_some(),
         last_turn_reason: if running {
             None
         } else {
-            map_turn_reason(last_ended.map(|last| last.reason))
+            map_turn_reason(last_ended.map(|last| match last.reason.as_str() {
+                "completed" => crate::agent::r#loop::turn_events::TurnEndReason::Completed,
+                "cancelled" => crate::agent::r#loop::turn_events::TurnEndReason::Cancelled,
+                _ => crate::agent::r#loop::turn_events::TurnEndReason::Failed,
+            }))
         },
     }
 }

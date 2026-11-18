@@ -647,7 +647,7 @@ impl TowerStore {
             let Some(pid) = lock_pid(&holder) else {
                 return Ok(None);
             };
-            if pid == 0 || !self.state_lock_holder_is_dead(pid) {
+            if pid == 0 || !self.state_lock_holder_is_dead(pid).await {
                 return Ok(None);
             }
         }
@@ -716,13 +716,13 @@ impl TowerStore {
         let Some(pid) = lock_pid(&content) else {
             return Ok(false);
         };
-        if pid == 0 || !self.state_lock_holder_is_dead(pid) {
+        if pid == 0 || !self.state_lock_holder_is_dead(pid).await {
             return Ok(false);
         }
         let Ok(confirmed) = fs::read_to_string(path).await else {
             return Ok(false);
         };
-        if confirmed != content || !self.state_lock_holder_is_dead(pid) {
+        if confirmed != content || !self.state_lock_holder_is_dead(pid).await {
             return Ok(false);
         }
         match fs::remove_file(path).await {
@@ -931,7 +931,7 @@ impl TowerStore {
                 });
                 continue;
             }
-            let mission_tip = branch_tip(&self.repo_root, &mission.branch).await?;
+            let mission_tip = branch_tip(&self.repo_root, mission.branch.as_str()).await?;
             let relation = if is_ancestor(&self.repo_root, &base_tip, &mission_tip).await? {
                 TowerReanchorRelation::UpToDate
             } else {
@@ -2372,7 +2372,7 @@ impl TowerStore {
     }
 
     async fn list_inbox_items(&self) -> Result<Vec<TowerInboxItem>, String> {
-        Ok(self.list_inbox_snapshot().await?.items)
+        Ok(self.list_inbox_snapshot().await?.0)
     }
 
     async fn list_inbox_snapshot(
@@ -2897,12 +2897,13 @@ impl TowerStore {
                     )
                     .await?
                 {
+                    let before_mission_id = before_mission.id.clone();
                     return Ok(TowerCompleteResult {
                         mission: Some(before_mission),
                         recovered_at: None,
                         message: Some(TowerSendResult {
                             item: existing,
-                            mission_id: Some(before_mission.id.clone()),
+                            mission_id: Some(before_mission_id),
                             activity_log_error: None,
                         }),
                         notification_created: false,
@@ -4363,7 +4364,7 @@ impl TowerStore {
                 branch: None,
             });
         }
-        let tip = branch_tip(&self.repo_root, &mission.branch).await?;
+        let tip = branch_tip(&self.repo_root, mission.branch.as_str()).await?;
         let (base_is_ancestor, spawn_base_is_ancestor) = tokio::join!(
             is_ancestor(&self.repo_root, &base_tip, &tip),
             async {
@@ -4516,7 +4517,7 @@ impl TowerStore {
             ));
         }
         let base_commit = branch_tip(&self.repo_root, &state.base).await?;
-        let from_commit = branch_tip(&self.repo_root, &mission.branch).await?;
+        let from_commit = branch_tip(&self.repo_root, mission.branch.as_str()).await?;
         let checked_out = git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
         if checked_out != mission.branch {
             return Err(format!(
@@ -4624,7 +4625,7 @@ impl TowerStore {
             ));
         }
 
-        let to_commit = match branch_tip(&self.repo_root, &mission.branch).await {
+        let to_commit = match branch_tip(&self.repo_root, mission.branch.as_str()).await {
             Ok(commit) => commit,
             Err(error) => {
                 return Err(format!(
@@ -4634,7 +4635,7 @@ impl TowerStore {
         };
         let mut problems = Vec::new();
         match git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).await {
-            Ok(checked_out) if checked_out != mission.branch => {
+            Ok(checked_out) if checked_out != mission.branch.as_str() => {
                 problems.push("the worktree no longer has the mission branch checked out");
             }
             Err(error) => {
@@ -4718,33 +4719,33 @@ impl TowerStore {
         mission: &TowerMission,
         from_commit: &str,
     ) -> Result<(), String> {
-        let mut problems = Vec::new();
+        let mut problems: Vec<String> = Vec::new();
         if rebase_in_progress(git_dir) {
-            problems.push("a rebase is still in progress");
+            problems.push("a rebase is still in progress".to_string());
         }
         match git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).await {
-            Ok(checked_out) if checked_out != mission.branch => {
-                problems.push("the mission branch is not checked out");
+            Ok(checked_out) if checked_out != mission.branch.as_str() => {
+                problems.push("the mission branch is not checked out".to_string());
             }
             Ok(_) => {}
             Err(error) => problems.push(format!("recovery inspection failed: {error}")),
         }
         match branch_tip(worktree, "HEAD").await {
             Ok(head) if head != from_commit => {
-                problems.push("worktree HEAD was not restored to the pre-rebase commit");
+                problems.push("worktree HEAD was not restored to the pre-rebase commit".to_string());
             }
             Ok(_) => {}
             Err(error) => problems.push(format!("recovery inspection failed: {error}")),
         }
-        match branch_tip(&self.repo_root, &mission.branch).await {
+        match branch_tip(&self.repo_root, mission.branch.as_str()).await {
             Ok(tip) if tip != from_commit => {
-                problems.push("the mission branch tip was not restored");
+                problems.push("the mission branch tip was not restored".to_string());
             }
             Ok(_) => {}
             Err(error) => problems.push(format!("recovery inspection failed: {error}")),
         }
         match is_worktree_dirty(worktree).await {
-            Ok(true) => problems.push("the worktree is not clean"),
+            Ok(true) => problems.push("the worktree is not clean".to_string()),
             Ok(false) => {}
             Err(error) => problems.push(format!("recovery inspection failed: {error}")),
         }
@@ -5424,7 +5425,7 @@ async fn merge_no_ff_with_message(
             if let Err(abort_error) = git(cwd, &["merge", "--abort"]).await {
                 return Err(format!("recovery-required: {abort_error}"));
             }
-            let mut problems = Vec::new();
+            let mut problems: Vec<String> = Vec::new();
             match has_merge_head(cwd).await {
                 Ok(true) => problems.push("MERGE_HEAD still exists".to_string()),
                 Ok(false) => {}

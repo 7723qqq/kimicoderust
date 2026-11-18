@@ -261,7 +261,7 @@ impl IAgentContextMemoryService for AgentContextMemoryService {
             &self.scope_context.agent_context(),
             TokenCountingRebaseInput {
                 length: result.messages.len(),
-                tokens: result.tokens_after as usize,
+                tokens: result.tokens_after,
                 measured: false,
             },
         );

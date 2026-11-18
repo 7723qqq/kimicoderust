@@ -104,6 +104,12 @@ pub struct LogLevelState {
     pub level: Mutex<LogLevel>,
 }
 
+impl Clone for LogLevelState {
+    fn clone(&self) -> Self {
+        Self { level: Mutex::new(*self.level.lock()) }
+    }
+}
+
 pub struct BoundLogger {
     writer: Arc<dyn ILogWriter>,
     level_state: Arc<LogLevelState>,

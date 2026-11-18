@@ -998,7 +998,7 @@ impl AgentTaskService {
                 .get(&key)
                 .map(|request| request.handle.clone());
             if let Some(request) = request {
-                request.lock().drop();
+                drop(request.lock());
             }
             self.mark_delivered_notification(&origin);
             keys.push(key);
@@ -1128,14 +1128,19 @@ impl AgentTaskService {
         entry: &SharedManagedTask,
         options: TerminateOptions,
     ) -> Result<AgentTaskInfo, WireAsyncError> {
+        let terminal_persist = {
+            let managed = entry.lock();
+            managed
+                .status
+                .is_terminal()
+                .then(|| managed.persist_write_queue.future())
+        };
+        if let Some(persist) = terminal_persist {
+            persist.await;
+            return Ok(self.to_info(entry));
+        }
         let (lifecycle, force_stop) = {
             let mut managed = entry.lock();
-            if managed.status.is_terminal() {
-                let persist = managed.persist_write_queue.future();
-                drop(managed);
-                persist.await;
-                return Ok(self.to_info(entry));
-            }
             if let Some(handle) = managed.timeout_handle.take() {
                 self.timers.clear_timeout(handle);
             }
@@ -1170,31 +1175,32 @@ impl AgentTaskService {
             _ = receiver => false,
         };
         self.timers.clear_timeout(grace_timer);
-        if entry.lock().status.is_terminal() {
-            let persist_queue = entry.lock().persist_write_queue.future();
+        let terminal_persist = {
+            let managed = entry.lock();
+            managed
+                .status
+                .is_terminal()
+                .then(|| managed.persist_write_queue.future())
+        };
+        if let Some(persist_queue) = terminal_persist {
             persist_queue.await;
             return Ok(self.to_info(entry));
         }
         if !graceful && let Some(force_stop) = force_stop {
             run_force_stop(force_stop).await;
         }
-        let persist_queue = {
-            let managed = entry.lock();
-            if managed.status.is_terminal() {
-                managed.persist_write_queue.future()
-            } else {
-                drop(managed);
-                self.settle_task(
-                    entry,
-                    AgentTaskSettlement {
-                        status: options.final_status,
-                        stop_reason: options.stop_reason,
-                    },
-                )
-                .await;
-                entry.lock().persist_write_queue.future()
-            }
-        };
+        let was_terminal = entry.lock().status.is_terminal();
+        if !was_terminal {
+            self.settle_task(
+                entry,
+                AgentTaskSettlement {
+                    status: options.final_status,
+                    stop_reason: options.stop_reason,
+                },
+            )
+            .await;
+        }
+        let persist_queue = entry.lock().persist_write_queue.future();
         persist_queue.await;
         Ok(self.to_info(entry))
     }
@@ -1207,7 +1213,11 @@ impl AgentTaskService {
         let results = join_all(
             task_ids
                 .into_iter()
-                .map(|task_id| self.stop(&task_id, reason.clone())),
+                .map(|task_id| {
+                    let task_id = task_id.clone();
+                    let reason = reason.clone();
+                    async move { self.stop(&task_id, reason).await }
+                }),
         )
         .await;
         let mut output = Vec::new();
@@ -1228,7 +1238,7 @@ impl AgentTaskService {
             .map(|request| request.handle.clone())
             .collect::<Vec<_>>();
         for request in requests {
-            request.lock().drop();
+            drop(request.lock());
         }
         Ok(())
     }
@@ -1957,10 +1967,10 @@ impl AgentTaskService {
             if !matches_origin {
                 return false;
             }
-            message.blocks.iter().any(|part| match part {
+            message.content.iter().any(|part| match part {
                 ContentPart::Text { text, .. } => text.lines().any(|line| line.starts_with(&prefix)),
                 _ => false,
-            }) || message.content.lines().any(|line| line.starts_with(&prefix))
+            })
         })
     }
 
@@ -2199,7 +2209,7 @@ impl AgentTaskService {
             message
                 .origin
                 .as_ref()
-                .and_then(task_notification_origin_from_value)
+                .and_then(task_notification_origin_from_prompt)
                 .is_some_and(|origin| notification_key(&origin) == key)
         })
     }
@@ -2623,6 +2633,17 @@ fn newer_restored_task(existing: &AgentTaskInfo, loaded: &AgentTaskInfo) -> Agen
         (Some(_), None) => existing.clone(),
         (None, Some(_)) => loaded.clone(),
         (None, None) => loaded.clone(),
+    }
+}
+
+fn task_notification_origin_from_prompt(origin: &PromptOrigin) -> Option<TaskNotificationOrigin> {
+    match origin {
+        PromptOrigin::Task(task) => Some(TaskNotificationOrigin {
+            task_id: task.task_id.clone(),
+            status: task.status.as_str().to_string(),
+            notification_id: task.notification_id.clone(),
+        }),
+        _ => None,
     }
 }
 

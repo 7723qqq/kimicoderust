@@ -58,7 +58,7 @@ pub fn prepare_google_gen_ai_request(
     };
     let mut kwargs = Map::new();
     if let Some(thinking) = &input.thinking {
-        let fallback = Arc::new(
+        let fallback: crate::human::llm::protocol::thinking::ThinkingFallback = Arc::new(
             |thinking: &crate::human::llm::thinking::ThinkingRequestOptions, ctx: &TraitContext| {
                 Some(Map::from_iter([(
                     "thinkingConfig".to_string(),
@@ -418,7 +418,7 @@ impl GoogleGenAIRequester {
             .create_stream(request, control.signal.clone())
             .await?;
         let parse = self.format.create_stream_parser(StreamParserOptions::default());
-        let mut message_id = None;
+        let message_id = std::sync::Arc::new(parking_lot::Mutex::new(None::<String>));
         while let Some(chunk) = chunks.next().await {
             if control.signal.is_cancelled() {
                 let error = Box::new(GoogleGenAIAbortError) as WireAsyncError;
@@ -446,7 +446,7 @@ impl GoogleGenAIRequester {
                     return Ok(());
                 }
             };
-            let mut failed = false;
+            let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let parse_result = parse(chunk, &StreamParseSink {
                 on_delta: {
                     let on_event = control.on_event.clone();
@@ -458,11 +458,15 @@ impl GoogleGenAIRequester {
                 },
                 on_message_id: Some({
                     let on_event = control.on_event.clone();
+                    let message_id = message_id.clone();
                     Arc::new(move |id| {
-                        if message_id.as_ref() == Some(&id) {
-                            return;
+                        {
+                            let mut guard = message_id.lock();
+                            if guard.as_ref() == Some(&id) {
+                                return;
+                            }
+                            *guard = Some(id.clone());
                         }
-                        message_id = Some(id.clone());
                         on_event(LlmRequestEvent::StreamingMessageId { message_id: id });
                     })
                 }),
@@ -472,8 +476,9 @@ impl GoogleGenAIRequester {
                 }),
                 on_error: Some({
                     let on_event = control.on_event.clone();
+                    let failed = failed.clone();
                     Arc::new(move |error| {
-                        failed = true;
+                        failed.store(true, std::sync::atomic::Ordering::SeqCst);
                         on_event(LlmRequestEvent::FailedRemote {
                             error,
                             raw_error: None,
@@ -492,7 +497,7 @@ impl GoogleGenAIRequester {
                 });
                 return Ok(());
             }
-            if failed {
+            if failed.load(std::sync::atomic::Ordering::SeqCst) {
                 return Ok(());
             }
         }

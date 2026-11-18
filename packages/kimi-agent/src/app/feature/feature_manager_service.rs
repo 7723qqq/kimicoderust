@@ -1,4 +1,5 @@
 use std::io::{Error, ErrorKind};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -52,8 +53,14 @@ impl FeatureManagerService {
         recipe: ServiceRecipe,
         opts: Option<FiberProvideOptions>,
     ) -> Arc<dyn FiberHandle> {
-        let meta = recipe.meta().clone();
-        let handle = self.runtime.provide_recipe(recipe, opts);
+        let meta = meta_to_values(&recipe.statics().meta);
+        let handle = self
+            .runtime
+            .provide(crate::_base::di::fiber::ProvideRequest::Anonymous {
+                recipe,
+                options: opts,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
         self.track(handle, meta)
     }
 
@@ -63,8 +70,15 @@ impl FeatureManagerService {
         recipe: ServiceClassRecipe,
         opts: Option<FiberProvideOptions>,
     ) -> Arc<dyn FiberHandle> {
-        let meta = recipe.meta().clone();
-        let handle = self.runtime.provide_class(id, recipe, opts);
+        let meta = meta_to_values(&recipe.statics.meta);
+        let handle = self
+            .runtime
+            .provide(crate::_base::di::fiber::ProvideRequest::TokenClass {
+                id,
+                recipe,
+                options: opts,
+            })
+            .unwrap_or_else(|error| panic!("{error}"));
         self.track(handle, meta)
     }
 
@@ -97,7 +111,11 @@ impl FeatureManagerService {
         let Some(entry) = entry else {
             return Ok(());
         };
-        let result = entry.handle.dispose().await;
+        let result = entry
+            .handle
+            .dispose()
+            .await
+            .map_err(|error| -> WireAsyncError { Box::new(std::io::Error::other(error)) });
         self.fire_units_changed();
         result
     }
@@ -118,7 +136,7 @@ impl FeatureManagerService {
                     format!("feature unit '{name}' is not managed by this FeatureManager"),
                 ))
             })?;
-        handle.update(config).await?;
+        handle.update(config.map(|value| Arc::new(value) as crate::_base::di::descriptors::DynamicValue)).await.map_err(|error| -> crate::wire::record::WireAsyncError { Box::new(std::io::Error::other(error)) })?;
         self.fire_units_changed();
         Ok(())
     }
@@ -130,14 +148,14 @@ impl FeatureManagerService {
             .map(|(name, entry)| ManagedUnitInfo {
                 name: name.clone(),
                 state: entry.handle.state(),
-                uid: entry.handle.uid().ok(),
+                uid: Some(entry.handle.uid()),
                 meta: entry.meta.clone(),
             })
             .collect()
     }
 
     pub fn contributed_services(&self) -> Vec<ContributedFeatureService> {
-        self.contributed_services.items.clone()
+        self.contributed_services.items()
     }
 
     pub fn on_did_change_units(
@@ -205,4 +223,25 @@ impl IFeatureManager for FeatureManagerService {
     fn on_did_change_units(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef {
         FeatureManagerService::on_did_change_units(self, listener)
     }
+}
+
+fn meta_to_values(meta: &HashMap<String, crate::_base::di::descriptors::DynamicValue>) -> Map<String, Value> {
+    let mut out = Map::new();
+    for (key, value) in meta {
+        let json = if let Some(value) = value.downcast_ref::<Value>() {
+            Some(value.clone())
+        } else if let Some(value) = value.downcast_ref::<String>() {
+            Some(Value::String(value.clone()))
+        } else if let Some(value) = value.downcast_ref::<u64>() {
+            Some(serde_json::json!(value))
+        } else if let Some(value) = value.downcast_ref::<bool>() {
+            Some(Value::Bool(*value))
+        } else {
+            None
+        };
+        if let Some(json) = json {
+            out.insert(key.clone(), json);
+        }
+    }
+    out
 }

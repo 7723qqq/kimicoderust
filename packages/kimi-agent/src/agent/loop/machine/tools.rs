@@ -177,7 +177,7 @@ impl MachineToolsInner {
             match expected_calls {
                 None => {
                     queue.expected_ids = None;
-                    queue.pending.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
+                    queue.pending.drain(..).map(|(_, entry)| entry).collect::<Vec<_>>()
                 }
                 Some(calls) => {
                     let definitions = self.definitions.lock();
@@ -300,7 +300,7 @@ impl MachineToolsInner {
         if let Some(error) = &batch_error {
             (self.options.on_batch_error)(Value::String(error.clone()));
         }
-        for (_, entry) in in_flight.drain() {
+        for (_, entry) in in_flight.drain(..) {
             let name = entry.input.tool_call.name.clone();
             let text = match &batch_error {
                 Some(error) => format!("Tool \"{name}\" failed: {error}"),
@@ -324,7 +324,7 @@ impl MachineToolsInner {
             if queue.pending.shift_remove(id).is_none() {
                 return;
             }
-            queue.pending.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
+            queue.pending.drain(..).map(|(_, entry)| entry).collect::<Vec<_>>()
         };
         self.settle_aborted(current);
         for entry in stale {
@@ -393,7 +393,7 @@ impl MachineToolsInner {
         }
         receiver
             .await
-            .unwrap_or_else(|_| Err("Tool execution ended without a result".into()))?
+            .unwrap_or_else(|_| Err("Tool execution ended without a result".into()))
     }
 
     fn handle_progress(&self, tool_call_id: &str, update: AgentToolUpdate) {
@@ -407,9 +407,12 @@ impl MachineToolsInner {
             return;
         };
         handler(ToolUpdate {
-            key: update.custom_kind.unwrap_or(update.kind),
-            text: update.text.unwrap_or_default(),
+            kind: update.kind,
+            text: update.text,
             percent: update.percent,
+            custom_kind: update.custom_kind,
+            custom_data: update.custom_data,
+            replace: update.replace,
         });
     }
 }
@@ -420,12 +423,12 @@ fn combined_signal(entries: &[PendingEntry]) -> (AbortSignal, Vec<JoinHandle<()>
     for entry in entries {
         let signal = entry.input.signal.clone();
         if signal.is_cancelled() {
-            controller.abort(signal.reason());
+            controller.abort(None);
         }
         let controller = controller.clone();
         tasks.push(tokio::spawn(async move {
             signal.cancelled().await;
-            controller.abort(signal.reason());
+            controller.abort(None);
         }));
     }
     (controller.signal(), tasks)
@@ -465,10 +468,12 @@ impl MachineTools {
         self.inner.handle_progress(
             tool_call_id,
             AgentToolUpdate {
-                kind: update.key,
-                text: Some(update.text),
+                kind: update.kind,
+                text: update.text,
                 percent: update.percent,
-                ..Default::default()
+                custom_kind: update.custom_kind,
+                custom_data: update.custom_data,
+                replace: update.replace,
             },
         );
     }

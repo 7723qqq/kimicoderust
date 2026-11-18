@@ -242,7 +242,7 @@ pub async fn load_agents_md_for_roots<'a>(
     let generic_files = generic_dirs.iter().flat_map(|dir| {
         AGENTS_MD_PLAIN_NAMES
             .iter()
-            .map(move |name| join(&[dir, name]))
+            .map(move |name: &&str| join(&[dir, name]))
     });
     for file in generic_files {
         if collect_agent_file(

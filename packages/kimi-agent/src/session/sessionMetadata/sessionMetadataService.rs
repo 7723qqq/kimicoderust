@@ -63,6 +63,7 @@ impl fmt::Display for SharedMetadataError {
 
 impl Error for SharedMetadataError {}
 
+#[derive(Clone)]
 pub struct SessionMetadata {
     states: Arc<dyn ISessionStateService>,
     ctx: Arc<dyn ISessionContext>,
@@ -74,11 +75,11 @@ pub struct SessionMetadata {
     scope: String,
     update_queue: Arc<Mutex<Option<Shared<BoxFuture<'static, ()>>>>>,
     refresh_before_write: Arc<Mutex<bool>>,
-    disposed: std::sync::atomic::AtomicBool,
+    disposed: Arc<std::sync::atomic::AtomicBool>,
     ready: Arc<Mutex<Option<Shared<BoxFuture<'static, Result<(), SharedMetadataError>>>>>>,
     listeners: Arc<Mutex<HashMap<u64, Arc<dyn Fn(SessionMetadataChangedEvent) + Send + Sync>>>>,
     next_listener_id: Arc<Mutex<u64>>,
-    _subscriptions: Mutex<Vec<DisposableRef>>,
+    _subscriptions: Arc<Mutex<Vec<DisposableRef>>>,
 }
 
 impl SessionMetadata {
@@ -104,11 +105,11 @@ impl SessionMetadata {
             scope: scope.clone(),
             update_queue: Arc::new(Mutex::new(None)),
             refresh_before_write: Arc::new(Mutex::new(true)),
-            disposed: std::sync::atomic::AtomicBool::new(false),
+            disposed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ready: Arc::new(Mutex::new(None)),
             listeners: Arc::new(Mutex::new(HashMap::new())),
             next_listener_id: Arc::new(Mutex::new(0)),
-            _subscriptions: Mutex::new(Vec::new()),
+            _subscriptions: Arc::new(Mutex::new(Vec::new())),
         };
         let refresh = this.refresh_before_write.clone();
         let session_id = ctx.session_id();
@@ -128,8 +129,9 @@ impl SessionMetadata {
                 mirror_to_read_model(&weak_states, &weak_ctx, &weak_mirror, &weak_workspace, &weak_scope, &weak_log);
             }
         })));
-        let ready = this.load(scope);
-        *this.ready_lock() = Some(ready);
+        let load_this = this.clone();
+        let ready = async move { load_this.load(scope).await }.boxed().shared();
+        *this.ready_lock().lock() = Some(ready);
         this
     }
 
@@ -163,11 +165,13 @@ impl SessionMetadata {
     }
 
     pub async fn update(&self, patch: SessionMetaPatch, touch_updated_at: Option<bool>) -> Result<(), WireAsyncError> {
-        self.enqueue_update(move || async move {
-            if !(self.prepare_write().await?) {
+        let this = self.clone();
+        let work_this = this.clone();
+        this.enqueue_update(move || async move {
+            if !(work_this.prepare_write().await?) {
                 return Ok(());
             }
-            self.apply_update(&patch, touch_updated_at).await
+            work_this.apply_update(&patch, touch_updated_at).await.map(|_| ())
         }).await
     }
 
@@ -187,7 +191,7 @@ impl SessionMetadata {
     }
 
     async fn apply_update(&self, patch: &SessionMetaPatch, touch_updated_at: Option<bool>) -> Result<bool, WireAsyncError> {
-        let lease = self.session_locks.lease(&self.ctx.session_id());
+        let lease = self.session_locks.lease(&self.ctx.session_id())?;
         let result = async {
             let updated_at = patch.updated_at.unwrap_or_else(|| {
                 if touch_updated_at == Some(false) {
@@ -200,7 +204,7 @@ impl SessionMetadata {
             apply_patch(&mut next, patch);
             next.updated_at = updated_at;
             self.set_data(next.clone());
-            self.store.set(&self.scope, META_KEY, encode_session_meta(&next)).await?;
+            self.store.set(&self.scope, META_KEY, serde_json::to_value(encode_session_meta(&next)).unwrap_or_default()).await?;
             if self.disposed.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(false);
             }
@@ -228,14 +232,17 @@ impl SessionMetadata {
     }
 
     pub async fn set_generated_title_if_uncustomized(&self, title: &str, force: Option<bool>) -> Result<bool, WireAsyncError> {
-        self.enqueue_update(move || async move {
-            if !(self.prepare_write().await?) {
+        let this = self.clone();
+        let title = title.to_string();
+        let work_this = this.clone();
+        this.enqueue_update(move || async move {
+            if !(work_this.prepare_write().await?) {
                 return Ok(false);
             }
-            if force != Some(true) && self.data().title_kind == Some(SessionTitleKind::Custom) {
+            if force != Some(true) && work_this.data().title_kind == Some(SessionTitleKind::Custom) {
                 return Ok(false);
             }
-            self.apply_update(
+            work_this.apply_update(
                 &SessionMetaPatch {
                     title: Some(title.to_string()),
                     title_kind: Some(SessionTitleKind::Generated),
@@ -249,12 +256,16 @@ impl SessionMetadata {
     }
 
     pub async fn apply_prompt_metadata(&self, last_prompt: &str, title: &str) -> Result<bool, WireAsyncError> {
-        self.enqueue_update(move || async move {
-            if !(self.prepare_write().await?) {
+        let this = self.clone();
+        let last_prompt = last_prompt.to_string();
+        let title = title.to_string();
+        let work_this = this.clone();
+        this.enqueue_update(move || async move {
+            if !(work_this.prepare_write().await?) {
                 return Ok(false);
             }
-            let apply_title = self.data().title_kind != Some(SessionTitleKind::Custom)
-                && is_untitled(&self.data().title);
+            let apply_title = work_this.data().title_kind != Some(SessionTitleKind::Custom)
+                && is_untitled(work_this.data().title.as_deref());
             let patch = if apply_title {
                 SessionMetaPatch {
                     last_prompt: Some(last_prompt.to_string()),
@@ -268,7 +279,7 @@ impl SessionMetadata {
                     ..Default::default()
                 }
             };
-            let applied = self.apply_update(&patch, None).await?;
+            let applied = work_this.apply_update(&patch, None).await?;
             Ok(applied && apply_title)
         })
         .await
@@ -287,25 +298,28 @@ impl SessionMetadata {
     }
 
     pub async fn register_agent(&self, agent_id: &str, meta: AgentMeta) -> Result<(), WireAsyncError> {
-        self.enqueue_update(move || async move {
-            self.ready().await?;
-            let existing = self.data().agents.as_ref().and_then(|agents| agents.get(agent_id)).cloned();
+        let this = self.clone();
+        let agent_id = agent_id.to_string();
+        let work_this = this.clone();
+        this.enqueue_update(move || async move {
+            work_this.ready().await?;
+            let existing = work_this.data().agents.as_ref().and_then(|agents| agents.get(&agent_id)).cloned();
             if existing.as_ref().is_some_and(|existing| agent_meta_equals(&existing, &meta)) {
                 return Ok(());
             }
-            if !self.session_locks.try_hold(&self.ctx.session_id()) {
-                self.log.warn(
+            if !work_this.session_locks.try_hold(&work_this.ctx.session_id()).unwrap_or(false) {
+                work_this.log.warn(
                     "session metadata agent registration skipped; session is in use by another client",
-                    Some(json!({ "sessionId": self.ctx.session_id(), "agentId": agent_id })),
+                    Some(json!({ "sessionId": work_this.ctx.session_id(), "agentId": agent_id })),
                 );
                 return Ok(());
             }
-            if !(self.prepare_write().await?) {
+            if !(work_this.prepare_write().await?) {
                 return Ok(());
             }
-            let mut agents = self.data().agents.unwrap_or_default();
-            agents.insert(agent_id.to_string(), meta);
-            self.apply_update(
+            let mut agents = work_this.data().agents.unwrap_or_default();
+            agents.insert(agent_id.clone(), meta);
+            work_this.apply_update(
                 &SessionMetaPatch {
                     agents: Some(agents),
                     ..Default::default()
@@ -313,14 +327,17 @@ impl SessionMetadata {
                 Some(false),
             )
             .await
+            .map(|_| ())
         })
         .await
     }
 
-    fn enqueue_update<T: Clone + Send + 'static>(
-        &self,
-        work: impl FnOnce() -> BoxFuture<'static, Result<T, WireAsyncError>> + Send + 'static,
-    ) -> BoxFuture<'static, Result<T, WireAsyncError>> {
+    fn enqueue_update<T, F, Fut>(&self, work: F) -> BoxFuture<'static, Result<T, WireAsyncError>>
+    where
+        T: Clone + Send + Sync + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, WireAsyncError>> + Send + 'static,
+    {
         let previous = self.update_queue.lock().clone();
         let run = async move {
             if let Some(previous) = previous {
@@ -401,8 +418,8 @@ impl SessionMetadata {
                 next.agents.get_or_insert_with(HashMap::new);
                 next.custom.get_or_insert_with(HashMap::new);
                 self.set_data(next.clone());
-                if self.session_locks.try_hold(&self.ctx.session_id()) {
-                    self.store.set(&scope, META_KEY, encode_session_meta(&next)).await.map_err(|error| SharedMetadataError::new(error))?;
+                if self.session_locks.try_hold(&self.ctx.session_id()).unwrap_or(false) {
+                    self.store.set(&scope, META_KEY, serde_json::to_value(encode_session_meta(&next)).unwrap_or_default()).await.map_err(|error| SharedMetadataError::new(error))?;
                 }
             }
             return Ok(());
@@ -419,8 +436,8 @@ impl SessionMetadata {
             custom: Some(HashMap::new()),
             ..Default::default()
         });
-        if self.session_locks.try_hold(&self.ctx.session_id()) {
-            self.store.set(&scope, META_KEY, encode_session_meta(&self.data())).await.map_err(|error| SharedMetadataError::new(error))?;
+        if self.session_locks.try_hold(&self.ctx.session_id()).unwrap_or(false) {
+            self.store.set(&scope, META_KEY, serde_json::to_value(encode_session_meta(&self.data())).unwrap_or_default()).await.map_err(|error| SharedMetadataError::new(error))?;
         }
         self.mirror_to_read_model();
         self.log.debug(
@@ -553,11 +570,11 @@ pub fn normalize_session_meta(raw: Value, session_id: &str) -> SessionMeta {
         environment_id: clean.get("environmentId").and_then(Value::as_str).map(str::to_string),
         environment_cwd: clean.get("environmentCwd").and_then(Value::as_str).map(str::to_string),
         forked_from: clean.get("forkedFrom").and_then(Value::as_str).map(str::to_string),
-        agents: clean.get("agents").and_then(Value::as_object).cloned().unwrap_or_default().into_iter().filter_map(|(key, value)| {
+        agents: Some(clean.get("agents").and_then(Value::as_object).cloned().unwrap_or_default().into_iter().filter_map(|(key, value)| {
             serde_json::from_value(value).ok().map(|meta| (key, meta))
-        }).collect(),
-        custom: clean.get("custom").and_then(Value::as_object).cloned(),
-        last_turn_reason: clean.get("lastTurnReason").and_then(|value| serde_json::from_value(value).ok()),
+        }).collect()),
+        custom: clean.get("custom").and_then(Value::as_object).map(|map| map.iter().map(|(key, value)| (key.clone(), value.clone())).collect()),
+        last_turn_reason: clean.get("lastTurnReason").and_then(|value| serde_json::from_value(value.clone()).ok()),
     }
 }
 
@@ -606,8 +623,8 @@ pub struct PersistedSessionMeta {
     pub is_custom_title: bool,
 }
 
-fn session_meta_title_needs_migration(raw: &SessionMeta, normalized: &SessionMeta) -> bool {
-    let record = serde_json::to_value(raw).unwrap();
+fn session_meta_title_needs_migration(raw: &Value, normalized: &SessionMeta) -> bool {
+    let record = raw;
     record.get("title") != Some(&json!(normalized.title))
         || record.get("titleKind") != Some(&json!(normalized.title_kind))
         || record.get("isCustomTitle").and_then(Value::as_bool) != Some(normalized.title_kind == Some(SessionTitleKind::Custom))

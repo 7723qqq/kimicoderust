@@ -354,9 +354,12 @@ impl AskUserQuestionTool {
 }
 
 pub fn question_multi_select(item: &AskUserQuestionItemInput) -> bool {
-    item.multi_select
-        .or(item.multi_select_camel)
-        .unwrap_or(false)
+    // v2 forwards only `multi_select` into the host payload
+    // (askUserQuestionTool.ts:244 `multiSelect: q.multi_select`); a
+    // camelCase `multiSelect` input is accepted by the schema description
+    // but resolves to `undefined`, so the host sees it as unset. Mirror
+    // that: drop the alias here instead of resolving it.
+    item.multi_select.unwrap_or(false)
 }
 
 pub fn question_uniqueness_error(questions: &[AskUserQuestionItemInput]) -> Option<String> {

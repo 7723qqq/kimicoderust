@@ -13,7 +13,7 @@ use crate::llm_adapter::contract::model_family::ImageTokenPricing;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenCountingRebaseInput {
     pub length: usize,
-    pub tokens: usize,
+    pub tokens: u64,
     pub measured: bool,
 }
 
@@ -27,7 +27,7 @@ pub trait ISessionTokenCountingService: Send + Sync {
         output: &[Message],
         usage: &TokenUsage,
     );
-    fn latest_measured(&self, agent: &AgentContext) -> usize;
+    fn latest_measured(&self, agent: &AgentContext) -> u64;
     fn status_size(&self, agent: &AgentContext) -> u64;
     fn record_truncation(&self, agent: &AgentContext, cut_index: usize);
     fn rebase(&self, agent: &AgentContext, input: TokenCountingRebaseInput);
@@ -35,11 +35,11 @@ pub trait ISessionTokenCountingService: Send + Sync {
         &self,
         request: &TokenCountingRequest,
         pricing: Option<&ImageTokenPricing>,
-    ) -> usize;
-    fn estimate_text(&self, text: &str) -> usize;
-    fn estimate_message(&self, message: &Message, pricing: Option<&ImageTokenPricing>) -> usize;
-    fn estimate_messages(&self, messages: &[Message], pricing: Option<&ImageTokenPricing>) -> usize;
-    fn estimate_tools(&self, tools: &[Tool]) -> usize;
+    ) -> u64;
+    fn estimate_text(&self, text: &str) -> u64;
+    fn estimate_message(&self, message: &Message, pricing: Option<&ImageTokenPricing>) -> u64;
+    fn estimate_messages(&self, messages: &[Message], pricing: Option<&ImageTokenPricing>) -> u64;
+    fn estimate_tools(&self, tools: &[Tool]) -> u64;
 }
 
 

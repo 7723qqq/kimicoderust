@@ -22,7 +22,8 @@ use serde_json::{Map, Value, json};
 
 use crate::_base::di::instantiation::IInstantiationService;
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
-use crate::_base::di::scope::{ISessionScopeHandle, LifecycleScope, ScopeSeed, create_scoped_child_handle};
+use crate::_base::di::instantiation::create_decorator;
+use crate::_base::di::scope::{ISessionScopeHandle, LifecycleScope, ScopeSeed, create_scoped_child_handle, seed_instance};
 use crate::_base::log::log::ILogService;
 use crate::_base::log::log_service::drain_log_closes;
 use crate::_base::utils::paths::join;
@@ -45,7 +46,7 @@ use crate::app::session_index::session_index_source::{
 };
 use crate::app::telemetry::telemetry::{ITelemetryService, I_TELEMETRY_SERVICE};
 use crate::app::telemetry::telemetry_service::bind_telemetry_scope;
-use crate::environment::environment::{EnvironmentBinding, EnvironmentLease, LOCAL_ENVIRONMENT_ID};
+use crate::environment::environment::{EnvironmentBinding, EnvironmentCapability, EnvironmentLease, LOCAL_ENVIRONMENT_ID};
 use crate::environment::environment_registry::EnvironmentError;
 use crate::features::fileHistory::fileHistory::IAgentFileHistoryService;
 use crate::features::fileHistory::fileHistoryRetention::{
@@ -81,7 +82,8 @@ use crate::session::session_context::session_context::{
 };
 use crate::session::session_instructions::instructions_provider::ISessionInstructionsProvider;
 use crate::session::session_metadata::session_metadata::{
-    AgentMeta, ISessionMetadata, SESSION_META_VERSION, SessionMeta, SessionMetaPatch,
+    AgentMeta, AgentType, ISessionMetadata, SESSION_META_VERSION, SessionLastTurnReason,
+    SessionMeta, SessionMetaPatch, SessionTitleKind,
 };
 use crate::session::session_metadata::session_metadata_service::{
     drain_session_metadata_writes, encode_session_meta, to_epoch_ms,
@@ -271,7 +273,7 @@ impl SessionLifecycleService {
                     agent_id: Some(MAIN_AGENT_ID.to_string()),
                     binding: opts.main_agent_binding.clone(),
                     environment_id: environment.as_ref().map(|environment| environment.environment_id.clone()),
-                    environment_cwd: environment.as_ref().map(|environment| environment.cwd.clone()),
+                    environment_cwd: environment.as_ref().and_then(|environment| environment.cwd.clone()),
                     ..Default::default()
                 })).await?)
             } else {
@@ -333,7 +335,7 @@ impl SessionLifecycleService {
             read_user_permission_rules(self.services.config.as_ref()).await?;
             dirs.ready().await?;
             dirs.merge_additional_dirs(
-                environment.as_ref().map(|environment| environment.cwd.as_str()).unwrap_or(&opts.work_dir),
+                environment.as_ref().and_then(|environment| environment.cwd.as_deref()).unwrap_or(&opts.work_dir),
                 opts.additional_dirs.as_deref().unwrap_or(&[]),
             ).await
         }
@@ -350,7 +352,7 @@ impl SessionLifecycleService {
             cwd: environment
                 .as_ref()
                 .filter(|environment| environment.environment_id == LOCAL_ENVIRONMENT_ID)
-                .map(|environment| environment.cwd.clone())
+                .and_then(|environment| environment.cwd.clone())
                 .unwrap_or_else(|| opts.work_dir.clone()),
             scope: session_scope.clone(),
         };
@@ -374,47 +376,106 @@ impl SessionLifecycleService {
                 workdir.local_config.clone(),
                 self.services.trust.clone(),
             ));
-        let mut seeds = session_context_seed(ctx.clone());
-        seeds.push(ScopeSeed::new::<dyn IProjectLocalConfigService>(
+        let ctx: Arc<dyn crate::session::session_context::session_context::ISessionContext> =
+            Arc::new(ctx);
+        let mut seeds = session_context_seed(ctx);
+        let local_config_id = create_decorator::<Arc<dyn IProjectLocalConfigService>>(
+            "projectLocalConfigService",
+        );
+        seeds.extend(seed_instance(&local_config_id, Arc::new(
             workdir.local_config.clone() as Arc<dyn IProjectLocalConfigService>,
-        ));
-        seeds.push(ScopeSeed::new::<dyn IWorkspaceTrust>(
-            self.services.trust.clone(),
-        ));
-        seeds.push(ScopeSeed::new::<dyn IProjectPermissionRulesService>(
-            project_permission_rules,
-        ));
-        let configure = move |container: Arc<crate::_base::di::instantiation_service::InstantiationService>| {
-            container.anchor_kernel_entry(Box::new(|| telemetry_binding.dispose()), "telemetry:session-context");
-            let workdir_dispose = workdir.clone();
-            container.anchor_kernel_entry(Box::new(move || workdir_dispose.dispose()), "sessionLifecycle:workdir");
-            let read_container = container.clone_handle();
-            let contribute_container = container.clone_handle();
-            let dispose_container = container.clone_handle();
-            self.fire_will_create(SessionWillCreateEvent {
-                session_id: session_id.to_string(),
-                on_did_create_scope: Arc::new(move |listener| {
-                    add_listener(&will_create_listeners, listener)
+        )));
+        let trust_id = create_decorator::<Arc<dyn IWorkspaceTrust>>("workspaceTrust");
+        seeds.extend(seed_instance(&trust_id, Arc::new(self.services.trust.clone())));
+        let permission_rules_id = create_decorator::<Arc<dyn IProjectPermissionRulesService>>(
+            "projectPermissionRulesService",
+        );
+        seeds.extend(seed_instance(&permission_rules_id, Arc::new(project_permission_rules)));
+        let configure = {
+            let telemetry_binding = telemetry_binding.clone();
+            let workdir = workdir.clone();
+            let session_id = session_id.to_string();
+            let will_create_events = self.events.will_create.clone();
+            let will_create_listeners = will_create_listeners.clone();
+            move |container: Arc<crate::_base::di::instantiation_service::InstantiationService>| {
+            let telemetry_dispose = telemetry_binding.clone();
+            container.anchor_kernel_entry(
+                Arc::new(move |_reason| {
+                    telemetry_dispose.dispose();
+                    None
                 }),
-                read_seed: Arc::new(move |id| read_container.invoke_function(id)),
-                contribute_seed: Arc::new(move |id, value| contribute_container.provide(id, value)),
+                "telemetry:session-context",
+            );
+            let workdir_dispose = workdir.clone();
+            container.anchor_kernel_entry(
+                Arc::new(move |_reason| {
+                    workdir_dispose.dispose();
+                    None
+                }),
+                "sessionLifecycle:workdir",
+            );
+            let read_container = container.clone();
+            let contribute_container = container.clone();
+            let dispose_container = container.clone();
+            fire_listeners(&will_create_events, SessionWillCreateEvent {
+                session_id: session_id.clone(),
+                on_did_create_scope: {
+                    let will_create_listeners = will_create_listeners.clone();
+                    Arc::new(move |listener| {
+                        add_listener(&will_create_listeners, listener)
+                    })
+                },
+                read_seed: Arc::new(move |id| {
+                    let token = crate::_base::di::instantiation::create_decorator::<
+                        crate::_base::di::descriptors::DynamicValue,
+                    >(id);
+                    read_container.invoke_function(|accessor| accessor.get_dynamic(&token))
+                }),
+                contribute_seed: Arc::new(move |id, value| {
+                    let token = crate::_base::di::instantiation::create_decorator::<
+                        crate::_base::di::descriptors::DynamicValue,
+                    >(id);
+                    let _ = contribute_container.provide(
+                        token,
+                        crate::_base::di::service_collection::ServiceValue::Instance(value),
+                        None,
+                    );
+                }),
                 on_session_dispose: Arc::new(move |dispose| {
-                    dispose_container.anchor_kernel_entry(dispose, "sessionLifecycle:willCreateParticipant");
+                    let dispose = Arc::new(Mutex::new(Some(dispose)));
+                    let disposer: crate::_base::lifecycle::disposer::Disposer =
+                        Arc::new(move |_reason| {
+                            if let Some(dispose) = dispose.lock().take() {
+                                dispose();
+                            }
+                            None
+                        });
+                    dispose_container.anchor_kernel_entry(disposer, "sessionLifecycle:willCreateParticipant");
                 }),
             });
             let _ = container_scope;
+            Ok(())
+            }
         };
+        let parent = self
+            .services
+            .instantiation
+            .concrete()
+            .ok_or_else(|| -> WireAsyncError { "session lifecycle requires a concrete instantiation service".into() })?;
         let handle = match create_scoped_child_handle(
-            self.services.instantiation.clone(),
-            LifecycleScope::Session,
-            session_id,
-            seeds,
-            configure,
+            parent,
+            LifecycleScope::Session.as_str().to_string(),
+            session_id.to_string(),
+            crate::_base::di::scope::ScopeOptions {
+                id: None,
+                seeds: Some(seeds),
+                configure_container: Some(Arc::new(configure)),
+            },
         ) {
             Ok(handle) => handle,
             Err(error) => {
                 workdir.dispose();
-                return Err(error);
+                return Err(error.into());
             }
         };
         fire_listeners(&scope_listeners, handle.clone());
@@ -452,12 +513,13 @@ impl SessionLifecycleService {
             return fallback_cwd.to_string();
         }
         let primary = self.services.workspace_context.meta().root;
-        resolve_effective_workspace_roots(
+        crate::session::workspace_context::workspace_roots::resolve_effective_workspace_roots_data(
             &self.workspace_id(),
             fallback_cwd,
             environment,
             &HashMap::from([(self.workspace_id(), primary)]),
             &[],
+            None,
         ).work_dir
     }
 
@@ -466,8 +528,12 @@ impl SessionLifecycleService {
             return (self.services.acquire_workdir)(LOCAL_ENVIRONMENT_ID.to_string(), work_dir.to_string(), true).await;
         };
         let environment_id = environment.environment_id.clone();
-        let cwd = environment.cwd.clone();
-        let lease = match self.services.environments.acquire_when_ready(&environment_id, &["fs"]).await {
+        let cwd = environment.cwd.clone().unwrap_or_else(|| work_dir.to_string());
+        let binding = EnvironmentBinding {
+            environment_id: environment_id.clone(),
+            cwd: Some(cwd.clone()),
+        };
+        let lease = match self.services.environments.acquire_when_ready(&binding, &[EnvironmentCapability::Fs]).await {
             Ok(lease) => lease,
             Err(error) if error.downcast_ref::<EnvironmentError>().is_some() => return Err(error),
             Err(error) => {
@@ -479,7 +545,7 @@ impl SessionLifecycleService {
             }
         };
         let stat_result = async {
-            let stat = lease.environment.fs.as_ref().unwrap().stat(&cwd).await.map_err(|error| {
+            let stat = lease.environment.fs().stat(&cwd).await.map_err(|error| {
                 Box::new(EnvironmentError::new(
                     "environment.invalid_cwd",
                     format!("cwd {cwd} is not readable on environment {environment_id}: {error}"),
@@ -545,21 +611,22 @@ impl SessionLifecycleService {
         self.state.lock().resume_failures.remove(session_id);
         let this = self.clone_handle();
         let session_id = session_id.to_string();
+        let future_session_id = session_id.clone();
         let future = async move {
-            let result = this.do_resume(&session_id, source, opts).await;
+            let result = this.do_resume(&future_session_id, source, opts).await;
             if let Err(error) = &result {
                 let reason = error_code(error.as_ref()).unwrap_or("unknown");
                 let mut properties = Map::new();
                 properties.insert("reason".to_string(), reason.into());
                 this.services.telemetry.with_context(serde_json::Map::from_iter([
-                    ("session_id".to_string(), session_id.clone().into()),
+                    ("session_id".to_string(), future_session_id.clone().into()),
                 ])).track2("session_load_failed", Some(properties));
                 this.state.lock().resume_failures.insert(
-                    session_id.clone(),
+                    future_session_id.clone(),
                     SharedLifecycleError::new(error.to_string().into()),
                 );
             }
-            this.state.lock().resuming.remove(&session_id);
+            this.state.lock().resuming.remove(&future_session_id);
             result.map_err(SharedLifecycleError::new)
         }
         .boxed()
@@ -604,7 +671,7 @@ impl SessionLifecycleService {
             main_agent_binding: None,
             ensure_main_agent: false,
             environment_id: environment.as_ref().map(|environment| environment.environment_id.clone()),
-            environment_cwd: environment.as_ref().map(|environment| environment.cwd.clone()),
+            environment_cwd: environment.as_ref().and_then(|environment| environment.cwd.clone()),
             mcp_servers: opts.and_then(|opts| opts.mcp_servers),
         };
         let workdir = self.open_workdir(environment.as_ref(), &work_dir).await?;
@@ -722,7 +789,7 @@ impl SessionLifecycleService {
             self.services.event.publish(SessionRestored::new(SessionRestoredPayload {
                 session_id: session_id.to_string(),
                 workspace_id: self.workspace_id(),
-            }));
+            }).to_event2());
         }
         Ok(Some(handle))
     }
@@ -785,7 +852,7 @@ impl SessionLifecycleService {
             return Err(Box::new(Error2::new("session.not_found", format!("session {source_id} does not exist"))));
         }
         assert_fork_turn_index(opts.turn_index)?;
-        let source_lease = self.services.session_locks.lease(&source_id);
+        let source_lease = self.services.session_locks.lease(&source_id)?;
         let mut target_session_dir = None;
         let result = self.fork_inner(&opts, source_handle.clone(), &mut target_session_dir).await;
         if result.is_err() {
@@ -805,12 +872,12 @@ impl SessionLifecycleService {
     ) -> Result<SessionMeta, WireAsyncError> {
         let source_id = opts.source_session_id.clone();
         let mut quiescence_holds = Vec::new();
-        let mut history_snapshot_agent_ids = HashSet::new();
-        let mut active_turn_ids = HashMap::new();
-        let mut queued_prompt_ids = HashMap::new();
+        let mut history_snapshot_agent_ids: HashSet<String> = HashSet::new();
+        let mut active_turn_ids: HashMap<String, i64> = HashMap::new();
+        let mut queued_prompt_ids: HashMap<String, Vec<String>> = HashMap::new();
         if let Some(source_handle) = &source_handle {
             let agents = source_handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
-            let agent_handles = agents.list().into_iter().filter_map(|agent| agents.handle_of(&agent.agent_id)).collect::<Vec<_>>();
+            let agent_handles = agents.list(None).into_iter().filter_map(|agent| agents.handle_of(&agent.agent_id)).collect::<Vec<_>>();
             for agent_handle in agent_handles {
                 let loop_ = agent_handle.accessor().get(&I_AGENT_LOOP_SERVICE);
                 let snapshot = loop_.snapshot();
@@ -833,16 +900,16 @@ impl SessionLifecycleService {
                 };
                 quiescence_holds.push(hold);
                 if requires_history_snapshot {
-                    history_snapshot_agent_ids.insert(agent_handle.id());
-                    queued_prompt_ids.insert(agent_handle.id(), snapshot.queue.iter().filter_map(|item| {
-                        item.meta.as_ref().and_then(|meta| meta.get("promptId")).and_then(Value::as_str).map(str::to_string)
+                    history_snapshot_agent_ids.insert(agent_handle.id().to_string());
+                    queued_prompt_ids.insert(agent_handle.id().to_string(), snapshot.queue.iter().filter_map(|item| {
+                        item.meta.as_ref().and_then(|meta| meta.prompt_id.clone())
                     }).collect::<Vec<_>>());
                 }
                 if let Some(active_turn_id) = active_turn_id {
-                    active_turn_ids.insert(agent_handle.id(), active_turn_id);
+                    active_turn_ids.insert(agent_handle.id().to_string(), active_turn_id as i64);
                 }
             }
-            for agent_handle in agents.list().into_iter().filter_map(|agent| agents.handle_of(&agent.agent_id)) {
+            for agent_handle in agents.list(None).into_iter().filter_map(|agent| agents.handle_of(&agent.agent_id)) {
                 agent_handle.accessor().get(&I_EVENT_DISPATCHER).flush().await?;
             }
             self.services.append_log_store.flush().await?;
@@ -850,7 +917,7 @@ impl SessionLifecycleService {
         drain_session_metadata_writes().await?;
         if let Some(source_handle) = &source_handle {
             let agents = source_handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
-            for agent in agents.list() {
+            for agent in agents.list(None) {
                 if let Some(handle) = agents.handle_of(&agent.agent_id) {
                     handle.accessor().get(&I_AGENT_FILE_HISTORY_SERVICE).settled().await;
                 }
@@ -901,7 +968,7 @@ impl SessionLifecycleService {
             &target_dir,
             turn_slice.is_some(),
         ).await?;
-        let source_agents = source_meta.as_ref().map(|meta| meta.agents.clone()).unwrap_or_default();
+        let source_agents = source_meta.as_ref().and_then(|meta| meta.agents.clone()).unwrap_or_default();
         let agent_ids = source_agents.keys().cloned().collect::<Vec<_>>();
         let mut retained_agent_ids = agent_ids.clone();
         if let Some(turn_slice) = &turn_slice {
@@ -941,7 +1008,7 @@ impl SessionLifecycleService {
             touch_forked_file_history(FileHistoryRetentionInput {
                 docs: self.services.docs.clone(),
                 workspace_id: self.workspace_id(),
-                session_dir: target_dir.clone(),
+                session_dir: target_dir.clone().into(),
                 session_id: target_id.clone(),
             }).await;
         }
@@ -953,9 +1020,9 @@ impl SessionLifecycleService {
         for agent_id in &retained_agent_ids {
             let source_agent = source_agents.get(agent_id).unwrap();
             agents.insert(agent_id.clone(), AgentMeta {
-                homedir: join(&self.services.bootstrap.home_dir(), &[&agent_scope_of(&session_scope_of(&self.handler_scope(), &target_id), agent_id)]),
-                type_: if agent_id == MAIN_AGENT_ID { "main".to_string() } else { "sub".to_string() },
-                parent_agent_id: (agent_id != MAIN_AGENT_ID).then(|| MAIN_AGENT_ID.to_string()),
+                homedir: Some(join(&self.services.bootstrap.home_dir(), &[&agent_scope_of(&session_scope_of(&self.handler_scope(), &target_id), agent_id)])),
+                type_: Some(if agent_id == MAIN_AGENT_ID { AgentType::Main } else { AgentType::Sub }),
+                parent_agent_id: Some((agent_id != MAIN_AGENT_ID).then(|| MAIN_AGENT_ID.to_string())),
                 forked_from: source_agent.forked_from.clone(),
                 labels: labels_from_agent_meta(source_agent),
                 ..source_agent.clone()
@@ -966,24 +1033,24 @@ impl SessionLifecycleService {
             .unwrap_or_else(|| self.services.workspace_context.cwd());
         let meta = SessionMeta {
             id: target_id.clone(),
-            version: SESSION_META_VERSION,
+            version: Some(SESSION_META_VERSION),
             cwd: Some(host_cwd.clone()),
             created_at: now,
-            updated_at: source_meta.as_ref().map(|meta| to_epoch_ms(&meta.updated_at)).filter(|time| *time != 0).unwrap_or(now),
+            updated_at: source_meta.as_ref().map(|meta| meta.updated_at).filter(|time| *time != 0).unwrap_or(now),
             archived: false,
             archived_at: None,
-            title,
-            title_kind: if opts.title.is_some() { Some("custom".to_string()) } else { source_meta.as_ref().and_then(|meta| meta.title_kind.clone()) },
+            title: Some(title),
+            title_kind: if opts.title.is_some() { Some(SessionTitleKind::Custom) } else { source_meta.as_ref().and_then(|meta| meta.title_kind.clone()) },
             forked_from: Some(source_id.clone()),
-            agents,
+            agents: Some(agents),
             environment_id: source_meta.as_ref().and_then(|meta| meta.environment_id.clone()),
             environment_cwd: source_meta.as_ref().and_then(|meta| meta.environment_cwd.clone()),
             custom: fork_custom_metadata(source_meta.as_ref().and_then(|meta| meta.custom.clone()), opts.metadata.clone()),
             last_prompt: if turn_slice.is_some() { turn_slice.as_ref().and_then(|slice| slice.last_prompt.clone()) } else { source_meta.as_ref().and_then(|meta| meta.last_prompt.clone()) },
-            last_turn_reason: if turn_slice.is_some() { turn_slice.as_ref().and_then(|slice| slice.last_turn_reason.map(|reason| reason.as_str().to_string())) } else { source_meta.as_ref().and_then(|meta| meta.last_turn_reason.clone()) },
+            last_turn_reason: if turn_slice.is_some() { turn_slice.as_ref().and_then(|slice| slice.last_turn_reason.map(Into::into)) } else { source_meta.as_ref().and_then(|meta| meta.last_turn_reason.clone()) },
             ..Default::default()
         };
-        self.services.docs.set(&session_scope_of(&self.handler_scope(), &target_id), "state.json", encode_session_meta(&meta)).await?;
+        self.services.docs.set(&session_scope_of(&self.handler_scope(), &target_id), "state.json", serde_json::to_value(encode_session_meta(&meta))?).await?;
         self.services.index_mirror.record(build_session_summary(SessionSummaryInput {
             id: target_id.clone(),
             workspace_id: self.workspace_id(),
@@ -1026,7 +1093,8 @@ impl SessionLifecycleService {
     }
 
     async fn resolve_source_title(&self, source_id: &str) -> Result<Option<String>, WireAsyncError> {
-        if let Some(live) = self.state.lock().sessions.get(source_id).cloned() {
+        let live = self.state.lock().sessions.get(source_id).cloned();
+        if let Some(live) = live {
             return Ok(live.accessor().get(&I_SESSION_METADATA).read().await?.title);
         }
         Ok(self.services.index.get(source_id).await?.and_then(|summary| summary.title))
@@ -1047,7 +1115,7 @@ impl SessionLifecycleService {
         self.services.append_log_store.rewrite(
             &agent_scope_of(&session_scope_of(&self.handler_scope(), &input.target_session_id), &input.agent_id),
             AGENT_WIRE_RECORD_KEY,
-            &values,
+            values,
             None,
         ).await
     }
@@ -1076,7 +1144,7 @@ impl SessionLifecycleService {
             records.push(record?);
         }
         records.push(Value::Object(forked_record(agent_id)));
-        self.services.append_log_store.rewrite(&scope, AGENT_WIRE_RECORD_KEY, &records, None).await
+        self.services.append_log_store.rewrite(&scope, AGENT_WIRE_RECORD_KEY, records, None).await
     }
 
     async fn read_source_wire_records(&self, source_handle: Option<&Arc<ISessionScopeHandle>>, source_session_id: &str, agent_id: &str) -> Result<Vec<WireRecord>, WireAsyncError> {
@@ -1099,7 +1167,8 @@ impl SessionLifecycleService {
                 records.push(record.clone());
             }
         }
-        if let Some(truncation) = truncation.lock().take() {
+        let truncation = truncation.lock().take();
+        if let Some(truncation) = truncation {
             let values = records.iter().cloned().map(Value::Object).collect::<Vec<_>>();
             repair_wire_journal(&WireJournalRepairServices {
                 append_log: self.services.append_log_store.clone(),
@@ -1335,7 +1404,7 @@ fn session_environment(environment_id: Option<&str>, cwd: Option<&str>) -> Resul
     if environment_id.is_none() || environment_id == Some(LOCAL_ENVIRONMENT_ID) {
         return Ok(cwd.map(|cwd| EnvironmentBinding {
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
-            cwd: cwd.to_string(),
+            cwd: Some(cwd.to_string()),
         }));
     }
     let environment_id = environment_id.unwrap();
@@ -1348,7 +1417,7 @@ fn session_environment(environment_id: Option<&str>, cwd: Option<&str>) -> Resul
     };
     Ok(Some(EnvironmentBinding {
         environment_id: environment_id.to_string(),
-        cwd: cwd.to_string(),
+        cwd: Some(cwd.to_string()),
     }))
 }
 
@@ -1380,10 +1449,7 @@ fn without_goal(value: Option<HashMap<String, Value>>) -> HashMap<String, Value>
 }
 
 fn is_missing_file_error(error: &WireAsyncError) -> bool {
-    error
-        .downcast_ref::<crate::os::interface::host_fs_errors::HostFsError>()
-        .and_then(|error| error.errno())
-        == Some("ENOENT")
+    crate::os::interface::host_fs_errors::is_host_fs_not_found(error)
 }
 
 fn error_code<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a str> {

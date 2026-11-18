@@ -17,6 +17,7 @@ pub use crate::wire::record::PartsTransformer as PublicPartsTransformer;
 pub type StateFold = Arc<dyn Fn(Value, &Event2, &mut dyn FoldContext) -> Option<Value> + Send + Sync>;
 pub type EventApplier = Arc<dyn Fn(&Event2, &mut dyn FoldContext) + Send + Sync>;
 
+#[derive(Clone)]
 pub struct StateBlobCodec {
     pub dehydrate: RecordDehydrator,
     pub rehydrate: Arc<dyn Fn(Value, PartsTransformer) -> BoxFuture<'static, Result<Value, WireAsyncError>> + Send + Sync>,
@@ -37,10 +38,12 @@ pub struct ReplayableOptions {
     pub mutable_replay: Option<bool>,
 }
 
+#[derive(Clone)]
 pub struct UndoableOptions {
     pub on_undo: Option<StateFold>,
 }
 
+#[derive(Clone)]
 pub struct ReplayableStateMeta {
     pub schema: Value,
     pub durable: bool,
@@ -50,6 +53,7 @@ pub struct ReplayableStateMeta {
     pub folds: HashMap<usize, StateFold>,
 }
 
+#[derive(Clone)]
 pub struct ReplayableStateKey {
     pub snapshot_excluded: bool,
     pub initial: Arc<dyn Fn() -> Value + Send + Sync>,
@@ -74,7 +78,7 @@ impl ReplayableStateKey {
         }
     }
 
-    pub fn state_key(self: &Arc<Self>) -> StateKey {
+    pub fn state_key(self: &Arc<Self>) -> StateKey<Value> {
         StateKey {
             name: self.name.clone(),
             initial: self.initial.clone(),
@@ -128,7 +132,7 @@ impl ReplayableStateKey {
                 },
             ));
         }
-        register_event2_class(cls)?;
+        register_event2_class(cls).map_err(|message| StateError::new("internal", message))?;
         self.replayable.folds.insert(address, fold);
         Ok(self)
     }
@@ -196,7 +200,7 @@ pub fn register_undoable_protocol(protocol: UndoableProtocol) -> Result<(), Stat
         &protocol.clear,
         &protocol.undo,
     ] {
-        register_event2_class(cls)?;
+        register_event2_class(cls).map_err(|message| StateError::new("internal", message))?;
     }
     Ok(())
 }
@@ -234,7 +238,7 @@ pub fn expanded_state_folds(key: &ReplayableStateKey) -> Result<HashMap<usize, S
     }
     let custom = undoable.on_undo.is_some();
     let mut folds = meta.folds.clone();
-    let domain_append = folds.get(&Arc::as_ptr(&protocol.append_message) as usize).cloned();
+    let domain_append = folds.get(&(Arc::as_ptr(&protocol.append_message) as usize)).cloned();
     let is_undo_anchor = protocol.is_undo_anchor.clone();
     folds.insert(
         Arc::as_ptr(&protocol.append_message) as usize,
@@ -250,7 +254,7 @@ pub fn expanded_state_folds(key: &ReplayableStateKey) -> Result<HashMap<usize, S
         }),
     );
     for cls in [&protocol.apply_compaction, &protocol.clear] {
-        let domain = folds.get(&Arc::as_ptr(cls) as usize).cloned();
+        let domain = folds.get(&(Arc::as_ptr(cls) as usize)).cloned();
         folds.insert(
             Arc::as_ptr(cls) as usize,
             Arc::new(move |state, event, ctx| {
@@ -312,7 +316,7 @@ pub fn expanded_model_appliers(
     }
     let custom = on_undo.is_some();
     let mut expanded = appliers.clone();
-    let domain_append = expanded.get(&Arc::as_ptr(&protocol.append_message) as usize).cloned();
+    let domain_append = expanded.get(&(Arc::as_ptr(&protocol.append_message) as usize)).cloned();
     let is_undo_anchor = protocol.is_undo_anchor.clone();
     expanded.insert(
         Arc::as_ptr(&protocol.append_message) as usize,
@@ -327,7 +331,7 @@ pub fn expanded_model_appliers(
         }),
     );
     for cls in [&protocol.apply_compaction, &protocol.clear] {
-        let domain = expanded.get(&Arc::as_ptr(cls) as usize).cloned();
+        let domain = expanded.get(&(Arc::as_ptr(cls) as usize)).cloned();
         expanded.insert(
             Arc::as_ptr(cls) as usize,
             Arc::new(move |event, ctx| {
@@ -386,7 +390,7 @@ pub fn expanded_runtime_folds(
         ));
     }
     let mut expanded = folds.clone();
-    let domain_append = expanded.get(&Arc::as_ptr(&protocol.append_message) as usize).cloned();
+    let domain_append = expanded.get(&(Arc::as_ptr(&protocol.append_message) as usize)).cloned();
     let is_undo_anchor = protocol.is_undo_anchor.clone();
     expanded.insert(
         Arc::as_ptr(&protocol.append_message) as usize,
@@ -402,7 +406,7 @@ pub fn expanded_runtime_folds(
         }),
     );
     for cls in [&protocol.apply_compaction, &protocol.clear] {
-        let domain = expanded.get(&Arc::as_ptr(cls) as usize).cloned();
+        let domain = expanded.get(&(Arc::as_ptr(cls) as usize)).cloned();
         expanded.insert(
             Arc::as_ptr(cls) as usize,
             Arc::new(move |state, event, ctx| {

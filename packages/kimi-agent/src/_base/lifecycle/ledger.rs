@@ -149,7 +149,7 @@ impl Ledger {
     {
         self.assert_active("register")
             .unwrap_or_else(|error| panic!("{error}"));
-        let disposer = Arc::new(move |reason| disposer(reason).into_disposer_output()) as Disposer;
+        let disposer = Arc::new(move |reason: TeardownReason<'_>| disposer(reason).into_disposer_output()) as Disposer;
         self.push("disposer", label, disposer, false, None)
     }
 
@@ -160,7 +160,7 @@ impl Ledger {
     {
         self.assert_active("registerFinalizer")
             .unwrap_or_else(|error| panic!("{error}"));
-        let disposer = Arc::new(move |reason| disposer(reason).into_disposer_output()) as Disposer;
+        let disposer = Arc::new(move |reason: TeardownReason<'_>| disposer(reason).into_disposer_output()) as Disposer;
         self.push("disposer", label, disposer, true, None)
     }
 
@@ -202,14 +202,14 @@ impl Ledger {
             EffectResult::Sync(disposers) => self.push(
                 "effect",
                 label,
-                Arc::new(move |reason| run_disposers_reverse(disposers.clone(), reason)),
+                Arc::new(move |reason: TeardownReason<'_>| run_disposers_reverse(disposers.clone(), reason)),
                 false,
                 None,
             ),
             EffectResult::Async(stream) => {
                 let future = async move {
                     let disposers = stream.collect::<Vec<_>>().await;
-                    Arc::new(move |reason| run_disposers_reverse(disposers.clone(), reason)) as Disposer
+                    Arc::new(move |reason: TeardownReason<'_>| run_disposers_reverse(disposers.clone(), reason)) as Disposer
                 }
                 .boxed()
                 .shared();
@@ -242,7 +242,15 @@ impl Ledger {
         let entry = self.push(
             "ledger",
             label,
-            Arc::new(move |reason| teardown_child.teardown(reason)),
+            Arc::new(move |reason: TeardownReason<'_>| {
+                teardown_child.teardown(reason).map(|future| {
+                    async move {
+                        future.await;
+                        Ok(())
+                    }
+                    .boxed()
+                })
+            }),
             false,
             Some(child.clone()),
         );
@@ -406,7 +414,8 @@ fn drain_records(
     reason: TeardownReason<'_>,
 ) -> Option<BoxFuture<'static, ()>> {
     let reason = reason.to_string();
-    drain_records_at(records, records.len(), reason)
+    let len = records.len();
+    drain_records_at(records, len, reason)
 }
 
 fn drain_records_at(
@@ -438,7 +447,8 @@ fn run_disposers_reverse(
     reason: TeardownReason<'_>,
 ) -> DisposerOutput {
     let reason = reason.to_string();
-    run_disposers_at(disposers, disposers.len(), reason)
+    let len = disposers.len();
+    run_disposers_at(disposers, len, reason)
 }
 
 fn run_disposers_at(

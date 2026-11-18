@@ -199,10 +199,10 @@ impl IHostFileSystem for HostFileSystem {
         decode_text_with_errors(
             &bytes,
             &options.encoding.unwrap_or_else(|| "utf-8".to_string()),
-            options.errors.unwrap_or_default(),
+            options.errors.unwrap_or(crate::_base::exec_env::decode_text::TextDecodeErrors::Strict),
             options.preserve_bom.unwrap_or(false),
         )
-        .map_err(|error| to_host_fs_error(error, path, "read"))
+        .map_err(|error| to_host_fs_error(Box::new(error) as WireAsyncError, path, "read"))
     }
 
     async fn write_text(&self, path: &str, data: &str) -> Result<(), WireAsyncError> {
@@ -266,13 +266,13 @@ impl IHostFileSystem for HostFileSystem {
     ) -> HostLineStream {
         let options = options.unwrap_or_default();
         let encoding = options.encoding.unwrap_or_else(|| "utf-8".to_string());
-        let errors = options.errors.unwrap_or_default();
+        let errors = options.errors.unwrap_or(crate::_base::exec_env::decode_text::TextDecodeErrors::Strict);
         if encoding != "utf-8" && encoding != "utf8" {
             let path = path.to_string();
             return Box::pin(futures_util::stream::once(async move {
                 let bytes = std::fs::read(&path).map_err(|error| host_error(error, &path, "read"))?;
                 let text = decode_text_with_errors(&bytes, &encoding, errors, false)
-                    .map_err(|error| to_host_fs_error(error, &path, "read"))?;
+                    .map_err(|error| to_host_fs_error(Box::new(error) as WireAsyncError, &path, "read"))?;
                 Ok(text)
             })
             .flat_map(|result| -> HostLineStream { match result {
@@ -285,8 +285,12 @@ impl IHostFileSystem for HostFileSystem {
             }}));
         }
         let path = path.to_string();
-        let bytes = byte_stream(path);
-        read_utf8_lines(bytes, errors)
+        let source = byte_stream(path).map(|item| {
+            item.map_err(|error| std::io::Error::other(error.to_string()))
+        });
+        let source: crate::_base::exec_env::decode_text::ByteStream = Box::pin(source);
+        let lines = read_utf8_lines(source, errors);
+        Box::pin(lines.map(|line| line.map_err(|error| Box::new(error) as WireAsyncError)))
     }
 
     async fn create_exclusive(&self, path: &str, data: &[u8]) -> Result<bool, WireAsyncError> {

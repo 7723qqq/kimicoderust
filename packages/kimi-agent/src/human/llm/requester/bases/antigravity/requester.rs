@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use parking_lot::Mutex;
 
+use crate::human::llm::message::ContentPart;
 use crate::human::llm::errors::{is_abort_error, to_llm_error_message, to_llm_transport_error_message};
 use crate::human::llm::finish_reason::FinishInfo;
 use crate::human::llm::message::Message;
@@ -30,12 +31,14 @@ fn same_message(a: &Message, b: &Message) -> bool {
     ) {
         return false;
     }
-    let content = |message: &Message| match message {
-        Message::System(message) => &message.content,
-        Message::User(message) => &message.content,
-        Message::Assistant(message) => &message.content,
-        Message::Tool(message) => &message.content,
-    };
+    fn content(message: &Message) -> &Vec<ContentPart> {
+        match message {
+            Message::System(message) => &message.content,
+            Message::User(message) => &message.content,
+            Message::Assistant(message) => &message.content,
+            Message::Tool(message) => &message.content,
+        }
+    }
     let (left, right) = (content(a), content(b));
     if left.len() != right.len()
         || left

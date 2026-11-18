@@ -268,7 +268,7 @@ impl OpenAIProtocolFormat {
                 (sink.on_finish)(normalize_finish_reason(Some(finish_reason)));
             }
             let Some(delta) = choice.and_then(|choice| choice.delta.as_ref()) else {
-                return;
+                return Ok(());
             };
             let delta_value = serde_json::to_value(delta).unwrap();
             let reasoning_details = if options.reasoning_key.is_none() {
@@ -321,7 +321,7 @@ impl ProtocolFormat<OpenAIRawChunk> for OpenAIProtocolFormat {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct BufferedStreamToolCall {
     id: Option<String>,
     arguments: String,
@@ -373,7 +373,7 @@ fn convert_stream_tool_call(
         let initial_arguments = if buffered.arguments.is_empty() {
             function.arguments
         } else {
-            let mut arguments = buffered.arguments;
+            let mut arguments = buffered.arguments.clone();
             arguments.push_str(function.arguments.as_deref().unwrap_or(""));
             Some(arguments)
         };

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
-use crate::_base::di::scope::ScopeSeed;
+use crate::_base::di::instantiation::create_decorator;
+use crate::_base::di::scope::{ScopeSeed, seed_instance};
 use crate::wire::record::WireAsyncError;
 
 #[async_trait]
@@ -15,6 +16,7 @@ pub trait ISessionWorkspaceInfo: Send + Sync {
     fn on_did_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> DisposableRef;
 }
 
-pub fn session_workspace_info_seed(info: Arc<dyn ISessionWorkspaceInfo>) -> Vec<ScopeSeed> {
-    vec![ScopeSeed::new::<ISessionWorkspaceInfo>(info)]
+pub fn session_workspace_info_seed(info: Arc<dyn ISessionWorkspaceInfo>) -> ScopeSeed {
+    let id = create_decorator::<Arc<dyn ISessionWorkspaceInfo>>("sessionWorkspaceInfo");
+    seed_instance(&id, info)
 }

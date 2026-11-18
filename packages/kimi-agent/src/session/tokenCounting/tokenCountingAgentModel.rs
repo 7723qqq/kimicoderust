@@ -62,9 +62,15 @@ impl TokenCountingAgentModel {
         let measured = if from == 0 && measured_end == anchor.length {
             anchor.tokens
         } else {
-            estimate_tokens_for_messages(slice_messages(&context, from, measured_end))
+            estimate_tokens_for_messages(
+                &slice_messages(&context, from, measured_end).iter().map(ContextMessage::estimable).collect::<Vec<_>>(),
+                None,
+            )
         };
-        let estimated = estimate_tokens_for_messages(slice_messages(&context, estimated_start, to));
+        let estimated = estimate_tokens_for_messages(
+            &slice_messages(&context, estimated_start, to).iter().map(ContextMessage::estimable).collect::<Vec<_>>(),
+            None,
+        );
         ContextSize {
             size: measured + estimated,
             measured,
@@ -94,7 +100,7 @@ impl TokenCountingAgentModel {
             .await
     }
 
-    pub fn latest_measured(&self) -> usize {
+    pub fn latest_measured(&self) -> u64 {
         self.state
             .lock()
             .anchors
@@ -105,10 +111,13 @@ impl TokenCountingAgentModel {
             .unwrap_or(0)
     }
 
-    pub fn status_size(&self, strategy: TokenCountingStrategy) -> usize {
+    pub fn status_size(&self, strategy: TokenCountingStrategy) -> u64 {
         match strategy {
             TokenCountingStrategy::Measured => self.latest_measured(),
-            TokenCountingStrategy::Estimated => estimate_tokens_for_messages(&self.context()),
+            TokenCountingStrategy::Estimated => estimate_tokens_for_messages(
+                &self.context().iter().map(ContextMessage::estimable).collect::<Vec<_>>(),
+                None,
+            ),
             _ => self.get(None, None).size.max(self.latest_measured()),
         }
     }
@@ -181,7 +190,7 @@ impl TokenCountingAgentModel {
             .iter()
             .rev()
             .find(|anchor| anchor.length <= context_length)
-            .copied()
+            .cloned()
             .unwrap_or(ZERO_ANCHOR)
     }
 }
@@ -197,8 +206,8 @@ fn register_appliers(
     base.on(
         &TokenCountingMeasured::class(),
         Arc::new(move |event| {
-            let length = normalize_anchor_length(number(event, "length"));
-            let tokens = number(event, "tokens").max(0) as usize;
+            let length = normalize_anchor_length(number(event, "length") as f64);
+            let tokens = number(event, "tokens").max(0) as u64;
             let anchor = TokenAnchor {
                 length,
                 tokens,
@@ -209,7 +218,7 @@ fn register_appliers(
                 .anchors
                 .iter()
                 .filter(|anchor| anchor.length < length)
-                .copied()
+                .cloned()
                 .collect::<Vec<_>>();
             anchors.push(anchor);
             if state.tokens != tokens || !anchors_equal(&state.anchors, &anchors) {
@@ -231,14 +240,14 @@ fn register_appliers(
     base.on(
         &TokenCountingTruncated::class(),
         Arc::new(move |event| {
-            let length = normalize_anchor_length(number(event, "length"));
-            let tokens = number(event, "tokens").max(0) as usize;
+            let length = normalize_anchor_length(number(event, "length") as f64);
+            let tokens = number(event, "tokens").max(0) as u64;
             let mut state = truncated_state.lock();
             let anchors = state
                 .anchors
                 .iter()
                 .filter(|anchor| anchor.length <= length)
-                .copied()
+                .cloned()
                 .collect::<Vec<_>>();
             if state.tokens != tokens || !anchors_equal(&state.anchors, &anchors) {
                 state.anchors = anchors;
@@ -255,8 +264,8 @@ fn register_appliers(
     base.on(
         &TokenCountingRebased::class(),
         Arc::new(move |event| {
-            let length = normalize_anchor_length(number(event, "length"));
-            let tokens = number(event, "tokens").max(0) as usize;
+            let length = normalize_anchor_length(number(event, "length") as f64);
+            let tokens = number(event, "tokens").max(0) as u64;
             let anchors = vec![TokenAnchor {
                 length,
                 tokens,
@@ -282,8 +291,8 @@ fn register_appliers(
     base.on(
         &TokenCountingTurnRecorded::class(),
         Arc::new(move |event| {
-            let length = normalize_anchor_length(number(event, "length"));
-            let tokens = number(event, "tokens").max(0) as usize;
+            let length = normalize_anchor_length(number(event, "length") as f64);
+            let tokens = number(event, "tokens").max(0) as u64;
             let mut state = turn_state.lock();
             if state.anchors.iter().any(|anchor| anchor.length == length) {
                 state.tokens = tokens;
@@ -292,7 +301,7 @@ fn register_appliers(
                     .anchors
                     .iter()
                     .filter(|anchor| anchor.length < length)
-                    .copied()
+                    .cloned()
                     .chain(std::iter::once(TokenAnchor {
                         length,
                         tokens,
@@ -311,12 +320,13 @@ fn register_appliers(
 fn emit_status(
     bridge: &Arc<dyn crate::state::agent_model::AgentModelBridge>,
     agent_id: &str,
-    tokens: usize,
+    tokens: u64,
 ) {
     let bridge = bridge.clone();
     let event: Event2 = AgentStatusUpdated::new(AgentStatusUpdatedPayload {
         agent_id: agent_id.to_string(),
-        context_tokens: Some(tokens as u64),
+        context_tokens: Some(tokens),
+        ..Default::default()
     })
     .into();
     tokio::spawn(async move {
@@ -370,11 +380,11 @@ fn matches_context(input: &[Message], context: &[ContextMessage]) -> bool {
         })
 }
 
-fn token_usage_total(usage: &TokenUsage) -> usize {
+fn token_usage_total(usage: &TokenUsage) -> u64 {
     (usage.input_cache_read
         + usage.input_cache_creation
         + usage.input_other
-        + usage.output) as usize
+        + usage.output)
 }
 
 fn normalize_slice_index(index: isize, length: usize) -> usize {

@@ -581,8 +581,7 @@ async fn preserve_attachment_result(
     throw_if_aborted(options.signal.as_ref())?;
     let result = async {
         let store = options.attachment_store.as_ref().ok_or_else(|| {
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::Unavailable,
+            Box::new(std::io::Error::other(
                 "Session attachment storage is unavailable",
             )) as WireAsyncError
         })?;

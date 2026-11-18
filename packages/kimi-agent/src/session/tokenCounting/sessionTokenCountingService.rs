@@ -18,6 +18,7 @@ use crate::llm_adapter::contract::tokens::{
     estimate_tokens, estimate_tokens_for_message, estimate_tokens_for_messages,
     estimate_tokens_for_tools,
 };
+use crate::human::llm::tokens::EstimableMessage;
 use crate::session::agent_lifecycle::agent_lifecycle::IAgentLifecycleService;
 
 use super::session_token_counting::{ISessionTokenCountingService, TokenCountingRebaseInput};
@@ -89,7 +90,7 @@ impl ISessionTokenCountingService for SessionTokenCountingService {
         });
     }
 
-    fn latest_measured(&self, agent: &AgentContext) -> usize {
+    fn latest_measured(&self, agent: &AgentContext) -> u64 {
         agent_space_of(agent).use_(&TOKEN_COUNTING_AGENT_MODEL_DEFINITION, |model| {
             model.latest_measured()
         })
@@ -125,25 +126,25 @@ impl ISessionTokenCountingService for SessionTokenCountingService {
         &self,
         request: &TokenCountingRequest,
         pricing: Option<&ImageTokenPricing>,
-    ) -> usize {
+    ) -> u64 {
         self.estimate_text(&request.system_prompt)
             + self.estimate_tools(&request.tools)
             + self.estimate_messages(&request.messages, pricing)
     }
 
-    fn estimate_text(&self, text: &str) -> usize {
+    fn estimate_text(&self, text: &str) -> u64 {
         estimate_tokens(text)
     }
 
-    fn estimate_message(&self, message: &Message, pricing: Option<&ImageTokenPricing>) -> usize {
-        estimate_tokens_for_message(message, pricing)
+    fn estimate_message(&self, message: &Message, pricing: Option<&ImageTokenPricing>) -> u64 {
+        estimate_tokens_for_message(&message.into(), pricing)
     }
 
-    fn estimate_messages(&self, messages: &[Message], pricing: Option<&ImageTokenPricing>) -> usize {
-        estimate_tokens_for_messages(messages, pricing)
+    fn estimate_messages(&self, messages: &[Message], pricing: Option<&ImageTokenPricing>) -> u64 {
+        estimate_tokens_for_messages(&messages.iter().map(EstimableMessage::from).collect::<Vec<_>>(), pricing)
     }
 
-    fn estimate_tools(&self, tools: &[Tool]) -> usize {
+    fn estimate_tools(&self, tools: &[Tool]) -> u64 {
         estimate_tokens_for_tools(tools)
     }
 }

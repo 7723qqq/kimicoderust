@@ -38,7 +38,7 @@ impl SessionProcessRunner {
         let env = build_exec_env(options.env);
         let process = self
             .host_process
-            .spawn(command, &args[1..], cwd.as_deref(), env.as_ref())
+            .spawn(command, &args[1..], Some(&cwd), env.as_ref())
             .await?;
         Ok(Arc::new(HostProcessAdapter { process }))
     }
@@ -78,11 +78,11 @@ impl IProcess for HostProcessAdapter {
     }
 
     async fn stdin_write(&self, data: &[u8]) -> Result<(), WireAsyncError> {
-        self.process.stdin_write(data).await
+        self.process.write_stdin(data).await
     }
 
     async fn stdin_end(&self) -> Result<(), WireAsyncError> {
-        self.process.stdin_end().await
+        self.process.close_stdin().await
     }
 
     async fn wait(&self) -> Result<i32, WireAsyncError> {
@@ -94,7 +94,8 @@ impl IProcess for HostProcessAdapter {
     }
 
     async fn dispose(&self) -> Result<(), WireAsyncError> {
-        self.process.dispose().await
+        self.process.dispose().await;
+        Ok(())
     }
 }
 

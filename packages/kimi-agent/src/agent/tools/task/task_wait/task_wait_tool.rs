@@ -41,6 +41,12 @@ pub struct WaitContext<'a> {
     pub caller_agent_id: &'a str,
 
     pub display_name: &'a str,
+
+    /// Streaming progress sink: `Some` when the host observes updates.
+    pub on_update: Option<&'a dyn Fn(&crate::tools::ToolUpdate<'_>)>,
+
+    /// Telemetry sink (`HostCallbacks::telemetry`), for `wait_for_completed`.
+    pub telemetry: Option<&'a dyn Fn(Value)>,
 }
 
 impl WaitContext<'_> {
@@ -50,6 +56,32 @@ impl WaitContext<'_> {
 
     fn is_subagent(&self) -> bool {
         self.caller_agent_id != "main"
+    }
+
+    fn track(&self, event: Value) {
+        if let Some(telemetry) = self.telemetry {
+            telemetry(event);
+        }
+    }
+
+    fn emit_progress(&self, timeout_s: u64, elapsed_ms: u128, running: usize) {
+        let Some(on_update) = self.on_update else {
+            return;
+        };
+        let text = format!(
+            "Waiting {} / {} · {running} background task{} still running",
+            format_wait_seconds((elapsed_ms / 1000) as u64),
+            format_wait_seconds(timeout_s),
+            if running == 1 { "" } else { "s" },
+        );
+        on_update(&crate::tools::ToolUpdate {
+            kind: "status",
+            text: &text,
+            percent: None,
+            custom_kind: None,
+            custom_data: None,
+            replace: true,
+        });
     }
 
     async fn with_repeat_warning(
@@ -273,6 +305,11 @@ async fn wait_with_runner(
         .filter_map(|entry| entry.get("taskId").and_then(|v| v.as_str()))
         .map(str::to_string)
         .collect();
+    wait.emit_progress(
+        timeout_ms / 1000,
+        std::time::Duration::ZERO.as_millis(),
+        running_at_start.len(),
+    );
     let result = match task_id {
         Some(_) => {
             runner
@@ -283,6 +320,44 @@ async fn wait_with_runner(
     };
     let waited = waited_ms(started);
     let still_running = running_wires(runner);
+    let outcome = match &result {
+        TaskWaitResult::Interrupted => "interrupted",
+        TaskWaitResult::NotFound => "task_not_found",
+        TaskWaitResult::Completed(_) => "completed",
+        TaskWaitResult::TimedOut(_) => "timed_out",
+    };
+    let extra_count = match &result {
+        TaskWaitResult::Completed(entry) => {
+            let finished_id = entry
+                .get("taskId")
+                .or_else(|| entry.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            running_at_start
+                .iter()
+                .filter(|id| id.as_str() != finished_id)
+                .filter_map(|id| runner.entry(id))
+                .filter(|entry| {
+                    entry
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .is_some_and(is_terminal_status)
+                })
+                .count()
+        }
+        _ => 0,
+    };
+    wait.track(serde_json::json!({
+        "event": "wait_for_completed",
+        "outcome": outcome,
+        "timeout_ms": timeout_ms,
+        "waited_ms": waited,
+        "has_task_id": task_id.is_some(),
+        "extra_completed_count": extra_count,
+    }));
+    if let TaskWaitResult::Completed(entry) = &result {
+        mark_delivered_via_wait(runner, entry, &running_at_start);
+    }
     let rendered = match result {
         TaskWaitResult::Interrupted => {
             render_wait_interrupted(task_id, timeout_ms, waited, &still_running)
@@ -330,6 +405,36 @@ async fn wait_with_runner(
         ),
     };
     (rendered, true)
+}
+
+/// v2 `markTasksDeliveredViaWait` (taskWaitTool.ts:241-243): a task the wait
+/// reported is not announced again by the automatic completion notification
+/// (`agent/task/taskService.ts:684-694`). The runner's pending-notification
+/// queue is the delivery path, so drop those entries.
+fn mark_delivered_via_wait(
+    runner: &crate::storage::TaskRunner,
+    entry: &Value,
+    running_at_start: &[String],
+) {
+    let finished_id = entry
+        .get("taskId")
+        .or_else(|| entry.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut delivered: Vec<(String, String)> = vec![(finished_id.clone(), "waited".into())];
+    for id in running_at_start {
+        if id.as_str() == finished_id {
+            continue;
+        }
+        if let Some(wire) = runner.entry(id)
+            && let Some(status) = wire.get("status").and_then(|s| s.as_str())
+            && is_terminal_status(status)
+        {
+            delivered.push((id.clone(), status.to_string()));
+        }
+    }
+    runner.mark_notifications_delivered_via_wait(&delivered);
 }
 
 fn running_wires(runner: &crate::storage::TaskRunner) -> Vec<Value> {
@@ -576,19 +681,41 @@ pub fn wait_for_flag(environment: Option<bool>, config: Option<bool>) -> bool {
     environment.or(config).unwrap_or(true)
 }
 
+/// v2's `FlagService.explain` precedence (`app/flag/flagService.ts:82-118`):
+/// the flag's own env var when it parses as a boolean, else the
+/// `[experimental] wait_for` config entry, else the
+/// `KIMI_CODE_EXPERIMENTAL_FLAG` master switch, else the registered default.
+/// An unparsable env value falls through instead of forcing the flag on.
 pub fn wait_for_enabled() -> bool {
-    let environment = std::env::var_os("KIMI_CODE_EXPERIMENTAL_WAIT_FOR")
-        .map(|_| crate::env::env_switch_default_on("KIMI_CODE_EXPERIMENTAL_WAIT_FOR"));
+    let environment = crate::_base::utils::env::parse_boolean_env(std::env::var(
+        "KIMI_CODE_EXPERIMENTAL_WAIT_FOR",
+    )
+    .ok()
+    .as_deref());
+    if let Some(environment) = environment {
+        return environment;
+    }
     let config = crate::config::KimiConfig::discover()
         .ok()
         .and_then(|(config, _)| match config.experimental.get("wait_for") {
             Some(crate::config::ExperimentalValue::Bool(value)) => Some(*value),
             Some(crate::config::ExperimentalValue::String(value)) => {
-                crate::env::parse_bool_env(Some(value)).or(Some(true))
+                crate::env::parse_bool_env(Some(value))
             }
             None => None,
         });
-    wait_for_flag(environment, config)
+    if let Some(config) = config {
+        return config;
+    }
+    if crate::_base::utils::env::parse_boolean_env(
+        std::env::var("KIMI_CODE_EXPERIMENTAL_FLAG")
+            .ok()
+            .as_deref(),
+    ) == Some(true)
+    {
+        return true;
+    }
+    true
 }
 
 pub fn wait_for_tool_def() -> crate::turn_loop::types::ToolInfo {

@@ -19,9 +19,9 @@ impl DebugLedgerService {
             path: path.clone(),
             label: scope_container_label(container),
             units: join_units(container),
-            ledger: container.ledger.entries(),
+            ledger: container.ledger().entries(),
             children: container
-                .children
+                .children()
                 .iter()
                 .map(|child| self.node(child, format!("{path}/{}", scope_container_label(child))))
                 .collect(),
@@ -37,7 +37,7 @@ impl IDebugLedgerService for DebugLedgerService {
 
 fn join_units(container: &InstantiationService) -> Vec<DebugUnit> {
     let states = container
-        .cascade
+        .cascade()
         .units_snapshot()
         .into_iter()
         .map(|unit| (unit.token.clone(), unit))
@@ -45,15 +45,15 @@ fn join_units(container: &InstantiationService) -> Vec<DebugUnit> {
     container
         .services_snapshot()
         .into_iter()
-        .map(|registration| {
-            let unit = states.get(&registration.token);
+        .map(|(token, uid)| {
+            let unit = states.get(&token);
             DebugUnit {
-                token: registration.token,
-                uid: registration.uid,
-                state: unit.and_then(|unit| unit.state),
+                token,
+                uid,
+                state: unit.map(|unit| unit.state),
                 error: unit.and_then(|unit| unit.error.clone()),
-                ever_active: unit.and_then(|unit| unit.ever_active),
-                in_flight: unit.and_then(|unit| unit.in_flight),
+                ever_active: unit.map(|unit| unit.ever_active),
+                in_flight: unit.map(|unit| unit.in_flight),
             }
         })
         .collect()

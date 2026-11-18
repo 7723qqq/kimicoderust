@@ -314,7 +314,7 @@ pub struct ContextMessageTiming {
     pub llm_stream_duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextMessage {
     pub role: Role,

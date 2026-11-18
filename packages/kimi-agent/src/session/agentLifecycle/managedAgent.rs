@@ -31,13 +31,10 @@ impl ManagedAgent {
     }
 
     pub fn kill_space(&self) {
-        if let Some(space) = self
-            .context
-            .space
-            .as_any()
-            .downcast_ref::<AgentSpaceImpl>()
-        {
-            space.kill();
+        if let Some(space) = self.context.space.clone() {
+            tokio::spawn(async move {
+                space.kill().await;
+            });
         }
     }
 }

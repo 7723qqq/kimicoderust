@@ -163,7 +163,7 @@ impl AcpBackend {
             id: format!("acp-{}", uuid::Uuid::new_v4()),
             result,
             dispose: Arc::new(move || {
-                dispose_controller.abort(abort_error("Aborted"));
+                dispose_controller.abort(Some(Arc::new(abort_error()) as crate::_base::errors::errors::SharedError));
                 dispose_signal.remove_event_listener("abort", abort_from_signal.clone());
                 let process = dispose_process.clone();
                 Box::pin(async move {

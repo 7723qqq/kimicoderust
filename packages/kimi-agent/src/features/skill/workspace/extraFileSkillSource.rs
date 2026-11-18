@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
-use crate::app::config::config_service::ConfigService;
+use crate::app::config::config::IConfigService;
 
 use super::super::catalog::configSection::EXTRA_SKILL_DIRS_SECTION;
 use super::super::catalog::skillDiscovery::{ISkillDiscovery, SkillDiscoveryResult};
@@ -24,7 +24,7 @@ struct ExtraWatchState {
 
 pub struct ExtraFileSkillSource {
     discovery: Arc<dyn ISkillDiscovery>,
-    config: Arc<ConfigService>,
+    config: Arc<dyn IConfigService>,
     workspace_cwd: String,
     os_home_dir: String,
     on_did_change_emitter: Arc<Emitter<()>>,
@@ -35,17 +35,17 @@ pub struct ExtraFileSkillSource {
 impl ExtraFileSkillSource {
     pub fn new(
         discovery: Arc<dyn ISkillDiscovery>,
-        config: Arc<ConfigService>,
+        config: Arc<dyn IConfigService>,
         workspace_cwd: String,
         os_home_dir: String,
     ) -> Arc<Self> {
         let on_did_change_emitter = Arc::new(Emitter::new());
         let emitter = on_did_change_emitter.clone();
-        let config_subscription = config.on_did_section_change(move |event| {
+        let config_subscription = config.on_did_section_change(Box::new(move |event| {
             if event.domain == EXTRA_SKILL_DIRS_SECTION {
                 emitter.fire(());
             }
-        });
+        }));
         Arc::new(Self {
             discovery,
             config,

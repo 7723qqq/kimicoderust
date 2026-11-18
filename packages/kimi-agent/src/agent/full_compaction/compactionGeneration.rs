@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -92,7 +93,7 @@ pub async fn generate_compaction_summary(
                     source: Some(AgentLLMRequestSource::Operation {
                         turn_id: deps.origin_turn_id,
                         request_kind: Some("full_compaction".to_string()),
-                        log_fields: Some(HashMap::from([(
+                        log_fields: Some(IndexMap::from([(
                             "droppedCount".to_string(),
                             serde_json::json!(dropped_count),
                         )])),

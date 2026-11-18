@@ -1,6 +1,8 @@
 use std::sync::LazyLock;
 
-use crate::app::flag::flag_registry::{FlagDefinitionInput, FlagSurface};
+use crate::app::flag::flag_registry::{
+    FlagDefinitionInput, FlagSurface, register_flag_definition,
+};
 
 pub const WAIT_FOR_FLAG_ID: &str = "wait_for";
 pub const WAIT_FOR_FLAG_ENV: &str = "KIMI_CODE_EXPERIMENTAL_WAIT_FOR";
@@ -15,6 +17,11 @@ pub static WAIT_FOR_FLAG: LazyLock<FlagDefinitionInput> = LazyLock::new(|| FlagD
     is_exposed: None,
 });
 
+static REGISTRATION: LazyLock<()> = LazyLock::new(|| {
+    register_flag_definition(WAIT_FOR_FLAG.clone());
+});
+
 pub fn wait_for_flag() -> FlagDefinitionInput {
+    LazyLock::force(&REGISTRATION);
     WAIT_FOR_FLAG.clone()
 }

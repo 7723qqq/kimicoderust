@@ -227,7 +227,7 @@ impl AgentFullCompactionService {
         run_gate: Arc<dyn ISessionRunGate>,
         associative_memory: Arc<AssociativeMemoryService>,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|this| {
+        Arc::new_cyclic(|this: &Weak<Self>| {
             let registrations = DisposableStore::new();
             for key in [
                 full_compaction_key(),
@@ -724,11 +724,11 @@ impl AgentFullCompactionService {
     fn install_abort_listener(&self, active: &ActiveCompaction) {
         let signal = active.task.abort_controller.signal();
         let this = self.this.clone();
-        let active = active.clone();
+        let active_for_task = active.clone();
         let listener = tokio::spawn(async move {
             let _ = abortable(pending::<()>(), signal).await;
             if let Some(this) = this.upgrade() {
-                this.cancel_active(&active);
+                this.cancel_active(&active_for_task);
             }
         });
         *active.abort_listener.lock() = Some(listener);
@@ -982,7 +982,21 @@ impl AgentFullCompactionService {
                         Err(error)
                     } else {
                         self.dispatch(AgentErrorEvent::new(AgentErrorEventPayload {
-                            error: kimi_core::primitives::errors::to_kimi_error_payload(error.as_ref()),
+                            error: crate::_base::errors::serialize::to_kimi_error_payload(
+                                &error
+                                    .downcast_ref::<crate::_base::errors::errors::Error2>()
+                                    .map(|coded| {
+                                        crate::_base::errors::serialize::UnknownError::Error(
+                                            Arc::new(coded.clone())
+                                                as crate::_base::errors::errors::SharedError,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| {
+                                        crate::_base::errors::serialize::UnknownError::String(
+                                            error.to_string(),
+                                        )
+                                    }),
+                            ),
                             agent_id: self.agent.agent_id(),
                         }));
                         Err(error)

@@ -23,7 +23,7 @@ pub fn truncate_text_to_tokens(text: &str, max_tokens: i64) -> String {
         } else {
             non_ascii_count += 1;
         }
-        if ascii_count.div_ceil(4) + non_ascii_count > max_tokens {
+        if (ascii_count + 3) / 4 + non_ascii_count > max_tokens {
             break;
         }
         end = index + character.len_utf8();
@@ -44,7 +44,7 @@ pub fn truncate_text_to_tokens_from_end(text: &str, max_tokens: i64) -> String {
         } else {
             non_ascii_count += 1;
         }
-        if ascii_count.div_ceil(4) + non_ascii_count > max_tokens {
+        if (ascii_count + 3) / 4 + non_ascii_count > max_tokens {
             break;
         }
         start = index;

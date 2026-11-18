@@ -3,20 +3,30 @@ use serde_json::Value;
 use super::task_stop::task_stop_input_schema;
 use crate::callbacks::HostCallbacks;
 use crate::rpc::types::StateWriteRequest;
+use crate::storage::TaskRunner;
 use crate::tool::output_pointer::{OutputUnit, output_size_line};
-use crate::tools::task_tools::{map_state_error, parse_task_id, truncated_line};
+use crate::tools::task_tools::{
+    is_terminal_status, map_state_error, parse_task_id, truncated_line,
+};
 use crate::tools::{err_result, ok_result};
 use crate::turn_loop::types::ExecutableToolResult;
 use crate::turn_loop::wall_time;
 
 pub async fn execute_task_stop(
     callbacks: &dyn HostCallbacks,
+    runner: Option<&TaskRunner>,
     args: &Value,
 ) -> ExecutableToolResult {
     let task_id = match parse_task_id(args, "TaskStop") {
         Ok(task_id) => task_id,
         Err(message) => return err_result(message),
     };
+
+    if let Some(runner) = runner
+        && let Some(info) = runner.entry(&task_id)
+    {
+        return stop_runner_task(runner, &info, &task_id, args).await;
+    }
 
     let reason = match args.get("reason").and_then(|r| r.as_str()) {
         Some(reason) => {
@@ -48,6 +58,49 @@ pub async fn execute_task_stop(
     match callbacks.state_write(request).await {
         Ok(response) => render_task_stop(&response.value, &task_id, &reason),
         Err(error) => map_state_error(error, Some(&task_id)),
+    }
+}
+
+async fn stop_runner_task(
+    runner: &TaskRunner,
+    info: &Value,
+    task_id: &str,
+    args: &Value,
+) -> ExecutableToolResult {
+    let requested_reason = args
+        .get("reason")
+        .and_then(|r| r.as_str())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string);
+
+    if let Some(status) = info.get("status").and_then(Value::as_str)
+        && is_terminal_status(status)
+    {
+        let already_reason = info
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("Task already in terminal state")
+            .to_string();
+        let lines = vec![
+            format!("task_id: {task_id}"),
+            format!("status: {status}"),
+            format!("reason: {already_reason}"),
+        ];
+        let body = lines.join("\n");
+        let content = match task_wall_time_ms(info) {
+            Some(duration_ms) => format!("{}\n{body}", wall_time::wall_time_header(duration_ms)),
+            None => body,
+        };
+        return ok_result(content);
+    }
+
+    let reason = requested_reason.unwrap_or_else(|| "Stopped by TaskStop".to_string());
+    match runner.stop(task_id, Some(&reason)).await {
+        Ok(outcome) => render_task_stop(&outcome.wire, task_id, &reason),
+        Err(message) => err_result(message),
     }
 }
 
@@ -180,7 +233,7 @@ mod tests {
             })),
         );
         let result =
-            execute_task_stop(&callbacks, &serde_json::json!({ "task_id": "task-1" })).await;
+            execute_task_stop(&callbacks, None, &serde_json::json!({ "task_id": "task-1" })).await;
         assert!(!result.is_error);
         assert_eq!(
             result.content,
@@ -281,6 +334,7 @@ mod tests {
         );
         let result = execute_task_stop(
             &callbacks,
+            None,
             &serde_json::json!({ "task_id": "task-1", "reason": "  user asked  " }),
         )
         .await;
@@ -299,7 +353,7 @@ mod tests {
             Err("State write error: [-32002] task not found: task-9".into()),
         );
         let result =
-            execute_task_stop(&callbacks, &serde_json::json!({ "task_id": "task-9" })).await;
+            execute_task_stop(&callbacks, None, &serde_json::json!({ "task_id": "task-9" })).await;
         assert!(result.is_error);
         assert_eq!(result.content, "Task not found: task-9");
     }
@@ -309,7 +363,7 @@ mod tests {
         let (callbacks, read_received, write_received) =
             scripted(read_ok(Value::Null), write_ok(Value::Null));
         for bad in [serde_json::json!({}), serde_json::json!({ "task_id": 42 })] {
-            let result = execute_task_stop(&callbacks, &bad).await;
+            let result = execute_task_stop(&callbacks, None, &bad).await;
             assert!(result.is_error, "args: {bad}");
             assert!(result.content.contains("Invalid TaskStop arguments"));
         }
@@ -324,7 +378,7 @@ mod tests {
             Err("State write error: [-32603] host does not support state bridge".into()),
         );
         let result =
-            execute_task_stop(&callbacks, &serde_json::json!({ "task_id": "task-1" })).await;
+            execute_task_stop(&callbacks, None, &serde_json::json!({ "task_id": "task-1" })).await;
         assert!(result.is_error);
         assert_eq!(result.content, STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE);
     }
@@ -339,5 +393,97 @@ mod tests {
             "Stopped by TaskStop"
         );
         assert!(def.description.contains("Stop a running background task"));
+    }
+}
+
+#[cfg(test)]
+mod runner_path_tests {
+    use super::*;
+    use crate::storage::task_runner::TaskSpawnMeta;
+    use crate::storage::{TaskOutcome, TaskRunner};
+    use crate::tools::task_tools::tests::{read_ok, scripted, write_ok};
+
+    #[tokio::test]
+    async fn stop_runner_task_cancels_a_live_task_and_renders_killed() {
+        let runner = std::sync::Arc::new(TaskRunner::new(None));
+        runner
+            .spawn_task_with_meta(
+                TaskSpawnMeta {
+                    session_id: None,
+                    kind: "bash",
+                    subagent_type: None,
+                    agent_id: None,
+                    timeout_ms: None,
+                },
+                "task-live".into(),
+                "long build".into(),
+                std::future::pending::<TaskOutcome>(),
+            )
+            .unwrap();
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+
+        let result = execute_task_stop(
+            &callbacks,
+            Some(runner.as_ref()),
+            &serde_json::json!({ "task_id": "task-live" }),
+        )
+        .await;
+        assert!(!result.is_error, "content: {}", result.content);
+        assert!(result.content.contains("task_id: task-live"));
+        assert!(result.content.contains("status: killed"));
+        assert!(result.content.contains("reason: Stopped by TaskStop"));
+        assert_eq!(
+            runner.entry("task-live").unwrap()["status"].as_str(),
+            Some("killed"),
+            "the live task must be settled as killed by the stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_runner_task_already_terminal_returns_state_without_stopping() {
+        let runner = std::sync::Arc::new(TaskRunner::new(None));
+        runner
+            .spawn_task_with_meta(
+                TaskSpawnMeta {
+                    session_id: None,
+                    kind: "bash",
+                    subagent_type: None,
+                    agent_id: None,
+                    timeout_ms: None,
+                },
+                "task-done".into(),
+                "quick".into(),
+                std::future::ready(TaskOutcome::Completed("done".into())),
+            )
+            .unwrap();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match runner.entry("task-done").map(|wire| wire["status"].as_str() == Some("completed")) {
+                    Some(true) => break,
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await;
+        assert!(settled.is_ok(), "task did not settle in time");
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+
+        let result = execute_task_stop(
+            &callbacks,
+            Some(runner.as_ref()),
+            &serde_json::json!({ "task_id": "task-done", "reason": "  user asked  " }),
+        )
+        .await;
+        assert!(!result.is_error, "content: {}", result.content);
+        assert!(
+            result.content.contains("status: completed"),
+            "content: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("killed"),
+            "an already-terminal task must not be re-stopped: {}",
+            result.content
+        );
     }
 }

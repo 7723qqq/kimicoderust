@@ -12,7 +12,7 @@ use crate::_base::di::collection::CollectionView;
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::errors::unexpected_error::on_unexpected_error;
 use crate::_base::log::log::ILogService;
-use crate::agent::agent_context::agent_space::AgentSpaceImpl;
+use crate::agent::agent_context::agent_space::{AgentSpaceHost, AgentSpaceImpl};
 use crate::agent::blob::agent_blob_service::IAgentBlobService;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
 use crate::agent::state::agent_state::IAgentStateService;
@@ -34,7 +34,7 @@ use super::event_dispatcher::{
     IEventDispatcher, RestorePhase,
 };
 use super::state::{
-    ReplayableStateKey, expanded_model_appliers, expanded_runtime_folds,
+    ReplayableStateKey, StateFold, expanded_model_appliers, expanded_runtime_folds,
 };
 use super::state_contribution::{
     EventStateContributionRecord, FoldedEventStateRegistry, fold_event_state_contributions,
@@ -120,12 +120,13 @@ struct PreparedFold {
     next: Value,
 }
 
-type ParticipantApplier = Arc<dyn Fn(Value, &Event2, &mut FoldContextImpl) -> Option<Value> + Send + Sync>;
+type ParticipantApplier = StateFold;
 
 #[derive(Clone)]
 struct ParticipantAttachment {
     id: String,
-    appliers: HashMap<String, ParticipantApplier>,
+    appliers: HashMap<usize, ParticipantApplier>,
+    event_classes: Vec<Arc<Event2Class>>,
     meta: Arc<Mutex<StateMeta>>,
     undoable: bool,
     initial: Value,
@@ -236,7 +237,7 @@ struct EventDispatcherServiceInner {
     blob_service: Arc<dyn IAgentBlobService>,
     agent_state: Arc<dyn IAgentStateService>,
     logger: Arc<dyn ILogService>,
-    space_host: Mutex<AgentSpaceHost>,
+    space_host: Mutex<Arc<dyn AgentSpaceHost>>,
     hooks: EventDispatcherHooks,
     state: Arc<Mutex<DispatcherState>>,
 }
@@ -247,8 +248,7 @@ pub struct EventDispatcherService {
     _registrations: Arc<Mutex<Vec<DisposableRef>>>,
 }
 
-#[derive(Clone)]
-struct AgentSpaceHost {
+struct SpaceHostAdapter {
     is_active_model_definition: Arc<dyn Fn(&Arc<AgentModelDefinition>) -> bool + Send + Sync>,
     register_model: Arc<dyn Fn(&Arc<AgentModelDefinition>, &AgentModel) + Send + Sync>,
     dispatch_model_event: Arc<dyn Fn(Event2) -> BoxFuture<'static, Result<(), WireAsyncError>> + Send + Sync>,
@@ -256,7 +256,32 @@ struct AgentSpaceHost {
         Arc<dyn Fn(&Arc<crate::state::state::ReplayableStateKey>) -> Value + Send + Sync>,
 }
 
+impl AgentSpaceHost for SpaceHostAdapter {
+    fn is_active_model_definition(&self, definition: &AgentModelDefinition) -> bool {
+        (self.is_active_model_definition)(&Arc::new(definition.clone()))
+    }
+
+    fn register_model(&self, definition: &AgentModelDefinition, model: &AgentModel) {
+        (self.register_model)(&Arc::new(definition.clone()), model)
+    }
+
+    fn dispatch_model_event(
+        &self,
+        event: Event2,
+    ) -> crate::rpc::types::BoxFuture<'static, Result<(), WireAsyncError>> {
+        (self.dispatch_model_event)(event)
+    }
+
+    fn read_legacy_state(&self, key: &Arc<ReplayableStateKey>) -> Value {
+        (self.read_legacy_state)(key)
+    }
+}
+
 impl EventDispatcherService {
+    fn from_inner(inner: Arc<EventDispatcherServiceInner>) -> Self {
+        Self { inner, _registrations: Arc::new(Mutex::new(Vec::new())) }
+    }
+
     pub fn new(
         wire: Arc<dyn IWireService>,
         event_bus: Arc<dyn IEventBus>,
@@ -267,8 +292,10 @@ impl EventDispatcherService {
         contribution_view: CollectionView<EventStateContributionRecord>,
         model_view: CollectionView<Arc<AgentModelDefinition>>,
     ) -> Self {
-        let folded = fold_event_state_contributions(&contribution_view.items, &agent_state.replayable_keys());
-        let active_model_defs = model_view.items.iter().map(|definition| (definition.id.clone(), definition.clone())).collect();
+        let contribution_items = contribution_view.items();
+        let model_items = model_view.items();
+        let folded = fold_event_state_contributions(&contribution_items, &agent_state.replayable_keys());
+        let active_model_defs = model_items.iter().map(|definition| (definition.id.clone(), definition.clone())).collect();
         let this = Self {
             inner: Arc::new(EventDispatcherServiceInner {
                 wire,
@@ -277,12 +304,12 @@ impl EventDispatcherService {
                 blob_service,
                 agent_state,
                 logger,
-                space_host: Mutex::new(AgentSpaceHost {
+                space_host: Mutex::new(Arc::new(SpaceHostAdapter {
                     is_active_model_definition: Arc::new(|_| true),
                     register_model: Arc::new(|_, _| {}),
-                    dispatch_model_event: Arc::new(|event| async move { Ok(()) }.boxed()),
-                    read_legacy_state: Arc::new(|key| key.initial()),
-                }),
+                    dispatch_model_event: Arc::new(|_event| async move { Ok(()) }.boxed()),
+                    read_legacy_state: Arc::new(|_key| Value::Null),
+                })),
                 hooks: EventDispatcherHooks {
                     on_did_restore: OrderedHookSlot::new(),
                 },
@@ -316,9 +343,9 @@ impl EventDispatcherService {
             _registrations: Arc::new(Mutex::new(Vec::new())),
         };
         *this.inner.space_host.lock() = this.build_space_host();
-        this.register_contribution_view(contribution_view);
-        this.register_model_view(model_view);
-        this.refold_models(model_view.items.clone());
+        this.register_contribution_view(contribution_view, contribution_items);
+        this.register_model_view(model_view, model_items.clone());
+        this.refold_models(model_items);
         if let Some(space) = this.space() {
             space.attach_host(this.inner.space_host.lock().clone());
         }
@@ -326,9 +353,9 @@ impl EventDispatcherService {
         this
     }
 
-    fn build_space_host(&self) -> AgentSpaceHost {
+    fn build_space_host(&self) -> Arc<dyn AgentSpaceHost> {
         let weak = Arc::downgrade(&self.inner);
-        AgentSpaceHost {
+        Arc::new(SpaceHostAdapter {
             is_active_model_definition: {
                 let weak = weak.clone();
                 Arc::new(move |definition| {
@@ -346,7 +373,7 @@ impl EventDispatcherService {
                 let weak = weak.clone();
                 Arc::new(move |definition, model| {
                     if let Some(inner) = weak.upgrade() {
-                        Self { inner: weak_inner(&inner) }.register_model(definition, model);
+                        Self::from_inner(weak_inner(&inner)).register_model(definition, model);
                     }
                 })
             },
@@ -356,7 +383,7 @@ impl EventDispatcherService {
                     let weak = weak.clone();
                     async move {
                         if let Some(inner) = weak.upgrade() {
-                            return Self { inner: weak_inner(&inner) }.dispatch(event).await;
+                            return Self::from_inner(weak_inner(&inner)).dispatch(event).await;
                         }
                         Ok(())
                     }
@@ -367,20 +394,27 @@ impl EventDispatcherService {
                 let agent_state = self.inner.agent_state.clone();
                 Arc::new(move |key| agent_state.get(&key.state_key()))
             },
-        }
+        })
     }
 
-    fn register_contribution_view(&self, view: CollectionView<EventStateContributionRecord>) {
+    fn register_contribution_view(
+        &self,
+        view: CollectionView<EventStateContributionRecord>,
+        initial_items: Vec<EventStateContributionRecord>,
+    ) {
+        let _ = initial_items;
         let weak = Arc::downgrade(&self.inner);
-        self._registrations.lock().push(view.on_did_change(Arc::new(move || {
+        let view_ref = view.clone();
+        self._registrations.lock().push(Arc::new(view.on_did_change_event.subscribe(move |_change| {
             if let Some(inner) = weak.upgrade() {
                 inner.state.lock().folded = fold_event_state_contributions(
-                    &view.items,
+                    &view_ref.items(),
                     &inner.agent_state.replayable_keys(),
                 );
             }
         })));
         let weak = Arc::downgrade(&self.inner);
+        let view_ref = view.clone();
         self._registrations.lock().push(self.inner.agent_state.on_did_contribute_replayable(Arc::new(move |key| {
             if let Some(inner) = weak.upgrade() {
                 let phase = inner.state.lock().restore_phase;
@@ -392,19 +426,20 @@ impl EventDispatcherService {
                     );
                 }
                 inner.state.lock().folded = fold_event_state_contributions(
-                    &view.items,
+                    &view_ref.items(),
                     &inner.agent_state.replayable_keys(),
                 );
             }
             Ok(())
         })));
         let weak = Arc::downgrade(&self.inner);
+        let view_ref = view.clone();
         self._registrations.lock().push(self.inner.agent_state.on_did_withdraw_replayable(Arc::new(move |key| {
             if let Some(inner) = weak.upgrade() {
                 let address = Arc::as_ptr(key) as usize;
                 inner.state.lock().metas.remove(&address);
                 inner.state.lock().folded = fold_event_state_contributions(
-                    &view.items,
+                    &view_ref.items(),
                     &inner.agent_state.replayable_keys(),
                 );
             }
@@ -412,16 +447,22 @@ impl EventDispatcherService {
         })));
     }
 
-    fn register_model_view(&self, view: CollectionView<Arc<AgentModelDefinition>>) {
+    fn register_model_view(
+        &self,
+        view: CollectionView<Arc<AgentModelDefinition>>,
+        initial_items: Vec<Arc<AgentModelDefinition>>,
+    ) {
+        let _ = initial_items;
         let weak = Arc::downgrade(&self.inner);
-        self._registrations.lock().push(view.on_did_change(Arc::new(move |change| {
+        let view_ref = view.clone();
+        let subscription = view.on_did_change_event.subscribe(move |change| {
             if let Some(inner) = weak.upgrade() {
                 for definition in &change.removed {
                     inner.state.lock().withdrawn_model_ids.insert(definition.id.clone());
                     let address = Arc::as_ptr(definition) as usize;
                     if let Some(attachment) = inner.state.lock().model_attachments.remove(&address) {
-                        Self { inner: weak_inner(&inner) }.detach_participant(&attachment);
-                        if let Some(space) = (Self { inner: weak_inner(&inner) }).space() {
+                        Self::from_inner(weak_inner(&inner)).detach_participant(&attachment);
+                        if let Some(space) = (Self::from_inner(weak_inner(&inner))).space() {
                             space.retire_model(definition);
                         }
                     }
@@ -429,18 +470,19 @@ impl EventDispatcherService {
                 for definition in &change.added {
                     inner.state.lock().withdrawn_model_ids.remove(&definition.id);
                 }
-                let this = Self { inner: weak_inner(&inner) };
-                this.refold_models(view.items.clone());
+                let this = Self::from_inner(weak_inner(&inner));
+                this.refold_models(view_ref.items());
                 this.materialize_undoable_models();
             }
-        })));
+        });
+        self._registrations.lock().push(Arc::new(subscription));
     }
 
     fn space(&self) -> Option<Arc<AgentSpaceImpl>> {
         self.inner
             .agent_scope
             .as_ref()
-            .and_then(|scope| scope.agent_context().space())
+            .and_then(|scope| scope.agent_context().space.clone())
     }
 
     pub fn attach(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> DisposableRef {
@@ -453,21 +495,28 @@ impl EventDispatcherService {
         }
         let attachment = self.build_participant_attachment(participant);
         self.attach_participant(attachment.clone());
+        let this = self.clone();
         to_disposable(move || {
-            self.detach_participant(&attachment);
+            this.detach_participant(&attachment);
         })
     }
 
     pub async fn attach_late(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> Result<DisposableRef, WireAsyncError> {
         if self.inner.state.lock().restore_phase == RestorePhase::Restoring {
             let (sender, receiver) = tokio::sync::oneshot::channel();
+            let sender = Arc::new(Mutex::new(Some(sender)));
+            let sender_reject = sender.clone();
             self.inner.state.lock().late_attachments.push(LateAttachment {
                 participant,
                 resolve: Arc::new(move |disposable| {
-                    let _ = sender.send(Ok(disposable));
+                    if let Some(sender) = sender.lock().take() {
+                        let _ = sender.send(Ok(disposable));
+                    }
                 }),
                 reject: Arc::new(move |error| {
-                    let _ = sender.send(Err(error));
+                    if let Some(sender) = sender_reject.lock().take() {
+                        let _ = sender.send(Err(error));
+                    }
                 }),
             });
             return receiver.await.unwrap_or_else(|_| Err("late attach cancelled".into()));
@@ -539,13 +588,14 @@ impl EventDispatcherService {
                 if record.get("type").and_then(serde_json::Value::as_str) == Some("metadata") {
                     continue;
                 }
-                let Some(resolved) = self.resolve_record(&record) else {
-                    continue;
-                };
+                let resolved = self.resolve_record(&record);
                 let Some(event) = resolved.event else {
                     continue;
                 };
-                let Some(applier) = attachment.appliers.get(&event.type_).cloned() else {
+                let Some(applier) = resolved
+                    .cls
+                    .and_then(|cls| attachment.appliers.get(&(Arc::as_ptr(&cls) as usize)).cloned())
+                else {
                     continue;
                 };
                 let mut ctx = FoldContextImpl {
@@ -601,25 +651,26 @@ impl EventDispatcherService {
         if let Some(error) = replay_failure {
             return Err(error);
         }
+        let this = self.clone();
         Ok(to_disposable(move || {
-            self.detach_participant(&attachment);
+            this.detach_participant(&attachment);
         }))
     }
 
     fn build_participant_attachment(&self, participant: Arc<dyn DurableAgentRuntimeParticipant>) -> ParticipantAttachment {
-        let base = participant
-            .events()
-            .into_iter()
-            .map(|cls| (cls.type_.clone(), participant.transition()))
+        let events = participant.events();
+        let base = events
+            .iter()
+            .map(|cls| (Arc::as_ptr(cls) as usize, participant.transition()))
             .collect::<HashMap<_, _>>();
         let folds = expanded_runtime_folds(participant.id(), participant.undoable(), &base)
             .expect("failed to expand runtime folds");
         let appliers = folds
             .into_iter()
-            .map(|(cls, fold)| {
+            .map(|(address, fold)| {
                 (
-                    cls.type_.clone(),
-                    Arc::new(move |state, event, ctx| fold(state, event, ctx)) as ParticipantApplier,
+                    address,
+                    fold,
                 )
             })
             .collect();
@@ -627,12 +678,16 @@ impl EventDispatcherService {
         ParticipantAttachment {
             id: participant.id().to_string(),
             appliers,
+            event_classes: events,
             meta: Arc::new(Mutex::new(StateMeta {
                 checkpoints: Vec::new(),
             })),
             undoable: participant.undoable(),
             initial,
-            get_state: Arc::new(move || participant.get_state()),
+            get_state: {
+                let participant = participant.clone();
+                Arc::new(move || participant.get_state())
+            },
             commit: Arc::new(move |state, silent| participant.commit(state, silent)),
         }
     }
@@ -652,12 +707,12 @@ impl EventDispatcherService {
             .lock()
             .participant_attachments
             .insert(attachment.id.clone(), attachment.clone());
-        for event_type in attachment.appliers.keys() {
+        for cls in &attachment.event_classes {
             self.inner
                 .state
                 .lock()
                 .participant_targets
-                .entry(event_type.clone())
+                .entry(cls.type_.clone())
                 .or_default()
                 .push(attachment.clone());
         }
@@ -679,14 +734,14 @@ impl EventDispatcherService {
             .lock()
             .participant_attachments
             .remove(&attachment.id);
-        for event_type in attachment.appliers.keys() {
+        for cls in &attachment.event_classes {
             let mut state = self.inner.state.lock();
-            let Some(list) = state.participant_targets.get_mut(event_type) else {
+            let Some(list) = state.participant_targets.get_mut(&cls.type_) else {
                 continue;
             };
             list.retain(|candidate| candidate.id != attachment.id || !std::ptr::eq(candidate, attachment));
             if list.is_empty() {
-                state.participant_targets.remove(event_type);
+                state.participant_targets.remove(&cls.type_);
             }
         }
     }
@@ -747,8 +802,8 @@ impl EventDispatcherService {
             else {
                 continue;
             };
-            for event_type in attachment.appliers.keys() {
-                add(event_type, &definition);
+            for cls in &attachment.event_classes {
+                add(&cls.type_, &definition);
             }
         }
         self.inner.state.lock().model_targets = targets;
@@ -782,32 +837,36 @@ impl EventDispatcherService {
             .iter()
             .map(|(address, applier)| {
                 let applier = applier.clone();
-                let model = model.clone();
                 (
                     *address,
-                    Arc::new(move |event: &Event2, _ctx: &mut FoldContextImpl| {
+                    Arc::new(move |event: &Event2, _ctx: &mut dyn super::state::FoldContext| {
                         applier(event);
-                    }) as ParticipantApplier,
+                    }) as super::state::EventApplier,
                 )
             })
             .collect::<HashMap<_, _>>();
         let custom_undo = model.on_undo_handler.clone();
         let expanded = expanded_model_appliers(&definition.id, definition.undoable, &domain_appliers, custom_undo)
             .expect("failed to expand model appliers");
+        let shared_model = Arc::new(Mutex::new(model.clone()));
         let appliers = expanded
             .into_iter()
             .map(|(address, applier)| {
-                let model = model.clone();
+                let model = shared_model.clone();
                 (
                     address,
-                    Arc::new(move |state, event, ctx| {
-                        model.enter_window(state, Arc::new(Mutex::new(ctx.clone())));
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            applier(event, ctx);
-                        }));
-                        let window = model.exit_window();
-                        match result {
-                            Ok(()) => window.1,
+                    Arc::new(move |state: Value, event: &Event2, ctx: &mut dyn super::state::FoldContext| {
+                        let result = {
+                            let mut model = model.lock();
+                            model.enter_window(state);
+                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                applier(event, ctx);
+                            }));
+                            let window = model.exit_window();
+                            (result, window.1)
+                        };
+                        match result.0 {
+                            Ok(()) => result.1,
                             Err(error) => std::panic::resume_unwind(error),
                         }
                     }) as ParticipantApplier,
@@ -817,21 +876,19 @@ impl EventDispatcherService {
         let attachment = ParticipantAttachment {
             id: definition.id.clone(),
             appliers,
+            event_classes: definition.events.clone(),
             meta: Arc::new(Mutex::new(StateMeta {
                 checkpoints: Vec::new(),
             })),
             undoable: definition.undoable,
             initial: model.state_value(),
-            get_state: Arc::new({
-                let model = model.clone();
-                move || model.state_value()
-            }),
-            commit: Arc::new({
-                let model = model.clone();
-                move |state, _silent| model.commit_state(state)
-            }),
+            get_state: {
+                let model = shared_model.clone();
+                Arc::new(move || model.lock().state_value())
+            },
+            commit: Arc::new(move |state, _silent| shared_model.lock().commit_state(state)),
         };
-        self.attach_participant(attachment);
+        self.attach_participant(attachment.clone());
         self.inner
             .state
             .lock()
@@ -899,13 +956,19 @@ impl EventDispatcherService {
                 );
             }
             let (sender, receiver) = tokio::sync::oneshot::channel();
+            let sender = Arc::new(Mutex::new(Some(sender)));
+            let sender_reject = sender.clone();
             self.inner.state.lock().queue.push(QueuedEvent {
                 event,
                 resolve: Arc::new(move || {
-                    let _ = sender.send(Ok(()));
+                    if let Some(sender) = sender.lock().take() {
+                        let _ = sender.send(Ok(()));
+                    }
                 }),
                 reject: Arc::new(move |error| {
-                    let _ = sender.send(Err(error));
+                    if let Some(sender) = sender_reject.lock().take() {
+                        let _ = sender.send(Err(error));
+                    }
                 }),
             });
             return receiver.await.unwrap_or_else(|_| Err("event dispatch cancelled".into()));
@@ -934,6 +997,10 @@ impl EventDispatcherService {
             state.drain_counts.clear();
         }
         result
+    }
+
+    fn drain_queue(&self) -> Result<(), WireAsyncError> {
+        self.inner.drain_queue(&self.inner)
     }
 
     fn run_dispatch(&self, event: Event2) -> Result<(), WireAsyncError> {
@@ -1014,13 +1081,24 @@ impl EventDispatcherService {
             }
         }
         let targets = self.inner.state.lock().participant_targets.get(&event.type_).cloned();
+        let event_class_address = self
+            .inner
+            .state
+            .lock()
+            .folded
+            .events
+            .get(&event.type_)
+            .map(|cls| Arc::as_ptr(cls) as usize);
         let mut prepared_participants = Vec::new();
         if let Some(targets) = targets {
             for attachment in targets {
                 if replay_undoable.is_some_and(|undoable| attachment.undoable != undoable) {
                     continue;
                 }
-                let Some(applier) = attachment.appliers.get(&event.type_).cloned() else {
+                let Some(applier) = event_class_address
+                    .and_then(|address| attachment.appliers.get(&address))
+                    .cloned()
+                else {
                     continue;
                 };
                 let mut ctx = FoldContextImpl {
@@ -1046,10 +1124,10 @@ impl EventDispatcherService {
                 });
             }
         }
-        for prepared in prepared {
+        for mut prepared in prepared {
             self.commit(&prepared.key, &prepared.meta, &mut prepared.ctx, prepared.next);
         }
-        for prepared in prepared_participants {
+        for mut prepared in prepared_participants {
             self.commit_participant(&prepared.attachment, &mut prepared.ctx, prepared.next);
         }
         if silent {
@@ -1067,7 +1145,12 @@ impl EventDispatcherService {
                             .map(|codec| codec.dehydrate.clone())
                     })
                 });
-                self.inner.wire.append_record(event.serialize(), dehydrator);
+                let record = event
+                    .serialize()
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_else(serde_json::Map::new);
+                self.inner.wire.append_record(record, dehydrator);
             }
             if cls.observable && !self.inner.state.lock().disposed {
                 self.inner.event_bus.publish(event, self.inner.agent_scope.as_ref().map(|scope| scope.agent_context()));
@@ -1121,7 +1204,7 @@ impl EventDispatcherService {
     }
 
     fn commit_participant(&self, attachment: &ParticipantAttachment, ctx: &mut FoldContextImpl, next: Value) {
-        let meta = attachment.meta.lock();
+        let mut meta = attachment.meta.lock();
         if let Some(count) = ctx.pending_undo {
             let target_index = meta.checkpoints.len() - count as usize;
             let snapshot = meta.checkpoints[target_index].clone();
@@ -1136,7 +1219,7 @@ impl EventDispatcherService {
                 .replay_fresh_attachments
                 .insert(attachment.id.as_ptr() as usize);
         }
-        (attachment.commit)(next, ctx.silent);
+        (attachment.commit)(next.clone(), ctx.silent);
         if ctx.pending_clear {
             meta.checkpoints.clear();
         }
@@ -1173,7 +1256,8 @@ impl EventDispatcherService {
             state.dispatching_since = Some(now_ms());
         }
         let result = async {
-            if let Some(tail) = self.inner.state.lock().late_attachment_tail.clone() {
+            let late_attachment_tail = self.inner.state.lock().late_attachment_tail.clone();
+            if let Some(tail) = late_attachment_tail {
                 tail.await;
             }
             if rerun {
@@ -1185,7 +1269,7 @@ impl EventDispatcherService {
             self.rehydrate_states().await?;
             self.inner.state.lock().restore_phase = RestorePhase::Ready;
             if !self.inner.state.lock().did_run_restore_hooks {
-                self.hooks().on_did_restore.run(()).await?;
+                self.hooks().on_did_restore.run(()).await;
                 self.inner.state.lock().did_run_restore_hooks = true;
             }
             if rerun {
@@ -1277,7 +1361,7 @@ impl EventDispatcherService {
             }
         }
         let chains = self.inner.wire.read_restore_chains().await?;
-        let mut resolved = HashMap::<*const std::collections::HashMap<String, Value>, ResolvedRecord>::new();
+        let mut resolved = HashMap::<*const WireRecord, ResolvedRecord>::new();
         self.inner.state.lock().replay_fresh_keys.clear();
         self.replay_pass(&chains.restorable, true, &mut resolved)?;
         self.replay_pass(&chains.journal, false, &mut resolved)
@@ -1287,7 +1371,7 @@ impl EventDispatcherService {
         &self,
         records: &[WireRecord],
         undoable: bool,
-        resolved: &mut HashMap<*const std::collections::HashMap<String, Value>, ResolvedRecord>,
+        resolved: &mut HashMap<*const WireRecord, ResolvedRecord>,
     ) -> Result<(), WireAsyncError> {
         let mut record_index = 0;
         for record in records {
@@ -1295,7 +1379,7 @@ impl EventDispatcherService {
             if record_type == "metadata" {
                 continue;
             }
-            let key = record as *const std::collections::HashMap<String, Value>;
+            let key = record as *const WireRecord;
             let entry = resolved.entry(key).or_insert_with(|| self.resolve_record(record));
             if entry.event.is_none() {
                 if !undoable {
@@ -1353,7 +1437,7 @@ impl EventDispatcherService {
             }
         }
         ResolvedRecord {
-            cls: cls.clone(),
+            cls: Some(cls.clone()),
             event: event2_from_record(&cls, &Value::Object(event_record)),
         }
     }
@@ -1427,10 +1511,22 @@ impl EventDispatcherService {
             let blob_service = self.inner.blob_service.clone();
             Arc::new(move |parts| {
                 let blob_service = blob_service.clone();
-                async move { blob_service.load_parts(parts).await }.boxed()
+                async move {
+                    let parts = parts
+                        .into_iter()
+                        .map(|part| serde_json::from_value(part).map_err(|error| -> WireAsyncError { Box::new(error) }))
+                        .collect::<Result<Vec<kimi_core::types::ContentPart>, _>>()?;
+                    let loaded = blob_service.load_parts(&parts).await?;
+                    loaded
+                        .into_iter()
+                        .map(|part| serde_json::to_value(part).map_err(|error| -> WireAsyncError { Box::new(error) }))
+                        .collect::<Result<Vec<Value>, _>>()
+                }
+                .boxed()
             })
         };
-        for key in self.inner.state.lock().folded.states.clone() {
+        let states = self.inner.state.lock().folded.states.clone();
+        for key in states {
             let Some(codec) = &key.replayable.blobs else {
                 continue;
             };
@@ -1464,7 +1560,7 @@ impl EventDispatcherServiceInner {
         self.state.lock()
     }
 
-    fn drain_queue(&self) -> Result<(), WireAsyncError> {
+    fn drain_queue(&self, owner: &Arc<EventDispatcherServiceInner>) -> Result<(), WireAsyncError> {
         loop {
             let next = self.inner_state().queue.first().cloned();
             let Some(next) = next else {
@@ -1475,7 +1571,8 @@ impl EventDispatcherServiceInner {
                 state.drain_depth += 1;
                 let seen = state.drain_counts.entry(next.event.type_.clone()).or_insert(0);
                 *seen += 1;
-                (state.drain_depth, *seen)
+                let seen = *seen;
+                (state.drain_depth, seen)
             };
             if depth > MAX_DRAIN || seen > MAX_DRAIN_PER_TYPE {
                 return Err(CycleError::new(
@@ -1489,10 +1586,7 @@ impl EventDispatcherServiceInner {
                 ).into());
             }
             self.inner_state().queue.remove(0);
-            EventDispatcherService {
-                inner: self.clone(),
-                _registrations: Arc::new(Mutex::new(Vec::new())),
-            }
+            EventDispatcherService::from_inner(owner.clone())
             .run_dispatch(next.event)?;
             (next.resolve)();
         }

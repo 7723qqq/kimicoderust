@@ -43,7 +43,7 @@ pub async fn repair_wire_journal(
                     .write(
                         scope,
                         &backup_key,
-                        &original,
+                        original.clone(),
                         Some(StorageWriteOptions {
                             atomic: Some(true),
                             signal: None,
@@ -55,7 +55,7 @@ pub async fn repair_wire_journal(
         }
         services
             .append_log
-            .rewrite(scope, key, records, None)
+            .rewrite(scope, key, records.clone(), None)
             .await?;
         Ok(())
     }

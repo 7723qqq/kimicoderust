@@ -141,7 +141,7 @@ impl ExitSpecModeTool {
             .filter(|name| {
                 status
                     .files
-                    .get(*name)
+                    .get(**name)
                     .is_some_and(|content| !content.trim().is_empty())
             })
             .count();

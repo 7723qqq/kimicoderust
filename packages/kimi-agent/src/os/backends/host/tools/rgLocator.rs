@@ -123,14 +123,18 @@ pub async fn ensure_rg_path(
             result.map_err(SharedRgError::boxed)
         };
         return match signal {
-            Some(signal) => abortable(wait, signal).await,
+            Some(signal) => abortable(wait, signal)
+                .await
+                .map_err(|error| Box::new(error) as WireAsyncError)?,
             None => wait.await,
         };
     }
     let share_dir = options.share_dir.clone().unwrap_or_else(get_share_dir);
     let resolution = resolve_rg_path(probe, share_dir, &options);
     match signal {
-        Some(signal) => abortable(resolution, signal).await,
+        Some(signal) => abortable(resolution, signal)
+            .await
+            .map_err(|error| Box::new(error) as WireAsyncError)?,
         None => resolution.await,
     }
 }
@@ -631,7 +635,7 @@ pub fn rg_unavailable_message(
     let detail = cause.to_string();
     if is_remote_environment(environment) {
         let environment = environment.unwrap();
-        let share_bin = share_bin_rg_path(environment);
+        let share_bin = share_bin_rg_path(Some(environment));
         return format!(
             "ripgrep (rg) is not available on environment \"{}\" and the automatic bootstrap failed.\n\nError: {detail}\n\nFix options (install on the target):\n  macOS:   brew install ripgrep\n  Ubuntu:  sudo apt-get install ripgrep\n  Other:   https://github.com/BurntSushi/ripgrep#installation\n\nAlternatively, drop a static rg binary at {share_bin} on the target",
             environment.identity().environment_id
@@ -732,7 +736,7 @@ fn os_unavailable(message: impl Into<String>, details: Option<Value>) -> WireAsy
         kimi_core::primitives::errors::domains::os_fs::OS_FS_UNAVAILABLE,
         message.into(),
         kimi_core::primitives::errors::Error2Options {
-            details: Some(details),
+            details,
             ..Default::default()
         },
     ))

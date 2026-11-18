@@ -73,7 +73,7 @@ impl GitMemoryService {
         scope_context: Arc<dyn IAgentScopeContext>,
         session: Arc<dyn ISessionContext>,
     ) -> Arc<Self> {
-        let this = Arc::new_cyclic(|weak| {
+        let this = Arc::new_cyclic(|weak: &std::sync::Weak<Self>| {
             let render_state = Arc::new(parking_lot::Mutex::new(GitMemoryRenderState::default()));
             let index_loader = GitMemoryIndexLoader::new(GitMemoryIndexLoaderDeps {
                 process: process.clone(),
@@ -132,7 +132,7 @@ impl GitMemoryService {
                         return Ok(None);
                     };
                     let message = this.last_user_text();
-                    let block = this.signal_block(message).await;
+                    let block = this.signal_block(&message).await;
                     Ok(Some(ContextInjectionResult {
                         content: ContextInjectionContent::Text(block),
                         disclosure: None,
@@ -153,13 +153,18 @@ impl GitMemoryService {
             store_dir: self.bootstrap.store_dir().into(),
             cwd: self.bootstrap.cwd(),
             log: self.log.clone(),
-            now: Arc::new(|| self.now()),
+            now: Arc::new(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            }),
             on_index_changed: {
                 let render_state = self.render_state.clone();
                 Arc::new(move || render_state.lock().clear())
             },
             on_head_unavailable: {
-                let weak = self.downgrade();
+                let weak = Arc::downgrade(self);
                 Arc::new(move |reason| {
                     if let Some(this) = weak.upgrade() {
                         this.notify_unavailable(reason);
@@ -412,7 +417,7 @@ impl IGitMemoryService for GitMemoryService {
             if commits.is_empty() {
                 continue;
             }
-            let seen = self.render_state.lock().rendered_commits().clone();
+            let seen = self.render_state.lock().rendered_commits().iter().cloned().collect::<std::collections::HashSet<String>>();
             let block = project_signal_block(&path, &commits, &seen);
             if block.is_empty() {
                 continue;
@@ -450,7 +455,7 @@ impl IGitMemoryService for GitMemoryService {
             return String::new();
         }
         self.render_state.lock().mark_path(key.clone());
-        let seen = self.render_state.lock().rendered_commits().clone();
+        let seen = self.render_state.lock().rendered_commits().iter().cloned().collect::<std::collections::HashSet<String>>();
         let mut block = project_file_block(
             &key,
             &commits,

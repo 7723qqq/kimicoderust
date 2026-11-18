@@ -330,8 +330,8 @@ impl AgentToolExecutorService {
                 }
                 continue;
             }
-            match select(timed_results.next().boxed(), finalizations.next().boxed()).await {
-                Either::Left((timed, _)) => match timed {
+            tokio::select! {
+                timed = timed_results.next() => match timed {
                     Some(Ok(timed)) => {
                         finalizations.push(self.finalize_timed_result(
                             prepared_tasks[timed.index].clone(),
@@ -346,7 +346,7 @@ impl AgentToolExecutorService {
                     }
                     None => timed_done = true,
                 },
-                Either::Right((finalized, _)) => match finalized {
+                finalized = finalizations.next() => match finalized {
                     Some(Ok(result)) => {
                         if sender.unbounded_send(Ok(result)).is_err() {
                             drain_pending_results(&mut timed_results, &mut finalizations).await;
@@ -685,7 +685,7 @@ impl AgentToolExecutorService {
     }
 
     async fn run_single_execution_inner(
-        &self,
+        self: &Arc<Self>,
         call: PreflightedToolCall,
         execution: RunnableToolExecution,
         metadata: Option<Value>,
@@ -701,7 +701,7 @@ impl AgentToolExecutorService {
                 outcome: ToolExecutionOutcome::Aborted,
             });
         }
-        let this = self.clone();
+        let this = Arc::clone(self);
         let progress_call = call.clone();
         let progress_options = options.clone();
         let progress_signal = signal.clone();

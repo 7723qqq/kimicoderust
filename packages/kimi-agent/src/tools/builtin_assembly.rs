@@ -84,6 +84,10 @@ pub fn builtin_tool_contributions(context: &BuiltinToolContext<'_>) -> Vec<Agent
         crate::tools::task_tools::wait_for_tool_def(),
         Some(Arc::new(crate::tools::task_tools::wait_for_enabled) as ToolWhen),
     ));
+    // v2 registers the wait_for flag at module load (task-wait/flag.ts:16);
+    // force the LazyLock so `FlagService.explain("wait_for")` can resolve and
+    // the subagent_background_task injection gate reads the same switch.
+    let _ = crate::agent::tools::task::task_wait::flag::wait_for_flag();
     records.push((crate::tools::skill::skill_tool_def(), None));
     records.push((crate::tools::knowledge_tool::knowledge_tool_def(), None));
     records.push((

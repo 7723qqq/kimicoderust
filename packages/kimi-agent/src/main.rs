@@ -1307,6 +1307,33 @@ fn install_web_services(config: &kimi_agent::config::KimiConfig) {
 ///
 /// Until now every part of that chain existed but nothing assembled it, so the
 /// native REST surface was unreachable from a real process.
+fn github_spec_token(config: &kimi_agent::config::KimiConfig) -> Option<String> {
+    config
+        .github
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            ["GITHUB_TOKEN", "GH_TOKEN"]
+                .iter()
+                .find_map(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty())
+                })
+        })
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
     let address = cli.serve.clone().expect("checked by the caller");
 
@@ -1428,8 +1455,16 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
                 .program,
         ),
         policy_snapshot: Some(config.build_policy_snapshot(Some(workspace.clone()))),
-        github_token: config.github.token.clone(),
-        github_base_url: config.github.base_url.clone(),
+        // v2 gates the GitHub tool table on the effective token view, which
+        // includes the env overlay (envOverlay.ts + configSection.ts): a
+        // token from GITHUB_TOKEN / GH_TOKEN enables the tools the same way
+        // `[github] token` does.
+        github_token: github_spec_token(&config),
+        github_base_url: config
+            .github
+            .base_url
+            .clone()
+            .or_else(|| non_empty_env("GITHUB_API_URL")),
         subagent_timeout_ms: None,
         agent_tool_veto: None,
         tools_veto: None,

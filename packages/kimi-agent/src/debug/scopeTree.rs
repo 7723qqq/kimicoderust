@@ -11,20 +11,19 @@ pub struct ScopeContainerInfo {
 
 pub fn scope_container_label(container: &InstantiationService) -> String {
     container
-        .debug_label
-        .clone()
-        .unwrap_or_else(|| format!("#{}", container.cascade_tree.seq_of(container)))
+        .debug_label()
+        .unwrap_or_else(|| format!("#{}", container.cascade_tree().seq_of(container as *const InstantiationService as usize)))
 }
 
 pub fn walk_scope_containers(root: &Arc<InstantiationService>) -> Vec<ScopeContainerInfo> {
     fn visit(container: &Arc<InstantiationService>, path: String, out: &mut Vec<ScopeContainerInfo>) {
         out.push(ScopeContainerInfo {
             container: container.clone(),
-            path,
+            path: path.clone(),
             label: scope_container_label(container),
         });
-        for child in &container.children {
-            visit(child, format!("{path}/{}", scope_container_label(child)), out);
+        for child in container.children() {
+            visit(&child, format!("{path}/{}", scope_container_label(&child)), out);
         }
     }
     let mut out = Vec::new();
@@ -48,6 +47,6 @@ pub fn scope_path_of_engine(
 ) -> Option<String> {
     walk_scope_containers(root)
         .into_iter()
-        .find(|info| std::ptr::eq(info.container.cascade.as_ref(), engine))
+        .find(|info| std::ptr::eq(info.container.cascade().as_ref(), engine))
         .map(|info| info.path)
 }

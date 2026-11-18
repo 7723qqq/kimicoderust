@@ -266,6 +266,14 @@ impl EnvironmentLease {
         Ok(resource)
     }
 
+    pub fn track_dyn(
+        &self,
+        resource: Arc<dyn EnvironmentResource>,
+        session_id: Option<String>,
+    ) -> Result<(), WireAsyncError> {
+        (self.track_resource)(resource, session_id)
+    }
+
     pub fn dispose(&self) {
         if let Some(dispose) = self.dispose.lock().take() {
             dispose();

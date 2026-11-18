@@ -468,7 +468,8 @@ impl NativeToolset {
             }
             "taskstop" | "task_stop" => {
                 let callbacks = self.callbacks.as_deref()?;
-                Some(task_tools::execute_task_stop(callbacks, args).await)
+                let runner = self.task_runner.as_deref();
+                Some(task_tools::execute_task_stop(callbacks, runner, args).await)
             }
             "taskwait" | "task_wait" | "waitfor" | "wait_for" => {
                 if !task_tools::wait_for_enabled() {
@@ -487,11 +488,17 @@ impl NativeToolset {
                 } else {
                     "TaskWait"
                 };
+                let mut telemetry_holder: Option<Box<dyn Fn(Value) + '_>> = None;
+                if let Some(callbacks) = self.callbacks.as_ref() {
+                    telemetry_holder = Some(Box::new(|event: Value| callbacks.telemetry(event)));
+                }
                 let wait = task_tools::WaitContext {
                     tally: &self.wait_tally,
                     turn_id: self.effective_turn_id(),
                     caller_agent_id: caller.as_str(),
                     display_name,
+                    on_update: on_update.map(|emit| emit as &(dyn Fn(&crate::tools::ToolUpdate<'_>))),
+                    telemetry: telemetry_holder.as_deref(),
                 };
                 Some(
                     task_tools::execute_task_wait(callbacks, runner, steer.as_ref(), &wait, args)
@@ -1099,10 +1106,12 @@ impl NativeToolset {
             "bash" => self.bash_with(args, on_update, tool_call_id).await,
             "powershell" => self.powershell_with(args, on_update, tool_call_id).await,
             _ if crate::agent::tools::github::github_legacy::is_github_tool(tool_name) => {
+                let cancel = self.effective_parent_cancel();
                 crate::agent::tools::github::github_legacy::execute_github_tool(
                     tool_name,
                     args,
                     self.github_credentials.as_ref(),
+                    cancel.as_ref(),
                 )
                 .await
             }

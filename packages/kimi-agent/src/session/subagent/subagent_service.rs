@@ -108,14 +108,17 @@ impl SessionSubagentService {
         opts: RunAgentOptions,
     ) -> Result<impl std::future::Future<Output = Result<AgentRunHandle, WireAsyncError>>, WireAsyncError> {
         let handle = self.require_caller(&agent.agent_id)?;
-        Ok(run_agent_turn(
-            &handle,
-            request,
-            RunAgentTurnOptions {
-                signal: opts.signal,
-                on_ready: opts.on_ready,
-            },
-        ))
+        Ok(async move {
+            run_agent_turn(
+                &handle,
+                request,
+                RunAgentTurnOptions {
+                    signal: opts.signal,
+                    on_ready: opts.on_ready,
+                },
+            )
+            .await
+        })
     }
 
     pub async fn plan_spawn(
@@ -134,7 +137,7 @@ impl SessionSubagentService {
             .map(ToString::to_string)
             .or_else(|| {
                 fork.then(|| {
-                    own.profile_name
+                    own.base.profile_name
                         .clone()
                         .unwrap_or_else(|| DEFAULT_PROFILE_NAME.to_string())
                 })
@@ -179,23 +182,24 @@ impl SessionSubagentService {
                 },
             )));
         }
-        let Some(own_model) = own.model_alias.clone() else {
+        let Some(own_model) = own.base.model_alias.clone() else {
             return Err(agent_error(
                 MODEL_NOT_CONFIGURED,
                 "Caller agent has no model bound".to_string(),
                 &input.caller_agent_id,
             ));
         };
+        let own_model_clone = own_model.clone();
         let binding = if fork {
             SubagentBinding {
                 model: own_model,
-                thinking: Some(own.thinking_level.clone()),
+                thinking: Some(own.base.thinking_level.clone()),
                 model_source: SubagentModelSource::Inherited,
             }
         } else {
             resolve_subagent_binding(
                 self.config_service.as_ref(),
-                (&own_model, &own.thinking_level),
+                (&own_model, &own.base.thinking_level),
                 input.model.as_deref(),
             )?
         };
@@ -205,7 +209,7 @@ impl SessionSubagentService {
                 return Err(wrap_subagent_model_error(
                     error,
                     &binding.model,
-                    Some(&own_model),
+                    Some(&own_model_clone),
                 ));
             }
         };
@@ -253,13 +257,8 @@ impl SessionSubagentService {
         let lease = if plan.fork {
             None
         } else {
-            Some(
-                caller
-                    .accessor()
-                    .get(&I_AGENT_ENVIRONMENT_SERVICE)
-                    .acquire_when_ready(&["process"])
-                    .await?,
-            )
+            let environment_service = caller.accessor().get(&I_AGENT_ENVIRONMENT_SERVICE);
+            Some(environment_service.acquire_when_ready(&["process"]).await?)
         };
         let result = self
             .spawn_with_lease(&caller, &opts, &plan, labels, &caller_binding, lease.as_ref())
@@ -296,7 +295,13 @@ impl SessionSubagentService {
                 created
                     .accessor()
                     .get(&I_AGENT_REMINDER_SERVICE)
-                    .notify(FORK_CONTEXT_NOTICE, Some(json_variant("fork_context")));
+                    .notify(
+                        FORK_CONTEXT_NOTICE,
+                        &crate::features::reminder::types::ReminderNotification {
+                            variant: "fork_context".to_string(),
+                            owner_prompt_id: None,
+                        },
+                    );
                 Ok::<_, WireAsyncError>(created)
             } else {
                 let created_context = self
@@ -328,6 +333,7 @@ impl SessionSubagentService {
                     .accessor()
                     .get(&I_AGENT_PROFILE_SERVICE)
                     .data()
+                    .base
                     .model_alias;
                 return Err(wrap_subagent_model_error(
                     error,
@@ -348,9 +354,9 @@ impl SessionSubagentService {
                 .accessor()
                 .get(&I_AGENT_PROFILE_SERVICE)
                 .get_active_tool_names();
-            created_user_tools.inherit_user_tools(&caller_user_tools, active_tool_names);
+            created_user_tools.inherit_user_tools(caller_user_tools.as_ref(), active_tool_names);
         } else {
-            created_user_tools.inherit_user_tools(&caller_user_tools, None);
+            created_user_tools.inherit_user_tools(caller_user_tools.as_ref(), None);
         }
         let prompt_text = if plan.fork {
             opts.prompt.clone()
@@ -394,19 +400,24 @@ impl SessionSubagentService {
         }
         let view = EnvironmentWorkspaceView::new(
             environment.clone(),
-            cwd.map(ToString::to_string)
-                .unwrap_or_else(|| self.session_context.cwd()),
+            crate::environment::environment::EnvironmentWorkspaceRoots {
+                work_dir: cwd.map(ToString::to_string).unwrap_or_else(|| self.session_context.cwd()),
+                primary_dir: None,
+                additional_dirs: None,
+                follows_primary: None,
+            },
         );
-        apply_profile_prompt_prefix(
+        let with_prefix = apply_profile_prompt_prefix(
             &profile,
             prompt,
             AgentProfilePromptPrefixContext {
                 cwd: view.work_dir().to_string(),
-                process: environment.process.clone().unwrap(),
+                process: environment.process(),
                 log: Some(self.log.clone()),
             },
         )
-        .await
+        .await;
+        Ok(with_prefix)
     }
 
     fn require_caller(&self, agent_id: &str) -> Result<Arc<IAgentScopeHandle>, WireAsyncError> {

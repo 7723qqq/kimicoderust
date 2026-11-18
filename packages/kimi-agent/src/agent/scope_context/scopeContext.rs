@@ -55,7 +55,7 @@ pub fn make_agent_scope_context(
         generation,
         space: Some(space.clone()),
     });
-    space.bind_context((*agent_context).clone());
+    space.bind_context(agent_context.clone());
     Arc::new(AgentScopeContext {
         agent_id,
         forked_from,

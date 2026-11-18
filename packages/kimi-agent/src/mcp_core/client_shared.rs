@@ -18,7 +18,8 @@ use crate::wire::record::WireAsyncError;
 use super::types::{MCPContentBlock, MCPToolDefinition, MCPToolResult};
 
 pub const KIMI_MCP_CLIENT_NAME: &str = "kimi-code";
-pub const KIMI_MCP_CLIENT_VERSION: &str = get_core_version();
+pub static KIMI_MCP_CLIENT_VERSION: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| get_core_version().to_string());
 pub const MCP_LIVENESS_PROBE_TIMEOUT_MS: u64 = 5_000;
 pub const MCP_ERROR_METHOD_NOT_FOUND: i64 = -32601;
 pub const MCP_ERROR_CONNECTION_CLOSED: i64 = -32000;

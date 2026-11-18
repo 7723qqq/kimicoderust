@@ -122,7 +122,7 @@ impl OAuthService {
         bootstrap: Arc<dyn IBootstrapService>,
         region_service: Arc<dyn IRegionService>,
     ) -> Arc<Self> {
-        Arc::new_cyclic(|weak| {
+        Arc::new_cyclic(|weak: &std::sync::Weak<OAuthService>| {
             let listener_weak = weak.clone();
             let subscription = provider_service.on_did_change_providers(Arc::new(
                 move |event: ProvidersChangedEvent| {
@@ -161,7 +161,7 @@ impl OAuthService {
         let provider = provider.unwrap_or(KIMI_CODE_PROVIDER_NAME).to_string();
         self.log.info(
             "oauth startLogin: enter",
-            Some(properties(json!({"provider": provider}))),
+            Some(json!({"provider": provider})),
         );
         let configured = self.provider_service.get(&provider);
         let region = match options.and_then(|options| options.region) {
@@ -177,12 +177,12 @@ impl OAuthService {
         let login_auth = self.resolve_login_auth(&provider, region);
         self.log.info(
             "oauth startLogin: resolved login auth",
-            Some(properties(json!({
+            Some(json!({
                 "provider": provider,
                 "hasOAuthRef": login_auth.oauth_ref.is_some(),
                 "hasBaseUrl": login_auth.base_url.is_some(),
                 "hasOAuthHost": login_auth.oauth_host.is_some()
-            }))),
+            })),
         );
         self.abort_existing(&provider);
 
@@ -211,7 +211,7 @@ impl OAuthService {
 
         self.log.info(
             "oauth startLogin: calling toolkit.login",
-            Some(properties(json!({"provider": provider}))),
+            Some(json!({"provider": provider})),
         );
         let callback_state = state.clone();
         let callback_log = self.log.clone();
@@ -225,7 +225,7 @@ impl OAuthService {
             on_device_code: Arc::new(move |auth| {
                 callback_log.info(
                     "oauth startLogin: onDeviceCode fired",
-                    Some(properties(json!({"provider": callback_provider}))),
+                    Some(json!({"provider": callback_provider})),
                 );
                 {
                     let mut mutable = callback_state.mutable.lock();
@@ -255,15 +255,15 @@ impl OAuthService {
                     if !has_device {
                         service.log.info(
                             "oauth startLogin: toolkit resolved without device code (already authenticated)",
-                            Some(properties(json!({"provider": login_provider}))),
+                            Some(json!({"provider": login_provider})),
                         );
                     }
                     service.log.info(
                         "oauth startLogin: toolkit.login resolved",
-                        Some(properties(json!({
+                        Some(json!({
                             "provider": login_provider,
                             "deviceArrived": has_device
-                        }))),
+                        })),
                     );
                     if has_device {
                         service.handle_success(login_state.clone());
@@ -276,10 +276,10 @@ impl OAuthService {
                 Err(error) => {
                     service.log.warn(
                         "oauth startLogin: toolkit.login rejected",
-                        Some(properties(json!({
+                        Some(json!({
                             "provider": login_provider,
                             "error": error.to_string()
-                        }))),
+                        })),
                     );
                     service.handle_failure(&login_state, error.as_ref());
                     login_state.mutable.lock().start_error = Some(error);
@@ -290,7 +290,7 @@ impl OAuthService {
 
         self.log.info(
             "oauth startLogin: awaiting device flow start",
-            Some(properties(json!({"provider": provider}))),
+            Some(json!({"provider": provider})),
         );
         loop {
             let notified = state.notify.notified();
@@ -316,14 +316,14 @@ impl OAuthService {
                 StartAction::Device(device) => {
                     self.log.info(
                         "oauth startLogin: deviceReady resolved",
-                        Some(properties(json!({"provider": provider}))),
+                        Some(json!({"provider": provider})),
                     );
                     return Ok(Self::to_flow_start(&state, &device));
                 }
                 StartAction::Fast => {
                     self.log.info(
                         "oauth startLogin: fast path returned authenticated",
-                        Some(properties(json!({"provider": provider}))),
+                        Some(json!({"provider": provider})),
                     );
                     return Ok(OAuthFlowStart::Authenticated(OAuthFlowStartAuthenticated {
                         flow_id: state.flow_id.clone(),
@@ -393,17 +393,17 @@ impl OAuthService {
         let provider = provider.unwrap_or(KIMI_CODE_PROVIDER_NAME);
         self.log.info(
             "oauth status: enter",
-            Some(properties(json!({"provider": provider}))),
+            Some(json!({"provider": provider})),
         );
         let oauth_ref = self.read_oauth_ref_optional(provider);
         match self.get_cached_access_token(provider, oauth_ref.as_ref()).await {
             Ok(token) => {
                 self.log.info(
                     "oauth status: got token",
-                    Some(properties(json!({
+                    Some(json!({
                         "provider": provider,
                         "hasToken": token.is_some()
-                    }))),
+                    })),
                 );
                 Ok(match token {
                     Some(_) => AuthStatus {
@@ -419,10 +419,10 @@ impl OAuthService {
             Err(error) => {
                 self.log.warn(
                     "oauth status: getCachedAccessToken threw",
-                    Some(properties(json!({
+                    Some(json!({
                         "provider": provider,
                         "error": error.to_string()
-                    }))),
+                    })),
                 );
                 Err(error)
             }
@@ -531,7 +531,7 @@ impl OAuthService {
 
         let result = self.finish_refresh(&changed, &unchanged, &failed);
         if !result.changed.is_empty() {
-            self.events.publish(model_catalog_changed(&result));
+            self.events.publish(model_catalog_changed(&result).to_event2());
         }
         Ok(result)
     }
@@ -638,19 +638,20 @@ impl OAuthService {
                 &collect_model_ids_for_aliases(&next, &refreshed_alias_keys),
             );
             self.config
-                .replace(PROVIDERS_SECTION, Some(next["providers"].clone()))
+                .replace(PROVIDERS_SECTION, Some(next["providers"].clone()), None)
                 .await?;
             self.config
                 .replace(
                     MODELS_SECTION,
                     Some(next.get("models").cloned().unwrap_or_else(|| json!({}))),
+                    None,
                 )
                 .await?;
             self.config
-                .replace(DEFAULT_MODEL_SECTION, optional_value(next.get("defaultModel")))
+                .replace(DEFAULT_MODEL_SECTION, optional_value(next.get("defaultModel")), None)
                 .await?;
             self.config
-                .replace(THINKING_SECTION, optional_value(next.get("thinking")))
+                .replace(THINKING_SECTION, optional_value(next.get("thinking")), None)
                 .await?;
             changed.push(ProviderRefreshChange {
                 provider_id: KIMI_CODE_PROVIDER_NAME.to_string(),
@@ -865,10 +866,10 @@ impl OAuthService {
         if let Err(error) = result {
             self.log.warn(
                 "oauth provider provisioning failed",
-                Some(properties(json!({
+                Some(json!({
                     "provider": state.provider,
                     "error": error.to_string()
-                }))),
+                })),
             );
         }
         if state.status() == OAuthFlowStatus::Pending {
@@ -915,10 +916,10 @@ impl OAuthService {
         if !result.failed.is_empty() {
             self.log.warn(
                 "oauth startLogin: model refresh failed on already-authenticated fast path",
-                Some(properties(json!({
+                Some(json!({
                     "provider": provider,
                     "failures": result.failed
-                }))),
+                })),
             );
         }
         Ok(())
@@ -944,7 +945,7 @@ impl OAuthService {
         }
         if cleanup.removed_provider {
             self.config
-                .replace(PROVIDERS_SECTION, Some(next["providers"].clone()))
+                .replace(PROVIDERS_SECTION, Some(next["providers"].clone()), None)
                 .await?;
         }
         if !cleanup.removed_models.is_empty() {
@@ -952,22 +953,23 @@ impl OAuthService {
                 .replace(
                     MODELS_SECTION,
                     Some(next.get("models").cloned().unwrap_or_else(|| json!({}))),
+                    None,
                 )
                 .await?;
         }
         if !cleanup.removed_services.is_empty() {
             self.config
-                .replace(SERVICES_SECTION, optional_value(next.get("services")))
+                .replace(SERVICES_SECTION, optional_value(next.get("services")), None)
                 .await?;
         }
         if cleanup.default_model_cleared {
-            self.config.replace(DEFAULT_MODEL_SECTION, None).await?;
-            self.config.replace(THINKING_SECTION, None).await?;
+            self.config.replace(DEFAULT_MODEL_SECTION, None, None).await?;
+            self.config.replace(THINKING_SECTION, None, None).await?;
         }
         Ok(())
     }
 
-    fn handle_failure(&self, state: &FlowState, error: &(dyn Error + Send + Sync + 'static)) {
+    fn handle_failure(&self, state: &Arc<FlowState>, error: &(dyn Error + Send + Sync + 'static)) {
         let status = {
             let mut mutable = state.mutable.lock();
             if mutable.status != OAuthFlowStatus::Pending {
@@ -1174,10 +1176,10 @@ impl AuthSummaryService {
             .collect::<Vec<_>>();
         self.log.info(
             "auth summarize: enter",
-            Some(properties(json!({
+            Some(json!({
                 "total": providers.len(),
                 "oauthProviders": oauth_providers
-            }))),
+            })),
         );
         let mut statuses = Vec::new();
         for name in oauth_providers {
@@ -1186,10 +1188,10 @@ impl AuthSummaryService {
                 Err(error) => {
                     self.log.warn(
                         "auth summarize: status threw",
-                        Some(properties(json!({
+                        Some(json!({
                             "provider": name,
                             "error": error.to_string()
-                        }))),
+                        })),
                     );
                 }
             }
@@ -1268,12 +1270,7 @@ impl AuthSummaryService {
             return Ok(());
         }
         if let Some(api_key_env) = auth.api_key_env {
-            if std::env::var(&api_key_env)
-                .ok()
-                .as_deref()
-                .and_then(non_empty)
-                .is_some()
-            {
+            if non_empty(std::env::var(&api_key_env).ok().as_deref()).is_some() {
                 return Ok(());
             }
             return Err(Box::new(AuthCredentialEnvMissingError::new(
@@ -1499,7 +1496,7 @@ fn preserve_user_provider_aliases(
     let mut preserved = Map::new();
     for (alias, model) in models_object(config) {
         if model.get("provider").and_then(Value::as_str) != Some(provider_id)
-            || refreshed_alias_keys.contains(alias)
+            || refreshed_alias_keys.contains(&alias)
         {
             continue;
         }

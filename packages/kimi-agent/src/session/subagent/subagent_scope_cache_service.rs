@@ -85,7 +85,7 @@ impl SessionSubagentScopeCacheService {
         this.subscriptions.lock().push(bus.subscribe_subagent_completed(
             Arc::new(move |event: SubagentCompleted| {
                 if let Some(this) = weak.upgrade() {
-                    this.retire(event.subagent_id);
+                    this.retire(event.subagent_id.clone());
                 }
             }),
         ));
@@ -93,7 +93,7 @@ impl SessionSubagentScopeCacheService {
         this.subscriptions.lock().push(bus.subscribe_subagent_failed(
             Arc::new(move |event: SubagentFailed| {
                 if let Some(this) = weak.upgrade() {
-                    this.retire(event.subagent_id);
+                    this.retire(event.subagent_id.clone());
                 }
             }),
         ));
@@ -101,7 +101,7 @@ impl SessionSubagentScopeCacheService {
         this.subscriptions.lock().push(bus.subscribe_subagent_cancelled(
             Arc::new(move |event: SubagentCancelled| {
                 if let Some(this) = weak.upgrade() {
-                    this.retire(event.subagent_id);
+                    this.retire(event.subagent_id.clone());
                 }
             }),
         ));
@@ -300,10 +300,10 @@ impl SessionSubagentScopeCacheService {
 
     fn busy(&self, handle: &Arc<IAgentScopeHandle>) -> bool {
         let snapshot = handle.accessor().get(&I_AGENT_LOOP_SERVICE).snapshot();
-        if snapshot.state == "running" || snapshot.has_pending_requests {
+        if snapshot.state == crate::agent::r#loop::r#loop::LoopState::Running || snapshot.has_pending_requests {
             return true;
         }
-        !handle.accessor().get(&I_AGENT_TASK_SERVICE).list(true).is_empty()
+        !handle.accessor().get(&I_AGENT_TASK_SERVICE).list(Some(true), None).is_empty()
     }
 }
 

@@ -391,6 +391,7 @@ pub fn compare_suggest_candidates(a: &SuggestCandidate, b: &SuggestCandidate) ->
         .then_with(|| a.path.encode_utf16().cmp(b.path.encode_utf16()))
 }
 
+#[derive(Debug)]
 pub struct SuggestTopHeap {
     heap: Vec<SuggestCandidate>,
     cap: usize,

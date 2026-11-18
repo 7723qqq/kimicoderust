@@ -144,7 +144,7 @@ impl FileSessionIndex {
         workspace_store: LiveRef<Arc<dyn IWorkspacePersistence>>,
     ) -> Arc<Self> {
         let sessions_scope = bootstrap.scope("sessions");
-        let this = Arc::new_cyclic(|weak| {
+        let this = Arc::new_cyclic(|weak: &std::sync::Weak<Self>| {
             let primary_weak = weak.clone();
             let primary_by_workspace = Arc::new(move || {
                 let weak = primary_weak.clone();
@@ -197,19 +197,22 @@ impl FileSessionIndex {
                 this.subscribe_workspace_persistence();
             }
         });
-        this.subscriptions.lock().push(subscription);
+        this.subscriptions.lock().push(Arc::new(subscription) as DisposableRef);
         this
     }
 
     fn subscribe_workspace_persistence(&self) {
         let subscription = self.workspace_store.current().map(|store| {
             let weak = self.weak.clone();
-            let subscription = store.on_did_change(Arc::new(move || {
-                if let Some(this) = weak.upgrade() {
-                    this.schedule_primary_refresh();
-                }
-            }));
-            Arc::from(subscription) as DisposableRef
+            let subscription = crate::app::workspace::workspace_persistence::IWorkspacePersistence::on_did_change(
+                store.as_ref(),
+                Arc::new(move || {
+                    if let Some(this) = weak.upgrade() {
+                        this.schedule_primary_refresh();
+                    }
+                }),
+            );
+            subscription
         });
         *self.workspace_persistence_subscription.lock() = subscription;
     }
@@ -261,7 +264,8 @@ impl FileSessionIndex {
         if !self.read_model_enabled() {
             return self.status();
         }
-        if let Some((_, flight)) = self.prepare_flight.lock().as_ref().cloned() {
+        let existing_flight = self.prepare_flight.lock().as_ref().cloned();
+        if let Some((_, flight)) = existing_flight {
             return flight.await;
         }
         let id = self.next_flight_id.fetch_add(1, Ordering::Relaxed);
@@ -418,9 +422,10 @@ impl FileSessionIndex {
             return false;
         };
         let result = async {
+            let sessions_scope = self.sessions_scope();
             let (marks, workspace_ids, primaries) = tokio::join!(
-                list_dirty_marks(self.storage.as_ref(), &self.sessions_scope()),
-                list_workspace_ids(self.storage.as_ref(), &self.sessions_scope()),
+                list_dirty_marks(self.storage.as_ref(), &sessions_scope),
+                list_workspace_ids(self.storage.as_ref(), &sessions_scope),
                 self.primary_by_workspace()
             );
             let marks = marks?;
@@ -736,16 +741,18 @@ impl FileSessionIndex {
         if !self.read_model_enabled() {
             return legacy().await;
         }
-        match self.state.lock().state {
+        let (index_state, next_prepare_retry_at) = {
+            let state = self.state.lock();
+            (state.state, state.next_prepare_retry_at)
+        };
+        match index_state {
             SessionIndexState::Uninitialized => {
                 self.spawn_prepare();
                 return legacy().await;
             }
             SessionIndexState::Preparing => return legacy().await,
             SessionIndexState::Degraded => {
-                if chrono::Utc::now().timestamp_millis()
-                    >= self.state.lock().next_prepare_retry_at
-                {
+                if chrono::Utc::now().timestamp_millis() >= next_prepare_retry_at {
                     self.spawn_prepare();
                 }
                 return legacy().await;
@@ -1314,7 +1321,7 @@ impl FileSessionIndex {
         }
         let mut by_id = HashMap::new();
         if mtime_ms.is_some() {
-            let entries = match read_session_index_entries(self.storage.as_ref()).await {
+            let entries = match read_session_index_entries(&self.storage).await {
                 Ok(entries) => entries,
                 Err(_) => return None,
             };

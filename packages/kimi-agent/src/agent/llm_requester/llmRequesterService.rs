@@ -540,14 +540,17 @@ impl AgentLLMRequesterService {
         bootstrap: Arc<dyn IBootstrapService>,
         options: AgentLLMRequesterServiceOptions,
     ) -> Self {
-        let registrations = vec![
+        let registrations: Vec<Arc<dyn crate::_base::di::lifecycle::IDisposable>> = vec![
             states.contribute_state(llm_request_trace_key().state_key()),
             states.contribute_state(llm_requester_last_config_log_signature_key().state_key()),
             states.contribute_state(llm_requester_turn_configs_key().state_key()),
             states.contribute_state(llm_requester_media_recovery_key().state_key()),
             states.contribute_state(llm_requester_emitted_thinking_effort_warnings_key().state_key()),
             states.contribute_state(llm_requester_last_turn_request_key().state_key()),
-        ];
+        ]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
         let deps = Arc::new(RequesterDeps {
             context,
             projector,
@@ -1525,7 +1528,7 @@ fn normalize_stream_part(
     let StreamedMessagePart::ToolCall(call) = &part else {
         return part;
     };
-    let assigned = tool_call_ids.remap_streamed_id(&call.id, call._stream_index);
+    let assigned = tool_call_ids.remap_streamed_id(&call.id, call._stream_index.clone());
     if assigned == call.id {
         return part;
     }
@@ -1722,12 +1725,12 @@ async fn resolve_request(
     let used_context_tokens = match overrides.used_context_tokens {
         Some(used_context_tokens) => Some(used_context_tokens),
         None if overrides.messages.is_none() => Some(
-            u32::try_from(
+            u64::try_from(
                 deps.token_counting
                     .get(&deps.scope_context.agent_context(), None, None)
                     .size,
             )
-            .unwrap_or(u32::MAX),
+            .unwrap_or(u64::from(u32::MAX)),
         ),
         None => None,
     };
@@ -1736,7 +1739,7 @@ async fn resolve_request(
         max_completion_tokens_cap,
     );
     let budget_params =
-        completion_budget_params(budget, Some(&resolved.model_capabilities), used_context_tokens);
+        completion_budget_params(budget, Some(&resolved.model_capabilities), used_context_tokens.map(|value| u32::try_from(value).unwrap_or(u32::MAX)));
     let opted_out = max_completion_tokens_cap == Some(0);
     let messages = match &overrides.messages {
         Some(messages) => messages
@@ -1753,7 +1756,7 @@ async fn resolve_request(
         params.max_context_tokens = budget_params.max_context_tokens;
     }
     if let Some(used_context_tokens) = used_context_tokens {
-        params.used_context_tokens = Some(used_context_tokens);
+        params.used_context_tokens = Some(u32::try_from(used_context_tokens).unwrap_or(u32::MAX));
     }
     if opted_out {
         params.max_completion_tokens = max_completion_tokens_cap;

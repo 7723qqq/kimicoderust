@@ -169,8 +169,8 @@ impl fmt::Display for InstantiationServiceDisposedError {
 
 impl std::error::Error for InstantiationServiceDisposedError {}
 
-pub fn is_instantiation_service_disposed_error(error: &dyn std::error::Error) -> bool {
-    error.is::<InstantiationServiceDisposedError>()
+pub fn is_instantiation_service_disposed_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.downcast_ref::<InstantiationServiceDisposedError>().is_some()
 }
 
 #[derive(Default)]
@@ -648,11 +648,11 @@ impl InstantiationService {
     }
 
     pub fn anchor_kernel_entry(&self, disposer: Disposer, label: &str) -> LedgerEntry {
-        self.ledger.register(disposer, label)
+        self.ledger.register(move |reason| disposer(reason), label)
     }
 
     pub fn anchor_kernel_finalizer(&self, disposer: Disposer, label: &str) -> LedgerEntry {
-        self.ledger.register_finalizer(disposer, label)
+        self.ledger.register_finalizer(move |reason| disposer(reason), label)
     }
 
     fn materialized_instance_of(&self, id: &ServiceIdentifier<DynamicValue>) -> Option<DynamicValue> {
@@ -679,9 +679,10 @@ impl InstantiationService {
             }));
         }
         let dispose_change = change.clone();
+        let dispose_subscriptions = Arc::new(Mutex::new(subscriptions));
         self.ledger.register(
             move |_| {
-                for subscription in subscriptions {
+                for subscription in dispose_subscriptions.lock().drain(..) {
                     subscription.dispose();
                 }
                 dispose_change.dispose();
@@ -755,7 +756,7 @@ impl InstantiationService {
         self.children.lock().insert(child.id, child.clone());
         let dispose_child = child.clone();
         *child.parent_ledger_entry.lock() = Some(self.ledger.register(
-            move |_| dispose_child.dispose(),
+            move |_| crate::_base::di::lifecycle::IDisposable::dispose(&*dispose_child),
             "child-instantiation",
         ));
         if let Some(store) = store {
@@ -1027,7 +1028,7 @@ impl InstantiationService {
                     let instance = self.create_service_instance_with_owner(
                         &data.id,
                         &data.descriptor,
-                        data.trace,
+                        data.trace.clone(),
                     )?;
                     self.set_created_service_instance(&data.id, instance)?;
                 }
@@ -1597,6 +1598,10 @@ impl IInstantiationService for InstantiationService {
         InstantiationService::cascade(self)
     }
 
+    fn concrete(&self) -> Option<Arc<InstantiationService>> {
+        Some(self.arc())
+    }
+
     fn invoke_function_dyn(&self, callback: &mut dyn FnMut(&dyn ServicesAccessor)) {
         InstantiationService::invoke_function(self, callback)
     }
@@ -1613,7 +1618,7 @@ impl IInstantiationService for InstantiationService {
         services: ServiceCollection,
         store: Option<DisposableStore>,
     ) -> Arc<dyn IInstantiationService> {
-        InstantiationService::create_child(self, Arc::new(services), store)
+        InstantiationService::create_child(&self.arc(), Arc::new(services), store)
             .unwrap_or_else(|error| panic!("{error}"))
     }
 
@@ -1636,7 +1641,7 @@ impl IInstantiationService for InstantiationService {
     }
 
     fn provide_all(&self, entries: Vec<ProvideAllEntry>) {
-        InstantiationService::provide_all(self, entries)
+        InstantiationService::provide_all(&self.arc(), entries)
             .unwrap_or_else(|error| panic!("{error}"));
     }
 
@@ -1644,7 +1649,7 @@ impl IInstantiationService for InstantiationService {
     where
         Self: Sized,
     {
-        InstantiationService::unprovide(self, super::instantiation::refine_service_decorator(id));
+        InstantiationService::unprovide(&self.arc(), super::instantiation::refine_service_decorator(id));
     }
 
     fn dispose(&self) {

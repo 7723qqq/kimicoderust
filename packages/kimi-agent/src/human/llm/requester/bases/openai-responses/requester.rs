@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde_json::{Map, Value, json};
 
+use crate::human::llm::protocol::format::ProtocolFormat;
 use crate::human::llm::errors::{headers_to_record, to_llm_syntax_error_message};
 use crate::human::llm::model::LlmModel;
 use crate::human::llm::protocol::base::{ProtocolBase, ProtocolRequesterOptions, TraitContext};
@@ -91,7 +92,7 @@ pub fn prepare_open_ai_responses_request(
         let strict = trait_
             .and_then(|trait_| trait_.strict_thinking_validation)
             .unwrap_or(false);
-        let fallback = Arc::new(move |thinking: &crate::human::llm::thinking::ThinkingRequestOptions, ctx: &TraitContext| {
+        let fallback: crate::human::llm::protocol::thinking::ThinkingFallback = Arc::new(move |thinking: &crate::human::llm::thinking::ThinkingRequestOptions, ctx: &TraitContext| {
             encode_reasoning_effort_fallback(thinking, &ctx.model, strict)
                 .unwrap_or_else(|error| std::panic::panic_any(error))
         });
@@ -343,7 +344,7 @@ impl OpenAIResponsesRequester {
                 self.connection
                     .as_ref()
                     .and_then(|connection| connection.default_headers.as_ref())
-                    .and_then(|headers| headers(ctx.clone()))
+                    .and_then(|headers| headers(crate::human::llm::protocol::connection::ConnectionContext { model: ctx.model.clone() }))
                     .as_ref(),
                 ctx.model.connection.default_headers.as_ref(),
             )
@@ -379,7 +380,7 @@ impl OpenAIResponsesRequester {
                 }) as _)
             }),
         });
-        let mut message_id = None;
+        let message_id = std::sync::Arc::new(parking_lot::Mutex::new(None::<String>));
         let mut chunks = response.chunks;
         while let Some(chunk) = chunks.next().await {
             let chunk = match chunk {
@@ -392,7 +393,7 @@ impl OpenAIResponsesRequester {
                     return Ok(());
                 }
             };
-            let mut failed = false;
+            let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let parse_result = parse(chunk, &StreamParseSink {
                 on_delta: {
                     let on_event = control.on_event.clone();
@@ -404,11 +405,15 @@ impl OpenAIResponsesRequester {
                 },
                 on_message_id: Some({
                     let on_event = control.on_event.clone();
+                    let message_id = message_id.clone();
                     Arc::new(move |id| {
-                        if message_id.as_ref() == Some(&id) {
-                            return;
+                        {
+                            let mut guard = message_id.lock();
+                            if guard.as_ref() == Some(&id) {
+                                return;
+                            }
+                            *guard = Some(id.clone());
                         }
-                        message_id = Some(id.clone());
                         on_event(LlmRequestEvent::StreamingMessageId { message_id: id });
                     })
                 }),
@@ -418,8 +423,9 @@ impl OpenAIResponsesRequester {
                 }),
                 on_error: Some({
                     let on_event = control.on_event.clone();
+                    let failed = failed.clone();
                     Arc::new(move |error| {
-                        failed = true;
+                        failed.store(true, std::sync::atomic::Ordering::SeqCst);
                         on_event(LlmRequestEvent::FailedRemote {
                             error,
                             raw_error: None,
@@ -434,7 +440,7 @@ impl OpenAIResponsesRequester {
                 });
                 return Ok(());
             }
-            if failed {
+            if failed.load(std::sync::atomic::Ordering::SeqCst) {
                 return Ok(());
             }
         }

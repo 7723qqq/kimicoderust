@@ -14,7 +14,8 @@ use crate::_base::utils::abort::{AbortError, AbortSignal, abort_error};
 use crate::_base::utils::proxy::{proxy_env_for_child, reconcile_child_no_proxy};
 use crate::app::environment::environment::EnvironmentResolver;
 use crate::environment::environment::{
-    EnvironmentLease, EnvironmentResource, LOCAL_ENVIRONMENT_ID,
+    EnvironmentBinding, EnvironmentCapability, EnvironmentLease, EnvironmentResource,
+    LOCAL_ENVIRONMENT_ID,
 };
 use crate::environment::environment_registry::EnvironmentError;
 use crate::mcp_core::errors::MCP_STARTUP_FAILED;
@@ -124,7 +125,7 @@ impl EnvironmentStdioTransport {
             (state.process.take(), state.tracked.take(), state.lease.take())
         };
         if let Some(process) = process {
-            tokio::spawn(process.dispose());
+            tokio::spawn(async move { process.dispose().await });
         }
         self.read_buffer.lock().clear();
         if let Some(tracked) = tracked {
@@ -199,17 +200,20 @@ impl EnvironmentStdioTransport {
         let lease = self
             .options
             .environment_resolver
-            .acquire_when_ready(&self.options.environment_id, &["process"])
+            .acquire_when_ready(
+                &EnvironmentBinding { environment_id: self.options.environment_id.clone(), cwd: None },
+                &[EnvironmentCapability::Process],
+            )
             .await?;
         let result = async {
-            let host = lease.environment.host.as_ref().ok_or_else(|| {
+            let host = lease.environment.host().ok_or_else(|| {
                 Box::new(EnvironmentError::new(
                     "environment.unavailable",
                     format!("environment {} is not ready", self.options.environment_id),
                     None,
                 )) as WireAsyncError
             })?;
-            let path = lease.environment.path.as_ref().ok_or_else(|| {
+            let path = lease.environment.path().ok_or_else(|| {
                 Box::new(EnvironmentError::new(
                     "environment.unavailable",
                     format!("environment {} is not ready", self.options.environment_id),
@@ -230,24 +234,25 @@ impl EnvironmentStdioTransport {
             } else {
                 self.config.env.clone().unwrap_or_default()
             };
-            let process = lease.track(
-                lease.environment.process.clone().unwrap()
-                    .spawn(
-                        self.config.command.as_ref().unwrap(),
-                        self.config.args.as_deref().unwrap_or(&[]),
-                        Some(&cwd),
-                        env.as_ref(),
-                    )
-                    .await?,
-                self.options.session_id.as_deref(),
-            );
+            let process: Arc<dyn IHostProcess> = lease.environment.process()
+                .spawn(
+                    self.config.command.as_ref().unwrap(),
+                    self.config.args.as_deref().unwrap_or(&[]),
+                    Some(&cwd),
+                    Some(&env),
+                )
+                .await?;
+            lease.track_dyn(
+                Arc::new(crate::os::interface::host_process::TrackedHostProcess(process.clone())),
+                self.options.session_id.clone(),
+            )?;
             self.state.lock().process = Some(process.clone());
             let tracked = lease.track(
                 Arc::new(TransportDisposable {
                     transport: self.clone_handle(),
                 }),
-                self.options.session_id.as_deref(),
-            );
+                self.options.session_id.clone(),
+            )?;
             self.state.lock().tracked = Some(tracked);
             self.pump_stdout(process.clone());
             self.pump_stderr(process.clone());
@@ -283,7 +288,7 @@ impl EnvironmentStdioTransport {
             let mut stdout = process.stdout();
             while let Some(chunk) = stdout.next().await {
                 match chunk {
-                    Ok(chunk) => this.on_data(&chunk),
+                    Ok(chunk) => this.on_data(chunk.as_bytes()),
                     Err(error) => this.on_error(error),
                 }
             }
@@ -299,7 +304,7 @@ impl EnvironmentStdioTransport {
             let mut stderr = process.stderr();
             while let Some(chunk) = stderr.next().await {
                 match chunk {
-                    Ok(chunk) => this.stderr.lock().push(&String::from_utf8_lossy(&chunk)),
+                    Ok(chunk) => this.stderr.lock().push(&chunk),
                     Err(error) => this.on_error(error),
                 }
             }
@@ -321,7 +326,7 @@ impl EnvironmentStdioTransport {
             state.process.take()
         };
         if let Some(process) = process {
-            if let Err(error) = process.stdin_end().await {
+            if let Err(error) = process.close_stdin().await {
                 self.on_error(error);
             }
             let exited_on_eof = wait_for_exit(&process, STDIO_EOF_GRACE_MS).await;
@@ -333,7 +338,7 @@ impl EnvironmentStdioTransport {
                     let _ = process.wait().await;
                 }
             }
-            tokio::spawn(process.dispose());
+            tokio::spawn(async move { process.dispose().await });
         }
         self.read_buffer.lock().clear();
         let (tracked, lease) = {
@@ -389,14 +394,19 @@ struct TransportDisposable {
 
 impl IDisposable for TransportDisposable {
     fn dispose(&self) {
-        tokio::spawn(self.transport.close());
+        let transport = self.transport.clone_handle();
+        tokio::spawn(async move {
+            let _ = transport.close().await;
+        });
     }
 }
 
 impl EnvironmentResource for TransportDisposable {
     fn dispose(&self) -> futures_util::future::BoxFuture<'static, ()> {
         let transport = self.transport.clone_handle();
-        Box::pin(transport.close())
+        Box::pin(async move {
+            let _ = transport.close().await;
+        })
     }
 }
 
@@ -428,7 +438,7 @@ impl McpTransport for EnvironmentStdioTransport {
         let data = serde_json::to_string(&body)? + "\n";
         let this = self.clone_handle();
         let mut write = tokio::spawn(async move {
-            let result = process.stdin_write(data.as_bytes()).await;
+            let result = process.write_stdin(data.as_bytes()).await;
             if let Err(error) = &result {
                 this.on_error(error.to_string().into());
             }
@@ -494,7 +504,7 @@ impl McpTransport for EnvironmentStdioTransport {
             body.insert("params".to_string(), params);
         }
         let data = serde_json::to_string(&body)? + "\n";
-        if let Err(error) = process.stdin_write(data.as_bytes()).await {
+        if let Err(error) = process.write_stdin(data.as_bytes()).await {
             self.on_error(error.to_string().into());
             return Err(error);
         }
@@ -834,7 +844,7 @@ fn error2_errno(error: &Error2) -> Option<String> {
 }
 
 fn io_error_errno(error: &std::io::Error) -> Option<String> {
-    if let Some(errno) = error.raw_os_error().and_then(io_errno_code) {
+    if let Some(errno) = error.raw_os_error().and_then(|code| io_errno_code(code as i64)) {
         return Some(errno);
     }
     match error.kind() {

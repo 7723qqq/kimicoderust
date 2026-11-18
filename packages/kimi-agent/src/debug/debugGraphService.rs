@@ -30,21 +30,21 @@ impl IDebugGraphService for DebugGraphService {
         for info in &infos {
             let states = info
                 .container
-                .cascade
+                .cascade()
                 .units_snapshot()
                 .into_iter()
                 .map(|unit| (unit.token.clone(), unit))
                 .collect::<HashMap<_, _>>();
-            for registration in info.container.services_snapshot() {
-                let id = node_id(&info.path, &registration.token);
+            for (token, uid) in info.container.services_snapshot() {
+                let id = node_id(&info.path, &token);
                 nodes.insert(
                     id.clone(),
                     DebugGraphNode {
                         id,
-                        token: registration.token,
+                        token: token.clone(),
                         scope_path: info.path.clone(),
-                        uid: Some(registration.uid),
-                        state: states.get(&registration.token).and_then(|unit| unit.state),
+                        uid: Some(uid),
+                        state: states.get(&token).map(|unit| unit.state),
                     },
                 );
             }
@@ -53,9 +53,9 @@ impl IDebugGraphService for DebugGraphService {
             path_by_container
                 .get(&scope)
                 .cloned()
-                .unwrap_or_else(|| format!("#{}", self.root.cascade_tree.seq_of(scope)))
+                .unwrap_or_else(|| format!("#{}", self.root.cascade_tree().seq_of(scope)))
         };
-        let endpoint_node = |path: String, token: String| {
+        let mut endpoint_node = |path: String, token: String| {
             let id = node_id(&path, &token);
             if !nodes.contains_key(&id) {
                 nodes.insert(
@@ -72,7 +72,7 @@ impl IDebugGraphService for DebugGraphService {
             id
         };
         let mut edges = Vec::new();
-        for edge in self.root.dependency_graph.edges() {
+        for edge in self.root.dependency_graph().lock().edges() {
             edges.push(DebugGraphEdge {
                 from: endpoint_node(path_of(edge.consumer.scope), edge.consumer.token.to_string()),
                 to: endpoint_node(path_of(edge.dependency.scope), edge.dependency.token.to_string()),

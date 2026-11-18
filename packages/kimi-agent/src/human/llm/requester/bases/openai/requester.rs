@@ -156,7 +156,7 @@ pub fn prepare_open_ai_request(
         let strict = trait_
             .and_then(|trait_| trait_.strict_thinking_validation)
             .unwrap_or(false);
-        let fallback = Arc::new(move |thinking: &crate::human::llm::thinking::ThinkingRequestOptions, ctx: &TraitContext| {
+        let fallback: crate::human::llm::protocol::thinking::ThinkingFallback = Arc::new(move |thinking: &crate::human::llm::thinking::ThinkingRequestOptions, ctx: &TraitContext| {
             encode_reasoning_effort_fallback(thinking, &ctx.model, strict)
                 .unwrap_or_else(|error| std::panic::panic_any(error))
         });
@@ -281,7 +281,7 @@ pub fn prepare_open_ai_request(
         if matches!(hooked, Some(Some(None))) {
             continue;
         }
-        let converted_message = hooked.flatten().unwrap_or(lowered.message);
+        let converted_message = hooked.flatten().flatten().unwrap_or(lowered.message);
         if let Message::System(source) = &lowered.source
             && source.content.is_empty()
             && source.tools.as_ref().is_some_and(|tools| !tools.is_empty())
@@ -500,7 +500,7 @@ impl OpenAIRequester {
                 self.connection
                     .as_ref()
                     .and_then(|connection| connection.default_headers.as_ref())
-                    .and_then(|headers| headers(ctx.clone()))
+                    .and_then(|headers| headers(crate::human::llm::protocol::connection::ConnectionContext { model: ctx.model.clone() }))
                     .as_ref(),
                 ctx.model.connection.default_headers.as_ref(),
             )
@@ -539,7 +539,7 @@ impl OpenAIRequester {
                 }) as _)
             }),
         });
-        let mut message_id = None;
+        let message_id = std::sync::Arc::new(parking_lot::Mutex::new(None::<String>));
         let mut chunks = response.chunks;
         while let Some(chunk) = chunks.next().await {
             let chunk = match chunk {
@@ -555,7 +555,7 @@ impl OpenAIRequester {
             if let Some(delta) = chunk.choices.first().and_then(|choice| choice.delta.as_ref()) {
                 reasoning.observe(&serde_json::to_value(delta)?);
             }
-            let mut failed = false;
+            let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let parse_result = parse(chunk, &StreamParseSink {
                 on_delta: {
                     let on_event = control.on_event.clone();
@@ -567,11 +567,15 @@ impl OpenAIRequester {
                 },
                 on_message_id: Some({
                     let on_event = control.on_event.clone();
+                    let message_id = message_id.clone();
                     Arc::new(move |id| {
-                        if message_id.as_ref() == Some(&id) {
-                            return;
+                        {
+                            let mut guard = message_id.lock();
+                            if guard.as_ref() == Some(&id) {
+                                return;
+                            }
+                            *guard = Some(id.clone());
                         }
-                        message_id = Some(id.clone());
                         on_event(LlmRequestEvent::StreamingMessageId { message_id: id });
                     })
                 }),
@@ -581,8 +585,9 @@ impl OpenAIRequester {
                 }),
                 on_error: Some({
                     let on_event = control.on_event.clone();
+                    let failed = failed.clone();
                     Arc::new(move |error| {
-                        failed = true;
+                        failed.store(true, std::sync::atomic::Ordering::SeqCst);
                         on_event(LlmRequestEvent::FailedRemote {
                             error,
                             raw_error: None,
@@ -597,7 +602,7 @@ impl OpenAIRequester {
                 });
                 return Ok(());
             }
-            if failed {
+            if failed.load(std::sync::atomic::Ordering::SeqCst) {
                 return Ok(());
             }
         }

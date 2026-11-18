@@ -2221,6 +2221,22 @@ impl TaskRunner {
             .count()
     }
 
+    /// Drop queued completion notifications for tasks the WaitFor tool has
+    /// just reported, so the automatic notification does not repeat them
+    /// (v2 `markTasksDeliveredViaWait`, `agent/task/taskService.ts:684-694`).
+    /// `(task_id, status)` pairs; a pair matches when both fields agree.
+    pub fn mark_notifications_delivered_via_wait(&self, delivered: &[(String, String)]) {
+        if delivered.is_empty() {
+            return;
+        }
+        let mut queue = self.pending_notifications.lock().unwrap_or_else(|e| e.into_inner());
+        queue.retain(|notification| {
+            !delivered.iter().any(|(task_id, status)| {
+                notification.task_id == *task_id && notification.status.as_str() == status
+            })
+        });
+    }
+
     /// A receiver that fires whenever a completion notification is queued.
     ///
     /// Each idle session pump watches this to start the notification turn

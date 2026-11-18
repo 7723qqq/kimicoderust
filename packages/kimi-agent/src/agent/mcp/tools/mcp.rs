@@ -100,7 +100,12 @@ impl ExecutableTool for McpTool {
             let execute_name = qualified_name.clone();
             let execute_tool_name = tool_name.clone();
             let execute_client = client.clone();
-            let args = input.as_object().cloned().unwrap_or_default();
+            let args = input
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<HashMap<String, Value>>();
             Ok(ToolExecution::Runnable(RunnableToolExecution {
                 accesses: None,
                 display: None,

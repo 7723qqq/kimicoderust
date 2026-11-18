@@ -83,6 +83,7 @@ pub async fn execute_github_tool(
     tool_name: &str,
     args: &Value,
     credentials: Option<&GitHubCredentials>,
+    cancel: Option<&crate::subagent::types::ParentCancel>,
 ) -> Option<LegacyExecutableToolResult> {
     let spec = GITHUB_SPECS
         .iter()
@@ -98,12 +99,30 @@ pub async fn execute_github_tool(
     match tool.resolve_execution(args.clone()) {
         ToolExecution::Error(result) => Some(legacy_result(result)),
         ToolExecution::Runnable(run) => {
+            // v2 passes ctx.signal so a user abort cancels the in-flight
+            // request; bridge the turn's ParentCancel into one AbortSignal.
+            let controller = AbortController::new();
+            if let Some(cancel) = cancel {
+                let listener_controller = controller.clone();
+                let listener_cancel = cancel.clone();
+                tokio::spawn(async move {
+                    listener_cancel.wait().await;
+                    listener_controller.abort(Some(std::sync::Arc::new(
+                        crate::_base::utils::abort::user_cancellation_reason(),
+                    ) as crate::_base::errors::errors::SharedError));
+                });
+                if cancel.triggered() {
+                    controller.abort(Some(std::sync::Arc::new(
+                        crate::_base::utils::abort::user_cancellation_reason(),
+                    ) as crate::_base::errors::errors::SharedError));
+                }
+            }
             let context = ExecutableToolContext {
                 turn_id: 0,
                 tool_call_id: String::new(),
                 trace: None,
                 metadata: None,
-                signal: AbortController::new().signal(),
+                signal: controller.signal(),
                 steer_signal: None,
                 on_update: None,
                 on_foreground_task_start: None,

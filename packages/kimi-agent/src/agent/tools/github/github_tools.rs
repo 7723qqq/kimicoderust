@@ -44,11 +44,19 @@ impl GitHubToolBase {
     }
 
     pub fn side_effect(&self) -> &'static str {
-        "write"
+        if self.spec.mutating == Some(true) {
+            "write"
+        } else {
+            "read"
+        }
     }
 
     pub fn repo_mutation(&self) -> &'static str {
-        "none"
+        if self.spec.mutating == Some(true) {
+            "possible"
+        } else {
+            "none"
+        }
     }
 
     pub fn description(&self) -> &str {
@@ -107,17 +115,23 @@ impl GitHubToolBase {
             accept: spec.accept.clone(),
             token: resolve_github_token(&self.deps.config).map(str::to_string),
             base_url: resolve_github_base_url(&self.deps.config).map(str::to_string),
+            max_bytes: spec.max_bytes,
         };
         let request = github_request(
-            &spec.method,
-            &(spec.path)(&args),
+            spec.method.clone(),
+            (spec.path)(&args),
             options,
             GitHubRequestDeps {
                 client: self.deps.client.clone(),
                 signal: None,
             },
         );
-        let response = match abortable(request, context.signal).await {
+        // v2 wires ctx.signal into the request so a user abort cancels the
+        // in-flight HTTP call (github-tools.ts:86-89 → github-request.ts:63-66,
+        // 105); `abortable` below already races the same signal, so the request
+        // future is dropped together with the abort instead of finishing and
+        // being discarded.
+        let response = match abortable(request, context.signal.clone()).await {
             Ok(result) => result.map_err(|error| Box::new(error) as WireAsyncError)?,
             Err(error) if is_user_cancellation(error.as_ref()) => {
                 return Err(Box::new(user_cancellation_reason()) as WireAsyncError);
@@ -151,6 +165,10 @@ impl GitHubToolBase {
         } else {
             response.body
         };
+        let mut body = body;
+        if response.next_page {
+            body.push_str("\n\n(has_more: true)");
+        }
         let mut builder = ToolOutputAccumulator::new();
         builder.write(&format!("{body}{rate}"));
         let result = builder.ok("", None);
@@ -458,15 +476,18 @@ fn build_github_specs() -> Vec<GitHubToolSpec> {
             "/repos/{owner}/{repo}/pulls/{pullNumber}",
             vec![("pullNumber", integer("Pull request number.", None, None), true)],
         ),
-        with_accept(
-            repo_spec(
-                "GitHubGetPRDiff",
-                "Get the unified diff for a pull request.",
-                "GET",
-                "/repos/{owner}/{repo}/pulls/{pullNumber}",
-                vec![("pullNumber", integer("Pull request number.", None, None), true)],
+        with_max_bytes(
+            with_accept(
+                repo_spec(
+                    "GitHubGetPRDiff",
+                    "Get the unified diff for a pull request.",
+                    "GET",
+                    "/repos/{owner}/{repo}/pulls/{pullNumber}",
+                    vec![("pullNumber", integer("Pull request number.", None, None), true)],
+                ),
+                "application/vnd.github.diff",
             ),
-            "application/vnd.github.diff",
+            crate::agent::tools::github::github_request::GITHUB_DIFF_MAX_RESPONSE_BODY_BYTES,
         ),
         with_query(
             repo_spec(
@@ -685,6 +706,7 @@ fn base_spec(
         query: None,
         body: None,
         accept: None,
+        max_bytes: None,
         mutating: None,
         subject,
     }
@@ -702,6 +724,11 @@ fn with_body(mut spec: GitHubToolSpec, resolver: BodyResolver) -> GitHubToolSpec
 
 fn with_accept(mut spec: GitHubToolSpec, accept: &str) -> GitHubToolSpec {
     spec.accept = Some(accept.to_string());
+    spec
+}
+
+fn with_max_bytes(mut spec: GitHubToolSpec, max_bytes: usize) -> GitHubToolSpec {
+    spec.max_bytes = Some(max_bytes);
     spec
 }
 
@@ -870,7 +897,11 @@ fn parse_args(schema: &Value, input: Value) -> Result<Value, String> {
     if issues.is_empty() {
         Ok(parsed)
     } else {
-        Err(serde_json::to_string_pretty(&issues).unwrap_or_default())
+        // v2's zod error.message is `JSON.stringify({issues}, null, 2)`
+        // (zod errors.js:13) — the pretty-printed issues wrapped in an
+        // `{"issues": …}` object, not a bare array.
+        let wrapped = json!({ "issues": issues });
+        Err(serde_json::to_string_pretty(&wrapped).unwrap_or_default())
     }
 }
 
@@ -881,7 +912,6 @@ fn parse_value(
     issues: &mut Vec<Value>,
 ) -> Value {
     let kind = schema.get("type").and_then(Value::as_str).unwrap_or_default();
-    let expected = if kind == "integer" { "number" } else { kind };
     let type_valid = match kind {
         "object" => input.is_object(),
         "array" => input.is_array(),
@@ -892,6 +922,7 @@ fn parse_value(
         _ => true,
     };
     if !type_valid {
+        let expected = if kind == "integer" { "int" } else { kind };
         issues.push(invalid_type_issue(path, expected, received_type(&input)));
         return input;
     }
@@ -899,10 +930,10 @@ fn parse_value(
         && !values.contains(&input)
     {
         issues.push(json!({
-            "code": "invalid_enum_value",
-            "options": values,
+            "code": "invalid_value",
+            "values": values,
             "path": path,
-            "message": format!("Invalid enum value. Expected one of {values:?}")
+            "message": format!("Invalid option: expected one of {values:?}")
         }));
     }
     match kind {
@@ -947,10 +978,10 @@ fn parse_value(
                 issues.push(json!({
                     "code": "too_small",
                     "minimum": minimum,
-                    "type": "array",
+                    "origin": "array",
                     "inclusive": true,
                     "path": path,
-                    "message": format!("Array must contain at least {minimum} element(s)")
+                    "message": format!("Too small: expected array to have >={minimum} items")
                 }));
             }
             let mut output = Vec::with_capacity(values.len());
@@ -973,26 +1004,27 @@ fn parse_value(
                 issues.push(json!({
                     "code": "too_small",
                     "minimum": minimum,
-                    "type": "string",
+                    "origin": "string",
                     "inclusive": true,
                     "path": path,
-                    "message": format!("String must contain at least {minimum} character(s)")
+                    "message": format!("Too small: expected string to have >={minimum} characters")
                 }));
             }
             input
         }
         "integer" | "number" => {
             let value = input.as_f64().expect("number type was checked");
+            let origin = if kind == "integer" { "int" } else { "number" };
             if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
                 && value < minimum
             {
                 issues.push(json!({
                     "code": "too_small",
                     "minimum": minimum,
-                    "type": "number",
+                    "origin": origin,
                     "inclusive": true,
                     "path": path,
-                    "message": format!("Number must be greater than or equal to {minimum}")
+                    "message": format!("Too small: expected {origin} to be >={minimum}")
                 }));
             }
             if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
@@ -1001,10 +1033,10 @@ fn parse_value(
                 issues.push(json!({
                     "code": "too_big",
                     "maximum": maximum,
-                    "type": "number",
+                    "origin": origin,
                     "inclusive": true,
                     "path": path,
-                    "message": format!("Number must be less than or equal to {maximum}")
+                    "message": format!("Too big: expected {origin} to be <={maximum}")
                 }));
             }
             input
@@ -1021,6 +1053,56 @@ fn invalid_type_issue(path: &[Value], expected: &str, received: &str) -> Value {
         "path": path,
         "message": format!("Invalid input: expected {expected}, received {received}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_effects_follow_each_specs_mutating_flag() {
+        let deps = GitHubToolDeps {
+            config: Arc::new(KimiConfig::default()),
+            client: None,
+        };
+        for spec in GITHUB_SPECS.iter() {
+            let tool = GitHubToolBase::new(spec.clone(), deps.clone());
+            let expected = if spec.mutating == Some(true) {
+                ("write", "possible")
+            } else {
+                ("read", "none")
+            };
+            assert_eq!((tool.side_effect(), tool.repo_mutation()), expected, "{}", spec.name);
+        }
+    }
+
+    #[test]
+    fn mutation_and_readonly_spec_tables_cover_every_github_tool_once() {
+        assert!(!GITHUB_MUTATING_TOOL_NAMES.is_empty());
+        assert!(!GITHUB_READONLY_TOOL_NAMES.is_empty());
+        for spec in GITHUB_SPECS.iter() {
+            assert_ne!(
+                GITHUB_MUTATING_TOOL_NAMES.contains(&spec.name),
+                GITHUB_READONLY_TOOL_NAMES.contains(&spec.name),
+                "{}",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_pull_request_diff_has_the_smaller_response_limit() {
+        for spec in GITHUB_SPECS.iter() {
+            if spec.name == "GitHubGetPRDiff" {
+                assert_eq!(
+                    spec.max_bytes,
+                    Some(crate::agent::tools::github::github_request::GITHUB_DIFF_MAX_RESPONSE_BODY_BYTES)
+                );
+            } else {
+                assert_eq!(spec.max_bytes, None, "{}", spec.name);
+            }
+        }
+    }
 }
 
 fn received_type(value: &Value) -> &'static str {

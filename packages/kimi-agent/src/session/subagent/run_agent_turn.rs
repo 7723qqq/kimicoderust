@@ -172,12 +172,12 @@ async fn await_run(
     turn: Arc<Turn>,
     options: RunAgentTurnOptions,
 ) -> Result<AgentRunCompletion, WireAsyncError> {
-    let controller = AbortController::new();
-    let unlink = link_abort_signal(&options.signal, &controller);
-    let cancel_turn: Arc<dyn Fn(WireAsyncError) + Send + Sync> = {
+    let controller = Arc::new(AbortController::new());
+    let unlink = link_abort_signal(&options.signal, controller.clone());
+    let cancel_turn: Arc<dyn Fn(Option<crate::_base::errors::errors::SharedError>) + Send + Sync> = {
         let turn = turn.clone();
-        Arc::new(move |reason: WireAsyncError| {
-            turn.cancel(Some(reason));
+        Arc::new(move |reason: Option<crate::_base::errors::errors::SharedError>| {
+            turn.cancel(reason);
         })
     };
     let result = async {
@@ -229,7 +229,7 @@ async fn await_run(
 async fn await_turn(
     turn: &Arc<Turn>,
     controller: &AbortController,
-    cancel_turn: Arc<dyn Fn(WireAsyncError) + Send + Sync>,
+    cancel_turn: Arc<dyn Fn(Option<crate::_base::errors::errors::SharedError>) + Send + Sync>,
 ) -> Result<TurnResult, WireAsyncError> {
     let signal = controller.signal();
     let reason = signal.clone();
@@ -261,20 +261,24 @@ pub fn classify_turn_result(result: TurnResult) -> Result<CompletedTurnResult, W
         }
         TurnResult::Failed { error, .. } => {
             if is_provider_rate_limit_error(error.as_ref()) {
-                return Err(error);
+                return Err(crate::_base::errors::errors::shared_to_wire(error));
             }
-            let payload = to_kimi_error_payload(error.as_ref());
+            let payload = to_kimi_error_payload(&crate::_base::errors::serialize::UnknownError::Error(error.clone()));
             if payload.code == PROVIDER_RATE_LIMIT {
                 return Err(Box::new(provider_rate_limit_error_from_payload(&payload)));
             }
             if is_max_steps_exceeded_error(error.as_ref()) {
                 return Err(Box::new(max_steps_error_from_payload(&payload)));
             }
-            Err(to_run_error(Some(error)))
+            Err(to_run_error(Some(
+                crate::_base::errors::errors::shared_to_wire(error),
+            )))
         }
-        TurnResult::Cancelled { reason, .. } => Err(to_run_error(
-            reason.or_else(|| Some(user_cancellation_reason())),
-        )),
+        TurnResult::Cancelled { reason, .. } => Err(to_run_error(Some(
+            crate::_base::errors::errors::shared_to_wire(
+                reason.unwrap_or_else(|| Arc::new(user_cancellation_reason())),
+            ),
+        ))),
     }
 }
 

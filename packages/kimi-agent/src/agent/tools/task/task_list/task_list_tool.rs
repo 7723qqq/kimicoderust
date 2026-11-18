@@ -74,7 +74,22 @@ fn render_task_list(value: &Value, active_only: bool, limit: usize) -> Executabl
             .take(limit)
             .collect()
     } else {
-        tasks.iter().take(limit).collect()
+        // v2 `shouldListTask` (agent/task/taskService.ts:1666-1670): a
+        // terminal task stays out of the listing unless it detached
+        // (`detached !== false`), so a stopped foreground task is not
+        // re-listed after it settles.
+        tasks
+            .iter()
+            .filter(|task| {
+                let status = task.get("status").and_then(|s| s.as_str());
+                match status {
+                    None => true,
+                    Some(status) if !is_terminal_status(status) => true,
+                    Some(_) => task.get("detached").and_then(Value::as_bool) != Some(false),
+                }
+            })
+            .take(limit)
+            .collect()
     };
     let label = if active_only {
         "active_background_tasks"

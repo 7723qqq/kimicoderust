@@ -115,8 +115,10 @@ pub struct SessionWillCreateEvent {
             + Send
             + Sync,
     >,
-    pub read_seed: Arc<dyn Fn(&str) -> Value + Send + Sync>,
-    pub contribute_seed: Arc<dyn Fn(&str, Value) + Send + Sync>,
+    pub read_seed:
+        Arc<dyn Fn(&str) -> crate::_base::di::descriptors::DynamicValue + Send + Sync>,
+    pub contribute_seed:
+        Arc<dyn Fn(&str, crate::_base::di::descriptors::DynamicValue) + Send + Sync>,
     pub on_session_dispose: Arc<dyn Fn(Box<dyn FnOnce() + Send>) + Send + Sync>,
 }
 

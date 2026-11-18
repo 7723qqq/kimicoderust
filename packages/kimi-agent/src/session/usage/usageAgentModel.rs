@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::agent::llm_requester::llm_requester::AgentLLMRequestSource;
 use crate::agent::usage::usage::UsageStatus;
 use crate::agent::usage::usage_events::{AgentStatusUpdated, AgentStatusUpdatedPayload};
-use crate::agent::usage::usage_ops::{UsageModelState, UsageRecord, copy_usage};
+use crate::agent::usage::usage_ops::{UsageModelState, UsageRecord, UsageRecordPayload, UsageRecordScope, copy_usage};
 use crate::human::llm::usage::{TokenUsage, add_usage};
 use crate::state::agent_model::{
     AgentModel, AgentModelContext, AgentModelDefinition, AgentModelDefinitionInput,
@@ -85,12 +85,12 @@ impl UsageAgentModel {
             .flatten();
         self.base
             .emit(
-                UsageRecord::new(json!({
-                    "agentId": self.base.agent.agent_id,
-                    "model": input.model,
-                    "usage": input.usage,
-                    "usageScope": if is_turn { "turn" } else { "session" },
-                }))
+                UsageRecord::new(UsageRecordPayload {
+                    agent_id: self.base.agent.agent_id.clone(),
+                    model: input.model.clone(),
+                    usage: input.usage.clone(),
+                    usage_scope: Some(if is_turn { UsageRecordScope::Turn } else { UsageRecordScope::Session }),
+                })
                 .into(),
             )
             .await?;
@@ -112,6 +112,7 @@ impl UsageAgentModel {
                     agent_id: self.base.agent.agent_id.clone(),
                     context_tokens: None,
                     usage: Some(status),
+                    ..Default::default()
                 })
                 .into(),
             )

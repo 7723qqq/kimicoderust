@@ -717,6 +717,7 @@ impl ExecChannel for RemoteExecConnection {
         let state = self.state.clone();
         let method = method.to_string();
         Box::new(move || {
+            let mut state = state.lock();
             if let Some(handlers) = state.notification_handlers.get_mut(&method) {
                 handlers.remove(&id);
             }

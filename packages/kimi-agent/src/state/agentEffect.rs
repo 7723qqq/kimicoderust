@@ -9,6 +9,7 @@ pub struct AgentEffectContext {
     pub agent: Arc<AgentContext>,
 }
 
+#[derive(Clone)]
 pub struct AgentEffectDefinition {
     pub id: String,
     pub create: Arc<dyn Fn(AgentEffectContext) -> Arc<dyn DomainResourceRuntime> + Send + Sync>,
@@ -19,7 +20,7 @@ pub fn define_agent_effect(definition: AgentEffectDefinition) -> AgentEffectDefi
 }
 
 pub fn agent_effect_contribution() -> CollectionDescriptor<AgentEffectDefinition> {
-    collection("agent-effect", |value, existing| {
+    collection::<AgentEffectDefinition>("agent-effect", |value, existing| {
         if existing.iter().any(|definition| definition.id == value.id) {
             return Err(format!("Agent effect '{}' already has an active provider", value.id));
         }
@@ -32,13 +33,14 @@ pub struct SessionEffectContext {
     pub session_id: String,
 }
 
+#[derive(Clone)]
 pub struct SessionEffectDefinition {
     pub id: String,
     pub create: Arc<dyn Fn(SessionEffectContext) -> Arc<dyn DomainResourceRuntime> + Send + Sync>,
 }
 
 pub fn session_effect_contribution() -> CollectionDescriptor<SessionEffectDefinition> {
-    collection("session-effect", |value, existing| {
+    collection::<SessionEffectDefinition>("session-effect", |value, existing| {
         if existing.iter().any(|definition| definition.id == value.id) {
             return Err(format!("Session effect '{}' already has an active provider", value.id));
         }

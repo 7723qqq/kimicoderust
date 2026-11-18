@@ -41,22 +41,22 @@ pub static DATABASE_CONFIG_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 });
 
 fn parse_bool_value(raw: &str) -> Option<Value> {
-    parse_boolean_env(raw).map(Value::Bool)
+    parse_boolean_env(Some(raw)).map(Value::Bool)
 }
 
 fn parse_number_value(raw: &str) -> Option<Value> {
-    parse_number_env(raw).map(|value| json!(value))
+    parse_number_env(Some(raw)).map(|value| json!(value))
 }
 
 pub fn database_env_bindings() -> EnvBindings {
     env_bindings(
         &DATABASE_CONFIG_SCHEMA,
         &[
-            ("base", PERSISTENCE_MINIDB_READMODEL_ENV, parse_bool_value),
-            ("globalSearch", GLOBAL_SEARCH_ENV, parse_bool_value),
-            ("search", SEARCH_WORKER_ENV, parse_bool_value),
-            ("searchSyncSessionCap", SEARCH_SYNC_SESSION_CAP_ENV, parse_number_value),
-            ("searchSyncDebounceMs", SEARCH_SYNC_DEBOUNCE_MS_ENV, parse_number_value),
+            ("base", PERSISTENCE_MINIDB_READMODEL_ENV, parse_bool_value as fn(&str) -> Option<Value>),
+            ("globalSearch", GLOBAL_SEARCH_ENV, parse_bool_value as fn(&str) -> Option<Value>),
+            ("search", SEARCH_WORKER_ENV, parse_bool_value as fn(&str) -> Option<Value>),
+            ("searchSyncSessionCap", SEARCH_SYNC_SESSION_CAP_ENV, parse_number_value as fn(&str) -> Option<Value>),
+            ("searchSyncDebounceMs", SEARCH_SYNC_DEBOUNCE_MS_ENV, parse_number_value as fn(&str) -> Option<Value>),
         ],
     )
 }

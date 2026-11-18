@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value, json};
 
 use crate::os::backends::host::host_process_service::HostProcessService;
+use crate::os::interface::host_process::IHostProcessService;
 use crate::os::interface::host_process::{IHostProcess, OS_PROCESS_SPAWN_FAILED};
 use crate::remote::process_lifecycle::PROCESS_TERMINATION_GRACE_MS;
 use crate::remote::protocol::errors::{
@@ -170,8 +171,9 @@ impl ProcessManager {
         entry.lock().state = ProcessState::Running;
         if entry.lock().terminate_after_start {
             let entry = entry.clone();
+            let this = self.clone_handle();
             tokio::spawn(async move {
-                let _ = self.begin_termination(&entry).await;
+                let _ = this.begin_termination(&entry).await;
             });
         }
         Ok(ProcessStartResult { pid: entry.lock().pid as u32 })
@@ -184,15 +186,12 @@ impl ProcessManager {
         cwd: &str,
         env: Option<HashMap<String, String>>,
     ) -> Result<(), WireAsyncError> {
-        let child = match self.host.spawn(&argv[0], &argv[1..], Some(cwd), env.as_ref(), true).await {
+        let child = match self.host.spawn(&argv[0], &argv[1..], Some(cwd), env.as_ref()).await {
             Ok(child) => child,
             Err(error) => {
                 self.state.lock().processes.remove(&entry.lock().process_id);
                 let mut data = Map::new();
                 data.insert("domainCode".to_string(), OS_PROCESS_SPAWN_FAILED.into());
-                if let Some(errno) = error.downcast_ref::<crate::os::interface::host_process::HostProcessError>().and_then(|error| error.errno()) {
-                    data.insert("errno".to_string(), errno.into());
-                }
                 return Err(RpcError::new(
                     RPC_INTERNAL_ERROR,
                     format!("failed to spawn \"{}\": {error}", argv[0]),
@@ -200,7 +199,7 @@ impl ProcessManager {
                 ).into());
             }
         };
-        let pid = child.pid();
+        let pid = child.pid() as i32;
         entry.lock().child = Some(child.clone());
         entry.lock().pid = pid;
         self.apply_output_pause(&entry);
@@ -225,7 +224,7 @@ impl ProcessManager {
             use futures_util::StreamExt;
             while let Some(chunk) = output.next().await {
                 match chunk {
-                    Ok(chunk) => this.pump(&entry, stream, &chunk),
+                    Ok(chunk) => this.pump(&entry, stream, chunk.as_bytes()),
                     Err(_) => break,
                 }
             }
@@ -234,6 +233,9 @@ impl ProcessManager {
     }
 
     fn pump(&self, entry: &Arc<Mutex<ManagedProcess>>, stream: ProcessOutputStream, chunk: &[u8]) {
+        if self.state.lock().output_paused || entry.lock().client_paused {
+            return;
+        }
         let entry_snapshot = entry.lock();
         if self.state.lock().disposed {
             return;
@@ -264,12 +266,12 @@ impl ProcessManager {
 
     fn on_exit(&self, entry: &Arc<Mutex<ManagedProcess>>, exit_code: i32) {
         {
-            let mut entry = entry.lock();
-            let current = self.state.lock().processes.get(&entry.process_id).cloned();
-            if current.is_none_or(|current| !Arc::ptr_eq(&current, entry)) || entry.exit_code.is_some() {
+            let mut state = entry.lock();
+            let current = self.state.lock().processes.get(&state.process_id).cloned();
+            if current.is_none_or(|current| !Arc::ptr_eq(&current, entry)) || state.exit_code.is_some() {
                 return;
             }
-            entry.exit_code = Some(exit_code);
+            state.exit_code = Some(exit_code);
         }
         self.break_stdin(entry);
         (self.notify)(PROCESS_EXITED_METHOD, json!({ "processId": entry.lock().process_id, "exitCode": exit_code }));
@@ -326,25 +328,26 @@ impl ProcessManager {
 
     fn schedule_group_reap(&self, process_id: String, serial: u64) {
         let this = self.clone_handle();
+        let reap_process_id = process_id.clone();
         let timer = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(GROUP_REAP_INTERVAL_MS)).await;
-            let pid = match this.state.lock().exited_groups.get(&process_id) {
+            let pid = match this.state.lock().exited_groups.get(&reap_process_id) {
                 Some(group) if group.serial == serial => group.pid,
                 _ => return,
             };
             if kill_process_group(pid, "0") {
                 let mut state = this.state.lock();
-                if state.exited_groups.get(&process_id).is_some_and(|group| group.serial == serial) {
-                    if let Some(group) = state.exited_groups.get_mut(&process_id) {
+                if state.exited_groups.get(&reap_process_id).is_some_and(|group| group.serial == serial) {
+                    if let Some(group) = state.exited_groups.get_mut(&reap_process_id) {
                         if let Some(timer) = group.kill_timer.take() {
                             timer.abort();
                         }
                     }
-                    state.exited_groups.remove(&process_id);
+                    state.exited_groups.remove(&reap_process_id);
                 }
                 return;
             }
-            this.schedule_group_reap(process_id, serial);
+            this.schedule_group_reap(reap_process_id, serial);
         });
         if let Some(group) = self.state.lock().exited_groups.get_mut(&process_id)
             && group.serial == serial
@@ -375,7 +378,7 @@ impl ProcessManager {
         if eof {
             entry.lock().stdin_open = false;
             if let Some(child) = &entry.lock().child {
-                child.stdin_end().await?;
+                child.close_stdin().await?;
             }
             return Ok(Value::Object(Map::new()));
         }
@@ -386,21 +389,7 @@ impl ProcessManager {
                 entry.lock().stdin_open = false;
                 return Ok(Value::Object(Map::new()));
             };
-            if !child.stdin_write(&chunk).await? {
-                let waiter = Arc::new(tokio::sync::Notify::new());
-                let notified = waiter.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                entry.lock().stdin_waiters.push(waiter.clone());
-                tokio::select! {
-                    _ = child.stdin_drain() => {}
-                    _ = notified => {}
-                }
-                entry
-                    .lock()
-                    .stdin_waiters
-                    .retain(|candidate| !Arc::ptr_eq(candidate, &waiter));
-            }
+            child.write_stdin(&chunk).await?;
         }
         Ok(Value::Object(Map::new()))
     }
@@ -414,7 +403,8 @@ impl ProcessManager {
         }
         let entry = self.state.lock().processes.get(&process_id).cloned();
         let Some(entry) = entry else {
-            let group = self.state.lock().exited_groups.get_mut(&process_id);
+            let mut state = self.state.lock();
+            let group = state.exited_groups.get_mut(&process_id);
             if let Some(group) = group {
                 if signal == "terminate" {
                     kill_process_group(group.pid, "SIGTERM");
@@ -435,6 +425,7 @@ impl ProcessManager {
                 }
                 return Ok(Value::Object(Map::new()));
             }
+            drop(state);
             if signal == "terminate" {
                 let mut state = self.state.lock();
                 state.terminated_ids.insert(process_id.clone());
@@ -458,14 +449,16 @@ impl ProcessManager {
             self.begin_termination(&entry).await?;
             return Ok(Value::Object(Map::new()));
         }
-        if let Some(child) = &entry.lock().child {
+        let child = entry.lock().child.clone();
+        if let Some(child) = child {
             child.kill(if signal == "interrupt" { "SIGINT" } else { "SIGKILL" }).await?;
         }
         Ok(Value::Object(Map::new()))
     }
 
     async fn begin_termination(&self, entry: &Arc<Mutex<ManagedProcess>>) -> Result<(), WireAsyncError> {
-        if let Some(child) = &entry.lock().child {
+        let child = entry.lock().child.clone();
+        if let Some(child) = child {
             child.kill("SIGTERM").await?;
         }
         if cfg!(windows) {
@@ -473,9 +466,10 @@ impl ProcessManager {
         }
         let this = self.clone_handle();
         let entry = entry.clone();
+        let timer_entry = entry.clone();
         let timer = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(PROCESS_TERMINATION_GRACE_MS)).await;
-            this.kill_group(&entry, "SIGKILL");
+            this.kill_group(&timer_entry, "SIGKILL");
         });
         entry.lock().kill_timer = Some(timer);
         Ok(())
@@ -510,11 +504,8 @@ impl ProcessManager {
         self.apply_output_pause(&entry);
     }
 
-    fn apply_output_pause(&self, entry: &Arc<Mutex<ManagedProcess>>) {
-        let paused = self.state.lock().output_paused || entry.lock().client_paused;
-        if let Some(child) = &entry.lock().child {
-            child.set_output_paused(paused);
-        }
+    fn apply_output_pause(&self, _entry: &Arc<Mutex<ManagedProcess>>) {
+        // Output pause is enforced in `pump`, which drops notifications while paused.
     }
 
     pub async fn terminate_all(&self) {

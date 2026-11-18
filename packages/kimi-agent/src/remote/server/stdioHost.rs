@@ -408,7 +408,7 @@ impl StdioHost {
                     }
                 }
             }),
-            HostProcessService::new(),
+            HostProcessService::new(None),
         ));
         let writer = OutboundWriter::new(
             options.output.clone(),
@@ -417,7 +417,7 @@ impl StdioHost {
                 let host_weak = host_weak.clone();
                 move || {
                     if let Some(inner) = host_weak.lock().as_ref().and_then(|weak| weak.upgrade()) {
-                        inner.options.log("outbound pending frame fuse breached");
+                        (inner.options.log)("outbound pending frame fuse breached");
                         Self { inner }.shutdown_soon("send buffer fuse");
                     }
                 }
@@ -567,14 +567,14 @@ impl StdioHost {
         let weak = Arc::downgrade(&self.inner);
         self.inner.options.input.on_error(Arc::new(move |error| {
             if let Some(inner) = weak.upgrade() {
-                inner.options.log(&format!("stdin error: {error}"));
+                (inner.options.log)(&format!("stdin error: {error}"));
                 Self { inner }.shutdown_soon("stdin error");
             }
         }));
         let weak = Arc::downgrade(&self.inner);
         self.inner.options.output.on_error(Arc::new(move |error| {
             if let Some(inner) = weak.upgrade() {
-                inner.options.log(&format!("stdout error: {error}"));
+                (inner.options.log)(&format!("stdout error: {error}"));
                 Self { inner }.shutdown_soon("stdout error");
             }
         }));
@@ -750,7 +750,7 @@ impl StdioHost {
     }
 
     fn violation(&self, message: String) {
-        self.inner.options.log(&format!("protocol violation: {message}"));
+        (self.inner.options.log)(&format!("protocol violation: {message}"));
         self.shutdown_soon("protocol violation");
     }
 
@@ -763,7 +763,7 @@ impl StdioHost {
             state.shutting_down = true;
             state.waiting.clear();
         }
-        self.inner.options.log(&format!("shutdown: {reason}"));
+        (self.inner.options.log)(&format!("shutdown: {reason}"));
         true
     }
 

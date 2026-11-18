@@ -414,9 +414,10 @@ impl ModelRequester for ModelRequesterImpl {
         } else {
             self.resolve()
         };
-        let requester = resolved
-            .as_ref()
-            .map(|resolved| self.requester_for(resolved));
+        let requester = match &resolved {
+            Ok(resolved) => Ok(self.requester_for(resolved)),
+            Err(error) => Err(std::io::Error::other(error.to_string())),
+        };
         tokio::spawn(async move {
             let result = match (resolved, requester) {
                 (Ok(resolved), Ok(requester)) => {
@@ -431,7 +432,8 @@ impl ModelRequester for ModelRequesterImpl {
                     )
                     .await
                 }
-                (Err(error), _) | (_, Err(error)) => Err(error),
+                (Err(error), _) => Err(error),
+                (_, Err(error)) => Err(error.into()),
             };
             if let Err(error) = result {
                 let _ = task_sender.send(Err(error));
@@ -460,7 +462,7 @@ impl ModelRequester for ModelRequesterImpl {
                 return Err(Box::new(VideoUploadUnsupportedError::new(format!(
                     "Model \"{}\" (protocol={}) does not support video upload",
                     model.id, model.protocol
-                ))));
+                ))) as WireAsyncError);
             };
             let video = match input {
                 VideoUploadSource::Url(path) => read_video_file(&path)?,
@@ -499,7 +501,7 @@ impl ModelRequester for ModelRequesterImpl {
                 return Err(Box::new(ImageUploadUnsupportedError::new(format!(
                     "Model \"{}\" (protocol={}) does not support image upload",
                     model.id, model.protocol
-                ))));
+                ))) as WireAsyncError);
             };
             let credential = match &model.credential_provider {
                 Some(provider) => provider.resolve().await?,

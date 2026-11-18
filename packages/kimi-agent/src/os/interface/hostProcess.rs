@@ -135,11 +135,12 @@ pub trait IHostProcessService: Send + Sync {
     }
 }
 
-impl<T> crate::environment::environment::EnvironmentResource for T
-where
-    T: IHostProcess + ?Sized,
-{
+/// Wraps a boxed host process so it can be tracked as an environment resource.
+pub struct TrackedHostProcess(pub Arc<dyn IHostProcess>);
+
+impl crate::environment::environment::EnvironmentResource for TrackedHostProcess {
     fn dispose(&self) -> futures_util::future::BoxFuture<'static, ()> {
-        Box::pin(IHostProcess::dispose(self))
+        let process = self.0.clone();
+        Box::pin(async move { process.dispose().await })
     }
 }

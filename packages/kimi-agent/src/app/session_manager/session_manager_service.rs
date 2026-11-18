@@ -529,7 +529,7 @@ impl SessionManager {
                 })
                 .await
                 .map_err(SharedResumeFailure::new);
-            this.inner.state.lock().pending_resumes.shift_remove(&future_session_id);
+            this.inner.state.lock().pending_resumes.remove(&future_session_id);
             if let Err(error) = &result {
                 if !this.inner.state.lock().disposed {
                     let mut state = this.inner.state.lock();
@@ -692,7 +692,8 @@ impl SessionManager {
                     return Ok(());
                 };
                 let entry = this.retain_controller(&entry);
-                this.run_controller_operation(entry, move |controller| {
+                let op_this = this.clone();
+                op_this.run_controller_operation(entry, move |controller| {
                     async move { controller.close(&session_id).await }.boxed()
                 })
                 .await
@@ -722,7 +723,8 @@ impl SessionManager {
                     return Ok(false);
                 };
                 let entry = this.retain_controller(&entry);
-                this.run_controller_operation(entry, move |controller| {
+                let op_this = this.clone();
+                op_this.run_controller_operation(entry, move |controller| {
                     async move {
                         let last_active_at = handle.accessor().get(&I_SESSION_ACTIVITY_VIEW).last_active_at();
                         if chrono::Utc::now().timestamp_millis() - last_active_at < idle_timeout_ms {
@@ -758,7 +760,7 @@ impl SessionManager {
 
     async fn retained(&self, handle: &Arc<ISessionScopeHandle>) -> Result<bool, WireAsyncError> {
         let agents = handle.accessor().get(&I_AGENT_LIFECYCLE_SERVICE);
-        for agent in agents.list() {
+        for agent in agents.list(None) {
             let Some(agent_handle) = agents.handle_of(&agent.agent_id) else {
                 continue;
             };

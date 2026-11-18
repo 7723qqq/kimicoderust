@@ -36,7 +36,7 @@ pub fn abort_error() -> AbortError {
     AbortError::new("Aborted")
 }
 
-pub fn is_abort_error(error: &dyn std::error::Error) -> bool {
+pub fn is_abort_error(error: &(dyn std::error::Error + 'static)) -> bool {
     error.is::<AbortError>() || error.is::<UserCancellationError>()
 }
 
@@ -59,7 +59,7 @@ pub fn user_cancellation_reason() -> UserCancellationError {
     }
 }
 
-pub fn is_user_cancellation(error: &dyn std::error::Error) -> bool {
+pub fn is_user_cancellation(error: &(dyn std::error::Error + 'static)) -> bool {
     error.is::<UserCancellationError>()
 }
 
@@ -68,6 +68,9 @@ struct AbortInner {
     reason: Mutex<Option<SharedError>>,
     listeners: Mutex<Vec<(u64, Arc<dyn Fn() + Send + Sync>)>>,
     next_listener: AtomicU64,
+    // Controllers kept alive by derived signals (`any`/`timeout`), cleared on
+    // abort so the signal -> controller -> signal cycle is broken.
+    keepers: Mutex<Vec<Arc<AbortController>>>,
 }
 
 #[derive(Clone)]
@@ -129,6 +132,96 @@ impl AbortSignal {
     fn remove_listener(&self, id: u64) {
         self.inner.listeners.lock().retain(|(current, _)| *current != id);
     }
+
+    /// Resolves once this signal aborts (v2 `addEventListener('abort', …)`).
+    pub fn cancelled(&self) -> BoxFuture<'static, ()> {
+        if self.aborted() {
+            return async {}.boxed();
+        }
+        let (sender, receiver) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let signal = self.clone();
+        let listener_id = self.listen(Arc::new(move || {
+            if let Some(sender) = sender.lock().take() {
+                let _ = sender.send(());
+            }
+        }));
+        async move {
+            let _ = receiver.await;
+            signal.remove_listener(listener_id);
+        }
+        .boxed()
+    }
+
+    /// Aborts when any source aborts (v2 `AbortSignal.any`).
+    pub fn any(signals: &[AbortSignal]) -> AbortSignal {
+        let controller = Arc::new(AbortController::new());
+        for signal in signals {
+            if signal.aborted() {
+                controller.abort(signal.reason());
+                break;
+            }
+            let target = Arc::downgrade(&controller);
+            let source = signal.clone();
+            signal.add_event_listener(
+                "abort",
+                Arc::new(move || {
+                    if let Some(target) = target.upgrade() {
+                        target.abort(source.reason());
+                    }
+                }),
+                true,
+            );
+        }
+        let result = controller.signal();
+        result.inner.keepers.lock().push(controller);
+        result
+    }
+
+    /// Aborts after `timeout_ms` (v2 deadline-signal shorthand).
+    pub fn timeout(timeout_ms: u64) -> AbortSignal {
+        let controller = Arc::new(AbortController::new());
+        let deadline_controller = controller.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
+            deadline_controller.abort(Some(Arc::new(abort_error()) as SharedError));
+        });
+        let result = controller.signal();
+        result.inner.keepers.lock().push(controller);
+        result
+    }
+
+    /// Bridges a `CancellationToken` (e.g. an xstate actor's lifetime) into
+    /// this signal, the inverse of `cancellation_token`.
+    pub fn from_cancellation_token(token: tokio_util::sync::CancellationToken) -> AbortSignal {
+        let controller = Arc::new(AbortController::new());
+        if token.is_cancelled() {
+            controller.abort(Some(Arc::new(abort_error()) as SharedError));
+            return controller.signal();
+        }
+        let target = controller.clone();
+        tokio::spawn(async move {
+            token.cancelled().await;
+            target.abort(Some(Arc::new(abort_error()) as SharedError));
+        });
+        controller.signal()
+    }
+
+    /// Bridges to `CancellationToken` for token-based wire layers.
+    pub fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        if self.aborted() {
+            token.cancel();
+            return token;
+        }
+        let signal = self.clone();
+        let task_token = token.clone();
+        tokio::spawn(async move {
+            signal.cancelled().await;
+            task_token.cancel();
+        });
+        token
+    }
 }
 
 #[derive(Clone)]
@@ -145,6 +238,7 @@ impl AbortController {
                     reason: Mutex::new(None),
                     listeners: Mutex::new(Vec::new()),
                     next_listener: AtomicU64::new(1),
+                    keepers: Mutex::new(Vec::new()),
                 }),
             },
         }
@@ -159,6 +253,8 @@ impl AbortController {
             return;
         }
         *self.signal.inner.reason.lock() = reason;
+        // Break derived-signal cycles once this signal is terminal.
+        self.signal.inner.keepers.lock().clear();
         let listeners = self
             .signal
             .inner
@@ -246,7 +342,7 @@ fn abort_reason(signal: &AbortSignal) -> SharedError {
     Arc::new(abort_error())
 }
 
-fn is_default_abort_reason(reason: &dyn std::error::Error) -> bool {
+fn is_default_abort_reason(reason: &(dyn std::error::Error + 'static)) -> bool {
     reason
         .downcast_ref::<AbortError>()
         .is_some_and(|error| {
@@ -298,5 +394,69 @@ pub fn create_deadline_abort_signal(
         timed_out,
         timeout: Mutex::new(Some(timeout)),
         unlink: Mutex::new(Some(unlink)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_resolves_when_the_signal_aborts() {
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let observed = Arc::new(AtomicBool::new(false));
+        let observed_by_listener = observed.clone();
+        let task = tokio::spawn(async move {
+            signal.cancelled().await;
+            observed_by_listener.store(true, Ordering::SeqCst);
+        });
+        controller.abort(None);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancelled must resolve on abort")
+            .unwrap();
+        assert!(observed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancelled_resolves_immediately_for_an_aborted_signal() {
+        let controller = AbortController::new();
+        controller.abort(None);
+        tokio::time::timeout(Duration::from_secs(1), controller.signal().cancelled())
+            .await
+            .expect("an already-aborted signal resolves immediately");
+    }
+
+    #[tokio::test]
+    async fn any_aborts_when_one_source_aborts() {
+        let first = AbortController::new();
+        let second = AbortController::new();
+        let combined = AbortSignal::any(&[first.signal(), second.signal()]);
+        assert!(!combined.aborted());
+        second.abort(None);
+        assert!(combined.aborted());
+    }
+
+    #[tokio::test]
+    async fn timeout_aborts_after_the_deadline() {
+        let signal = AbortSignal::timeout(10);
+        assert!(!signal.aborted());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(signal.aborted());
+    }
+
+    #[tokio::test]
+    async fn cancellation_token_is_cancelled_when_the_signal_aborts() {
+        let controller = AbortController::new();
+        let token = controller.signal().cancellation_token();
+        assert!(!token.is_cancelled());
+        controller.abort(None);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            token.cancelled().await;
+        })
+        .await
+        .expect("the bridged token must be cancelled");
+        assert!(token.is_cancelled());
     }
 }

@@ -86,12 +86,19 @@ async fn fetch_via_moonshot(
         tracing::debug!("moonshot fetch failed (HTTP {status}), falling back to direct fetch");
         return Err(());
     }
+    // v2's tool result always carries the note + cite reminder
+    // (fetchUrlTool.ts:58-66), including the extraction-service branch —
+    // the legacy path returned the raw body without either.
+    let note = "The returned content is the main text extracted from the page.";
+    let cite_reminder =
+        "If you use it in your answer, cite this page as a markdown link, e.g. [title](url).";
+    let formatted = format!("{note} {cite_reminder}\n\n{text}");
     Ok(Some(ExecutableToolResult {
         spill: None,
         parts: Vec::new(),
         delivery: None,
         stop_turn: false,
-        content: text,
+        content: formatted,
         is_error: false,
         note: None,
         display: None,

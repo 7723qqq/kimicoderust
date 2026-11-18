@@ -153,12 +153,10 @@ async fn execute_auth(
     })?;
     if let Some(on_update) = &context.on_update {
         on_update(ToolUpdate {
-            kind: "custom",
-            text: "",
-            percent: None,
-            custom_kind: Some(MCP_OAUTH_AUTHORIZATION_URL_TOOL_UPDATE),
-            custom_data: Some(&custom_data),
-            replace: false,
+            kind: "custom".to_string(),
+            custom_kind: Some(MCP_OAUTH_AUTHORIZATION_URL_TOOL_UPDATE.to_string()),
+            custom_data: Some(custom_data.clone()),
+            ..Default::default()
         });
     }
     emit_status(

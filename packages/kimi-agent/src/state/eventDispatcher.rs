@@ -12,7 +12,7 @@ use crate::wire::record::WireAsyncError;
 use super::state::{FoldContext, StateFold};
 
 pub struct EventDispatcherHooks {
-    pub on_did_restore: crate::hooks::OrderedHookSlot,
+    pub on_did_restore: crate::hooks::OrderedHookSlot<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

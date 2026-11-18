@@ -20,7 +20,8 @@ use crate::mcp_core::connection_manager::{
     McpConnectionManager, McpConnectionManagerOptions, McpConnectionView, McpDefaults,
     McpServerEntry, McpServerStatus,
 };
-use crate::mcp_core::oauth::service::{McpOAuthEvent, McpOAuthService};
+use crate::mcp_core::oauth::provider::OAuthInvalidationScope;
+use crate::mcp_core::oauth::service::{McpOAuthEvent, McpOAuthEventType, McpOAuthService};
 use crate::mcp_core::oauth::store::canonical_mcp_oauth_resource;
 use crate::session::mcp::ephemeral_mcp_servers::ISessionEphemeralMcpServers;
 use crate::session::mcp::merged_connection_view::MergedMcpConnectionView;
@@ -154,7 +155,7 @@ impl WorkspaceMcpService {
             stdio_cwd: Some(Arc::new(move || manager_dirs.primary())),
             environment_resolver: Some(environment_resolver.clone()),
             environment_id: Some("local".to_string()),
-            reconnect_retry_enabled: Some(true),
+            reconnect_retry_enabled: true,
             resolve_defaults: Some(Arc::new(move || {
                 mcp_defaults(manager_config.tunables())
             })),
@@ -249,42 +250,42 @@ impl WorkspaceMcpService {
 
     fn register_config(&self) {
         let weak = Arc::downgrade(&self.inner);
-        let subscription = self.inner.mcp_config.on_did_change(move |event| {
+        let subscription = self.inner.mcp_config.on_did_change(Arc::new(move |event| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
             let this = Self { inner };
             let change = event.change.clone();
             (event.wait_until)(Box::pin(this.schedule_apply(change)));
-        });
+        }));
         self.inner._subscriptions.lock().push(subscription);
         let weak = Arc::downgrade(&self.inner);
-        let subscription = self.inner.mcp_config.on_did_change_tunables(move |_| {
+        let subscription = self.inner.mcp_config.on_did_change_tunables(Arc::new(move |_| {
             if let Some(inner) = weak.upgrade() {
                 inner.manager.reschedule_retries();
             }
-        });
+        }));
         self.inner._subscriptions.lock().push(subscription);
     }
 
     fn register_dirs(&self) {
         let weak = Arc::downgrade(&self.inner);
-        let subscription = self.inner.dirs.on_did_change(move || {
+        let subscription = self.inner.dirs.on_did_change(Arc::new(move || {
             if let Some(inner) = weak.upgrade() {
                 Self { inner }.schedule_primary_rebind();
             }
-        });
+        }));
         self.inner._subscriptions.lock().push(subscription);
     }
 
     fn register_lifecycle_ref(&self) {
         let weak = Arc::downgrade(&self.inner);
-        let subscription = self.inner.session_lifecycle.on_did_change(move || {
+        let subscription = self.inner.session_lifecycle.on_did_change.subscribe(move |_| {
             if let Some(inner) = weak.upgrade() {
                 Self { inner }.attach_session_lifecycle();
             }
         });
-        self.inner._subscriptions.lock().push(subscription);
+        self.inner._subscriptions.lock().push(Arc::new(subscription));
     }
 
     fn attach_session_lifecycle(&self) {
@@ -295,16 +296,23 @@ impl WorkspaceMcpService {
             return;
         };
         let weak = Arc::downgrade(&self.inner);
-        let Some(subscription) = lifecycle.on_will_create_session(move |event| {
+        let subscription = lifecycle.on_will_create_session(Arc::new(move |event| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
             let this = Self { inner };
-            let context = event.read_seed::<ISessionContext>();
+            let context_value = (event.read_seed)("sessionContext");
+            let context = context_value
+                .downcast_ref::<Arc<dyn ISessionContext>>()
+                .expect("sessionContext seed is not an ISessionContext");
             if context.workspace_id() != this.inner.workspace_id {
                 return;
             }
-            let servers = event.read_seed::<ISessionEphemeralMcpServers>();
+            let servers_value = (event.read_seed)("sessionEphemeralMcpServers");
+            let servers = servers_value
+                .downcast_ref::<ISessionEphemeralMcpServers>()
+                .cloned()
+                .expect("sessionEphemeralMcpServers seed has the wrong type");
             if servers.is_empty() {
                 return;
             }
@@ -315,15 +323,16 @@ impl WorkspaceMcpService {
                     session_id: Some(context.session_id()),
                 }),
             );
-            event.contribute_seed::<ISessionMcpHandle>(overlay.handle());
-            event.on_session_dispose(move || {
+            (event.contribute_seed)(
+                "sessionMcpHandle",
+                Arc::new(overlay.handle()) as crate::_base::di::descriptors::DynamicValue,
+            );
+            (event.on_session_dispose)(Box::new(move || {
                 tokio::spawn(async move {
                     let _ = overlay.shutdown().await;
                 });
-            });
-        }) else {
-            return;
-        };
+            }));
+        }));
         self.inner.state.lock().session_lifecycle_attached = true;
         self.inner._subscriptions.lock().push(subscription);
     }
@@ -367,8 +376,8 @@ impl WorkspaceMcpService {
             })),
             environment_resolver: Some(self.inner.environment_resolver.clone()),
             environment_id: Some("local".to_string()),
-            require_stdio_environment_id: Some(true),
-            reconnect_retry_enabled: Some(true),
+            require_stdio_environment_id: true,
+            reconnect_retry_enabled: true,
             session_id: opts.session_id.clone(),
             resolve_defaults: Some(Arc::new(move || {
                 mcp_defaults(overlay_config.tunables())
@@ -384,19 +393,16 @@ impl WorkspaceMcpService {
         let identity_ready = self.inner.identity.resolved();
         let log = self.inner.log.clone();
         let connect = async move {
-            if let Err(error) = async move {
-                let (config, identity) = tokio::join!(config_ready, identity_ready);
-                config?;
-                identity?;
-                connect_manager.connect_all(connect_servers).await
-            }
-            .await
-            {
+            let (config, identity) = tokio::join!(config_ready, identity_ready);
+            let error = config.err().or_else(|| identity.err());
+            if let Some(error) = error {
                 log.error(
                     "session mcp overlay initial load failed",
                     Some(serde_json::json!({ "error": error.to_string() })),
                 );
+                return;
             }
+            connect_manager.connect_all(connect_servers).await;
         }
         .boxed()
         .shared();
@@ -439,7 +445,7 @@ impl WorkspaceMcpService {
         manager: Arc<McpConnectionManager>,
     ) -> DisposableRef {
         let weak = Arc::downgrade(&self.inner);
-        let unsubscribe = self.inner.oauth_service.on_event(move |event| {
+        let unsubscribe = self.inner.oauth_service.on_event(Arc::new(move |event| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
@@ -453,7 +459,7 @@ impl WorkspaceMcpService {
                     );
                 }
             });
-        });
+        }));
         to_disposable(move || unsubscribe())
     }
 
@@ -462,7 +468,9 @@ impl WorkspaceMcpService {
         manager: Arc<McpConnectionManager>,
         event: McpOAuthEvent,
     ) -> Result<(), McpConfigAsyncError> {
-        if event.type_ == "tokens-invalidated" && event.scope != "tokens" && event.scope != "all" {
+        if event.type_ == McpOAuthEventType::TokensInvalidated
+            && !matches!(event.scope, Some(OAuthInvalidationScope::Tokens | OAuthInvalidationScope::All))
+        {
             return Ok(());
         }
         let Some(entry) = manager.get(&event.server_name) else {
@@ -471,10 +479,10 @@ impl WorkspaceMcpService {
         let Some(server_url) = manager.get_remote_server_url(&event.server_name) else {
             return Ok(());
         };
-        if canonical_mcp_oauth_resource(&server_url) != event.server_url {
+        if canonical_mcp_oauth_resource(&server_url)? != event.server_url {
             return Ok(());
         }
-        if event.type_ == "tokens-invalidated" {
+        if event.type_ == McpOAuthEventType::TokensInvalidated {
             self.inner
                 .oauth_service
                 .forget_provider(&event.server_name, &event.server_url);
@@ -488,12 +496,12 @@ impl WorkspaceMcpService {
         if entry.status == McpServerStatus::Pending {
             return self.wait_pending_reconnect(manager, event.server_name).await;
         }
-        if event.type_ == "tokens-saved"
+        if event.type_ == McpOAuthEventType::TokensSaved
             && !matches!(entry.status, McpServerStatus::NeedsAuth | McpServerStatus::Failed)
         {
             return Ok(());
         }
-        if event.type_ == "refresh-failed" && entry.status != McpServerStatus::Connected {
+        if event.type_ == McpOAuthEventType::RefreshFailed && entry.status != McpServerStatus::Connected {
             return Ok(());
         }
         manager.reconnect_and_join(&event.server_name).await
@@ -511,7 +519,7 @@ impl WorkspaceMcpService {
         let subscription_sink = subscription.clone();
         let manager_sink = manager.clone();
         let name = server_name.clone();
-        let handle = manager.on_status_change(move |next| {
+        let handle = manager.on_status_change(Arc::new(move |next| {
             if sender_sink.lock().is_none() {
                 return;
             }
@@ -534,7 +542,7 @@ impl WorkspaceMcpService {
             tokio::spawn(async move {
                 let _ = sender.send(manager.reconnect_after_current(&name).await);
             });
-        });
+        }));
         *subscription.lock() = Some(handle);
         let initial = manager.get(&server_name);
         if initial.as_ref().is_none_or(|entry| entry.status != McpServerStatus::Pending) {
@@ -625,6 +633,7 @@ impl WorkspaceMcpService {
     fn schedule_primary_rebind(&self) {
         let this = self.clone();
         tokio::spawn(async move {
+            let this_error = this.clone();
             let result = async move {
                 this.ready().await?;
                 let this_mutate = this.clone();
@@ -655,7 +664,7 @@ impl WorkspaceMcpService {
             }
             .await;
             if let Err(error) = result {
-                this.inner.log.warn(
+                this_error.inner.log.warn(
                     &format!("mcp primary reconnect failed: {error}"),
                     None,
                 );
@@ -674,13 +683,14 @@ impl WorkspaceMcpService {
         if servers.is_empty() {
             return Ok(());
         }
-        self.inner.manager.connect_all(servers).await?;
+        self.inner.manager.connect_all(servers).await;
         self.track_mcp_initial_load();
         Ok(())
     }
 
     fn schedule_apply(&self, change: McpServersChange) -> McpConfigFuture {
         let this = self.clone();
+        let this_error = this.clone();
         async move {
             let result = async move {
                 this.ready().await?;
@@ -689,7 +699,7 @@ impl WorkspaceMcpService {
             }
             .await;
             if let Err(error) = result {
-                this.inner.log.warn(
+                this_error.inner.log.warn(
                     &format!("mcp server change apply failed: {error}"),
                     None,
                 );

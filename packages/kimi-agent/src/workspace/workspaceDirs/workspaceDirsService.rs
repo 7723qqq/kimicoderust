@@ -37,14 +37,14 @@ use super::workspace_dirs::{
 const WATCH_DEBOUNCE_MS: u64 = 200;
 
 pub static WORKSPACE_DIRS_FILE_DIRS_KEY: LazyLock<StateDefinition<Vec<String>>> =
-    LazyLock::new(|| define_state("workspaceDirs.fileDirs", Vec::new));
+    LazyLock::new(|| define_state("workspaceDirs.fileDirs", Arc::new(Vec::new) as Arc<dyn Fn() -> Vec<String> + Send + Sync>));
 pub static WORKSPACE_DIRS_EPHEMERAL_DIRS_KEY: LazyLock<StateDefinition<Vec<String>>> =
-    LazyLock::new(|| define_state("workspaceDirs.ephemeralDirs", Vec::new));
+    LazyLock::new(|| define_state("workspaceDirs.ephemeralDirs", Arc::new(Vec::new) as Arc<dyn Fn() -> Vec<String> + Send + Sync>));
 pub static WORKSPACE_DIRS_REGISTRY_DIRS_KEY: LazyLock<StateDefinition<Vec<String>>> =
-    LazyLock::new(|| define_state("workspaceDirs.registryDirs", Vec::new));
+    LazyLock::new(|| define_state("workspaceDirs.registryDirs", Arc::new(Vec::new) as Arc<dyn Fn() -> Vec<String> + Send + Sync>));
 pub static WORKSPACE_DIRS_PRIMARY_BY_WORKSPACE_KEY: LazyLock<
     StateDefinition<HashMap<String, String>>,
-> = LazyLock::new(|| define_state("workspaceDirs.primaryByWorkspace", HashMap::new));
+> = LazyLock::new(|| define_state("workspaceDirs.primaryByWorkspace", Arc::new(HashMap::new) as Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>));
 
 #[derive(Debug, Clone)]
 struct SharedDirsError(Arc<String>);
@@ -151,11 +151,21 @@ impl WorkspaceDirsService {
                 _store_subscription: Mutex::new(None),
             }),
         };
-        let ready = this.enqueue_with(|service| async move { service.reload_workspace(true).await });
+        let ready_service = this.clone();
+        let ready: ReadyFuture = async move {
+            ready_service
+                .enqueue_with(|service| async move { service.reload_workspace(true).await })
+                .await
+                .map_err(SharedDirsError::new)
+        }
+        .boxed()
+        .shared();
         *this.inner.ready.lock() = Some(ready.clone());
         tokio::spawn(ready.clone());
         let weak = Arc::downgrade(&this.inner);
-        let subscription = workspace_store.on_did_change(move || {
+        let subscription = IWorkspacePersistence::on_did_change(
+            workspace_store.as_ref(),
+            Arc::new(move || {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
@@ -177,7 +187,8 @@ impl WorkspaceDirsService {
                     );
                 }
             });
-        });
+            }),
+        );
         *this.inner._store_subscription.lock() = Some(subscription);
         this
     }
@@ -395,7 +406,7 @@ impl WorkspaceDirsService {
             None => registered,
         };
         let cwd_key = workspace_root_key(&self.inner.workspace.cwd());
-        let mut dirs = Vec::new();
+        let mut dirs: Vec<String> = Vec::new();
         let mut primary = HashMap::new();
         for entry in entries {
             let mut set = vec![entry.root.clone()];
@@ -416,7 +427,7 @@ impl WorkspaceDirsService {
                 if (!self.inner.follows_primary || !current_entry) && key == cwd_key {
                     continue;
                 }
-                if dirs.iter().any(|kept| workspace_root_key(kept) == key) {
+                if dirs.iter().any(|kept| workspace_root_key(kept.as_str()) == key) {
                     continue;
                 }
                 dirs.push(dir);
@@ -465,35 +476,26 @@ impl WorkspaceDirsService {
             let state = self.inner.state.lock();
             (state.project_root.clone(), state.config_path.clone())
         };
-        let handle = match watch_candidates(
-            &project_root,
-            &[config_path.clone()],
-            Some(subtree_watch_filter(&project_root, &[config_path.clone()])),
-        ) {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.inner.log.warn(
-                    &format!("cannot watch project-local config {config_path}: {error}"),
-                    None,
-                );
-                return;
-            }
-        };
+        let ignored: crate::human::utils::watch::WatchIgnored = Arc::from(
+            subtree_watch_filter(&project_root, &[config_path.clone()], None),
+        );
+        let handle = watch_candidates(&project_root, &[config_path.clone()], Some(ignored));
         let this = self.clone();
-        let subscription = handle.on_did_change(move || {
+        let subscription = handle.on_did_change(move |_change| {
             let generation = {
                 let mut state = this.inner.state.lock();
                 state.watch_generation += 1;
                 state.watch_generation
             };
+            let watch_service = this.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(WATCH_DEBOUNCE_MS)).await;
-                if this.inner.state.lock().watch_generation != generation {
+                if watch_service.inner.state.lock().watch_generation != generation {
                     return;
                 }
-                let future = this.enqueue_with(|service| async move { service.reload_from_disk().await });
+                let future = watch_service.enqueue_with(|service| async move { service.reload_from_disk().await });
                 if let Err(error) = future.await {
-                    this.inner.log.warn(
+                    watch_service.inner.log.warn(
                         &format!("local.toml reload failed: {error}"),
                         None,
                     );
@@ -528,9 +530,10 @@ impl WorkspaceDirsService {
         self.fire();
     }
 
-    async fn batch_changes<F>(&self, work: F) -> Result<(), WireAsyncError>
+    async fn batch_changes<F, Fut>(&self, work: F) -> Result<(), WireAsyncError>
     where
-        F: FnOnce(Self) -> BoxFuture<'static, Result<(), WireAsyncError>>,
+        F: FnOnce(Self) -> Fut,
+        Fut: std::future::Future<Output = Result<(), WireAsyncError>>,
     {
         self.inner.state.lock().change_batch_depth += 1;
         let result = work(self.clone()).await;
@@ -550,10 +553,11 @@ impl WorkspaceDirsService {
         result
     }
 
-    fn enqueue_with<T, F>(&self, work: F) -> BoxFuture<'static, Result<T, WireAsyncError>>
+    fn enqueue_with<T, F, Fut>(&self, work: F) -> BoxFuture<'static, Result<T, WireAsyncError>>
     where
-        T: Clone + Send + 'static,
-        F: FnOnce(Self) -> BoxFuture<'static, Result<T, WireAsyncError>> + Send + 'static,
+        T: Clone + Send + Sync + 'static,
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, WireAsyncError>> + Send + 'static,
     {
         let previous = self.inner.state.lock().mutation_tail.clone();
         let service = self.clone();

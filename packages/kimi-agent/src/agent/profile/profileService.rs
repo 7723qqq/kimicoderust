@@ -47,6 +47,7 @@ use crate::features::gitMemory::gitMemoryService::IGitMemoryService;
 use crate::features::notify::sessionNotify::ISessionNotify;
 use crate::features::notify::tools::notifyUser::notifyUser::NOTIFY_USER_TOOL_NAME;
 use crate::features::plan::tools::exitPlanMode::exitPlanMode::EXIT_PLAN_MODE_TOOL_NAME;
+use crate::features::skill::catalog::types::SkillCatalog;
 use crate::features::skill::session::skillCatalog::ISessionSkillCatalog;
 use crate::features::todo::todoItem::TODO_LIST_TOOL_NAME;
 use crate::llm_adapter::contract::capability::{ModelCapability, UNKNOWN_CAPABILITY};
@@ -1569,7 +1570,7 @@ fn into_profile_error(error: WireAsyncError) -> ProfileError {
     }
 }
 
-fn profile_binding_snapshot(data: ProfileData) -> ProfileBindingSnapshot {
+pub(crate) fn profile_binding_snapshot(data: ProfileData) -> ProfileBindingSnapshot {
     ProfileBindingSnapshot {
         model_alias: data.base.model_alias,
         profile_name: data.base.profile_name,

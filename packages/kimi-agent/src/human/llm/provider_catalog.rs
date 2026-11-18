@@ -317,7 +317,7 @@ impl ProviderCatalogMachine {
                         override_: models
                             .unwrap_or_default()
                             .into_iter()
-                            .map(|model| (model.model.clone(), model))
+                            .map(|model| (model.model.model.clone(), model))
                             .collect(),
                         ping_errors: None,
                     },
@@ -419,7 +419,7 @@ impl ProviderCatalogMachine {
                     };
                     let outcome = PingOutcome {
                         provider_id: request.provider.id().to_string(),
-                        model: request.model.model.clone(),
+                        model: request.model.model.model.clone(),
                         error,
                     };
                     let changed = apply_ping_outcome(&mut self.context.lock().snapshot, &outcome);
@@ -786,7 +786,7 @@ fn merge_entry_models(entry: &CatalogProviderEntry) -> Vec<CatalogModel> {
         let ping_error = entry
             .ping_errors
             .as_ref()
-            .and_then(|errors| errors.get(&model.model).cloned());
+            .and_then(|errors| errors.get(&model.model.model).cloned());
         CatalogModel {
             definition: model,
             ping_error,
@@ -795,7 +795,7 @@ fn merge_entry_models(entry: &CatalogProviderEntry) -> Vec<CatalogModel> {
     let mut merged = entry
         .override_
         .values()
-        .map(|record| attach(merge_model(record.clone(), entry.discovered.get(&record.model))))
+        .map(|record| attach(merge_model(record.clone(), entry.discovered.get(&record.model.model))))
         .collect::<Vec<_>>();
     merged.extend(
         entry
@@ -804,7 +804,7 @@ fn merge_entry_models(entry: &CatalogProviderEntry) -> Vec<CatalogModel> {
             .filter(|model| !entry.override_.contains_key(&model.model))
             .map(|model| attach(merge_model(model.clone().into(), None))),
     );
-    merged.sort_by(|left, right| left.model.cmp(&right.model));
+    merged.sort_by(|left, right| left.model.model.cmp(&right.model.model));
     merged
 }
 
@@ -813,7 +813,7 @@ fn enqueue_ping(
     queue: &[PingRequest],
     request: PingRequest,
 ) -> Vec<PingRequest> {
-    let key = |ping: &PingRequest| format!("{}#{}", ping.provider.id(), ping.model.model);
+    let key = |ping: &PingRequest| format!("{}#{}", ping.provider.id(), ping.model.model.model);
     if active.as_ref().is_some_and(|active| key(active) == key(&request))
         || queue.iter().any(|ping| key(ping) == key(&request))
     {
@@ -858,7 +858,7 @@ async fn run_ping_probe(
     let result = requester
         .generate(
             LlmRequestConfig {
-                model: model.clone(),
+                model: model.model.clone(),
                 system_prompt: Some("You are a connectivity probe. Answer with the single word \"pong\".".to_string()),
                 tools: Some(Vec::new()),
                 max_completion_tokens: Some(512),
@@ -871,7 +871,7 @@ async fn run_ping_probe(
             LlmRequestControl {
                 signal: tokio_util::sync::CancellationToken::new(),
                 on_event: Arc::new(move |event| {
-                    if let LlmEvent::FailedSyntax { error } | LlmEvent::FailedRemote { error } = event {
+                    if let LlmEvent::FailedSyntax { error, .. } | LlmEvent::FailedRemote { error, .. } = event {
                         *failure_sink.lock() = Some(error.message);
                     }
                 }),

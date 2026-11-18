@@ -58,7 +58,7 @@ pub enum LlmRequestEvent {
 
 pub type LlmEvent = LlmRequestEvent;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct ExtraParams {
     pub openai: Option<OpenAIExtraParams>,
     pub responses: Option<OpenAIResponsesExtraParams>,

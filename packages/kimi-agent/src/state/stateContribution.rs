@@ -7,10 +7,12 @@ use crate::_base::errors::unexpected_error::on_unexpected_error;
 
 use super::state::{ReplayableStateKey, StateFold, expanded_state_folds};
 
+#[derive(Clone)]
 pub struct EventStateContributionRecord {
     pub events: Option<Vec<Arc<Event2Class>>>,
 }
 
+#[derive(Clone)]
 pub struct StateFoldRegistration {
     pub key: Arc<ReplayableStateKey>,
     pub fold: StateFold,
@@ -27,14 +29,20 @@ pub fn fold_event_state_contributions(
     replayable_keys: &[Arc<ReplayableStateKey>],
 ) -> FoldedEventStateRegistry {
     let mut events = HashMap::new();
+    let mut classes_by_address = HashMap::new();
     let mut folds = HashMap::<String, Vec<StateFoldRegistration>>::new();
     let mut states = Vec::new();
     for cls in EVENT2_REGISTRY.lock().values() {
         events.insert(cls.type_.clone(), cls.clone());
+        classes_by_address.insert(Arc::as_ptr(cls) as usize, cls.clone());
     }
     for key in replayable_keys {
         states.push(key.clone());
-        for (cls, fold) in expanded_state_folds(key).unwrap() {
+        for (address, fold) in expanded_state_folds(key).unwrap() {
+            let Some(cls) = classes_by_address.get(&address) else {
+                continue;
+            };
+            let cls = cls.clone();
             folds.entry(cls.type_.clone()).or_default().push(StateFoldRegistration {
                 key: key.clone(),
                 fold,

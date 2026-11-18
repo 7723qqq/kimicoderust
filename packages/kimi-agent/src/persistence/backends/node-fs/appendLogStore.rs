@@ -183,21 +183,23 @@ impl AppendLogStore {
         state: Arc<Mutex<LogState>>,
     ) -> Result<(), WireAsyncError> {
         loop {
-            let generation = {
+            let (generation, need_wait) = {
                 let mut current = state.lock();
                 if current.flush_active {
-                    let generation = current.flush_generation;
-                    drop(current);
-                    wait_for_flush(&state, generation).await;
-                    continue;
+                    (current.flush_generation, true)
+                } else {
+                    if let Some(error) = &current.storage_failure {
+                        return Err(Box::new(LatchedError(error.clone())));
+                    }
+                    current.flush_active = true;
+                    current.flush_generation += 1;
+                    (current.flush_generation, false)
                 }
-                if let Some(error) = &current.storage_failure {
-                    return Err(Box::new(LatchedError(error.clone())));
-                }
-                current.flush_active = true;
-                current.flush_generation += 1;
-                current.flush_generation
             };
+            if need_wait {
+                wait_for_flush(&state, generation).await;
+                continue;
+            }
             self.watch_stuck_flush(scope, key, state.clone(), generation);
             let wrote = Arc::new(AtomicBool::new(false));
             let result = self
@@ -401,7 +403,8 @@ impl AppendLogStore {
                 return Ok(wrote);
             }
             let mut current = state.lock();
-            current.pending.drain(..batch.len().min(current.pending.len()));
+            let drain_len = batch.len().min(current.pending.len());
+            current.pending.drain(..drain_len);
             if current.pending.is_empty() {
                 break;
             }

@@ -12,7 +12,7 @@ use crate::features::tower::tower::TowerExitReason;
 
 use super::usage::UsageStatus;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatusUpdatedPayload {
     pub agent_id: String,

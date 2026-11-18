@@ -52,7 +52,7 @@ pub async fn set_cold_session_archived(
     let Some(summary) = summary else {
         return Ok(ColdSessionArchiveOutcome::NotFound);
     };
-    let lease = accessor.get(&I_SESSION_LOCK_SERVICE).lease(session_id);
+    let lease = accessor.get(&I_SESSION_LOCK_SERVICE).lease(session_id)?;
     let result = async {
         let docs = accessor.get(&I_ATOMIC_DOCUMENT_STORE);
         let meta_scope = session_scope_of(
@@ -107,14 +107,14 @@ pub async fn set_cold_session_archived(
                     session_id: session_id.to_string(),
                     workspace_id: summary.workspace_id.clone(),
                 },
-            ));
+            ).to_event2());
         } else if persisted.archived {
             accessor.get(&I_EVENT_SERVICE).publish(SessionRestored::new(
                 super::session_lifecycle_events::SessionRestoredPayload {
                     session_id: session_id.to_string(),
                     workspace_id: summary.workspace_id.clone(),
                 },
-            ));
+            ).to_event2());
         }
         Ok(ColdSessionArchiveOutcome::Updated)
     }

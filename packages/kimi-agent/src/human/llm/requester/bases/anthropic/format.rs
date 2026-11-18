@@ -156,7 +156,7 @@ pub fn default_anthropic_merge_history(
     messages: &[AnthropicWireMessage],
 ) -> Vec<AnthropicWireMessage> {
     let merge = merge_consecutive_users(MergeUsersPolicy {
-        is_user: |message| message.role == "user",
+        is_user: |message: &crate::human::llm::requester::bases::anthropic::contract::AnthropicWireMessage| message.role == "user",
         is_tool_result_only,
         merge: |last, next| AnthropicWireMessage {
             role: last.role.clone(),

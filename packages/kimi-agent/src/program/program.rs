@@ -18,6 +18,7 @@ use crate::features::skill::workspace::environment_skill_discovery::EnvironmentS
 use crate::features::skill::workspace::explicit_file_skill_source::ExplicitFileSkillSource;
 use crate::features::skill::workspace::extra_file_skill_source::ExtraFileSkillSource;
 use crate::features::skill::workspace::plugin_skill_source::PluginSkillSource;
+use crate::features::skill::catalog::types::SkillCatalog;
 use crate::features::skill::workspace::workspace_skill_catalog::IWorkspaceSkillCatalog;
 use crate::wire::record::WireAsyncError;
 use crate::workspace::session_lifecycle::session_lifecycle_service::SessionLifecycleService;
@@ -170,7 +171,7 @@ impl Program {
     ) -> Self {
         let binding = EnvironmentBinding {
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
-            cwd: context.cwd(),
+            cwd: Some(context.cwd()),
         };
         let this = Self {
             inner: Arc::new(ProgramInner {
@@ -195,11 +196,11 @@ impl Program {
             }),
         };
         let weak = Arc::downgrade(&this.inner);
-        let subscription = this.inner.environments.on_did_change(move |change| {
+        let subscription = this.inner.environments.on_did_change(Arc::new(move |change| {
             if let Some(inner) = weak.upgrade() {
                 Self { inner }.on_environment_change(change);
             }
-        });
+        }));
         *this.inner.registry_subscription.lock() = Some(subscription);
         this.reconcile_generation();
         this
@@ -282,7 +283,7 @@ impl Program {
     }
 
     fn root_key(&self) -> String {
-        environment_binding_id(LOCAL_ENVIRONMENT_ID, &self.inner.context.cwd())
+        environment_binding_id(LOCAL_ENVIRONMENT_ID, Some(&self.inner.context.cwd()))
     }
 
     pub fn create_session_controller(&self) -> Arc<SessionLifecycleService> {
@@ -424,7 +425,7 @@ impl Program {
             sources: ProgramSourceProvenanceSnapshot {
                 skills: skills_by_source
                     .into_iter()
-                    .map(|(source, count)| ProgramSourceCount { source, count })
+                    .map(|(source, count)| ProgramSourceCount { source: source.as_str().to_string(), count })
                     .collect(),
                 skill_roots: generation
                     .as_ref()
@@ -537,7 +538,7 @@ impl Program {
             .generation
             .as_ref()
             .map(|generation| generation.id.clone());
-        if generation_id.as_deref() != Some(local.identity.generation.as_str()) {
+        if generation_id.as_deref() != Some(local.identity().generation.as_str()) {
             let previous = self.inner.state.lock().generation.take();
             self.inner.state.lock().generation_failed = false;
             match self.create_generation() {
@@ -551,7 +552,7 @@ impl Program {
                 Err(error) => {
                     if error
                         .downcast_ref::<EnvironmentError>()
-                        .is_none_or(|error| error.code() != "environment.unavailable")
+                        .is_none_or(|error| error.code != "environment.unavailable")
                     {
                         self.inner.state.lock().generation_failed = true;
                         self.resolve_program_ready();
@@ -563,21 +564,27 @@ impl Program {
     }
 
     fn create_generation(&self) -> Result<Arc<ProgramGeneration>, WireAsyncError> {
-        let lease = self.inner.environments.acquire(&self.inner.binding, PROGRAM_CAPABILITIES);
+        let lease = self.inner.environments.acquire(&self.inner.binding, PROGRAM_CAPABILITIES)?;
         let disposables = Arc::new(Mutex::new(Vec::new()));
         let result = (|| {
-            let host_fs = lease.environment.fs.clone().unwrap();
-            let skill_discovery = EnvironmentSkillDiscovery::new(
-                self.inner.dependencies.log.clone(),
-                host_fs.clone(),
-            );
+            let host_fs = lease.environment.fs().clone();
+            let skill_discovery = Arc::new(EnvironmentSkillDiscovery);
+            let workspace_cwd = self.inner.context.cwd();
+            let os_home_dir = self.inner.dependencies.bootstrap.os_home_dir();
+            let explicit_dirs = self
+                .inner
+                .dependencies
+                .bootstrap
+                .args()
+                .skill_dirs
+                .clone()
+                .unwrap_or_default();
             let explicit_skills = own_arc(
                 ExplicitFileSkillSource::new(
                     skill_discovery.clone(),
-                    self.inner.context.clone(),
-                    self.inner.dependencies.bootstrap.clone(),
-                    host_fs.clone(),
-                    self.inner.dependencies.log.clone(),
+                    workspace_cwd.clone(),
+                    os_home_dir.clone(),
+                    explicit_dirs,
                 ),
                 &disposables,
             );
@@ -585,10 +592,8 @@ impl Program {
                 ExtraFileSkillSource::new(
                     skill_discovery.clone(),
                     self.inner.dependencies.config.clone(),
-                    self.inner.context.clone(),
-                    self.inner.dependencies.bootstrap.clone(),
-                    host_fs.clone(),
-                    self.inner.dependencies.log.clone(),
+                    workspace_cwd,
+                    os_home_dir,
                 ),
                 &disposables,
             );
@@ -637,7 +642,7 @@ impl Program {
                     self.inner.dependencies.clone(),
                     harness,
                     &disposables,
-                ),
+                )?,
                 &disposables,
             );
             let root = &workdirs.root;
@@ -693,7 +698,7 @@ impl Program {
             let mcp = Arc::new(WorkspaceMcpService::new(
                 self.inner.context.clone(),
                 root.dirs.clone(),
-                self.inner.environments.clone().into(),
+                self.inner.environments.clone() as Arc<dyn crate::app::environment::environment::EnvironmentResolver>,
                 mcp_config.clone(),
                 self.inner.dependencies.oauth.clone(),
                 self.inner.dependencies.log.clone(),
@@ -717,7 +722,7 @@ impl Program {
                 self.inner.dependencies.log.clone(),
             ));
             Ok(Arc::new(ProgramGeneration {
-                id: lease.environment.identity.generation.clone(),
+                id: lease.environment.identity().generation.clone(),
                 workdirs,
                 mcp_config,
                 mcp,
@@ -745,12 +750,21 @@ impl Program {
         let this = self.clone();
         tokio::spawn(async move {
             let results = futures_util::future::join_all([
-                generation.workdirs.root.dirs.ready(),
-                generation.workdirs.root.instructions.ready(),
-                generation.mcp_config.ready(),
-                generation.mcp.ready(),
-                generation.workdirs.root.skills.ready(),
-                generation.workdirs.root.agent_profiles.ready(),
+                generation.workdirs.root.dirs.ready().boxed(),
+                generation.workdirs.root.instructions.ready().boxed(),
+                generation.mcp_config.ready().boxed(),
+                generation.mcp.ready().boxed(),
+                async {
+                    generation
+                        .workdirs
+                        .root
+                        .skills
+                        .ready()
+                        .await
+                        .map_err(|error| -> WireAsyncError { error.into() })
+                }
+                .boxed(),
+                generation.workdirs.root.agent_profiles.ready().boxed(),
             ])
             .await;
             let failed = results.into_iter().any(|result| result.is_err());
@@ -794,7 +808,8 @@ impl Program {
         let log = self.inner.dependencies.log.clone();
         let cleanup = async move {
             let mut errors = Vec::new();
-            for disposable in disposables.lock().drain(..).rev() {
+            let items = { disposables.lock().drain(..).rev().collect::<Vec<_>>() };
+            for disposable in items {
                 if let Err(error) = disposable.dispose().await {
                     errors.push(SharedProgramError::new(error));
                 }
@@ -803,9 +818,9 @@ impl Program {
                 return Err(errors.remove(0));
             }
             if errors.len() > 1 {
-                return Err(SharedProgramError(Arc::new(format!(
-                    "program {workspace_id} generation disposal failed"
-                ))));
+                return Err(SharedProgramError::new(
+                    format!("program {workspace_id} generation disposal failed").into(),
+                ));
             }
             Ok(())
         }
@@ -846,7 +861,7 @@ impl Program {
         let state = self.inner.state.lock();
         let generation = state.generation.clone();
         drop(state);
-        let status = if local.as_ref().is_none_or(|local| local.status == "connecting") {
+        let status = if local.as_ref().is_none_or(|local| local.status().as_str() == "connecting") {
             ProgramStatus::Preparing
         } else if self.inner.state.lock().generation_failed
             || generation.as_ref().is_some_and(|generation| {
@@ -857,12 +872,12 @@ impl Program {
         } else if !generation.as_ref().is_some_and(|generation| {
             generation.ready.load(std::sync::atomic::Ordering::Relaxed)
         }) {
-            if generation.is_none() && local.as_ref().is_some_and(|local| local.status != "ready") {
+            if generation.is_none() && local.as_ref().is_some_and(|local| local.status().as_str() != "ready") {
                 ProgramStatus::Degraded
             } else {
                 ProgramStatus::Preparing
             }
-        } else if local.as_ref().is_some_and(|local| local.status == "ready") {
+        } else if local.as_ref().is_some_and(|local| local.status().as_str() == "ready") {
             ProgramStatus::Ready
         } else {
             ProgramStatus::Degraded

@@ -20,6 +20,7 @@ use crate::agent::context_memory::types::{ContextMessage, InjectionOrigin, Promp
 use crate::features::reminder::types::{
     ContextInjectionContent, ContextInjectionContext, ContextInjectionResult, ReminderNotification,
 };
+use crate::human::llm::tokens::estimate_tokens_for_messages;
 use kimi_core::types::ContentPart;
 
 #[derive(Clone)]
@@ -260,7 +261,7 @@ pub fn is_compaction_splice(splice: &Value) -> bool {
 }
 
 fn is_compaction_summary_message(message: &ContextMessage) -> bool {
-    crate::compaction::is_compaction_summary_message(message)
+    crate::agent::context_memory::compaction_handoff::is_compaction_summary_message(message)
 }
 
 pub fn is_injection_result(content: &Value) -> bool {
@@ -406,7 +407,7 @@ pub fn append_result(
             }
             memory.append(&[ContextMessage {
                 role: message.role,
-                blocks: message.content,
+                content: message.content,
                 tools: message.tools,
                 origin: Some(origin),
                 ..Default::default()
@@ -445,7 +446,10 @@ pub async fn inject(
     let history = runtime
         .service::<dyn IAgentContextMemoryService>("contextMemoryService")
         .get();
-    let estimated_tokens = crate::compaction::estimate_tokens_for_messages(&history);
+    let estimated_tokens = estimate_tokens_for_messages(
+        &history.iter().map(ContextMessage::estimable).collect::<Vec<_>>(),
+        None,
+    ) as usize;
     for entry in entries {
         inject_entry(
             runtime,
@@ -545,7 +549,10 @@ impl AgentReminderService {
             .actor
             .service::<dyn IAgentContextMemoryService>("contextMemoryService")
             .get();
-        let estimated_tokens = crate::compaction::estimate_tokens_for_messages(&history);
+        let estimated_tokens = estimate_tokens_for_messages(
+            &history.iter().map(ContextMessage::estimable).collect::<Vec<_>>(),
+            None,
+        ) as usize;
         let entries = actor_context(&self.actor).entries.lock().clone();
         for entry in entries {
             if entry.variant == variant {

@@ -20,26 +20,44 @@ pub fn resolve_effective_workspace_roots(
     workspace: &dyn ISessionWorkspaceInfo,
     host: Option<&HostEnvironmentInfo>,
 ) -> EffectiveWorkspaceRoots {
+    resolve_effective_workspace_roots_data(
+        &session.workspace_id(),
+        &session.cwd(),
+        binding,
+        &workspace.primary_by_workspace(),
+        &workspace.additional_dirs(),
+        host,
+    )
+}
+
+pub fn resolve_effective_workspace_roots_data(
+    workspace_id: &str,
+    fallback_cwd: &str,
+    binding: Option<&EnvironmentBinding>,
+    primary_by_workspace: &std::collections::HashMap<String, String>,
+    additional_dirs: &[String],
+    host: Option<&HostEnvironmentInfo>,
+) -> EffectiveWorkspaceRoots {
     let environment_id = binding.map_or(LOCAL_ENVIRONMENT_ID, |binding| binding.environment_id.as_str());
     let local = environment_id == LOCAL_ENVIRONMENT_ID;
     let primary_dir = if local {
-        workspace.primary_by_workspace().get(&session.workspace_id()).cloned()
+        primary_by_workspace.get(workspace_id).cloned()
     } else {
         None
     };
     let follows_primary = local && binding.and_then(|binding| binding.cwd.as_deref()).is_none() && primary_dir.is_some();
     let work_dir = binding.and_then(|binding| binding.cwd.clone()).or_else(|| {
         if local {
-            primary_dir.clone().or_else(|| Some(session.cwd()))
+            primary_dir.clone().or_else(|| Some(fallback_cwd.to_string()))
         } else {
             host.and_then(|host| host.cwd.clone().or_else(|| Some(host.home_dir.clone())))
-                .or_else(|| Some(session.cwd()))
+                .or_else(|| Some(fallback_cwd.to_string()))
         }
-    }).unwrap_or_else(|| session.cwd());
+    }).unwrap_or_else(|| fallback_cwd.to_string());
     let work_dir_key = workspace_root_key(&work_dir);
     let mut seen = HashSet::from([work_dir_key]);
     let mut additional_dirs = Vec::new();
-    for dir in std::iter::once(primary_dir.as_deref()).chain(workspace.additional_dirs().iter().map(String::as_str)) {
+    for dir in std::iter::once(primary_dir.as_deref()).chain(additional_dirs.iter().map(String::as_str)) {
         let Some(dir) = dir else {
             continue;
         };

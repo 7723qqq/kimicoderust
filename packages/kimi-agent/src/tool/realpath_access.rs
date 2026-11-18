@@ -11,6 +11,13 @@ fn existing_but_unresolvable(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
+fn is_missing_path_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    ) || matches!(error.raw_os_error(), Some(2) | Some(20))
+}
+
 pub fn realpath_existing_prefix(abs_path: &Path) -> Result<PathBuf, PathSecurityError> {
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut current = abs_path.to_path_buf();
@@ -23,7 +30,7 @@ pub fn realpath_existing_prefix(abs_path: &Path) -> Result<PathBuf, PathSecurity
                 }
                 return Ok(resolved);
             }
-            Err(_) => {
+            Err(error) if is_missing_path_io_error(&error) => {
                 if existing_but_unresolvable(&current) {
                     return Err(PathSecurityError::symlink_escape(
                         &abs_path.to_string_lossy(),
@@ -45,6 +52,16 @@ pub fn realpath_existing_prefix(abs_path: &Path) -> Result<PathBuf, PathSecurity
                 };
                 tail.push(name);
                 current = parent;
+            }
+            Err(_) => {
+                return Err(PathSecurityError::symlink_escape(
+                    &abs_path.to_string_lossy(),
+                    &current.to_string_lossy(),
+                    format!(
+                        "\"{}\" could not be resolved to a real path. Access is blocked.",
+                        current.to_string_lossy()
+                    ),
+                ));
             }
         }
     }

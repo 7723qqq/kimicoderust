@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crate::_base::di::scope::ScopeSeed;
+use crate::_base::di::instantiation::create_decorator;
+use crate::_base::di::scope::{ScopeSeed, seed_instance};
 
 pub trait ISessionAgentProfileCatalogSeed: Send + Sync {
     fn workspace_key(&self) -> &str;
@@ -25,6 +26,7 @@ impl ISessionAgentProfileCatalogSeed for SessionAgentProfileCatalogSeed {
 
 pub fn session_agent_profile_catalog_seed(
     seed: Arc<dyn ISessionAgentProfileCatalogSeed>,
-) -> Vec<ScopeSeed> {
-    vec![ScopeSeed::new::<ISessionAgentProfileCatalogSeed>(seed)]
+) -> ScopeSeed {
+    let id = create_decorator::<Arc<dyn ISessionAgentProfileCatalogSeed>>("sessionAgentProfileCatalogSeed");
+    seed_instance(&id, seed)
 }

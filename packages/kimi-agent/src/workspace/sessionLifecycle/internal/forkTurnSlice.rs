@@ -8,6 +8,7 @@ use crate::agent::prompt::prompt_metadata_text::{
 };
 use crate::agent::replay_builder::fold::match_wire_turn_input_records;
 use crate::features::fileHistory::fileHistoryOps::FILE_HISTORY_RECORD_PREFIX;
+use crate::session::session_metadata::session_metadata::SessionLastTurnReason;
 use crate::human::agent::origin::{
     annotate_bundled_skill_parts, is_skill_activation_part,
 };
@@ -27,6 +28,16 @@ impl LastTurnReason {
             Self::Completed => "completed",
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
+        }
+    }
+}
+
+impl From<LastTurnReason> for SessionLastTurnReason {
+    fn from(reason: LastTurnReason) -> Self {
+        match reason {
+            LastTurnReason::Completed => Self::Completed,
+            LastTurnReason::Cancelled => Self::Cancelled,
+            LastTurnReason::Failed => Self::Failed,
         }
     }
 }
@@ -109,7 +120,7 @@ pub fn slice_records_before_pending_work(
                     .or_else(|| record.get("id"));
                 prompt_id
                     .and_then(Value::as_str)
-                    .is_some_and(|prompt_id| queued.contains(prompt_id))
+                    .is_some_and(|prompt_id| queued.iter().any(|queued_id| queued_id.as_str() == prompt_id))
             })
             .map(|index| index as i64)
             .unwrap_or(-1)
@@ -167,7 +178,8 @@ pub fn slice_main_records_for_running_fork(
         return Ok(latest);
     };
     let prompt = &records[prompt_index];
-    let match_ = match_wire_turn_input_records(records, true)
+    let record_values = records.iter().cloned().map(Value::Object).collect::<Vec<_>>();
+    let match_ = match_wire_turn_input_records(&record_values, true)
         .into_iter()
         .find(|candidate| {
             candidate.input_index == Some(prompt_index) && candidate.turn_id == Some(active_turn_id)
@@ -363,18 +375,19 @@ struct PersistentTurnStart {
 }
 
 fn context_only_turn_starts(records: &[WireRecord]) -> Vec<LegacyTurnStart> {
-    match_wire_turn_input_records(records, false)
+    let record_values = records.iter().cloned().map(Value::Object).collect::<Vec<_>>();
+    match_wire_turn_input_records(&record_values, false)
         .into_iter()
         .filter(|match_| match_.input_index.is_none())
         .map(|match_| LegacyTurnStart {
             start: match_.append_index,
-            turn_index: match_.visible_turn_index,
+            turn_index: match_.visible_turn_index as i64,
         })
         .collect()
 }
 
 fn persistent_turn_starts(records: &[WireRecord]) -> Vec<PersistentTurnStart> {
-    let mut turns = Vec::new();
+    let mut turns: Vec<PersistentTurnStart> = Vec::new();
     let mut human_starts = HashMap::<i64, usize>::new();
     let mut terminal_turn_ids = HashSet::new();
     let mut cancelled_turn_ids = HashSet::new();
@@ -519,10 +532,11 @@ fn is_user_visible_turn_input_record(record: &WireRecord) -> bool {
 }
 
 fn turn_input_indices_through(records: &[WireRecord], turn_index: i64) -> HashSet<usize> {
-    match_wire_turn_input_records(records, false)
+    let record_values = records.iter().cloned().map(Value::Object).collect::<Vec<_>>();
+    match_wire_turn_input_records(&record_values, false)
         .into_iter()
         .filter(|match_| {
-            match_.visible_turn_index <= turn_index && match_.input_index.is_some()
+            match_.visible_turn_index as i64 <= turn_index && match_.input_index.is_some()
         })
         .map(|match_| match_.input_index.unwrap())
         .collect()
@@ -563,7 +577,10 @@ fn prompt_metadata_from_input(
         Some("skill_activation") => {
             let name = origin?.get("skillName")?.as_str()?;
             return prompt_metadata_text_from_content_parts(
-                &[json!({ "type": "text", "text": slash_command_text(&format!("/{name}"), origin?.get("skillArgs")) })],
+                &[kimi_core::types::ContentPart::Text {
+                    text: slash_command_text(&format!("/{name}"), origin?.get("skillArgs")),
+                    meta: None,
+                }],
                 origin?.get("clientMetadata"),
             );
         }
@@ -577,14 +594,27 @@ fn prompt_metadata_from_input(
         }
         _ => {}
     }
-    let content = content?.as_array()?;
+    let content_values = content?.as_array()?;
+    let content = content_values
+        .iter()
+        .map(|part| serde_json::from_value::<kimi_core::types::ContentPart>(part.clone()))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
     let activations = origin.and_then(|origin| origin.get("skillActivations"));
-    let bundled = if origin_kind(origin) == Some("user") {
-        activations.and_then(Value::as_array).cloned().unwrap_or_default()
+    let bundled: Vec<crate::human::agent::origin::BundledSkillActivation> = if origin_kind(origin) == Some("user") {
+        activations
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|value| serde_json::from_value(value.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
-    let parts = annotate_bundled_skill_parts(content, &bundled)
+    let parts = annotate_bundled_skill_parts(&content, &bundled)
         .into_iter()
         .filter(|part| !is_skill_activation_part(part) && !is_user_prompt_submit_hook_part(part))
         .collect::<Vec<_>>();

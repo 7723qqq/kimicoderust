@@ -49,7 +49,7 @@ impl ErrorNoTelemetry {
         }
     }
 
-    pub fn is_error_no_telemetry(error: &dyn Error) -> bool {
+    pub fn is_error_no_telemetry(error: &(dyn Error + 'static)) -> bool {
         error.is::<Self>()
     }
 }
@@ -95,6 +95,18 @@ impl Error for BugIndicatingError {}
 
 pub type SharedError = Arc<dyn Error + Send + Sync>;
 
+/// Convert the shared error representation to the wire/boundary one. `Arc<dyn
+/// Error>` itself implements `Error`, so this is a lossless ownership wrapper —
+/// the inner concrete error (and its downcasts) survives.
+pub fn shared_to_wire(error: SharedError) -> Box<dyn Error + Send + Sync> {
+    Box::new(error)
+}
+
+/// Inverse of `shared_to_wire`; also lossless (`Arc::from(Box<dyn Error>)`).
+pub fn wire_to_shared(error: Box<dyn Error + Send + Sync>) -> SharedError {
+    Arc::from(error)
+}
+
 #[derive(Default)]
 pub struct Error2Options {
     pub details: Option<HashMap<String, serde_json::Value>>,
@@ -102,6 +114,7 @@ pub struct Error2Options {
     pub name: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct Error2 {
     pub code: ErrorCode,
     pub message: String,
@@ -147,21 +160,19 @@ impl Error for Error2 {
     }
 }
 
-pub fn is_error2(error: &dyn Error) -> bool {
+pub fn is_error2(error: &(dyn Error + 'static)) -> bool {
     error.is::<Error2>()
 }
 
 pub fn unwrap_error_cause(mut error: SharedError) -> SharedError {
     loop {
-        match error.downcast::<Error2>() {
-            Ok(current) => {
-                if let Some(cause) = current.cause.clone() {
-                    error = cause;
-                } else {
-                    return current;
-                }
-            }
-            Err(current) => return current,
+        let Some(coded) = error.downcast_ref::<Error2>() else {
+            return error;
+        };
+        if let Some(cause) = coded.cause.clone() {
+            error = cause;
+        } else {
+            return error;
         }
     }
 }

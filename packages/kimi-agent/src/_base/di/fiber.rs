@@ -328,7 +328,7 @@ pub fn bind_service_unit(
     let runtime = Arc::new(FiberRuntime::new(
         frame.host,
         instance.unit_book(),
-        recipe_name(recipe.statics()),
+        recipe_name(&recipe.statics),
         frame.config,
         frame.token,
         instance.declared_dependencies().into_iter().collect(),
@@ -887,7 +887,7 @@ impl Fiber for FiberRuntime {
         let state_entry = entry.clone();
         Ok(Arc::new(BasicFiberHandle {
             name: label,
-            uid: self.host.mint_uid(),
+            uid: Some(self.host.mint_uid()),
             uid_of: None,
             state: Arc::new(move || {
                 if state_entry.disposed() {
@@ -955,7 +955,7 @@ impl Fiber for FiberRuntime {
         let state_entry = entry.clone();
         Ok(Arc::new(BasicFiberHandle {
             name: label,
-            uid: self.host.mint_uid(),
+            uid: Some(self.host.mint_uid()),
             uid_of: None,
             state: Arc::new(move || {
                 if state_entry.disposed() {

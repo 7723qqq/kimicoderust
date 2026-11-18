@@ -8,12 +8,32 @@ use tokio_util::sync::CancellationToken;
 use crate::human::llm::message::{ContentPart, ToolCall};
 use crate::wire::record::WireAsyncError;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Wire shape of a tool progress update. Mirrors v2's `ToolUpdate`
+/// (`tool/toolContract.ts:41`) and `packages/protocol`'s `toolUpdateSchema`.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolUpdate {
-    pub key: String,
-    pub text: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replace: Option<bool>,
+}
+
+impl ToolUpdate {
+    pub fn text(kind: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            text: Some(text.into()),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

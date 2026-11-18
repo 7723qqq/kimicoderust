@@ -34,9 +34,10 @@ const WATCH_DEBOUNCE_MS: u64 = 200;
 pub static WORKSPACE_INSTRUCTIONS_CURRENT_KEY: LazyLock<
     StateDefinition<WorkspaceInstructionsSnapshot>,
 > = LazyLock::new(|| {
-    define_state("workspaceInstructions.current", || {
-        WorkspaceInstructionsSnapshot::default()
-    })
+    define_state(
+        "workspaceInstructions.current",
+        Arc::new(|| WorkspaceInstructionsSnapshot::default()) as Arc<dyn Fn() -> WorkspaceInstructionsSnapshot + Send + Sync>,
+    )
 });
 
 #[derive(Debug, Clone)]
@@ -155,7 +156,7 @@ impl WorkspaceInstructionsService {
             }),
         };
         let weak = Arc::downgrade(&this.inner);
-        let subscription = this.inner.dirs.on_did_change(move || {
+        let subscription = this.inner.dirs.on_did_change(Arc::new(move || {
             if let Some(inner) = weak.upgrade() {
                 let this = Self { inner };
                 let generation = {
@@ -176,7 +177,7 @@ impl WorkspaceInstructionsService {
                     }
                 });
             }
-        });
+        }));
         *this.inner._dirs_subscription.lock() = Some(subscription);
         tokio::spawn(this.inner.ready.clone());
         this
@@ -268,16 +269,16 @@ impl WorkspaceInstructionsService {
     async fn reload_now(&self) -> Result<(), WireAsyncError> {
         let result = load_agents_md_for_roots(
             self.inner.fs.as_ref(),
-            &self.inner.env.home_dir(),
-            &self.inner.bootstrap.home_dir(),
+            &self.inner.env.home_dir,
+            Some(&self.inner.bootstrap.home_dir()),
             &[self.inner.dirs.primary()],
             self.inner.personal_fs.as_deref(),
         )
         .await?;
         let next = WorkspaceInstructionsSnapshot {
-            agents_md: result.content,
+            agents_md: Some(result.content),
             agents_md_warning: result.warning,
-            agents_md_paths: result.paths,
+            agents_md_paths: Some(result.paths),
         };
         let current = self.current();
         let changed = next.agents_md != current.agents_md
@@ -286,7 +287,7 @@ impl WorkspaceInstructionsService {
         self.refresh_watchers().await?;
         let (changes, loaded) = {
             let mut state = self.inner.state.lock();
-            let changes = state.pending_changes.drain(..).map(|(_, change)| change).collect();
+            let changes = state.pending_changes.drain(..).map(|(_, change)| change).collect::<Vec<_>>();
             let loaded = state.loaded;
             state.loaded = true;
             (changes, loaded)
@@ -321,9 +322,9 @@ impl WorkspaceInstructionsService {
         }
         let plan = agents_md_watch_roots(
             self.inner.fs.as_ref(),
-            &self.inner.env.home_dir(),
+            &self.inner.env.home_dir,
             &primary,
-            &self.inner.bootstrap.home_dir(),
+            Some(&self.inner.bootstrap.home_dir()),
         )
         .await?;
         let previous = {
@@ -335,20 +336,10 @@ impl WorkspaceInstructionsService {
         }
         self.inner.state.lock().watched_primary = Some(primary);
         for entry in plan {
-            let handle = match watch_candidates(
-                &entry.root,
-                &entry.candidates,
-                Some(subtree_watch_filter(&entry.root, &entry.candidates)),
-            ) {
-                Ok(handle) => handle,
-                Err(error) => {
-                    self.inner.log.warn(
-                        &format!("cannot watch instruction root {}: {error}", entry.root),
-                        None,
-                    );
-                    continue;
-                }
-            };
+            let ignored: crate::human::utils::watch::WatchIgnored = Arc::from(
+                subtree_watch_filter(&entry.root, &entry.candidates, None),
+            );
+            let handle = watch_candidates(&entry.root, &entry.candidates, Some(ignored));
             let this = self.clone();
             let subscription = handle.on_did_change(move |change| {
                 this.inner.state.lock().pending_changes.insert(
@@ -360,13 +351,14 @@ impl WorkspaceInstructionsService {
                     state.watch_generation += 1;
                     state.watch_generation
                 };
+                let debounce_this = this.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(WATCH_DEBOUNCE_MS)).await;
-                    if this.inner.state.lock().watch_generation != generation {
+                    if debounce_this.inner.state.lock().watch_generation != generation {
                         return;
                     }
-                    if let Err(error) = this.reload().await {
-                        this.inner.log.warn(
+                    if let Err(error) = debounce_this.reload().await {
+                        debounce_this.inner.log.warn(
                             &format!("AGENTS.md reload failed: {error}"),
                             None,
                         );
@@ -374,8 +366,8 @@ impl WorkspaceInstructionsService {
                 });
             });
             let mut state = self.inner.state.lock();
-            state.watchers.push(handle);
-            state.watchers.push(subscription);
+            state.watchers.push(Arc::new(*handle) as crate::_base::di::lifecycle::DisposableRef);
+            state.watchers.push(Arc::new(*subscription) as crate::_base::di::lifecycle::DisposableRef);
         }
         Ok(())
     }

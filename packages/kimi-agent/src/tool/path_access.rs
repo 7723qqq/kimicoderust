@@ -536,6 +536,14 @@ pub struct PathSecurityError {
     pub message: String,
 }
 
+impl std::fmt::Display for PathSecurityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PathSecurityError {}
+
 impl PathSecurityError {
     fn new(code: PathSecurityCode, raw_path: &str, canonical_path: &str, message: String) -> Self {
         Self {

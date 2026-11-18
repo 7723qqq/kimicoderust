@@ -59,8 +59,6 @@ Write patterns in ripgrep regex syntax, which differs from POSIX `grep` syntax. 
 Hidden files are searched by default.
 "#;
 
-static CONTENT_LINE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(.*?)([:-])(\d+)\2").expect("content line regex is valid"));
 static CONTENT_PAYLOAD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d+)([:-])").expect("content payload regex is valid"));
 static PARAMETERS: LazyLock<Value> = LazyLock::new(|| to_input_json_schema(grep_input_schema()));
@@ -163,7 +161,7 @@ impl GrepTool {
                             path,
                             &ResolvePathAccessPathOptions {
                                 path_class,
-                                home_dir: env.home_dir.as_deref(),
+                                home_dir: Some(&env.home_dir),
                                 shell_path_bridge: bridge
                                     .as_ref()
                                     .map(|bridge| bridge as &dyn Fn(&str) -> String),
@@ -927,14 +925,32 @@ fn parsed_file_path(
 }
 
 fn extract_content_file_path(line: &str, path_class: PathClass) -> Option<String> {
-    if let Some(captures) = CONTENT_LINE_RE.captures(line)
-        && let Some(path) = captures.get(1)
-    {
-        return Some(normalize_path(path.as_str(), path_class));
+    if let Some(path) = content_line_path(line) {
+        return Some(normalize_path(path, path_class));
     }
     no_line_number_content_separator_index(line, path_class)
         .filter(|index| *index > 0)
         .map(|index| normalize_path(&line[..index], path_class))
+}
+
+fn content_line_path(line: &str) -> Option<&str> {
+    for (start, separator) in line.char_indices() {
+        if separator != ':' && separator != '-' {
+            continue;
+        }
+        let digits = line[start + separator.len_utf8()..]
+            .bytes()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            continue;
+        }
+        let after_digits = start + separator.len_utf8() + digits;
+        if line.as_bytes().get(after_digits) == Some(&(separator as u8)) {
+            return Some(&line[..start]);
+        }
+    }
+    None
 }
 
 fn no_line_number_content_separator_index(line: &str, path_class: PathClass) -> Option<usize> {
@@ -1169,5 +1185,48 @@ fn from_accumulator(result: ToolOutputAccumulatorResult) -> ExecutableToolResult
         note: result.brief,
         spill: result.spill,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod content_line_tests {
+    use super::{PathClass, content_line_path, extract_content_file_path};
+
+    fn normalized(line: &str, path_class: PathClass) -> Option<String> {
+        extract_content_file_path(line, path_class)
+    }
+
+    #[test]
+    fn content_line_path_matches_v2_backreference_semantics() {
+        assert_eq!(content_line_path("src/main.ts:42:const x = 1;"), Some("src/main.ts"));
+        assert_eq!(content_line_path("src/main.ts-42-const x = 1;"), Some("src/main.ts"));
+        assert_eq!(content_line_path("foo/bar.rs:1000:hello world"), Some("foo/bar.rs"));
+        assert_eq!(content_line_path("f:42:x:43:y"), Some("f"));
+        assert_eq!(content_line_path(":5:x"), Some(""));
+        assert_eq!(content_line_path("-5-x"), Some(""));
+        assert_eq!(content_line_path("C:42:weird"), Some("C"));
+        assert_eq!(content_line_path("a:b-1-2"), Some("a:b"));
+    }
+
+    #[test]
+    fn content_line_path_rejects_non_matches() {
+        assert_eq!(content_line_path("no-separator-here"), None);
+        assert_eq!(content_line_path("prefix:12"), None);
+        assert_eq!(content_line_path("prefix::"), None);
+        assert_eq!(content_line_path("x:1"), None);
+        assert_eq!(content_line_path(""), None);
+    }
+
+    #[test]
+    fn extract_content_file_path_normalizes_and_falls_back() {
+        assert_eq!(
+            normalized("src/main.ts:42:body", PathClass::Posix),
+            Some("src/main.ts".to_string())
+        );
+        assert_eq!(
+            normalized("C:/foo/bar.py:17:let y;", PathClass::Win32),
+            Some("C:/foo/bar.py".to_string())
+        );
+        assert_eq!(normalized("plain text line", PathClass::Posix), None);
     }
 }

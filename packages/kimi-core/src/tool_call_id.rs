@@ -273,7 +273,7 @@ pub fn dedupe_duplicate_tool_calls(messages: &mut Vec<LLMMessage>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ToolCall;
+    use crate::types::{Role, ToolCall};
 
     fn call(id: &str) -> ToolCall {
         ToolCall {
@@ -624,12 +624,12 @@ mod tests {
             tool_msg("c1", "sunny"),
             msg("assistant", "It is sunny.", vec![]),
         ];
-        let before: Vec<(String, String, usize)> = messages
+        let before: Vec<(Role, String, usize)> = messages
             .iter()
             .map(|m| (m.role.clone(), m.content.clone(), m.tool_calls.len()))
             .collect();
         assert!(!dedupe_duplicate_tool_calls(&mut messages));
-        let after: Vec<(String, String, usize)> = messages
+        let after: Vec<(Role, String, usize)> = messages
             .iter()
             .map(|m| (m.role.clone(), m.content.clone(), m.tool_calls.len()))
             .collect();

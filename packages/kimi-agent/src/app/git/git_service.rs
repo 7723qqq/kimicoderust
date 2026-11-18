@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use serde_json::{Map, Value};
 
 use crate::app::environment::environment::EnvironmentResolver;
-use crate::environment::environment::LOCAL_ENVIRONMENT_ID;
+use crate::environment::environment::{EnvironmentBinding, EnvironmentCapability, LOCAL_ENVIRONMENT_ID};
 use crate::environment::program_path::resolve_program_path;
 use crate::os::interface::host_file_system::IHostFileSystem;
 use crate::os::interface::host_process::HostOutputStream;
@@ -379,12 +379,16 @@ impl GitService {
         let Some(program) = program else {
             return Ok(RunResult::failed());
         };
-        let lease = self.resolver.acquire(&self.environment_id, &["process"]);
-        let process = lease
-            .environment
-            .process
-            .clone()
-            .expect("process capability is required");
+        let lease = self
+            .resolver
+            .acquire(
+                &EnvironmentBinding {
+                    environment_id: self.environment_id.clone(),
+                    cwd: None,
+                },
+                &[EnvironmentCapability::Process],
+            )?;
+        let process = lease.environment.process();
         let proc = match process
             .spawn(&program, args, Some(cwd), options.env.as_ref())
             .await

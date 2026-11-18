@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
 use crate::_base::utils::paths::{SubtreeWatchFilterOptions, subtree_watch_filter};
-use crate::app::config::config_service::ConfigService;
+use crate::app::config::config::IConfigService;
 use crate::human::utils::watch::{WatchHandle, WatchOptions, WatchSubscription, watch_candidates_with_options};
 use crate::workspace::workspaceDirs::workspaceDirsService::WorkspaceDirsService;
 
@@ -40,7 +40,7 @@ pub struct WorkspaceRootSkillSource {
     discovery: Arc<dyn ISkillDiscovery>,
     workspace_id: String,
     workspace_cwd: String,
-    config: Arc<ConfigService>,
+    config: Arc<dyn IConfigService>,
     explicit_dirs: Vec<String>,
     dirs: Arc<WorkspaceDirsService>,
     watch_enabled: bool,
@@ -56,18 +56,18 @@ impl WorkspaceRootSkillSource {
         discovery: Arc<dyn ISkillDiscovery>,
         workspace_id: String,
         workspace_cwd: String,
-        config: Arc<ConfigService>,
+        config: Arc<dyn IConfigService>,
         explicit_dirs: Vec<String>,
         dirs: Arc<WorkspaceDirsService>,
         watch_enabled: bool,
     ) -> Arc<Self> {
         let on_did_change_emitter = Arc::new(Emitter::new());
         let config_emitter = on_did_change_emitter.clone();
-        let config_subscription = config.on_did_section_change(move |event| {
+        let config_subscription = config.on_did_section_change(Box::new(move |event| {
             if event.domain == MERGE_ALL_AVAILABLE_SKILLS_SECTION {
                 config_emitter.fire(());
             }
-        });
+        }));
         let dirs_emitter = on_did_change_emitter.clone();
         let dirs_subscription = dirs.on_did_change(Arc::new(move || dirs_emitter.fire(())));
         Arc::new(Self {

@@ -46,7 +46,7 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,7 +57,7 @@ pub struct UsageStatus {
     pub current_turn: Option<TokenUsage>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UsageRecordedContext {
     pub agent: AgentContext,
     pub model: String,

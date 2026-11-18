@@ -917,7 +917,8 @@ impl ConfigService {
         let pending = {
             let mut state = self.state.lock();
             let before = state.effective.clone();
-            state.validated = build_validated(self.registry.as_ref(), &state.raw, &mut state.diagnostics);
+            let raw_snapshot = state.raw.clone();
+            state.validated = build_validated(self.registry.as_ref(), &raw_snapshot, &mut state.diagnostics);
             let mut next = state.validated.clone();
             apply_section_env_bindings(
                 self.registry.as_ref(),
@@ -955,11 +956,12 @@ impl ConfigService {
         {
             let mut state = self.state.lock();
             if let Some(from_toml) = &section.from_toml
-                && let Some(raw_snake_value) = state.raw_snake.get(&camel_to_snake(domain))
+                && let Some(raw_snake_value) = state.raw_snake.get(&camel_to_snake(domain)).cloned()
             {
-                state.raw.insert(domain.to_string(), from_toml(raw_snake_value));
+                state.raw.insert(domain.to_string(), from_toml(&raw_snake_value));
             }
-            if let Some(raw) = state.raw.get(domain).cloned() {
+            let raw = state.raw.get(domain).cloned();
+            if let Some(raw) = raw {
                 match self.registry.validate(domain, raw) {
                     Ok(validated) => {
                         state.validated.insert(domain.to_string(), validated.clone());

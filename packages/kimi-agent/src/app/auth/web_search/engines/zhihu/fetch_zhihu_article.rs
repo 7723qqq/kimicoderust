@@ -164,7 +164,7 @@ pub fn fetch_zhihu_article(url: String, options: SearchEngineOptions) -> Article
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "Invalid URL: Cannot extract article ID.",
-            )));
+            )) as FetchError);
         }
         let html = fetch_article_html(&url, &options).await?;
         let content = extract_article_content(&html);

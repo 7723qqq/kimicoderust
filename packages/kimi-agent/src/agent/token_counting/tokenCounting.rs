@@ -7,9 +7,9 @@ use crate::llm_adapter::contract::message::Message;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContextSize {
-    pub size: usize,
-    pub measured: usize,
-    pub estimated: usize,
+    pub size: u64,
+    pub measured: u64,
+    pub estimated: u64,
 }
 
 #[derive(Debug, Clone, Default)]

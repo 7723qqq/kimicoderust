@@ -425,7 +425,7 @@ async fn spawn_agent(
     let caller_data = deps.lifecycle.handle_of(&deps.caller_agent_id).map(|handle| {
         handle.accessor().get(&I_AGENT_PROFILE_SERVICE).data()
     });
-    let model_alias = opts.model.clone().or_else(|| caller_data.as_ref().and_then(|data| data.model_alias.clone()));
+    let model_alias = opts.model.clone().or_else(|| caller_data.as_ref().and_then(|data| data.base.model_alias.clone()));
     let Some(model_alias) = model_alias else {
         return Err(workflow_error(LocalizedText::new("v2Errors.callerAgentNoModel").render()));
     };
@@ -440,7 +440,7 @@ async fn spawn_agent(
         binding: Some(BindAgentInput {
             profile: opts.agent_type.clone().unwrap_or_else(|| "coder".to_string()),
             model: Some(model_alias),
-            thinking: caller_data.as_ref().map(|data| data.thinking_level.clone()),
+            thinking: caller_data.as_ref().map(|data| data.base.thinking_level.clone()),
             strict_thinking: None,
         }),
         labels: Some(labels),
