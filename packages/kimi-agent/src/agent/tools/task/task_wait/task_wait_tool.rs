@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::time::Instant;
+use tokio::time::Instant;
 
 use super::task_wait::WAIT_FOR_MAX_TIMEOUT_S;
 use crate::callbacks::HostCallbacks;
@@ -42,11 +42,13 @@ pub struct WaitContext<'a> {
 
     pub display_name: &'a str,
 
+    pub parent_cancel: Option<&'a crate::subagent::types::ParentCancel>,
+
     /// Streaming progress sink: `Some` when the host observes updates.
-    pub on_update: Option<&'a dyn Fn(&crate::tools::ToolUpdate<'_>)>,
+    pub on_update: Option<&'a (dyn Fn(&crate::tools::ToolUpdate<'_>) + Send + Sync)>,
 
     /// Telemetry sink (`HostCallbacks::telemetry`), for `wait_for_completed`.
-    pub telemetry: Option<&'a dyn Fn(Value)>,
+    pub telemetry: Option<&'a (dyn Fn(Value) + Send + Sync)>,
 }
 
 impl WaitContext<'_> {
@@ -58,9 +60,23 @@ impl WaitContext<'_> {
         self.caller_agent_id != "main"
     }
 
-    fn track(&self, event: Value) {
+    fn track(
+        &self,
+        task_id: Option<&str>,
+        started: Instant,
+        timeout_ms: u64,
+        outcome: &str,
+        extra_completed_count: usize,
+    ) {
         if let Some(telemetry) = self.telemetry {
-            telemetry(event);
+            telemetry(serde_json::json!({
+                "event": "wait_for_completed",
+                "outcome": outcome,
+                "timeout_ms": timeout_ms,
+                "waited_ms": waited_ms(started),
+                "has_task_id": task_id.is_some(),
+                "extra_completed_count": extra_completed_count,
+            }));
         }
     }
 
@@ -70,8 +86,8 @@ impl WaitContext<'_> {
         };
         let text = format!(
             "Waiting {} / {} · {running} background task{} still running",
-            format_wait_seconds((elapsed_ms / 1000) as u64),
-            format_wait_seconds(timeout_s),
+            format_wait_seconds(elapsed_ms as u64),
+            format_wait_seconds(timeout_s.saturating_mul(1000)),
             if running == 1 { "" } else { "s" },
         );
         on_update(&crate::tools::ToolUpdate {
@@ -179,20 +195,20 @@ pub async fn execute_task_wait(
     steer: Option<&crate::subagent::types::ParentCancel>,
     wait: &WaitContext<'_>,
     args: &Value,
-) -> ExecutableToolResult {
+) -> Result<ExecutableToolResult, crate::wire::record::WireAsyncError> {
     let task_id = match parse_optional_task_id(args) {
         Ok(task_id) => task_id,
-        Err(message) => return err_result(message),
+        Err(message) => return Ok(err_result(message)),
     };
     let timeout_s = match parse_timeout(args) {
         Ok(timeout) => timeout,
-        Err(message) => return err_result(message),
+        Err(message) => return Ok(err_result(message)),
     };
     let timeout_ms = timeout_s * 1000;
     if !wait_for_enabled() {
-        return err_result(
+        return Ok(err_result(
             "WaitFor is disabled: the wait_for experimental flag is off.".into(),
-        );
+        ));
     }
 
     let calls = {
@@ -201,28 +217,32 @@ pub async fn execute_task_wait(
         tally.calls
     };
     let started = Instant::now();
-    if let Some(runner) = runner {
-        let known = match task_id.as_deref() {
-            Some(id) => runner.entry(id).is_some(),
-            None => true,
-        };
-        if known {
-            let (result, waited) =
-                wait_with_runner(runner, steer, task_id.as_deref(), timeout_ms, started, wait)
-                    .await;
-            if waited {
-                wait.lock_tally().waited_ms += waited_ms(started);
-            }
-            return wait
-                .with_repeat_warning(result, calls, callbacks, args)
-                .await;
+    let named_task = runner.and_then(|runner| task_id.as_deref().and_then(|id| runner.entry(id)));
+    if let Some(runner) = runner
+        && (task_id.is_none() || named_task.is_some())
+    {
+        let (result, waited) = wait_with_runner(
+            runner,
+            steer,
+            task_id.as_deref(),
+            named_task,
+            timeout_ms,
+            started,
+            wait,
+        )
+        .await?;
+        if waited {
+            wait.lock_tally().waited_ms += waited_ms(started);
         }
+        return Ok(wait
+            .with_repeat_warning(result, calls, callbacks, args)
+            .await);
     }
     let Some(task_id) = task_id else {
-        return err_result(
+        return Ok(err_result(
             "Invalid TaskWait arguments: `task_id` is required when the host owns background tasks."
                 .into(),
-        );
+        ));
     };
     let request = StateWriteRequest {
         domain: "task".into(),
@@ -240,10 +260,36 @@ pub async fn execute_task_wait(
             .unwrap_or("")
             .to_string(),
     };
-    match callbacks.state_write(request).await {
+    let response = tokio::select! {
+        biased;
+        () = wait_for_signal(wait.parent_cancel) => {
+            return Err(aborted_wait(wait, Some(&task_id), timeout_ms, started));
+        }
+        () = wait_for_signal(steer) => {
+            let waited = waited_ms(started);
+            wait.lock_tally().waited_ms += waited;
+            wait.track(Some(&task_id), started, timeout_ms, "interrupted", 0);
+            let result = render_wait_interrupted(Some(&task_id), timeout_ms, waited, &[]);
+            return Ok(wait.with_repeat_warning(result, calls, callbacks, args).await);
+        }
+        response = async { callbacks.state_write(request).await } => response,
+    };
+    Ok(match response {
         Ok(response) => {
             let waited = waited_ms(started);
             wait.lock_tally().waited_ms += waited;
+            let status = response.value.get("status").and_then(Value::as_str);
+            wait.track(
+                Some(&task_id),
+                started,
+                timeout_ms,
+                if status.is_some_and(is_terminal_status) {
+                    "completed"
+                } else {
+                    "timed_out"
+                },
+                0,
+            );
             let result = render_task_wait(
                 &response.value,
                 Some(&task_id),
@@ -258,182 +304,156 @@ pub async fn execute_task_wait(
         }
 
         Err(error) => {
-            let outcome = is_task_not_found(&error) || {
-                let lower = error.to_lowercase();
-                lower.contains("timed out") || lower.contains("timeout")
-            };
+            let lower = error.to_lowercase();
+            let not_found = is_task_not_found(&error);
+            let timed_out = lower.contains("timed out") || lower.contains("timeout");
+            if not_found || timed_out {
+                wait.track(
+                    Some(&task_id),
+                    started,
+                    timeout_ms,
+                    if not_found {
+                        "task_not_found"
+                    } else {
+                        "timed_out"
+                    },
+                    0,
+                );
+            }
             let result = map_wait_error(error, &task_id, timeout_ms, waited_ms(started), wait);
-            if outcome {
-                wait.with_repeat_warning(result, calls, callbacks, args).await
+            if not_found || timed_out {
+                wait.with_repeat_warning(result, calls, callbacks, args)
+                    .await
             } else {
                 result
             }
         }
-    }
+    })
 }
 
 async fn wait_with_runner(
     runner: &crate::storage::TaskRunner,
     steer: Option<&crate::subagent::types::ParentCancel>,
     task_id: Option<&str>,
+    named_task: Option<Value>,
     timeout_ms: u64,
     started: Instant,
     wait: &WaitContext<'_>,
-) -> (ExecutableToolResult, bool) {
-    let targets: Vec<String> = match task_id {
-        Some(id) => {
-            if runner.entry(id).is_none() {
-                return (err_result(format!("Task not found: {id}")), false);
-            }
-            vec![id.to_string()]
-        }
-        None => {
-            let running = running_wires(runner);
-            if running.is_empty() {
-                return (ok_result(render_wait_no_tasks(timeout_ms)), false);
-            }
-            running
-                .iter()
-                .filter_map(|entry| entry.get("taskId").and_then(|v| v.as_str()))
-                .map(str::to_string)
-                .collect()
-        }
-    };
-
+) -> Result<(ExecutableToolResult, bool), crate::wire::record::WireAsyncError> {
     let running_at_start: Vec<String> = running_wires(runner)
         .iter()
-        .filter_map(|entry| entry.get("taskId").and_then(|v| v.as_str()))
+        .filter_map(|entry| entry.get("taskId").and_then(Value::as_str))
         .map(str::to_string)
         .collect();
-    wait.emit_progress(
-        timeout_ms / 1000,
-        std::time::Duration::ZERO.as_millis(),
-        running_at_start.len(),
-    );
-    let result = match task_id {
-        Some(_) => {
-            runner
-                .wait_interruptible(&targets[0], timeout_ms, steer)
-                .await
+    if task_id.is_none() && running_at_start.is_empty() {
+        wait.track(None, started, timeout_ms, "completed", 0);
+        return Ok((ok_result(render_wait_no_tasks(timeout_ms)), false));
+    }
+
+    let terminal = named_task.filter(|entry| {
+        entry
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(is_terminal_status)
+    });
+    let result = if let Some(entry) = terminal {
+        TaskWaitResult::Completed(entry)
+    } else {
+        let waiting = async {
+            match task_id {
+                Some(id) => runner.wait_interruptible(id, timeout_ms, steer).await,
+                None => runner.wait_any(&running_at_start, timeout_ms, steer).await,
+            }
+        };
+        tokio::pin!(waiting);
+        let interval = std::time::Duration::from_secs(1);
+        let mut progress = tokio::time::interval_at(Instant::now() + interval, interval);
+        progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                () = wait_for_signal(wait.parent_cancel) => {
+                    return Err(aborted_wait(wait, task_id, timeout_ms, started));
+                }
+                result = &mut waiting => break result,
+                _ = progress.tick(), if wait.on_update.is_some() => {
+                    wait.emit_progress(
+                        timeout_ms / 1000,
+                        started.elapsed().as_millis(),
+                        running_wires(runner).len(),
+                    );
+                }
+            }
         }
-        None => runner.wait_any(&targets, timeout_ms, steer).await,
     };
     let waited = waited_ms(started);
     let still_running = running_wires(runner);
-    let outcome = match &result {
-        TaskWaitResult::Interrupted => "interrupted",
-        TaskWaitResult::NotFound => "task_not_found",
-        TaskWaitResult::Completed(_) => "completed",
-        TaskWaitResult::TimedOut(_) => "timed_out",
-    };
-    let extra_count = match &result {
-        TaskWaitResult::Completed(entry) => {
-            let finished_id = entry
-                .get("taskId")
-                .or_else(|| entry.get("id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            running_at_start
-                .iter()
-                .filter(|id| id.as_str() != finished_id)
-                .filter_map(|id| runner.entry(id))
-                .filter(|entry| {
-                    entry
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .is_some_and(is_terminal_status)
-                })
-                .count()
-        }
-        _ => 0,
-    };
-    wait.track(serde_json::json!({
-        "event": "wait_for_completed",
-        "outcome": outcome,
-        "timeout_ms": timeout_ms,
-        "waited_ms": waited,
-        "has_task_id": task_id.is_some(),
-        "extra_completed_count": extra_count,
-    }));
-    if let TaskWaitResult::Completed(entry) = &result {
-        mark_delivered_via_wait(runner, entry, &running_at_start);
-    }
-    let rendered = match result {
-        TaskWaitResult::Interrupted => {
-            render_wait_interrupted(task_id, timeout_ms, waited, &still_running)
-        }
-        TaskWaitResult::NotFound => {
-            err_result(format!("Task not found: {}", task_id.unwrap_or("")))
-        }
-
-        TaskWaitResult::Completed(entry) => {
-            let finished_id = entry
-                .get("taskId")
-                .or_else(|| entry.get("id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let extras: Vec<Value> = running_at_start
-                .iter()
-                .filter(|id| **id != finished_id)
-                .filter_map(|id| runner.entry(id))
-                .filter(|entry| {
-                    entry
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .is_some_and(is_terminal_status)
-                })
-                .collect();
-            render_task_wait(
-                &entry,
-                task_id,
-                timeout_ms,
-                waited,
-                &still_running,
-                &extras,
-                wait,
-            )
-        }
-        TaskWaitResult::TimedOut(entry) => render_task_wait(
-            &entry,
-            task_id,
-            timeout_ms,
-            waited,
-            &still_running,
-            &[],
-            wait,
+    let (rendered, outcome, extra_count) = match result {
+        TaskWaitResult::Interrupted => (
+            render_wait_interrupted(task_id, timeout_ms, waited, &still_running),
+            "interrupted",
+            0,
         ),
+        TaskWaitResult::NotFound => (
+            err_result(format!("Task not found: {}", task_id.unwrap_or(""))),
+            "task_not_found",
+            0,
+        ),
+        TaskWaitResult::Completed(entry) | TaskWaitResult::TimedOut(entry) => {
+            if entry
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(is_terminal_status)
+            {
+                let finished_id = entry
+                    .get("taskId")
+                    .or_else(|| entry.get("id"))
+                    .and_then(Value::as_str)
+                    .or(task_id)
+                    .unwrap_or_default();
+                let extras: Vec<Value> = running_at_start
+                    .iter()
+                    .filter(|id| id.as_str() != finished_id)
+                    .filter_map(|id| runner.entry(id))
+                    .filter(|entry| {
+                        entry
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_terminal_status)
+                    })
+                    .collect();
+                let rendered = render_wait_completed(
+                    &entry,
+                    finished_id,
+                    timeout_ms,
+                    waited,
+                    &still_running,
+                    &extras,
+                );
+                mark_delivered_via_wait(runner, &entry, &extras);
+                (rendered, "completed", extras.len())
+            } else {
+                (
+                    render_wait_timeout(task_id, timeout_ms, waited, &still_running, wait),
+                    "timed_out",
+                    0,
+                )
+            }
+        }
     };
-    (rendered, true)
+    wait.track(task_id, started, timeout_ms, outcome, extra_count);
+    Ok((rendered, true))
 }
 
-/// v2 `markTasksDeliveredViaWait` (taskWaitTool.ts:241-243): a task the wait
-/// reported is not announced again by the automatic completion notification
-/// (`agent/task/taskService.ts:684-694`). The runner's pending-notification
-/// queue is the delivery path, so drop those entries.
-fn mark_delivered_via_wait(
-    runner: &crate::storage::TaskRunner,
-    entry: &Value,
-    running_at_start: &[String],
-) {
-    let finished_id = entry
-        .get("taskId")
-        .or_else(|| entry.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let mut delivered: Vec<(String, String)> = vec![(finished_id.clone(), "waited".into())];
-    for id in running_at_start {
-        if id.as_str() == finished_id {
-            continue;
-        }
-        if let Some(wire) = runner.entry(id)
-            && let Some(status) = wire.get("status").and_then(|s| s.as_str())
-            && is_terminal_status(status)
-        {
-            delivered.push((id.clone(), status.to_string()));
-        }
-    }
+fn mark_delivered_via_wait(runner: &crate::storage::TaskRunner, entry: &Value, extras: &[Value]) {
+    let delivered = std::iter::once(entry)
+        .chain(extras)
+        .filter_map(|entry| {
+            let id = entry.get("taskId").or_else(|| entry.get("id"))?.as_str()?;
+            let status = entry.get("status")?.as_str()?;
+            Some((id.to_string(), status.to_string()))
+        })
+        .collect::<Vec<_>>();
     runner.mark_notifications_delivered_via_wait(&delivered);
 }
 
@@ -626,6 +646,23 @@ fn parse_timeout(args: &Value) -> Result<u64, String> {
     }
 }
 
+async fn wait_for_signal(signal: Option<&crate::subagent::types::ParentCancel>) {
+    match signal {
+        Some(signal) => signal.wait().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+fn aborted_wait(
+    wait: &WaitContext<'_>,
+    task_id: Option<&str>,
+    timeout_ms: u64,
+    started: Instant,
+) -> crate::wire::record::WireAsyncError {
+    wait.track(task_id, started, timeout_ms, "aborted", 0);
+    Box::new(crate::_base::utils::abort::user_cancellation_reason())
+}
+
 fn waited_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
@@ -687,11 +724,11 @@ pub fn wait_for_flag(environment: Option<bool>, config: Option<bool>) -> bool {
 /// `KIMI_CODE_EXPERIMENTAL_FLAG` master switch, else the registered default.
 /// An unparsable env value falls through instead of forcing the flag on.
 pub fn wait_for_enabled() -> bool {
-    let environment = crate::_base::utils::env::parse_boolean_env(std::env::var(
-        "KIMI_CODE_EXPERIMENTAL_WAIT_FOR",
-    )
-    .ok()
-    .as_deref());
+    let environment = crate::_base::utils::env::parse_boolean_env(
+        std::env::var("KIMI_CODE_EXPERIMENTAL_WAIT_FOR")
+            .ok()
+            .as_deref(),
+    );
     if let Some(environment) = environment {
         return environment;
     }
@@ -708,9 +745,7 @@ pub fn wait_for_enabled() -> bool {
         return config;
     }
     if crate::_base::utils::env::parse_boolean_env(
-        std::env::var("KIMI_CODE_EXPERIMENTAL_FLAG")
-            .ok()
-            .as_deref(),
+        std::env::var("KIMI_CODE_EXPERIMENTAL_FLAG").ok().as_deref(),
     ) == Some(true)
     {
         return true;
@@ -742,6 +777,9 @@ mod tests {
             turn_id: 1,
             caller_agent_id: "main",
             display_name: "WaitFor",
+            parent_cancel: None,
+            on_update: None,
+            telemetry: None,
         }
     }
 
@@ -758,7 +796,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(!result.is_error);
         let lines: Vec<&str> = result.content.lines().collect();
         assert_eq!(lines[0], "wait_status: completed");
@@ -934,7 +973,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(!result.is_error);
         assert!(result.content.starts_with("wait_status: timed_out\n"));
         assert!(result.content.contains("a timeout is not an error"));
@@ -955,7 +995,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-9", "timeout": 30 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(result.is_error);
         assert_eq!(result.content, "Task not found: task-9");
     }
@@ -973,7 +1014,9 @@ mod tests {
             serde_json::json!({ "task_id": "task-1", "timeout": 601 }),
             serde_json::json!({ "task_id": "task-1", "timeout": "30" }),
         ] {
-            let result = execute_task_wait(&callbacks, None, None, &wait, &bad).await;
+            let result = execute_task_wait(&callbacks, None, None, &wait, &bad)
+                .await
+                .unwrap();
             assert!(result.is_error, "args: {bad}");
             assert!(result.content.contains("Invalid TaskWait arguments"));
         }
@@ -996,7 +1039,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(result.is_error);
         assert_eq!(result.content, STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE);
     }
@@ -1016,7 +1060,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(result.is_error);
         assert!(result.content.contains("something else broke"));
     }
@@ -1053,7 +1098,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 1 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(!result.is_error);
         assert!(
             started.elapsed() >= std::time::Duration::from_millis(900),
@@ -1088,7 +1134,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(!result.is_error);
         assert_eq!(
             result.content.lines().next().unwrap(),
@@ -1097,6 +1144,231 @@ mod tests {
         assert!(result.content.contains("[finished]"));
         assert!(result.content.contains("HELD-OUTPUT"));
         assert_eq!(settle.entry("task-1").unwrap()["status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn wait_reports_a_terminal_task_without_repeating_its_notification() {
+        use crate::storage::task_runner::{TaskOutcome, TaskSpawnMeta};
+
+        let runner = Arc::new(crate::storage::TaskRunner::new(None));
+        runner
+            .spawn_task_with_meta(
+                TaskSpawnMeta {
+                    session_id: Some("session-1"),
+                    kind: "bash",
+                    subagent_type: None,
+                    agent_id: None,
+                    timeout_ms: None,
+                },
+                "task-1".into(),
+                "build".into(),
+                std::future::ready(TaskOutcome::Completed("build output".into())),
+            )
+            .unwrap();
+        assert!(matches!(
+            runner.wait("task-1", 1_000).await,
+            TaskWaitResult::Completed(_)
+        ));
+        assert_eq!(runner.pending_notification_count(Some("session-1")), 1);
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let cancel = crate::subagent::types::ParentCancel::new();
+        let steer = crate::subagent::types::ParentCancel::new();
+        cancel.trigger();
+        steer.trigger();
+        let updates = std::sync::Mutex::new(Vec::new());
+        let record = |update: &crate::tools::ToolUpdate<'_>| {
+            updates.lock().unwrap().push(update.text.to_string());
+        };
+        let events = std::sync::Mutex::new(Vec::new());
+        let track = |event: Value| events.lock().unwrap().push(event);
+        let wait = WaitContext {
+            parent_cancel: Some(&cancel),
+            on_update: Some(&record),
+            telemetry: Some(&track),
+            ..main_wait_ctx(&tally)
+        };
+        let result = execute_task_wait(
+            &callbacks,
+            Some(&runner),
+            Some(&steer),
+            &wait,
+            &serde_json::json!({ "task_id": "task-1", "timeout": 5 }),
+        )
+        .await
+        .unwrap();
+        assert!(!result.is_error);
+        assert!(result.content.contains("build output"));
+        assert_eq!(runner.pending_notification_count(Some("session-1")), 0);
+        assert!(updates.lock().unwrap().is_empty());
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["outcome"], "completed");
+        assert_eq!(events[0]["extra_completed_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn wait_delivers_only_the_tasks_running_when_it_started() {
+        use crate::storage::task_runner::{TaskOutcome, TaskSpawnMeta};
+
+        let runner = Arc::new(crate::storage::TaskRunner::new(None));
+        let mut releases = Vec::new();
+        for id in ["task-1", "task-2"] {
+            let (release, released) = tokio::sync::oneshot::channel();
+            runner
+                .spawn_task_with_meta(
+                    TaskSpawnMeta {
+                        session_id: Some("session-1"),
+                        kind: "bash",
+                        ..Default::default()
+                    },
+                    id.into(),
+                    id.into(),
+                    async move {
+                        released.await.unwrap();
+                        TaskOutcome::Completed(id.into())
+                    },
+                )
+                .unwrap();
+            releases.push(release);
+        }
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let events = std::sync::Mutex::new(Vec::new());
+        let track = |event: Value| events.lock().unwrap().push(event);
+        let wait = WaitContext {
+            telemetry: Some(&track),
+            ..main_wait_ctx(&tally)
+        };
+        let args = serde_json::json!({ "timeout": 30 });
+        let mut pending = Box::pin(execute_task_wait(
+            &callbacks,
+            Some(&runner),
+            None,
+            &wait,
+            &args,
+        ));
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        runner
+            .spawn_task_with_meta(
+                TaskSpawnMeta {
+                    session_id: Some("session-1"),
+                    kind: "bash",
+                    ..Default::default()
+                },
+                "task-later".into(),
+                "started after wait".into(),
+                std::future::ready(TaskOutcome::Completed("later output".into())),
+            )
+            .unwrap();
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for id in ["task-1", "task-2", "task-later"] {
+            assert!(matches!(
+                runner.wait(id, 1_000).await,
+                TaskWaitResult::Completed(_)
+            ));
+        }
+        let result = pending.await.unwrap();
+        assert!(result.content.contains("[completed_during_wait]"));
+        assert!(result.content.contains("task_id: task-1"));
+        assert!(result.content.contains("task_id: task-2"));
+        assert!(!result.content.contains("task-later"));
+        let remaining = runner.take_pending_notifications(Some("session-1"));
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].task_id, "task-later");
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["outcome"], "completed");
+        assert_eq!(events[0]["extra_completed_count"], 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_emits_progress_each_second_and_stops_on_completion() {
+        let (_dir, runner, release) = held_runner();
+        let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+        let tally = test_tally();
+        let updates = std::sync::Mutex::new(Vec::new());
+        let record = |update: &crate::tools::ToolUpdate<'_>| {
+            updates.lock().unwrap().push(update.text.to_string());
+        };
+        let wait = WaitContext {
+            on_update: Some(&record),
+            ..main_wait_ctx(&tally)
+        };
+        let args = serde_json::json!({ "task_id": "task-1", "timeout": 30 });
+        let mut pending = Box::pin(execute_task_wait(
+            &callbacks,
+            Some(&runner),
+            None,
+            &wait,
+            &args,
+        ));
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        assert!(updates.lock().unwrap().is_empty());
+        for elapsed in [1, 2] {
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            assert!(futures_util::poll!(&mut pending).is_pending());
+            assert_eq!(
+                updates.lock().unwrap().last().unwrap(),
+                &format!("Waiting {elapsed}s / 30s · 1 background task still running"),
+            );
+        }
+        release.send(()).unwrap();
+        assert!(!pending.await.unwrap().is_error);
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        assert_eq!(updates.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn turn_cancellation_takes_precedence_over_steering_and_leaves_the_task_running() {
+        use crate::_base::utils::abort::is_user_cancellation;
+        use crate::subagent::types::ParentCancel;
+
+        for args in [
+            serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
+            serde_json::json!({ "timeout": 30 }),
+        ] {
+            let (_dir, runner, release) = held_runner();
+            let (callbacks, _, _) = scripted(read_ok(Value::Null), write_ok(Value::Null));
+            let cancel = ParentCancel::new();
+            let steer = ParentCancel::new();
+            let tally = test_tally();
+            let events = std::sync::Mutex::new(Vec::new());
+            let track = |event: Value| events.lock().unwrap().push(event);
+            let wait = WaitContext {
+                parent_cancel: Some(&cancel),
+                telemetry: Some(&track),
+                ..main_wait_ctx(&tally)
+            };
+            let mut pending = Box::pin(execute_task_wait(
+                &callbacks,
+                Some(&runner),
+                Some(&steer),
+                &wait,
+                &args,
+            ));
+            assert!(futures_util::poll!(&mut pending).is_pending());
+            steer.trigger();
+            cancel.trigger();
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+                .await
+                .expect("cancellation must end the wait")
+                .unwrap_err();
+            assert!(is_user_cancellation(error.as_ref()));
+            let events = events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["outcome"], "aborted");
+            assert_eq!(events[0]["has_task_id"], args.get("task_id").is_some());
+            drop(events);
+            assert_eq!(runner.entry("task-1").unwrap()["status"], "running");
+            release.send(()).unwrap();
+            assert!(matches!(
+                runner.wait("task-1", 1_000).await,
+                TaskWaitResult::Completed(_)
+            ));
+        }
     }
 
     #[tokio::test]
@@ -1119,7 +1391,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(!result.is_error, "an interruption is not an error");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
@@ -1150,7 +1423,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "timeout": 5 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
 
         assert!(!result.is_error);
         assert!(result.content.starts_with("wait_status: timed_out"));
@@ -1174,7 +1448,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "timeout": 5 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(!result.is_error);
         assert!(result.content.starts_with("wait_status: no_tasks\n"));
         assert!(result.content.contains("nothing to wait for"));
@@ -1197,7 +1472,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "nope", "timeout": 5 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(result.is_error);
         assert_eq!(result.content, "Task not found: nope");
         assert_eq!(
@@ -1221,7 +1497,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 30 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(!result.is_error);
         assert_eq!(
             result.content.lines().next().unwrap(),
@@ -1245,7 +1522,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "timeout": 5 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(result.is_error);
         assert!(result.content.contains("`task_id` is required"));
         assert!(write_received.lock().unwrap().is_none());
@@ -1264,12 +1542,16 @@ mod tests {
         let tally = test_tally();
         let wait = main_wait_ctx(&tally);
         let args = serde_json::json!({ "timeout": 5 });
-        let first = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        let first = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args)
+            .await
+            .unwrap();
         assert!(
             !first.content.contains("[wait_warning]"),
             "first call: {first:?}"
         );
-        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args)
+            .await
+            .unwrap();
         assert!(
             second.content.contains("[wait_warning]"),
             "second call: {second:?}"
@@ -1295,10 +1577,17 @@ mod tests {
             turn_id: 1,
             caller_agent_id: "subagent-7",
             display_name: "WaitFor",
+            parent_cancel: None,
+            on_update: None,
+            telemetry: None,
         };
         let args = serde_json::json!({ "timeout": 5 });
-        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
-        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args)
+            .await
+            .unwrap();
+        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args)
+            .await
+            .unwrap();
         assert!(
             second
                 .content
@@ -1319,8 +1608,12 @@ mod tests {
         let tally = test_tally();
         let wait = main_wait_ctx(&tally);
         let args = serde_json::json!({ "timeout": 5 });
-        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
-        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args)
+            .await
+            .unwrap();
+        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args)
+            .await
+            .unwrap();
         assert!(
             second.content.contains("repeated waits stall the goal"),
             "goal advice: {second:?}"
@@ -1349,21 +1642,33 @@ mod tests {
             turn_id: 1,
             caller_agent_id: "main",
             display_name: "WaitFor",
+            parent_cancel: None,
+            on_update: None,
+            telemetry: None,
         };
-        let _ = execute_task_wait(&callbacks, Some(&runner), None, &turn_one, &args).await;
+        let _ = execute_task_wait(&callbacks, Some(&runner), None, &turn_one, &args)
+            .await
+            .unwrap();
 
         let turn_two = WaitContext {
             tally: &tally,
             turn_id: 2,
             caller_agent_id: "main",
             display_name: "WaitFor",
+            parent_cancel: None,
+            on_update: None,
+            telemetry: None,
         };
-        let fresh = execute_task_wait(&callbacks, Some(&runner), None, &turn_two, &args).await;
+        let fresh = execute_task_wait(&callbacks, Some(&runner), None, &turn_two, &args)
+            .await
+            .unwrap();
         assert!(
             !fresh.content.contains("[wait_warning]"),
             "a turn change must reset the tally: {fresh:?}"
         );
-        let repeated = execute_task_wait(&callbacks, Some(&runner), None, &turn_two, &args).await;
+        let repeated = execute_task_wait(&callbacks, Some(&runner), None, &turn_two, &args)
+            .await
+            .unwrap();
         assert!(
             repeated
                 .content
@@ -1382,10 +1687,17 @@ mod tests {
             turn_id: 1,
             caller_agent_id: "main",
             display_name: "TaskWait",
+            parent_cancel: None,
+            on_update: None,
+            telemetry: None,
         };
         let args = serde_json::json!({ "timeout": 5 });
-        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
-        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args).await;
+        let _ = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args)
+            .await
+            .unwrap();
+        let second = execute_task_wait(&callbacks, Some(&runner), None, &wait, &args)
+            .await
+            .unwrap();
         assert!(
             second
                 .content
@@ -1405,6 +1717,9 @@ mod tests {
             turn_id: 1,
             caller_agent_id: "subagent-7",
             display_name: "WaitFor",
+            parent_cancel: None,
+            on_update: None,
+            telemetry: None,
         };
         let result = execute_task_wait(
             &callbacks,
@@ -1413,7 +1728,8 @@ mod tests {
             &wait,
             &serde_json::json!({ "task_id": "task-1", "timeout": 1 }),
         )
-        .await;
+        .await
+        .expect("the wait must not be aborted");
         assert!(result.content.starts_with("wait_status: timed_out"));
         assert!(
             result.content.contains(
@@ -1422,6 +1738,27 @@ mod tests {
             "subagent timeout body: {result:?}"
         );
         let _ = release.send(());
+    }
+
+    #[test]
+    fn wait_progress_formats_elapsed_milliseconds_as_elapsed_seconds() {
+        let tally = test_tally();
+        let wait = main_wait_ctx(&tally);
+        let updates = std::sync::Mutex::new(Vec::new());
+        let record = |update: &crate::tools::ToolUpdate<'_>| {
+            updates.lock().unwrap().push(update.text.to_string());
+        };
+        let wait = WaitContext {
+            on_update: Some(&record),
+            ..wait
+        };
+
+        wait.emit_progress(30, 5_000, 2);
+
+        assert!(
+            updates.lock().unwrap()[0].starts_with("Waiting 5s / 30s · 2 background tasks"),
+            "progress text must be human-scale: {updates:?}"
+        );
     }
 
     #[test]

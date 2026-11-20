@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::app::config::config::IConfigService;
-use crate::app::config::config_section_contributions::register_config_section;
 
-use crate::tool::tool_contract::{ToolAccesses, ToolSideEffect};
+use crate::tool::tool_contract::ToolSideEffect;
+use crate::turn_loop::types::{FileOperation, ToolAccesses, ToolResourceAccess};
 
 pub const SANDBOX_SECTION: &str = "sandbox";
 
@@ -21,6 +21,19 @@ pub enum SandboxMode {
 }
 
 impl SandboxMode {
+    /// v2 `z.enum(['off', 'read-only', 'workspace-write'])`: an unknown spelling is
+    /// rejected at the config boundary.
+    pub fn validate(value: &str) -> Result<Self, String> {
+        match value {
+            "off" => Ok(Self::Off),
+            "read-only" => Ok(Self::ReadOnly),
+            "workspace-write" => Ok(Self::WorkspaceWrite),
+            other => Err(format!(
+                "invalid sandbox mode \"{other}\": expected \"off\", \"read-only\" or \"workspace-write\""
+            )),
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -44,14 +57,6 @@ pub static SANDBOX_CONFIG_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         }
     })
 });
-
-pub fn register_sandbox_config() {
-    register_config_section(
-        SANDBOX_SECTION,
-        SANDBOX_CONFIG_SCHEMA.clone(),
-        json!({"mode": "off"}),
-    );
-}
 
 pub fn resolve_sandbox_policy(
     config: &dyn IConfigService,
@@ -142,10 +147,14 @@ fn sandbox_write_veto(
     let write_paths = accesses
         .into_iter()
         .flatten()
-        .filter(|access| {
-            access.kind == "file" && matches!(access.operation.as_str(), "write" | "readwrite")
+        .filter_map(|access| match access {
+            ToolResourceAccess::File(file)
+                if matches!(file.operation, FileOperation::Write | FileOperation::ReadWrite) =>
+            {
+                Some(file.path.clone())
+            }
+            _ => None,
         })
-        .map(|access| access.path.clone())
         .collect::<Vec<_>>();
     if policy.mode == SandboxMode::ReadOnly {
         return Some(if write_paths.is_empty() {
@@ -206,3 +215,7 @@ fn t(key: &'static str, params: Map<String, Value>) -> String {
         .collect();
     crate::i18n::LocalizedText::with_params(key, params).render()
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

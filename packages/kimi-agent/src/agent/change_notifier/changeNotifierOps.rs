@@ -146,13 +146,13 @@ pub static CHANGE_NOTIFIER_SNAPSHOT_KEY: LazyLock<Arc<ReplayableStateKey>> =
                 blobs: None,
                 mutable_replay: None,
             });
-        key.undoable(None)
+        Arc::get_mut(&mut key).expect("fresh state key").undoable(None)
             .expect("change notifier snapshot can be undoable");
         for class in [
             CONTEXT_CLEAR_CLASS.clone(),
             CONTEXT_APPLY_COMPACTION_CLASS.clone(),
         ] {
-            key.on(&class, Arc::new(|state, _event, _ctx| {
+            Arc::get_mut(&mut key).expect("fresh state key").on(&class, Arc::new(|state, _event, _ctx| {
                 let mut next = Map::new();
                 for field in ["workspacePrimaryByWorkspace", "workspaceAdditionalDirs"] {
                     if let Some(value) = state.get(field) {
@@ -163,7 +163,7 @@ pub static CHANGE_NOTIFIER_SNAPSHOT_KEY: LazyLock<Arc<ReplayableStateKey>> =
             }))
             .expect("change notifier context reset fold can be registered");
         }
-        key.on(&snapshot, Arc::new(|_state, event, _ctx| {
+        Arc::get_mut(&mut key).expect("fresh state key").on(&snapshot, Arc::new(|_state, event, _ctx| {
             let mut next = Map::new();
             for field in [
                 "agentsMdHash",

@@ -56,7 +56,10 @@ pub fn bucket_of_record(record: &ModelRecord, default_provider: Option<&str>) ->
 
 fn oauth_to_catalog(oauth: Option<&OAuthRef>) -> Option<CatalogOAuthRef> {
     oauth.map(|oauth| CatalogOAuthRef {
-        storage: oauth.storage.clone(),
+        storage: match oauth.storage {
+            crate::app::kosong_config::config_section::OAuthStorage::File => "file".to_string(),
+            crate::app::kosong_config::config_section::OAuthStorage::Keyring => "keyring".to_string(),
+        },
         key: oauth.key.clone(),
         oauth_host: oauth.oauth_host.clone(),
     })
@@ -81,7 +84,11 @@ pub fn to_catalog_provider_info(config: &ProviderConfig) -> CatalogProviderInfo 
                 .map(|(key, value)| (key.clone(), Value::String(value.clone())))
                 .collect()
         }),
-        model_source: config.model_source.clone(),
+        model_source: config.model_source.map(|source| match source {
+            crate::app::kosong_config::config_section::ModelSource::Static => "static".to_string(),
+            crate::app::kosong_config::config_section::ModelSource::Discover => "discover".to_string(),
+            crate::app::kosong_config::config_section::ModelSource::OauthCatalog => "oauth-catalog".to_string(),
+        }),
         source: config.source.clone(),
     }
 }
@@ -388,7 +395,7 @@ impl IProviderCatalogRuntime for ProviderCatalogRuntimeService {
         self.catalog
             .models(&bucket)
             .into_iter()
-            .find(|model| model.model == alias)
+            .find(|model| model.model.model == alias)
     }
 
     fn on_changed(

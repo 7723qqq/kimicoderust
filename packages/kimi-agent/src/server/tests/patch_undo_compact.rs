@@ -682,8 +682,6 @@ async fn the_compact_route_writes_the_llm_summary_not_the_placeholder() {
             tower_enabled: false,
             notify_user_enabled: true,
             tool_select: false,
-            sandbox_mode: None,
-            sandbox_policy: None,
             caller_agent_id: None,
             session_id: None,
             secondary_model: None,

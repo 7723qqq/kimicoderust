@@ -1,5 +1,5 @@
 pub use super::progress_tracker::{
-    EBM_BLIND_MUTATION_THRESHOLD, EBM_REMINDER, ToolReceipt, ToolReceiptPaths,
+    EBM_BLIND_MUTATION_THRESHOLD, EBM_REMINDER, ProgressTracker, ToolReceipt, ToolReceiptPaths,
     is_verification_command,
 };
 use std::collections::HashSet;
@@ -21,7 +21,7 @@ pub trait IProgressTrackerService: Send + Sync {}
 pub struct ProgressTrackerService {
     tracker: Arc<parking_lot::Mutex<ProgressTracker>>,
     ebm_injected_this_turn: Arc<AtomicBool>,
-    hook: parking_lot::Mutex<Option<HookRegistration<()>>>,
+    hook: parking_lot::Mutex<Option<HookRegistration<ToolDidExecuteContext>>>,
     turn_subscription: parking_lot::Mutex<Option<Dispose>>,
 }
 
@@ -43,7 +43,7 @@ impl ProgressTrackerService {
                     observe_tool_round(
                         &context,
                         &tracker,
-                        &reminders,
+                        reminders.as_ref(),
                         &ebm_injected_this_turn,
                     );
                     Box::pin(async move { next.proceed(Some(context)).await })
@@ -139,57 +139,6 @@ fn receipt_from_context(context: &ToolDidExecuteContext) -> ToolReceipt {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ProgressTracker {
-    mutated_bases: HashSet<String>,
-
-    debt: bool,
-
-    blind: u32,
-}
-
-impl ProgressTracker {
-    pub fn observe(&mut self, receipt: &ToolReceipt) -> u32 {
-        let mut churn = false;
-        if receipt.success && !receipt.write_paths.is_empty() {
-            churn = true;
-            for path in &receipt.write_paths {
-                let base = path
-                    .replace('\\', "/")
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
-                if base.encode_utf16().count() >= 3 {
-                    self.mutated_bases.insert(base);
-                }
-            }
-        }
-
-        let discriminating = receipt.command.as_deref().is_some_and(|command| {
-            is_verification_command(command)
-                || command_exercises_mutation(command, &self.mutated_bases)
-        });
-
-        if discriminating {
-            self.debt = false;
-            self.blind = 0;
-        } else if churn {
-            self.debt = true;
-            self.blind += 1;
-        }
-        self.blind
-    }
-
-    pub fn blind_mutations(&self) -> u32 {
-        self.blind
-    }
-}
-
-fn command_exercises_mutation(command: &str, mutated_bases: &HashSet<String>) -> bool {
-    mutated_bases.iter().any(|base| command.contains(base))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,32 +174,6 @@ mod tests {
         for value in ["bun run build", "cargo build", "git status"] {
             assert!(!is_verification_command(value), "{value}");
         }
-    }
-
-    #[test]
-    fn test_writes_open_debt_and_verification_clears_it() {
-        let mut tracker = ProgressTracker::default();
-        assert_eq!(tracker.observe(&write("src/main.rs")), 1);
-        assert_eq!(tracker.observe(&write("src/lib.rs")), 2);
-        assert_eq!(tracker.observe(&command("cargo test --lib")), 0);
-        assert_eq!(tracker.observe(&write("src/lib.rs")), 1, "debt restarts");
-    }
-
-    #[test]
-    fn test_a_command_touching_a_mutated_file_clears_debt() {
-        let mut tracker = ProgressTracker::default();
-        tracker.observe(&write("packages/app/main.rs"));
-        assert_eq!(
-            tracker.observe(&command("git diff main.rs")),
-            0,
-            "a command naming the mutated file counts as discriminating"
-        );
-        assert_eq!(tracker.observe(&write("src/lib.rs")), 1);
-        assert_eq!(
-            tracker.observe(&command("echo done")),
-            1,
-            "an unrelated command leaves the debt alone"
-        );
     }
 
     #[test]

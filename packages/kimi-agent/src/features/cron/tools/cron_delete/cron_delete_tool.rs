@@ -8,6 +8,7 @@ use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::agent::tools::main_agent_only::{CRON_MAIN_AGENT_ONLY, main_agent_only_execution};
 use crate::features::cron::cron_service::AgentCronService;
 use crate::wire::record::WireAsyncError;
@@ -34,14 +35,6 @@ impl CronDeleteTool {
 
     pub fn name(&self) -> &'static str {
         "CronDelete"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "write"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -116,6 +109,14 @@ fn json_string(value: &str) -> String {
 }
 
 impl ExecutableTool for CronDeleteTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Write)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         CronDeleteTool::name(self)
     }

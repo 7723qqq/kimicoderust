@@ -105,6 +105,8 @@ impl CodexBackend {
         let cwd = request.cwd.clone();
         let prompt = request.prompt.clone();
         let result = Box::pin(async move {
+            let run_controller_for_run = run_controller.clone();
+            let run_output_for_run = run_output.clone();
             let run = async move {
                 run_wire
                     .request(
@@ -114,14 +116,14 @@ impl CodexBackend {
                             "modelProvider": "openai",
                             "model": model,
                         })),
-                        Some(run_controller.signal()),
+                        Some(run_controller_for_run.signal()),
                     )
                     .await?;
                 let thread = run_wire
                     .request(
                         "startThread",
                         Some(json!({ "cwd": cwd })),
-                        Some(run_controller.signal()),
+                        Some(run_controller_for_run.signal()),
                     )
                     .await?;
                 let thread_id = thread
@@ -133,7 +135,7 @@ impl CodexBackend {
                     .to_string();
                 let (complete_sender, complete_receiver) = tokio::sync::oneshot::channel::<bool>();
                 let complete_sender = Arc::new(std::sync::Mutex::new(Some(complete_sender)));
-                let updated_output = run_output.clone();
+                let updated_output = run_output_for_run.clone();
                 run_wire.on_notification(
                     "turn/updated",
                     Arc::new(move |value| {
@@ -186,7 +188,7 @@ impl CodexBackend {
                 let run_turn = run_wire.request(
                     "runTurn",
                     Some(json!({ "threadId": thread_id, "texts": [prompt] })),
-                    Some(run_controller.signal()),
+                    Some(run_controller_for_run.signal()),
                 );
                 tokio::pin!(run_turn);
                 let completed = tokio::select! {

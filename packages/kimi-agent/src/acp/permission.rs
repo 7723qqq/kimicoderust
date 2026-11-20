@@ -82,7 +82,7 @@ fn dismissed_question_response() -> AskQuestionResponse {
 /// acpTerminalRunner.ts:22).
 const TERMINAL_OUTPUT_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 /// Foreground Bash budget, mirroring the native tool's own bounds
-/// (`BASH_MAX_SECONDS` and the 60s default in `tools/mod.rs`).
+/// (`DEFAULT_TIMEOUT_S` and `MAX_TIMEOUT_S` in `agent/tools/os/bash/bash.rs`).
 const BASH_DEFAULT_TIMEOUT_S: u64 = 60;
 const BASH_MAX_TIMEOUT_S: u64 = 300;
 
@@ -260,7 +260,7 @@ pub struct AcpPermissionHost {
     /// Tools the user approved with `approve_always` in this session.
     approved_tools: Arc<Mutex<HashSet<String>>>,
     /// The client's declared capabilities; drives whether the client owns
-    /// Read/Write execution (fs reverse RPC) instead of the native sandbox.
+    /// Read/Write execution (fs reverse RPC) instead of the native runtime.
     capabilities: Arc<std::sync::Mutex<AcpClientCapabilities>>,
     /// Per-session turn cancellation, shared with the dispatcher so a
     /// `$/cancel_request` (or EOF) stops a permission/question wait instead of

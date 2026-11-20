@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::agent::agent_context::agent_context::AgentContext;
-use crate::agent::agent_context::agent_space::agent_space_of;
+use crate::agent::agent_context::agent_space::agent_space_or_bug;
 use crate::agent::r#loop::turn_ops::TurnEnded;
 use crate::agent::token_counting::config_section::{TOKEN_COUNTING_SECTION, TokenCountingConfig};
 use crate::agent::token_counting::token_counting::{
@@ -22,7 +22,9 @@ use crate::human::llm::tokens::EstimableMessage;
 use crate::session::agent_lifecycle::agent_lifecycle::IAgentLifecycleService;
 
 use super::session_token_counting::{ISessionTokenCountingService, TokenCountingRebaseInput};
-use super::token_counting_agent_model::TOKEN_COUNTING_AGENT_MODEL_DEFINITION;
+use super::token_counting_agent_model::{
+    TOKEN_COUNTING_AGENT_MODEL_DEFINITION, TokenCountingAgentModel,
+};
 
 pub struct SessionTokenCountingService {
     config: Arc<dyn IConfigService>,
@@ -41,12 +43,14 @@ impl SessionTokenCountingService {
                 return;
             };
             let strategy = strategy_from_config(strategy_config.as_ref());
-            let future = agent_space_of(&agent).use_async(
-                &TOKEN_COUNTING_AGENT_MODEL_DEFINITION,
-                move |model| async move { model.record_turn(event.turn_id, strategy).await },
-            );
+            let space = agent_space_or_bug(&agent);
             tokio::spawn(async move {
-                let _ = future.await;
+                let _ = space
+                    .use_async(
+                        &TOKEN_COUNTING_AGENT_MODEL_DEFINITION,
+                        async move |model: &TokenCountingAgentModel| { model.record_turn(event.turn_id, strategy).await },
+                    )
+                    .await;
             });
         }));
         Self {
@@ -66,7 +70,7 @@ impl ISessionTokenCountingService for SessionTokenCountingService {
     }
 
     fn get(&self, agent: &AgentContext, start: Option<isize>, end: Option<isize>) -> ContextSize {
-        agent_space_of(agent).use_(&TOKEN_COUNTING_AGENT_MODEL_DEFINITION, |model| {
+        agent_space_or_bug(agent).use_(&TOKEN_COUNTING_AGENT_MODEL_DEFINITION, |model: &TokenCountingAgentModel| {
             model.get(start, end)
         })
     }
@@ -81,45 +85,51 @@ impl ISessionTokenCountingService for SessionTokenCountingService {
         let input = input.to_vec();
         let output = output.to_vec();
         let usage = usage.clone();
-        let future = agent_space_of(agent).use_async(
-            &TOKEN_COUNTING_AGENT_MODEL_DEFINITION,
-            move |model| async move { model.measured(&input, &output, &usage).await },
-        );
-        tokio::spawn(async move {
-            let _ = future.await;
-        });
+        let space = agent_space_or_bug(agent);
+            tokio::spawn(async move {
+                let _ = space
+                    .use_async(
+                        &TOKEN_COUNTING_AGENT_MODEL_DEFINITION,
+                        async move |model: &TokenCountingAgentModel| { model.measured(&input, &output, &usage).await },
+                    )
+                    .await;
+            });
     }
 
     fn latest_measured(&self, agent: &AgentContext) -> u64 {
-        agent_space_of(agent).use_(&TOKEN_COUNTING_AGENT_MODEL_DEFINITION, |model| {
+        agent_space_or_bug(agent).use_(&TOKEN_COUNTING_AGENT_MODEL_DEFINITION, |model: &TokenCountingAgentModel| {
             model.latest_measured()
         })
     }
 
     fn status_size(&self, agent: &AgentContext) -> u64 {
-        agent_space_of(agent).use_(&TOKEN_COUNTING_AGENT_MODEL_DEFINITION, |model| {
+        agent_space_or_bug(agent).use_(&TOKEN_COUNTING_AGENT_MODEL_DEFINITION, |model: &TokenCountingAgentModel| {
             model.status_size(self.strategy()) as u64
         })
     }
 
     fn record_truncation(&self, agent: &AgentContext, cut_index: usize) {
-        let future = agent_space_of(agent).use_async(
-            &TOKEN_COUNTING_AGENT_MODEL_DEFINITION,
-            move |model| async move { model.record_truncation(cut_index).await },
-        );
-        tokio::spawn(async move {
-            let _ = future.await;
-        });
+        let space = agent_space_or_bug(agent);
+            tokio::spawn(async move {
+                let _ = space
+                    .use_async(
+                        &TOKEN_COUNTING_AGENT_MODEL_DEFINITION,
+                        async move |model: &TokenCountingAgentModel| { model.record_truncation(cut_index).await },
+                    )
+                    .await;
+            });
     }
 
     fn rebase(&self, agent: &AgentContext, input: TokenCountingRebaseInput) {
-        let future = agent_space_of(agent).use_async(
-            &TOKEN_COUNTING_AGENT_MODEL_DEFINITION,
-            move |model| async move { model.rebase(input).await },
-        );
-        tokio::spawn(async move {
-            let _ = future.await;
-        });
+        let space = agent_space_or_bug(agent);
+            tokio::spawn(async move {
+                let _ = space
+                    .use_async(
+                        &TOKEN_COUNTING_AGENT_MODEL_DEFINITION,
+                        async move |model: &TokenCountingAgentModel| { model.rebase(input).await },
+                    )
+                    .await;
+            });
     }
 
     fn request_size(

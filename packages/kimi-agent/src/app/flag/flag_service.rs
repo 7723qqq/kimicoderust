@@ -46,7 +46,7 @@ impl FlagService {
             config_overrides: Mutex::new(overrides),
         });
         let weak = Arc::downgrade(&inner);
-        let subscription = inner.config.on_did_section_change(move |event| {
+        let subscription = inner.config.on_did_section_change(Box::new(move |event| {
             if event.domain != EXPERIMENTAL_SECTION {
                 return;
             }
@@ -54,7 +54,7 @@ impl FlagService {
                 let overrides = read_config(inner.config.as_ref(), inner.registry.as_ref());
                 *inner.config_overrides.lock() = overrides;
             }
-        });
+        }));
         let this = Self {
             inner,
             _config_subscription: subscription,

@@ -1,8 +1,28 @@
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSideEffect {
+    Read,
+    Write,
+    Shell,
+    Execute,
+}
+
+impl ToolSideEffect {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Shell => "shell",
+            Self::Execute => "execute",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSource {
     Builtin,
+    User,
     Mcp,
     Host,
     Plugin,
@@ -12,6 +32,7 @@ impl ToolSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Builtin => "builtin",
+            Self::User => "user",
             Self::Mcp => "mcp",
             Self::Host => "host",
             Self::Plugin => "plugin",
@@ -32,25 +53,6 @@ impl ToolDisclosure {
         match self {
             Self::Inline => "inline",
             Self::Deferred => "deferred",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolSideEffect {
-    Read,
-    Write,
-    Shell,
-    Execute,
-}
-
-impl ToolSideEffect {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Write => "write",
-            Self::Shell => "shell",
-            Self::Execute => "execute",
         }
     }
 }

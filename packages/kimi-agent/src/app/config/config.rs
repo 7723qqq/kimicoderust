@@ -46,8 +46,8 @@ impl ConfigSchema for JsonConfigSchema {
 
 pub type ConfigMerge = Arc<dyn Fn(Option<&Value>, Option<&Value>) -> Option<Value> + Send + Sync>;
 pub type EnvParser = Arc<dyn Fn(&str) -> Option<Value> + Send + Sync>;
-pub type GetEnv = dyn Fn(&str) -> Option<String>;
-pub type ValidateConfig = dyn Fn(&str, Value) -> Value;
+pub type GetEnv<'a> = dyn Fn(&str) -> Option<String> + 'a;
+pub type ValidateConfig<'a> = dyn Fn(&str, Value) -> Value + 'a;
 
 #[derive(Clone)]
 pub struct EnvBinding {

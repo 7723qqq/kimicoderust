@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::_base::utils::abort::{
-    AbortController, abortable, abort_error, is_user_cancellation, user_cancellation_reason,
+    AbortController, abort_error, is_user_cancellation, user_cancellation_reason,
 };
 use crate::agent::tool_executor::tool_executor::{
     ExecutableToolContext, ExecutableToolResult, RunnableToolExecution, ToolExecution,
@@ -101,20 +101,18 @@ impl AskUserQuestionTool {
         "AskUserQuestion"
     }
 
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
-    }
-
     pub fn description(&self) -> String {
         let mut description = format!("{BASE_DESCRIPTION}\n");
         if self.allow_background() {
             description.push_str(BACKGROUND_DESCRIPTION);
         }
         description
+    }
+    pub fn side_effect(&self) -> &'static str {
+        "read"
+    }
+    pub fn repo_mutation(&self) -> &'static str {
+        "none"
     }
 
     pub fn parameters(&self) -> Map<String, Value> {
@@ -250,14 +248,23 @@ impl AskUserQuestionTool {
         let request = self.request(&args, &context);
         let question_id = request.question_id.clone();
         let mut guard = QuestionCancelGuard::new(self.inner.callbacks.clone(), question_id);
-        let response = abortable(
-            self.inner.callbacks.ask_question(request),
-            context.signal.clone(),
-        )
-        .await;
+        let response = tokio::select! {
+            biased;
+            response = self.inner.callbacks.ask_question(request) => response,
+            () = context.signal.cancelled() => {
+                drop(guard);
+                self.track_question_dismissed(&context);
+                return Ok(dismissed_question_result());
+            }
+        };
+        guard.disarm();
         match response {
-            Ok(Ok(response)) => {
-                guard.disarm();
+            Ok(response) => {
+                if response.cancelled == Some(true)
+                    && response.reason.as_deref() == Some("unsupported")
+                {
+                    return Ok(ExecutableToolResult::error(QUESTION_UNSUPPORTED_FAILURE_MESSAGE));
+                }
                 if response.cancelled == Some(true) || response.answers.is_empty() {
                     self.track_question_dismissed(&context);
                     return Ok(dismissed_question_result());
@@ -269,8 +276,7 @@ impl AskUserQuestionTool {
                     ..Default::default()
                 })
             }
-            Ok(Err(error)) => {
-                guard.disarm();
+            Err(error) => {
                 if context.signal.aborted() {
                     return Err(abort_reason(&context.signal));
                 }
@@ -280,14 +286,6 @@ impl AskUserQuestionTool {
                     ))
                 } else {
                     Ok(dismissed_question_result())
-                }
-            }
-            Err(error) => {
-                drop(guard);
-                if is_user_cancellation(error.as_ref()) {
-                    Err(Box::new(user_cancellation_reason()) as WireAsyncError)
-                } else {
-                    Err(Box::new(abort_error()) as WireAsyncError)
                 }
             }
         }
@@ -354,11 +352,6 @@ impl AskUserQuestionTool {
 }
 
 pub fn question_multi_select(item: &AskUserQuestionItemInput) -> bool {
-    // v2 forwards only `multi_select` into the host payload
-    // (askUserQuestionTool.ts:244 `multiSelect: q.multi_select`); a
-    // camelCase `multiSelect` input is accepted by the schema description
-    // but resolves to `undefined`, so the host sees it as unset. Mirror
-    // that: drop the alias here instead of resolving it.
     item.multi_select.unwrap_or(false)
 }
 
@@ -641,6 +634,7 @@ pub async fn execute_ask_user_question(
     tool_call_id: Option<&str>,
     non_interactive: bool,
     background_allowed: bool,
+    cancel: Option<&crate::subagent::types::ParentCancel>,
     args: &Value,
 ) -> crate::turn_loop::types::ExecutableToolResult {
     let tool = AskUserQuestionTool::new(AskUserQuestionToolDependencies {
@@ -655,6 +649,10 @@ pub async fn execute_ask_user_question(
     match execution {
         ToolExecution::Error(result) => legacy_result(result),
         ToolExecution::Runnable(run) => {
+            let controller = AbortController::new();
+            if cancel.is_some_and(|cancel| cancel.triggered()) {
+                controller.abort(Some(Arc::new(user_cancellation_reason())));
+            }
             let context = ExecutableToolContext {
                 turn_id,
                 tool_call_id: tool_call_id.unwrap_or_default().to_string(),
@@ -664,12 +662,28 @@ pub async fn execute_ask_user_question(
                     }
                 }),
                 metadata: None,
-                signal: AbortController::new().signal(),
+                signal: controller.signal(),
                 steer_signal: None,
                 on_update: None,
                 on_foreground_task_start: None,
             };
-            match (run.execute)(context).await {
+            let executing = (run.execute)(context);
+            tokio::pin!(executing);
+            let cancelled = async {
+                match cancel {
+                    Some(cancel) => cancel.wait().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            let result = tokio::select! {
+                biased;
+                () = cancelled => {
+                    controller.abort(Some(Arc::new(user_cancellation_reason())));
+                    executing.await
+                }
+                result = &mut executing => result,
+            };
+            match result {
                 Ok(result) => legacy_result(result),
                 Err(error) => crate::tools::err_result(error.to_string()),
             }

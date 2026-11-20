@@ -45,6 +45,17 @@ pub struct RpcServer {
     next_id: AtomicU32,
 }
 
+struct PendingHostCall<'a> {
+    server: &'a RpcServer,
+    id: u32,
+}
+
+impl Drop for PendingHostCall<'_> {
+    fn drop(&mut self) {
+        self.server.pending_map().remove(&self.id);
+    }
+}
+
 impl Default for RpcServer {
     fn default() -> Self {
         Self::new()
@@ -139,6 +150,7 @@ impl RpcServer {
         let (tx, rx) = oneshot::channel();
 
         self.pending_map().insert(id, tx);
+        let _pending = PendingHostCall { server: self, id };
 
         let request = serde_json::json!({
             "jsonrpc": "2.0",
@@ -168,13 +180,11 @@ impl RpcServer {
             Ok(Ok(Err(message))) => Err(message),
             // The sender was dropped without answering (the host closed).
             Ok(Err(_)) => {
-                self.pending_map().remove(&id);
                 Err(format!(
                     "{method} could not be answered: the host closed the response channel"
                 ))
             }
             Err(wait_timeout) => {
-                self.pending_map().remove(&id);
                 Err(wait_timeout.to_string())
             }
         }
@@ -467,6 +477,18 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn dropping_a_host_call_releases_its_pending_reply() {
+        let server = RpcServer::new();
+        let params = json!({});
+        let mut call = Box::pin(server.call_host("host/ask_question", &params, None));
+        assert!(futures_util::poll!(&mut call).is_pending());
+        assert_eq!(server.pending_map().len(), 1);
+
+        drop(call);
+        assert!(server.pending_map().is_empty());
+    }
 
     #[tokio::test]
     async fn test_register_and_call_handler() {

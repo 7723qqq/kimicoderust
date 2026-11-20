@@ -9,6 +9,7 @@ use crate::agent::environment_binding::agent_environment::{
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{ToolSideEffect};
 use crate::agent::tools::file_memory::{FileMemoryProvider, with_file_memory};
 use crate::app::edit::file_edit::{FileEditInput, FileEditResult, IFileEditService};
 use crate::environment::environment::{EnvironmentPath, EnvironmentWorkspaceRoots};
@@ -72,10 +73,6 @@ impl EditTool {
 
     pub fn name(&self) -> &'static str {
         "Edit"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "write"
     }
 
     pub fn description(&self) -> &'static str {
@@ -358,6 +355,10 @@ impl EditTool {
 impl IEditTool for EditTool {}
 
 impl ExecutableTool for EditTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Write)
+    }
+
     fn name(&self) -> &str {
         EditTool::name(self)
     }

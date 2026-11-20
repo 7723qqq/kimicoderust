@@ -817,12 +817,13 @@ impl AgentTaskService {
             *keys = restored.clone();
         });
         let scheduled = self.scheduled_notification_keys();
-        let pending = self.pending_notification_requests.lock();
-        let remove = scheduled
-            .into_iter()
-            .filter(|key| restored.contains(key) || !pending.contains_key(key))
-            .collect::<Vec<_>>();
-        drop(pending);
+        let remove = {
+            let pending = self.pending_notification_requests.lock();
+            scheduled
+                .into_iter()
+                .filter(|key| restored.contains(key) || !pending.contains_key(key))
+                .collect::<Vec<_>>()
+        };
         self.update_key_set(false, |keys| {
             for key in remove {
                 keys.remove(&key);
@@ -1041,18 +1042,20 @@ impl AgentTaskService {
 
     fn arm_manager_timeout(&self, entry: &SharedManagedTask, timeout_ms: u64) {
         let weak = self.weak_self.clone();
-        let entry = entry.clone();
+        let armed = entry.clone();
+        let timer_entry = entry.clone();
         let handle = self.timers.set_clamped_timeout(
             Arc::new(move || {
-                entry.lock().timeout_handle = None;
+                timer_entry.lock().timeout_handle = None;
                 let Some(this) = weak.upgrade() else {
                     return;
                 };
-                if this.can_auto_background_on_timeout(&entry) {
-                    detach_entry(&entry, true, this.as_ref());
+                if this.can_auto_background_on_timeout(&timer_entry) {
+                    detach_entry(&timer_entry, true, this.as_ref());
                     return;
                 }
                 let weak = this.weak_self.clone();
+                let entry = timer_entry.clone();
                 tokio::spawn(async move {
                     if let Some(this) = weak.upgrade() {
                         this.terminate_with_grace(
@@ -1069,7 +1072,7 @@ impl AgentTaskService {
             }),
             timeout_ms,
         );
-        entry.lock().timeout_handle = Some(handle);
+        armed.lock().timeout_handle = Some(handle);
     }
 
     fn can_auto_background_on_timeout(&self, entry: &SharedManagedTask) -> bool {
@@ -1323,23 +1326,32 @@ impl AgentTaskService {
             return Ok(self.ghosts().get(task_id).cloned());
         };
         let timeout_ms = timeout_ms.unwrap_or(30_000);
-        let (waiter_id, receiver) = {
+        enum WaitPlan {
+            Persist(Shared<BoxFuture<'static, ()>>),
+            Ready,
+            Wait(u64, tokio::sync::oneshot::Receiver<()>),
+        }
+        let plan = {
             let mut managed = entry.lock();
             if managed.status.is_terminal() {
-                let persist = managed.persist_write_queue.future();
-                drop(managed);
+                WaitPlan::Persist(managed.persist_write_queue.future())
+            } else if timeout_ms == 0 {
+                WaitPlan::Ready
+            } else {
+                let id = managed.next_waiter_id;
+                managed.next_waiter_id += 1;
+                let (sender, receiver) = oneshot::channel();
+                managed.waiters.push((id, sender));
+                WaitPlan::Wait(id, receiver)
+            }
+        };
+        let (waiter_id, receiver) = match plan {
+            WaitPlan::Persist(persist) => {
                 persist.await;
                 return Ok(Some(self.to_info(&entry)));
             }
-            if timeout_ms == 0 {
-                drop(managed);
-                return Ok(Some(self.to_info(&entry)));
-            }
-            let id = managed.next_waiter_id;
-            managed.next_waiter_id += 1;
-            let (sender, receiver) = oneshot::channel();
-            managed.waiters.push((id, sender));
-            (id, receiver)
+            WaitPlan::Ready => return Ok(Some(self.to_info(&entry))),
+            WaitPlan::Wait(id, receiver) => (id, receiver),
         };
         let (timeout_sender, timeout_receiver) = oneshot::channel();
         let timeout_sender = Arc::new(Mutex::new(Some(timeout_sender)));

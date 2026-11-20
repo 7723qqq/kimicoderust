@@ -4,6 +4,9 @@ use base64::prelude::*;
 use serde_json::Value;
 
 use super::{arg_error_text, err_result};
+use crate::agent::media::file_type::{
+    DetectFileTypeMode, FileKind as MediaFileKind, self as read_file_type,
+};
 use crate::i18n::{LocalizedText, i18n_params};
 use crate::native::file_type::{
     FileKind, MEDIA_SNIFF_BYTES, detect_file_type, resolve_mime, sniff_image_dimensions,
@@ -70,6 +73,7 @@ pub struct ReadMediaRequest {
     pub region: Option<ImageRegion>,
 
     pub full_resolution: bool,
+    has_line_paging: bool,
 }
 
 impl ReadMediaRequest {
@@ -113,6 +117,7 @@ impl ReadMediaRequest {
         Ok(Self {
             region,
             full_resolution,
+            has_line_paging: args.get("line_offset").is_some() || args.get("n_lines").is_some(),
         })
     }
 }
@@ -299,6 +304,21 @@ pub fn read_image_media(
     limits: &ReadMediaLimits,
 ) -> Option<ExecutableToolResult> {
     let header = read_header(path)?;
+    if request.has_line_paging
+        && matches!(
+            read_file_type::detect_file_type(
+                &path.to_string_lossy(),
+                Some(&header),
+                DetectFileTypeMode::Text,
+            )
+            .kind,
+            MediaFileKind::Image | MediaFileKind::Video | MediaFileKind::Document
+        )
+    {
+        return Some(err_result(
+            "line_offset and n_lines apply only to text files.".to_string(),
+        ));
+    }
     match detect_file_type(path, &header) {
         FileKind::Text => {
             if request.is_explicit() {
@@ -892,6 +912,7 @@ mod tests {
                 height: 30.0,
             }),
             full_resolution: false,
+            ..Default::default()
         };
         let result =
             read_image_media(&path, &request, &ReadMediaLimits::default()).expect("media result");
@@ -921,6 +942,7 @@ mod tests {
                 height: 10.0,
             }),
             full_resolution: false,
+            ..Default::default()
         };
         let result =
             read_image_media(&path, &request, &ReadMediaLimits::default()).expect("media result");
@@ -940,8 +962,8 @@ mod tests {
         let bytes = png_of(48, 48);
         let path = temp_png("full-res", &bytes);
         let request = ReadMediaRequest {
-            region: None,
             full_resolution: true,
+            ..Default::default()
         };
         let result =
             read_image_media(&path, &request, &ReadMediaLimits::default()).expect("media result");
@@ -972,6 +994,7 @@ mod tests {
                 height: 1.0,
             }),
             full_resolution: false,
+            ..Default::default()
         };
         let result = read_image_media(&path, &request, &ReadMediaLimits::default())
             .expect("the media path owns an explicit region call");

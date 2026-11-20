@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::agent::agent_context::agent_context::AgentContext;
-use crate::agent::agent_context::agent_space::agent_space_of;
+use crate::agent::agent_context::agent_space::agent_space_or_bug;
 use crate::agent::llm_requester::llm_requester::AgentLLMRequestSource;
 use crate::agent::usage::usage::{UsageRecordedContext, UsageStatus};
 use crate::agent::usage::usage_ops::copy_usage;
@@ -13,7 +13,7 @@ use crate::human::llm::usage::TokenUsage;
 use crate::wire::record::WireAsyncError;
 
 use super::session_usage::ISessionUsageService;
-use super::usage_agent_model::{USAGE_AGENT_MODEL_DEFINITION, UsageRecordInput};
+use super::usage_agent_model::{USAGE_AGENT_MODEL_DEFINITION, UsageAgentModel, UsageRecordInput};
 
 pub struct SessionUsageService {
     listeners: Arc<Mutex<Vec<(u64, Arc<dyn Fn(UsageRecordedContext) + Send + Sync>)>>>,
@@ -47,20 +47,20 @@ impl ISessionUsageService for SessionUsageService {
         let record_model = model.clone();
         let record_usage = usage.clone();
         let record_source = source.clone();
-        let first_record = agent_space_of(&agent)
-            .use_async(&USAGE_AGENT_MODEL_DEFINITION, move |model| {
+        let first_record = agent_space_or_bug(&agent)
+            .use_async(&USAGE_AGENT_MODEL_DEFINITION, async move |model: &UsageAgentModel| {
                 let model_input = UsageRecordInput {
                     model: record_model,
                     usage: record_usage,
                     source: record_source,
                 };
-                async move { model.record(model_input).await }
+                model.record(model_input).await
             })
-            .await?;
+            .await??;
         let listeners = self.listeners.lock().clone();
         for (_, listener) in listeners {
             listener(UsageRecordedContext {
-                agent: agent.clone(),
+                agent: (*agent).clone(),
                 model: model.clone(),
                 usage: copy_usage(&usage),
                 source: source.clone(),
@@ -71,7 +71,7 @@ impl ISessionUsageService for SessionUsageService {
     }
 
     fn status(&self, agent: &AgentContext) -> UsageStatus {
-        agent_space_of(agent).use_(&USAGE_AGENT_MODEL_DEFINITION, |model| model.status())
+        agent_space_or_bug(agent).use_(&USAGE_AGENT_MODEL_DEFINITION, |model: &UsageAgentModel| model.status())
     }
 
     fn on_did_record(

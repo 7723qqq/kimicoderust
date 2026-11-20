@@ -69,7 +69,7 @@ impl ExplicitAgentProfileLoaderService {
                                 &dirs.primary(),
                                 &bootstrap.os_home_dir(),
                             );
-                            let text = fs.read_text(&file_path).await?;
+                            let text = fs.read_text(&file_path, None).await?;
                             let user = user.clone();
                             profiles.push(agent_profile_from_file(
                                 parse_agent_file_text(ParseAgentFileOptions {
@@ -78,7 +78,7 @@ impl ExplicitAgentProfileLoaderService {
                                     text,
                                 })?,
                                 Arc::new(move |context| {
-                                    user.get_default_profile().render_system_prompt(context)
+                                    (user.get_default_profile().render_system_prompt)(context)
                                 }),
                             ));
                         }
@@ -93,7 +93,7 @@ impl ExplicitAgentProfileLoaderService {
             },
         ));
         let reload_base = base.clone();
-        let subscription = dirs.on_did_change(move || {
+        let subscription = dirs.on_did_change(Arc::new(move || {
             let base = reload_base.clone();
             let log = log.clone();
             tokio::spawn(async move {
@@ -104,7 +104,7 @@ impl ExplicitAgentProfileLoaderService {
                     );
                 }
             });
-        });
+        }));
         base.start();
         Self {
             base,
@@ -126,6 +126,7 @@ impl IExplicitAgentProfileLoader for ExplicitAgentProfileLoaderService {
     }
 
     fn reload(&self) -> BoxFuture<'static, Result<(), WireAsyncError>> {
-        self.base.reload().boxed()
+        let base = self.base.clone();
+        Box::pin(async move { base.reload().await })
     }
 }

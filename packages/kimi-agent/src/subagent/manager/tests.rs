@@ -1863,6 +1863,142 @@ fn tool_filter_callbacks_stamp_the_subagent_agent_id_on_events() {
     assert_eq!(recorded[1]["agent_id"], "other", "已有归属不被覆盖");
 }
 
+#[tokio::test]
+async fn a_profile_passes_background_task_policy_to_the_native_shell() {
+    use crate::callbacks::HostCallbacks;
+
+    struct NativeShell {
+        callbacks: Arc<dyn HostCallbacks>,
+        observed_policy: Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+    impl HostCallbacks for NativeShell {
+        fn llm_chat(
+            &self,
+            _: crate::rpc::types::LlmChatRequest,
+        ) -> futures_util::future::BoxFuture<'static, Result<crate::rpc::types::LlmChatResponse, String>> {
+            Box::pin(async { Err("unused".into()) })
+        }
+        fn execute_tool(
+            &self,
+            request: crate::rpc::types::ToolExecuteRequest,
+        ) -> futures_util::future::BoxFuture<'static, Result<crate::rpc::types::ToolExecuteResponse, String>> {
+            let callbacks = self.callbacks.clone();
+            let observed_policy = self.observed_policy.clone();
+            Box::pin(async move {
+                observed_policy.lock().unwrap().push(
+                    crate::tools::CALLER_BACKGROUND_TASKS_ALLOWED
+                        .try_with(|allowed| *allowed)
+                        .unwrap_or(true),
+                );
+                callbacks.execute_tool(request).await
+            })
+        }
+        fn check_permission(
+            &self,
+            _: crate::rpc::types::PermissionCheckRequest,
+        ) -> futures_util::future::BoxFuture<'static, Result<crate::rpc::types::PermissionDecision, String>> {
+            Box::pin(async { Ok(crate::rpc::types::PermissionDecision::allow()) })
+        }
+        fn list_tools(&self) -> futures_util::future::BoxFuture<'static, Result<crate::rpc::types::ListToolsResponse, String>> {
+            self.callbacks.list_tools()
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let observed_policy = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let toolset = crate::tools::NativeToolset::new(dir.path().to_str().unwrap(), None)
+        .unwrap()
+        .with_task_runner(Arc::new(crate::storage::TaskRunner::new(None)));
+    let inner = Arc::new(NativeShell {
+        callbacks: Arc::new(crate::callbacks::NativeToolCallbacks::for_standalone(
+            Arc::new(MockCallbacks),
+            Arc::new(toolset),
+            Arc::new(AtomicU32::new(0)),
+            None,
+            None,
+        )),
+        observed_policy: observed_policy.clone(),
+    });
+    let original_table = inner.list_tools().await.unwrap().tools;
+    for missing in ["TaskList", "TaskOutput", "TaskStop"] {
+        let allowlist = ["Bash", "PowerShell", "AskUserQuestion", "TaskList", "TaskOutput", "TaskStop"]
+            .into_iter()
+            .filter(|name| *name != missing)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let wrapper = ToolFilterCallbacks {
+            inner: inner.clone(),
+            filter: ToolPolicyFilter::from_allowlist(&allowlist),
+            agent_id: "subagent-1".into(),
+        };
+        let table = wrapper.list_tools().await.unwrap();
+        let bash = table.tools.iter().find(|tool| tool.name == "Bash").unwrap();
+        assert!(
+            bash.description.contains("Background execution is disabled"),
+            "{missing}"
+        );
+        let question = table.tools.iter().find(|tool| tool.name == "AskUserQuestion").unwrap();
+        assert!(question.input_schema["properties"].get("background").is_none());
+        let mut shell_tools = vec!["Bash"];
+        if cfg!(windows) {
+            shell_tools.push("PowerShell");
+        }
+        for tool in shell_tools {
+            let result = wrapper.execute_tool(crate::rpc::types::ToolExecuteRequest {
+                turn_id: "turn-1".into(),
+                agent_id: "subagent-1".into(),
+                tool_call_id: "call-1".into(),
+                tool_name: tool.into(),
+                arguments: serde_json::json!({
+                    "command": "should-not-run",
+                    "run_in_background": true,
+                    "description": "run a command"
+                }),
+            }).await.unwrap();
+            assert!(result.is_error, "{missing}: {tool}");
+            assert_eq!(
+                result.content,
+                crate::tools::shell_results::BACKGROUND_UNAVAILABLE
+            );
+        }
+    }
+    let observed = observed_policy.lock().unwrap().clone();
+    assert_eq!(observed.len(), 3 * if cfg!(windows) { 2 } else { 1 });
+    assert!(observed.into_iter().all(|allowed| !allowed));
+    assert!(crate::tools::CALLER_BACKGROUND_TASKS_ALLOWED.try_with(|_| ()).is_err());
+    assert_eq!(
+        serde_json::to_value(inner.list_tools().await.unwrap().tools).unwrap(),
+        serde_json::to_value(&original_table).unwrap(),
+        "a profile must not rewrite the shared native tool table"
+    );
+
+    let allowlist = ["Bash", "AskUserQuestion", "TaskList", "TaskOutput", "TaskStop"]
+        .map(str::to_string);
+    let wrapper = ToolFilterCallbacks {
+        inner: inner.clone(),
+        filter: ToolPolicyFilter::from_allowlist(&allowlist),
+        agent_id: "subagent-2".into(),
+    };
+    let table = wrapper.list_tools().await.unwrap();
+    for name in ["Bash", "AskUserQuestion"] {
+        let filtered = table.tools.iter().find(|tool| tool.name == name).unwrap();
+        let original = original_table.iter().find(|tool| tool.name == name).unwrap();
+        assert_eq!(filtered.description, original.description);
+        assert_eq!(filtered.input_schema, original.input_schema);
+    }
+    let result = wrapper.execute_tool(crate::rpc::types::ToolExecuteRequest {
+        turn_id: "turn-2".into(),
+        agent_id: "subagent-2".into(),
+        tool_call_id: "call-2".into(),
+        tool_name: "Bash".into(),
+        arguments: serde_json::json!({ "command": "printf aligned", "timeout": 86_401.0 }),
+    }).await.unwrap();
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("aligned"), "{}", result.content);
+    assert_eq!(observed_policy.lock().unwrap().last(), Some(&true));
+    assert!(crate::tools::CALLER_BACKGROUND_TASKS_ALLOWED.try_with(|_| ()).is_err());
+}
+
 /// The profile's tool table is a hint to the model, not a boundary: a
 /// subagent can name a tool it was never offered. The wrapper therefore
 /// re-checks the profile on the call path, the same way the global

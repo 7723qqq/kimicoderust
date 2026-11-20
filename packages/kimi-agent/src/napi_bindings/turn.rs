@@ -820,29 +820,6 @@ pub(crate) async fn build_engine_pipeline(
         // default); falling back to `false` keeps a direct napi caller on the
         // pre-disclosure behaviour: every tool advertised inline.
         tool_select: params.tool_select.unwrap_or(false),
-        // Same in-file convention as `policy_snapshot` above: report the bad
-        // value and fail closed rather than swallow it. `sandboxMode` is a
-        // documented optional *string* in `napi-contract.d.ts`, so it cannot be
-        // rejected by deserialization the way `RunTurnParams.sandbox_mode` now
-        // is; `parse` is the fail-closed shim, so an unknown spelling lands on
-        // `ReadOnly` instead of silently lifting every boundary.
-        sandbox_mode: params.sandbox_mode.as_deref().map(|mode_str| {
-            match crate::tools::sandbox::SandboxMode::validate(mode_str) {
-                Ok(mode) => mode,
-                Err(error) => {
-                    tracing::warn!("{error}; falling back to the most restrictive mode");
-                    crate::tools::sandbox::SandboxMode::parse(mode_str)
-                }
-            }
-        }),
-        sandbox_policy: params.sandbox_mode.as_deref().map(|mode_str| {
-            let mode = crate::tools::sandbox::SandboxMode::parse(mode_str);
-            let root = params.workspace_root.clone().unwrap_or_default();
-            // `additionalDirs` are part of the authorized boundary, not just a
-            // toolset search path.
-            crate::tools::sandbox::SandboxExecutionPolicy::new(mode, root)
-                .with_extra_roots(params.additional_dirs.clone().unwrap_or_default())
-        }),
         caller_agent_id: params.caller_agent_id.clone(),
         session_id: params.session_id.clone(),
         secondary_model: params.secondary_model_json.as_deref().and_then(|json| {

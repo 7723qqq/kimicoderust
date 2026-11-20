@@ -211,12 +211,12 @@ fn assistant_text_from_content_parts(parts: &[ContentPart]) -> Option<String> {
     let texts = parts
         .iter()
         .filter_map(|part| match part {
-            ContentPart::Text(text) if !text.text.trim().is_empty() => Some(text.text.clone()),
+            ContentPart::Text { text, .. } if !text.trim().is_empty() => Some(text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
     if texts.is_empty() {
         return None;
     }
-    Some(prompt_metadata_text_from_text(&texts.join("\n")))
+    prompt_metadata_text_from_text(&texts.join("\n"))
 }

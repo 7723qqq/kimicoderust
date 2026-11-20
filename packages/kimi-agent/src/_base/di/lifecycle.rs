@@ -305,7 +305,7 @@ impl DisposableStore {
         assert_ne!(disposable_id(&disposable), self.inner.id, "Cannot register a disposable on itself!");
         set_parent_of_disposable(
             disposable.clone(),
-            Some(self.clone() as DisposableRef),
+            Some(Arc::new(self.clone()) as DisposableRef),
         );
         if self.is_disposed() {
             disposable.dispose();
@@ -663,7 +663,7 @@ where
     }
 }
 
-pub trait ReferenceCollection<T>: Send + Sync
+pub trait ReferenceCollection<T>: Send + Sync + 'static
 where
     T: Send + Sync + 'static,
 {
@@ -723,6 +723,7 @@ where
     C: ReferenceCollection<SharedReferenceFuture<T>>,
 {
     reference_collection: Arc<C>,
+    marker: std::marker::PhantomData<fn() -> T>,
 }
 
 impl<T, C> AsyncReferenceCollection<T, C>
@@ -733,6 +734,7 @@ where
     pub fn new(reference_collection: Arc<C>) -> Self {
         Self {
             reference_collection,
+            marker: std::marker::PhantomData,
         }
     }
 

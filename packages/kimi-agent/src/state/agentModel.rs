@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use crate::_base::di::collection::{CollectionDescriptor, collection};
+use crate::_base::di::collection::{CollectionDescriptor, CollectionOptions, collection};
 use crate::state::state::ReplayableStateKey;
 use crate::agent::agent_context::agent_context::AgentContext;
 use crate::app::event::event2::{Event2, Event2Class, register_event2_class};
@@ -108,7 +108,7 @@ impl AgentModel {
         Ok(())
     }
 
-    pub async fn emit(&mut self, event: Event2) -> Result<(), WireAsyncError> {
+    pub async fn emit(&self, event: Event2) -> Result<(), WireAsyncError> {
         self.bridge.dispatch(event).await
     }
 
@@ -158,6 +158,32 @@ impl AgentModel {
 #[async_trait]
 impl DomainResourceRuntime for AgentModel {}
 
+/// The value a model definition constructs (v2 `AgentModelInstanceOf<D>`).
+///
+/// v2 types the instance by the definition, so `AgentSpace.use` hands callers the
+/// subclass the definition declares. The Rust port erases it at the definition
+/// boundary; this trait keeps the erased value reachable as its base model while
+/// leaving the concrete type available for a typed `use`.
+pub trait AgentModelInstance: Send + Sync {
+    fn base(&self) -> &AgentModel;
+    fn base_mut(&mut self) -> &mut AgentModel;
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl AgentModelInstance for AgentModel {
+    fn base(&self) -> &AgentModel {
+        self
+    }
+
+    fn base_mut(&mut self) -> &mut AgentModel {
+        self
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentModelStateSpec {
     pub initial: Arc<dyn Fn() -> Value + Send + Sync>,
@@ -167,7 +193,7 @@ pub struct AgentModelStateSpec {
 #[derive(Clone)]
 pub struct AgentModelDefinition {
     pub id: String,
-    pub model: Arc<dyn Fn(AgentModelContext) -> AgentModel + Send + Sync>,
+    pub model: Arc<dyn Fn(AgentModelContext) -> Box<dyn AgentModelInstance> + Send + Sync>,
     pub state: AgentModelStateSpec,
     pub events: Vec<Arc<Event2Class>>,
     pub undoable: bool,
@@ -175,7 +201,7 @@ pub struct AgentModelDefinition {
 
 pub struct AgentModelDefinitionInput {
     pub id: String,
-    pub model: Arc<dyn Fn(AgentModelContext) -> AgentModel + Send + Sync>,
+    pub model: Arc<dyn Fn(AgentModelContext) -> Box<dyn AgentModelInstance> + Send + Sync>,
     pub state: AgentModelStateSpec,
     pub events: Vec<Arc<Event2Class>>,
     pub undoable: Option<bool>,
@@ -218,12 +244,18 @@ pub fn agent_model_definitions() -> Vec<Arc<AgentModelDefinition>> {
 }
 
 pub fn agent_model_contribution() -> CollectionDescriptor<Arc<AgentModelDefinition>> {
-    collection::<Arc<AgentModelDefinition>>("agent-model", |value, existing| {
-        if existing.iter().any(|definition| definition.id == value.id) {
-            return Err(format!("Agent model '{}' already has an active provider", value.id));
-        }
-        Ok(())
-    })
+    collection::<Arc<AgentModelDefinition>>(
+        "agent-model",
+        CollectionOptions::validating(|value: &Arc<AgentModelDefinition>, existing: &[Arc<AgentModelDefinition>]| {
+            if existing.iter().any(|definition| definition.id == value.id) {
+                return Err(format!(
+                    "Agent model '{}' already has an active provider",
+                    value.id
+                ));
+            }
+            Ok(())
+        }),
+    )
 }
 
 #[derive(Clone)]
@@ -235,12 +267,18 @@ pub struct SessionModelDefinition {
 }
 
 pub fn session_model_contribution() -> CollectionDescriptor<SessionModelDefinition> {
-    collection::<SessionModelDefinition>("session-model", |value, existing| {
-        if existing.iter().any(|definition| definition.id == value.id) {
-            return Err(format!("Session model '{}' already has an active provider", value.id));
-        }
-        Ok(())
-    })
+    collection::<SessionModelDefinition>(
+        "session-model",
+        CollectionOptions::validating(|value: &SessionModelDefinition, existing: &[SessionModelDefinition]| {
+            if existing.iter().any(|definition| definition.id == value.id) {
+                return Err(format!(
+                    "Session model '{}' already has an active provider",
+                    value.id
+                ));
+            }
+            Ok(())
+        }),
+    )
 }
 
 pub fn duplicate_fold_error(name: &str, event_type: &str) -> StateError {

@@ -11,13 +11,13 @@ use crate::turn_loop::types::ExecutableToolResult;
 
 const STATE_BRIDGE_UNSUPPORTED_FAILURE_MESSAGE: &str = "The connected client does not support the state bridge. Do NOT call this tool again — the host cannot update goal state.";
 
-pub const GOAL_MAIN_AGENT_ONLY: &str = "Goal tools are only supported by the main agent.";
+pub use crate::agent::tools::main_agent_only::GOAL_MAIN_AGENT_ONLY;
 
 pub fn main_agent_only_refusal(caller_agent_id: &str) -> Option<ExecutableToolResult> {
-    if caller_agent_id == "main" {
-        return None;
-    }
-    Some(err_result(GOAL_MAIN_AGENT_ONLY.to_string()))
+    crate::agent::tools::main_agent_only::main_agent_only_execution(
+        caller_agent_id,
+        GOAL_MAIN_AGENT_ONLY,
+    )
 }
 
 #[derive(Debug, Deserialize)]

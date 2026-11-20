@@ -198,14 +198,6 @@ impl ReadTool {
         "Read"
     }
 
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
-    }
-
     pub fn description(&self) -> String {
         let limits = self.limits();
         let variables = HashMap::from([
@@ -214,6 +206,12 @@ impl ReadTool {
             ("MAX_MEDIA_MEGABYTES".to_string(), json!(MAX_MEDIA_MEGABYTES)),
         ]);
         render_prompt(READ_DESCRIPTION_TEMPLATE, &variables)
+    }
+    pub fn side_effect(&self) -> &'static str {
+        "read"
+    }
+    pub fn repo_mutation(&self) -> &'static str {
+        "none"
     }
 
     pub fn parameters(&self) -> Value {

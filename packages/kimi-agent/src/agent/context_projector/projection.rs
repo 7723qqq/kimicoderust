@@ -115,12 +115,11 @@ pub fn summarize_projection_repairs(
 
 pub fn project(
     history: &[ContextMessage],
-    on_anomaly: Option<OnAnomaly<'_>>,
+    on_anomaly: &mut Option<OnAnomaly<'_>>,
 ) -> Result<Vec<Message>, WireAsyncError> {
     let layout = slice_layout(history);
-    let mut on_anomaly = on_anomaly;
-    let blocks = pair_blocks(history, &layout, &mut on_anomaly)?;
-    Ok(flatten_blocks(blocks, &layout, &mut on_anomaly))
+    let blocks = pair_blocks(history, &layout, on_anomaly)?;
+    Ok(flatten_blocks(blocks, &layout, on_anomaly))
 }
 
 pub fn project_strict(
@@ -128,7 +127,7 @@ pub fn project_strict(
     on_anomaly: Option<OnAnomaly<'_>>,
 ) -> Result<Vec<Message>, WireAsyncError> {
     let mut on_anomaly = on_anomaly;
-    let projected = project(history, on_anomaly.as_deref_mut())?;
+    let projected = project(history, &mut on_anomaly)?;
     let deduped = dedupe_duplicate_tool_calls(projected, &mut on_anomaly);
     let merged = merge_consecutive_assistant_messages(deduped, &mut on_anomaly);
     Ok(drop_leading_non_user_messages(merged, &mut on_anomaly))

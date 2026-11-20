@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::agent::usage::usage_events::{AgentStatusUpdated, AgentStatusUpdatedPayload};
 use crate::app::event::event2::{Event2, Event2Class};
-use crate::state::state::{ReplayableOptions, ReplayableStateKey, UndoableOptions, define_state};
+use crate::state::state::{ReplayableOptions, ReplayableStateKey, UndoableOptions};
 
 pub const PLAN_STATE_KEY: &str = "plan";
 pub const PLAN_MODE_ENTER_TYPE: &str = "plan_mode.enter";
@@ -258,18 +258,18 @@ pub fn apply_revision(state: &mut PlanState, event: &PlanRevision) {
 }
 
 pub static PLAN_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::new(|| {
-    let mut key = define_state(
-        PLAN_STATE_KEY,
+    let mut key = ReplayableStateKey::new(
+        PLAN_STATE_KEY.to_string(),
         Arc::new(|| {
             serde_json::to_value(PlanState::default()).expect("plan state is serializable")
         }),
-    )
-    .replayable(ReplayableOptions {
-        schema: json!({}),
-        durable: None,
-        blobs: None,
-        mutable_replay: None,
-    });
+        ReplayableOptions {
+            schema: json!({}),
+            durable: None,
+            blobs: None,
+            mutable_replay: None,
+        },
+    );
     key.undoable(Some(UndoableOptions { on_undo: None }))
         .expect("plan state can be undoable");
     key.on(&PLAN_MODE_ENTER_CLASS, Arc::new(|state, event, context| {
@@ -306,7 +306,7 @@ pub static PLAN_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::new(|| {
         serde_json::to_value(plan).ok()
     }))
     .expect("plan revision fold can be registered");
-    key
+    Arc::new(key)
 });
 
 pub fn plan_key() -> Arc<ReplayableStateKey> {

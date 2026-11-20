@@ -6,7 +6,10 @@ use crate::app::session_index::session_index::I_SESSION_INDEX;
 use crate::app::session_index::session_index::I_SESSION_INDEX_MIRROR;
 use crate::persistence::interface::session_lock::I_SESSION_LOCK_SERVICE;
 use crate::app::session_manager::session_manager::I_SESSION_MANAGER;
+use std::sync::Arc;
+
 use futures_util::{StreamExt, stream};
+use futures_util::future::BoxFuture;
 
 use crate::_base::di::instantiation::ServicesAccessor;
 use crate::app::bootstrap::bootstrap::IBootstrapService;
@@ -44,15 +47,15 @@ impl ColdSessionArchiveOutcome {
 }
 
 pub async fn set_cold_session_archived(
-    accessor: &dyn ServicesAccessor,
-    session_id: &str,
+    accessor: Arc<dyn ServicesAccessor>,
+    session_id: String,
     archived: bool,
 ) -> Result<ColdSessionArchiveOutcome, WireAsyncError> {
-    let summary = accessor.get(&I_SESSION_INDEX).get(session_id).await?;
+    let summary = accessor.get(&I_SESSION_INDEX).get(&session_id).await?;
     let Some(summary) = summary else {
         return Ok(ColdSessionArchiveOutcome::NotFound);
     };
-    let lease = accessor.get(&I_SESSION_LOCK_SERVICE).lease(session_id)?;
+    let lease = accessor.get(&I_SESSION_LOCK_SERVICE).lease(&session_id)?;
     let result = async {
         let docs = accessor.get(&I_ATOMIC_DOCUMENT_STORE);
         let meta_scope = session_scope_of(
@@ -60,7 +63,7 @@ pub async fn set_cold_session_archived(
                 &accessor.get(&I_BOOTSTRAP_SERVICE).scope("sessions"),
                 &summary.workspace_id,
             ),
-            session_id,
+            &session_id,
         );
         let mut raw = docs.get(&meta_scope, "state.json").await?;
         let mut legacy_meta_scope = None;
@@ -72,21 +75,21 @@ pub async fn set_cold_session_archived(
         let Some(raw) = raw else {
             return Ok(ColdSessionArchiveOutcome::NotFound);
         };
-        let persisted = normalize_session_meta(raw, session_id);
+        let persisted = normalize_session_meta(raw, &session_id);
         let archived_at = archived.then(|| chrono::Utc::now().timestamp_millis());
         let next_meta = SessionMeta {
             archived,
             archived_at,
             ..persisted.clone()
         };
-        docs.set(&meta_scope, "state.json", encode_session_meta(&next_meta))
+        docs.set(&meta_scope, "state.json", serde_json::to_value(encode_session_meta(&next_meta))?)
             .await?;
         if let Some(legacy_meta_scope) = legacy_meta_scope {
             docs.delete(&legacy_meta_scope, "state.json").await?;
         }
         accessor.get(&I_SESSION_INDEX_MIRROR).record(build_session_summary(
             crate::app::session_index::session_index_source::SessionSummaryInput {
-                id: session_id.to_string(),
+                id: session_id.clone(),
                 workspace_id: summary.workspace_id.clone(),
                 cwd: next_meta.cwd.clone().or(summary.cwd.clone()),
                 environment_id: next_meta.environment_id.clone(),
@@ -104,14 +107,14 @@ pub async fn set_cold_session_archived(
         if archived {
             accessor.get(&I_EVENT_SERVICE).publish(SessionArchived::new(
                 super::session_lifecycle_events::SessionArchivedPayload {
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
                     workspace_id: summary.workspace_id.clone(),
                 },
             ).to_event2());
         } else if persisted.archived {
             accessor.get(&I_EVENT_SERVICE).publish(SessionRestored::new(
                 super::session_lifecycle_events::SessionRestoredPayload {
-                    session_id: session_id.to_string(),
+                    session_id: session_id.clone(),
                     workspace_id: summary.workspace_id.clone(),
                 },
             ).to_event2());
@@ -124,25 +127,38 @@ pub async fn set_cold_session_archived(
 }
 
 pub async fn set_session_archived(
-    accessor: &dyn ServicesAccessor,
-    session_id: &str,
+    accessor: Arc<dyn ServicesAccessor>,
+    session_id: String,
     archived: bool,
 ) -> Result<ColdSessionArchiveOutcome, WireAsyncError> {
     let manager = accessor.get(&I_SESSION_MANAGER);
-    let _ = manager.when_resume_settled(session_id).await;
-    manager
-        .with_lifecycle_serialization(session_id, move |unguarded| async move {
-            if get_live_session_by_id(accessor, session_id).is_some() {
+    let _ = manager.when_resume_settled(&session_id).await;
+    let accessor_for_work = accessor.clone();
+    let session_id_for_work = session_id.clone();
+    let output = manager
+        .with_lifecycle_serialization(
+            &session_id,
+            Box::new(move |unguarded: std::sync::Arc<
+                dyn crate::app::session_manager::session_manager::UnguardedSessionLifecycle,
+            >| {
+            Box::pin(async move {
+            let outcome = if get_live_session_by_id(accessor_for_work.as_ref(), &session_id_for_work).is_some() {
                 if archived {
-                    unguarded.archive(session_id).await?;
+                    unguarded.archive().await?;
                 } else {
-                    unguarded.restore(session_id, None).await?;
+                    unguarded.restore(None).await?;
                 }
-                return Ok(ColdSessionArchiveOutcome::Updated);
-            }
-            set_cold_session_archived(accessor, session_id, archived).await
-        })
-        .await
+                ColdSessionArchiveOutcome::Updated
+            } else {
+                set_cold_session_archived(accessor_for_work, session_id_for_work, archived).await?
+            };
+            Ok(Box::new(outcome) as Box<dyn std::any::Any + Send>)
+            }) as BoxFuture<'static, Result<Box<dyn std::any::Any + Send>, WireAsyncError>>
+        }))
+        .await?;
+    Ok(*output
+        .downcast::<ColdSessionArchiveOutcome>()
+        .expect("cold session archive outcome"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,12 +178,15 @@ pub enum SessionArchiveBatchItemOutcome {
 }
 
 pub async fn set_session_archived_batch(
-    accessor: &dyn ServicesAccessor,
+    accessor: Arc<dyn ServicesAccessor>,
     ids: &[String],
     archived: bool,
 ) -> Result<Vec<SessionArchiveBatchItemOutcome>, WireAsyncError> {
-    let outcomes = stream::iter(ids.iter().map(|id| async move {
-        match set_session_archived(accessor, id, archived).await {
+    let outcomes = stream::iter(ids.iter().map(|id| {
+        let accessor = accessor.clone();
+        let id = id.clone();
+        async move {
+        match set_session_archived(accessor, id.clone(), archived).await {
             Ok(ColdSessionArchiveOutcome::Updated) => SessionArchiveBatchItemOutcome::Ok {
                 id: id.clone(),
             },
@@ -181,6 +200,7 @@ pub async fn set_session_archived_batch(
                 reason: SessionArchiveBatchFailureReason::Error,
                 message: error.to_string(),
             },
+        }
         }
     }))
     .buffered(8)

@@ -11,7 +11,8 @@ use serde_json::Value;
 use crate::agent::agent_context::AgentContext;
 use crate::app::event::event2::Event2;
 use crate::state::agent_model::{
-    AgentModel, AgentModelBridge, AgentModelContext, AgentModelDefinition, DomainResourceRuntime,
+    AgentModel, AgentModelBridge, AgentModelContext, AgentModelDefinition, AgentModelInstance,
+    DomainResourceRuntime,
 };
 use crate::wire::record::WireAsyncError;
 use crate::state::state::ReplayableStateKey;
@@ -50,7 +51,7 @@ impl AgentModelBridge for SpaceBridge {
 
 pub struct ModelEntry {
     pub definition: AgentModelDefinition,
-    pub model: AgentModel,
+    pub model: Box<dyn AgentModelInstance>,
     pub leases: AtomicU32,
     pub retired: AtomicBool,
     pub disposed: AtomicBool,
@@ -93,25 +94,65 @@ impl AgentSpaceImpl {
         }
     }
 
-    pub async fn use_model<R, Fut>(
-        &self,
+    pub fn use_<M, R>(
+        self: &Arc<Self>,
         definition: &AgentModelDefinition,
-        run: impl FnOnce(&AgentModel) -> Fut,
+        run: impl FnOnce(&M) -> R,
+    ) -> R
+    where
+        M: AgentModelInstance + 'static,
+    {
+        let entry = match self.ensure_model(definition) {
+            Ok(entry) => entry,
+            Err(error) => panic!("{error}"),
+        };
+        let lease = ModelLease::acquire(self, &entry);
+        let model = entry
+            .model
+            .as_any()
+            .downcast_ref::<M>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "Agent model '{}' is not {}",
+                    definition.id,
+                    std::any::type_name::<M>()
+                )
+            });
+        let result = catch_unwind(AssertUnwindSafe(|| run(model)));
+        drop(lease);
+        match result {
+            Ok(value) => value,
+            Err(error) => resume_unwind(error),
+        }
+    }
+
+    pub async fn use_async<M, R, F>(
+        self: &Arc<Self>,
+        definition: &AgentModelDefinition,
+        run: F,
     ) -> Result<R, String>
     where
-        Fut: std::future::Future<Output = R>,
+        M: AgentModelInstance + 'static,
+        F: AsyncFnOnce(&M) -> R,
     {
         let entry = self.ensure_model(definition)?;
-        entry.leases.fetch_add(1, Ordering::SeqCst);
-        let future = match catch_unwind(AssertUnwindSafe(|| run(&entry.model))) {
+        let lease = ModelLease::acquire(self, &entry);
+        let Some(model) = entry.model.as_any().downcast_ref::<M>() else {
+            return Err(format!(
+                "Agent model '{}' is not {}",
+                definition.id,
+                std::any::type_name::<M>()
+            ));
+        };
+        let future = match catch_unwind(AssertUnwindSafe(|| run(model))) {
             Ok(future) => future,
             Err(error) => {
-                self.release(&entry).await;
+                drop(lease);
                 resume_unwind(error);
             }
         };
         let result = AssertUnwindSafe(future).catch_unwind().await;
-        self.release(&entry).await;
+        drop(lease);
         match result {
             Ok(result) => Ok(result),
             Err(error) => resume_unwind(error),
@@ -147,7 +188,7 @@ impl AgentSpaceImpl {
             agent: context,
             bridge,
         });
-        model.seal();
+        model.base_mut().seal();
         let entry = Arc::new(ModelEntry {
             definition: (*definition).clone(),
             model,
@@ -158,7 +199,7 @@ impl AgentSpaceImpl {
         self.instances
             .lock()
             .insert(definition.id.clone(), entry.clone());
-        host.register_model(definition, &entry.model);
+        host.register_model(definition, entry.model.base());
         Ok(entry)
     }
 
@@ -191,18 +232,41 @@ impl AgentSpaceImpl {
         }
     }
 
-    async fn release(&self, entry: &Arc<ModelEntry>) {
-        let previous = entry.leases.fetch_sub(1, Ordering::SeqCst);
-        if previous == 1 && entry.retired.load(Ordering::SeqCst) {
-            self.dispose_entry(entry).await;
-        }
-    }
 
     async fn dispose_entry(&self, entry: &Arc<ModelEntry>) {
         if entry.disposed.swap(true, Ordering::SeqCst) {
             return;
         }
-        let _ = entry.model.dispose().await;
+        let _ = entry.model.base().dispose().await;
+    }
+}
+
+/// v2 `use` releases the lease in `finally`, so a throwing callback or an
+/// ignored promise still releases it. A drop guard gives the same guarantee when
+/// the Rust future is cancelled or never awaited.
+struct ModelLease {
+    space: Arc<AgentSpaceImpl>,
+    entry: Arc<ModelEntry>,
+}
+
+impl ModelLease {
+    fn acquire(space: &Arc<AgentSpaceImpl>, entry: &Arc<ModelEntry>) -> Self {
+        entry.leases.fetch_add(1, Ordering::SeqCst);
+        Self {
+            space: space.clone(),
+            entry: entry.clone(),
+        }
+    }
+}
+
+impl Drop for ModelLease {
+    fn drop(&mut self) {
+        let previous = self.entry.leases.fetch_sub(1, Ordering::SeqCst);
+        if previous == 1 && self.entry.retired.load(Ordering::SeqCst) {
+            let space = self.space.clone();
+            let entry = self.entry.clone();
+            tokio::spawn(async move { space.dispose_entry(&entry).await });
+        }
     }
 }
 
@@ -213,4 +277,14 @@ pub fn agent_space_of(agent: &AgentContext) -> Result<Arc<AgentSpaceImpl>, Strin
             agent.agent_id, agent.generation
         )
     })
+}
+
+pub fn agent_space_or_bug(agent: &AgentContext) -> Arc<AgentSpaceImpl> {
+    match agent.space.clone() {
+        Some(space) => space,
+        None => panic!(
+            "Agent {}:{} is not a lifecycle-issued context",
+            agent.agent_id, agent.generation
+        ),
+    }
 }

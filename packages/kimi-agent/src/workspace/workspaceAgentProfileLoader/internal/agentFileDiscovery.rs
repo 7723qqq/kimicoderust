@@ -23,7 +23,7 @@ use super::types::{
 const MAX_AGENT_SCAN_DEPTH: u32 = 8;
 const MAX_SKIP_WARNINGS: usize = 5;
 
-pub type DiscoverAgentFilesWarn<'a> = &'a dyn Fn(&str, Option<&WireAsyncError>);
+pub type DiscoverAgentFilesWarn<'a> = &'a (dyn Fn(&str, Option<&WireAsyncError>) + Send + Sync);
 
 struct WarningState {
     emitted: usize,
@@ -147,7 +147,7 @@ fn walk<'a>(
             if entry.starts_with('.') || entry == "node_modules" {
                 continue;
             }
-            let entry_path = join(&dir_path, &entry);
+            let entry_path = join(&dir_path, &[entry.as_str()]);
             let result = async {
                 if is_directory_path(fs, &entry_path).await? {
                     walk(
@@ -200,7 +200,7 @@ async fn parse_and_register(
     warning_state: &Arc<Mutex<WarningState>>,
 ) -> Result<(), WireAsyncError> {
     let result = async {
-        let text = fs.read_text(file_path).await?;
+        let text = fs.read_text(file_path, None).await?;
         let agent = parse_agent_file_text(ParseAgentFileOptions {
             path: file_path.to_string(),
             source: root.source,

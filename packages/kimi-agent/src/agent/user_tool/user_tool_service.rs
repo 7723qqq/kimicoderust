@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
+use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
 use crate::_base::utils::abort::abortable;
 use crate::agent::profile::profile::IAgentProfileService;
 use crate::agent::scope_context::scope_context::IAgentScopeContext;
@@ -87,10 +87,7 @@ impl From<UserToolExecutionResponse> for ExecutableToolResult {
             stop_turn_reason: response.stop_turn_reason,
             truncated: response.truncated,
             note: response.note,
-            delivery: response
-                .delivery
-                .as_ref()
-                .map(crate::llm::wire::tool_delivery_from_wire),
+            delivery: response.delivery,
             spill: response.spill.map(|spill| ToolResultSpill {
                 output_path: spill.output_path,
                 total_chars: spill.total_chars,
@@ -149,9 +146,10 @@ fn execute_user_tool(
         let wait = async move { wait_interactions.wait(&wait_id, None).await };
         let result = abortable(wait, signal.clone()).await;
         match result {
-            Ok(response) => serde_json::from_value::<UserToolExecutionResponse>(response)
+            Ok(Ok(response)) => serde_json::from_value::<UserToolExecutionResponse>(response)
                 .map(ExecutableToolResult::from)
                 .map_err(|error| Box::new(error) as WireAsyncError),
+            Ok(Err(error)) => Err(error),
             Err(error) => {
                 if signal.aborted() {
                     interactions.respond(
@@ -162,7 +160,7 @@ fn execute_user_tool(
                         }),
                     );
                 }
-                Err(error)
+                Err(crate::_base::errors::errors::shared_to_wire(error))
             }
         }
     })
@@ -250,16 +248,16 @@ impl AgentUserToolServiceInner {
             description: input.description,
             parameters: input.parameters,
         };
-        let registration: DisposableRef = self
-            .registry
-            .register(
+        let registration: DisposableRef = to_disposable({
+            let registration = self.registry.register(
                 Arc::new(tool),
                 ToolRegistrationOptions {
                     source: Some(ToolSource::User),
                     disclosure: input.disclosure,
                 },
-            )
-            .into();
+            );
+            move || registration.dispose()
+        });
         self.registrations.lock().insert(name.clone(), registration);
         if activate {
             self.profile.add_active_tool(&name);
@@ -337,13 +335,17 @@ impl AgentUserToolService {
                         if let Some(service) = weak.upgrade() {
                             service.restore_registered_tools();
                         }
-                        next().await
-                    }) as BoxFuture<'static, Result<(), WireAsyncError>>
+                        next.proceed(None).await;
+                    })
                 }),
                 HookRegisterOptions::default(),
             )
             .expect("user tool restore hook can be registered");
-        service.inner.subscriptions.lock().push(Arc::new(restore));
+        service
+            .inner
+            .subscriptions
+            .lock()
+            .push(to_disposable(move || restore.dispose()));
         service
     }
 }

@@ -10,6 +10,7 @@ use crate::agent::task::types::AgentTaskStatus;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::features::tower::protocol::frontmatter::parse_frontmatter;
 use crate::features::tower::protocol::paths::{
     MISSIONS_DIR, TOWER_NAME, WORKTREES_DIR, is_reserved_tower_agent_name, mission_file_name,
@@ -132,14 +133,6 @@ impl TowerSpawnTool {
 
     pub fn name(&self) -> &'static str {
         TOWER_SPAWN_TOOL_NAME
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &str {
@@ -478,6 +471,14 @@ impl TowerSpawnTool {
 }
 
 impl ExecutableTool for TowerSpawnTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         TowerSpawnTool::name(self)
     }

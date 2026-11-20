@@ -1,3 +1,29 @@
+use std::time::Duration;
+
+use serde_json::Value;
+
+use crate::agent::tools::os::shell::shell_tool_results::normalize_timeout_ms;
+
+pub(super) fn parse_timeout(args: &Value) -> Result<Option<u64>, &'static str> {
+    match args.get("timeout") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|seconds| {
+                seconds.fract() == 0.0 && *seconds > 0.0 && *seconds <= 9_007_199_254_740_991.0
+            })
+            .map(|seconds| Some(seconds as u64))
+            .ok_or("timeout must be a positive integer"),
+    }
+}
+
+pub(super) fn background_timeout(timeout: Option<u64>, disable_timeout: bool) -> Option<Duration> {
+    if disable_timeout {
+        return None;
+    }
+    Some(Duration::from_millis(normalize_timeout_ms(timeout, true)))
+}
+
 pub fn format_timeout_label(timeout_ms: u64) -> String {
     if timeout_ms.is_multiple_of(1000) {
         format!("{}s", timeout_ms / 1000)
@@ -19,15 +45,25 @@ pub fn foreground_description(label: &str, command: &str, description: Option<&s
     format!("{label}: {preview}")
 }
 
+pub const BACKGROUND_UNAVAILABLE: &str =
+    "Background execution is not available for this agent because TaskOutput and TaskStop are not enabled.";
+
 pub fn validate_run_request(
     command: &str,
     run_in_background: bool,
     description: Option<&str>,
+    allow_background: bool,
 ) -> Option<String> {
     if command.is_empty() {
         return Some("Command cannot be empty.".to_string());
     }
-    if run_in_background && description.map(str::trim).is_none_or(str::is_empty) {
+    if !run_in_background {
+        return None;
+    }
+    if !allow_background {
+        return Some(BACKGROUND_UNAVAILABLE.to_string());
+    }
+    if description.map(str::trim).is_none_or(str::is_empty) {
         return Some("description is required when run_in_background is true.".to_string());
     }
     None
@@ -76,6 +112,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timeout_parser_accepts_json_schema_integers_without_applying_runtime_caps() {
+        for seconds in [1, 30, 301, 86_401, 9_007_199_254_740_991u64] {
+            assert_eq!(parse_timeout(&serde_json::json!({ "timeout": seconds })), Ok(Some(seconds)));
+        }
+        assert_eq!(parse_timeout(&serde_json::json!({ "timeout": 30.0 })), Ok(Some(30)));
+        assert_eq!(parse_timeout(&serde_json::json!({})), Ok(None));
+        assert_eq!(parse_timeout(&serde_json::json!({ "timeout": null })), Ok(None));
+        for timeout in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("30"),
+            serde_json::json!(true),
+            serde_json::json!(9_007_199_254_740_992u64),
+        ] {
+            assert!(parse_timeout(&serde_json::json!({ "timeout": timeout })).is_err());
+        }
+    }
+
+    #[test]
     fn a_whole_second_is_labelled_in_seconds() {
         assert_eq!(format_timeout_label(60_000), "60s");
         assert_eq!(format_timeout_label(1_000), "1s");
@@ -114,7 +170,7 @@ mod tests {
     #[test]
     fn an_empty_command_is_refused() {
         assert_eq!(
-            validate_run_request("", false, None).as_deref(),
+            validate_run_request("", false, None, true).as_deref(),
             Some("Command cannot be empty.")
         );
     }
@@ -123,16 +179,24 @@ mod tests {
     fn a_background_call_without_a_description_is_refused() {
         for missing in [None, Some(""), Some("   ")] {
             assert_eq!(
-                validate_run_request("npm test", true, missing).as_deref(),
+                validate_run_request("npm test", true, missing, true).as_deref(),
                 Some("description is required when run_in_background is true.")
             );
         }
-        assert!(validate_run_request("npm test", true, Some("tests")).is_none());
+        assert!(validate_run_request("npm test", true, Some("tests"), true).is_none());
+    }
+
+    #[test]
+    fn background_admission_precedes_the_description_check() {
+        assert_eq!(
+            validate_run_request("npm test", true, None, false).as_deref(),
+            Some(BACKGROUND_UNAVAILABLE)
+        );
     }
 
     #[test]
     fn a_foreground_call_needs_no_description() {
-        assert!(validate_run_request("npm test", false, None).is_none());
+        assert!(validate_run_request("npm test", false, None, false).is_none());
     }
 
     #[test]

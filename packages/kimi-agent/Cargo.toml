@@ -69,7 +69,7 @@ url = "2"
 # feature set (baked data only, no UTF-16 helpers) keeps the lockfile
 # unchanged.
 icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 toml = "0.8"

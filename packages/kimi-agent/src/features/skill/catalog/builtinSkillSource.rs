@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
+use crate::app::config::config::ConfigSectionChangedEvent;
 use crate::app::config::config_service::ConfigService;
 
 use super::builtin::builtin::builtin_skill_defs;
@@ -39,11 +40,11 @@ impl BuiltinSkillSource {
     pub fn new(config: Arc<ConfigService>) -> Arc<Self> {
         let on_did_change_emitter = Arc::new(Emitter::new());
         let emitter = on_did_change_emitter.clone();
-        let subscription = config.on_did_section_change(move |event| {
+        let subscription = config.on_did_section_change(Box::new(move |event: ConfigSectionChangedEvent| {
             if event.domain == BUILTIN_PRODUCT_SKILLS_SECTION {
                 emitter.fire(());
             }
-        });
+        }));
         Arc::new(Self {
             config,
             on_did_change_emitter,
@@ -57,6 +58,7 @@ pub trait IBuiltinSkillSource: ISkillSource {}
 
 impl IBuiltinSkillSource for BuiltinSkillSource {}
 
+#[async_trait]
 impl ISkillSource for BuiltinSkillSource {
     fn id(&self) -> &str {
         BUILTIN_SKILL_SOURCE_ID

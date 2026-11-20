@@ -34,12 +34,11 @@ impl SelectToolsTool {
         SELECT_TOOLS_TOOL_NAME
     }
 
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
-    }
-
     pub fn description(&self) -> &'static str {
         DESCRIPTION
+    }
+    pub fn repo_mutation(&self) -> &'static str {
+        "none"
     }
 
     pub fn parameters(&self) -> Map<String, Value> {

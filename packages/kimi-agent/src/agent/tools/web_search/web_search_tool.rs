@@ -8,6 +8,7 @@ use crate::_base::utils::abort::{AbortSignal, abortable, is_abort_error};
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolContext, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::app::auth::web_search::web_search::{WebSearchOptions, WebSearchProviderService};
 use crate::tool::input_schema::to_input_json_schema;
 use crate::tool::output_accumulator::{ToolOutputAccumulator, ToolOutputAccumulatorResult};
@@ -53,14 +54,6 @@ impl WebSearchTool {
 
     pub fn name(&self) -> &'static str {
         "WebSearch"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -170,6 +163,14 @@ impl WebSearchTool {
 }
 
 impl ExecutableTool for WebSearchTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         WebSearchTool::name(self)
     }

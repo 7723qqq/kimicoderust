@@ -17,6 +17,7 @@ use super::internal::agent_profile_from_file::profiles_from_discovery;
 use super::internal::agent_profile_loader::{
     AgentProfileLoaderBase, AgentProfileLoaderHooks, AgentProfileProvide,
 };
+use super::internal::types::{AgentFileRoot, AgentFileSource};
 use super::plugin_agent_profile_loader::IPluginAgentProfileLoader;
 use super::user_agent_profile_loader::IUserAgentProfileLoader;
 
@@ -55,17 +56,25 @@ impl PluginAgentProfileLoaderService {
                     let user = load_user.clone();
                     let log = load_log.clone();
                     async move {
-                        let roots = plugins.plugin_agent_roots().await?;
+                        let roots = plugins
+                            .plugin_agent_roots()
+                            .await?
+                            .into_iter()
+                            .map(|root| AgentFileRoot {
+                                path: root.path,
+                                source: AgentFileSource::Plugin,
+                            })
+                            .collect::<Vec<_>>();
                         let discovery = discover_agent_files(
                             fs.as_ref(),
                             &roots,
-                            Some(&|message| log.warn(message, None)),
+                            Some(&|message, _error| log.warn(message, None)),
                         )
                         .await?;
                         Ok(profiles_from_discovery(
                             discovery,
                             Arc::new(move |context| {
-                                user.get_default_profile().render_system_prompt(context)
+                                (user.get_default_profile().render_system_prompt)(context)
                             }),
                         ))
                     }
@@ -74,7 +83,7 @@ impl PluginAgentProfileLoaderService {
             },
         ));
         let reload_base = base.clone();
-        let subscription = plugins.on_did_reload(move |_| {
+        let subscription = plugins.on_did_reload(Arc::new(move |_| {
             let base = reload_base.clone();
             let log = log.clone();
             tokio::spawn(async move {
@@ -85,7 +94,7 @@ impl PluginAgentProfileLoaderService {
                     );
                 }
             });
-        });
+        }));
         base.start();
         Self {
             base,
@@ -107,6 +116,7 @@ impl IPluginAgentProfileLoader for PluginAgentProfileLoaderService {
     }
 
     fn reload(&self) -> BoxFuture<'static, Result<(), WireAsyncError>> {
-        self.base.reload().boxed()
+        let base = self.base.clone();
+        Box::pin(async move { base.reload().await })
     }
 }

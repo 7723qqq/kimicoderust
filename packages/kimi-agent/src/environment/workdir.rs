@@ -73,7 +73,7 @@ pub fn resolve_directory(raw: &Path) -> Result<PathBuf, EnvironmentError> {
 /// the user start a session anywhere, and the containment rule applies to what
 /// an *agent* may set, not to what the user may open. Child agents must pass
 /// `false`, so a subdirectory request that escapes the parent workspace is a
-/// refusal rather than a widened sandbox.
+/// refusal rather than a widened boundary.
 pub fn resolve_within(
     roots: &super::WorkspaceRoots,
     raw: &Path,

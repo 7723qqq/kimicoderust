@@ -45,12 +45,11 @@ impl IRepoMapTool for RepoMapTool {
         REPO_MAP_TOOL_NAME
     }
 
-    fn repo_mutation(&self) -> &'static str {
-        "none"
-    }
-
     fn description(&self) -> &'static str {
         DESCRIPTION
+    }
+    fn repo_mutation(&self) -> &'static str {
+        "none"
     }
 
     fn parameters(&self) -> Value {

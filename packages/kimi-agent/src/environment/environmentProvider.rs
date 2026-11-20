@@ -35,7 +35,7 @@ pub trait EnvironmentProviderHost: Send + Sync {
 }
 
 pub trait EnvironmentProviderHostExt: EnvironmentProviderHost {
-    fn get<T: ?Sized + 'static>(&self) -> Arc<T> {
+    fn get<T: ?Sized + Send + Sync + 'static>(&self) -> Arc<T> {
         let value = self.get_dynamic(&provider_service_identifier::<T>());
         Arc::downcast::<Arc<T>>(value)
             .unwrap_or_else(|_| panic!("service type does not match its identifier"))
@@ -69,6 +69,6 @@ pub trait EnvironmentProviderFactory: Send + Sync {
     fn id(&self) -> &str;
     async fn attach(
         &self,
-        host: &dyn EnvironmentProviderHost,
+        host: std::sync::Arc<dyn EnvironmentProviderHost>,
     ) -> Result<EnvironmentProviderAttachment, WireAsyncError>;
 }

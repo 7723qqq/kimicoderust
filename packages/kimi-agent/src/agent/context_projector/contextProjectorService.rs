@@ -104,7 +104,7 @@ impl AgentContextProjectorService {
             if strict {
                 project_strict(messages, Some(&mut on_anomaly))?
             } else {
-                project(messages, Some(&mut on_anomaly))?
+                project(messages, &mut Some(&mut on_anomaly))?
             }
         };
         self.report_projection_repairs(anomalies);

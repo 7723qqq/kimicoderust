@@ -8,8 +8,9 @@ use super::updateGoal::{UpdateGoalToolInput, update_goal_input_schema};
 use crate::agent::goal::judge::goal_judge_service::AgentGoalJudgeService;
 use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
-    ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
+    ExecutableTool, ExecutableToolOutput, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::agent::tools::main_agent_only::{GOAL_MAIN_AGENT_ONLY, main_agent_only_execution};
 use crate::features::goal::goal_service::{
     AgentGoalService, GOAL_OBJECTIVE_EDITED_TOOL_RESULT,
@@ -44,14 +45,6 @@ impl UpdateGoalTool {
 
     pub fn name(&self) -> &'static str {
         "UpdateGoal"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -205,7 +198,7 @@ impl UpdateGoalTool {
     }
 }
 
-fn output_result(output: impl Into<String>) -> ExecutableToolResult {
+fn output_result(output: impl Into<ExecutableToolOutput>) -> ExecutableToolResult {
     ExecutableToolResult {
         output: output.into(),
         ..Default::default()
@@ -285,6 +278,14 @@ fn wire_error(message: String) -> WireAsyncError {
 }
 
 impl ExecutableTool for UpdateGoalTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         UpdateGoalTool::name(self)
     }

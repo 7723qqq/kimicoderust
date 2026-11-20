@@ -59,12 +59,6 @@ const GREP_HEAD_LIMIT: usize = 250;
 
 const VCS_DIRECTORIES_TO_EXCLUDE: [&str; 6] = [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
 
-const BASH_MAX_SECONDS: u64 = 300;
-
-const BASH_TASK_DEFAULT_TIMEOUT_S: u64 = 600;
-
-const BASH_TASK_MAX_SECONDS: u64 = 86_400;
-
 const PROGRESS_MIN_INTERVAL_MS: u64 = 50;
 
 struct ProgressThrottle {
@@ -154,7 +148,6 @@ pub(crate) mod regex_js;
 pub mod registry;
 pub mod resolve;
 pub mod run_code;
-pub mod sandbox;
 pub(crate) mod search;
 pub mod select_tools;
 pub mod session_query;
@@ -323,6 +316,7 @@ tokio::task_local! {
 
 
 
+    pub static CALLER_BACKGROUND_TASKS_ALLOWED: bool;
     pub static CALLER_AGENT_ID: String;
 
 

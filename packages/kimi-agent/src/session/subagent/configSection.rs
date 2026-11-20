@@ -220,7 +220,7 @@ fn assert_valid_subagent_default_effort(
     pool: Option<&SubagentModelPool>,
     model_catalog: &dyn IModelCatalog,
 ) -> Result<(), WireAsyncError> {
-    let Some(effort) = section
+    let Some(Some(effort)) = section
         .and_then(|section| section.get("defaultEffort"))
         .and_then(Value::as_str)
         .map(|effort| normalize_requested_thinking_effort(Some(effort)))
@@ -511,7 +511,7 @@ pub fn wrap_subagent_model_error(
         json!({"section": "secondary_model.models"}),
     );
     let code = coded.code().clone();
-    let name = coded.name().map(str::to_string);
+    let name = Some(coded.name().to_string());
     let message = format!("{} (subagent model \"{bound_model}\" comes from [secondary_model.models] — check that it names a valid [models] entry)", coded);
     Box::new(Error2::with_options(
         code,

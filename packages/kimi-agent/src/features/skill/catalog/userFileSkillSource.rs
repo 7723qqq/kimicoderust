@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable};
 use crate::_base::event::{Emitter, Event};
 use crate::_base::utils::paths::subtree_watch_filter;
+use crate::app::config::config::ConfigSectionChangedEvent;
 use crate::app::config::config_service::ConfigService;
 use crate::human::utils::watch::{WatchHandle, WatchOptions, WatchSubscription, watch_candidates_with_options};
 
@@ -48,11 +49,11 @@ impl UserFileSkillSource {
     ) -> Arc<Self> {
         let on_did_change_emitter = Arc::new(Emitter::new());
         let emitter = on_did_change_emitter.clone();
-        let subscription = config.on_did_section_change(move |event| {
+        let subscription = config.on_did_section_change(Box::new(move |event: ConfigSectionChangedEvent| {
             if event.domain == MERGE_ALL_AVAILABLE_SKILLS_SECTION {
                 emitter.fire(());
             }
-        });
+        }));
         let debounce_revision = Arc::new(AtomicU64::new(0));
         let mut watches = Vec::new();
         if explicit_dirs.is_empty() {
@@ -105,6 +106,7 @@ pub trait IUserFileSkillSource: ISkillSource {}
 
 impl IUserFileSkillSource for UserFileSkillSource {}
 
+#[async_trait]
 impl ISkillSource for UserFileSkillSource {
     fn id(&self) -> &str {
         "user"

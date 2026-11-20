@@ -204,7 +204,9 @@ impl McpTransport for SseTransport {
                     }
                 } else if event_name == "message" {
                     match serde_json::from_str::<Value>(event_data) {
-                        Ok(message) => pending.handle(&message),
+                        Ok(message) => {
+                            pending.handle(&message);
+                        }
                         Err(error) => {
                             state.lock().last_error = Some(error.to_string());
                             let listener = state.lock().on_error.clone();
@@ -235,7 +237,7 @@ impl McpTransport for SseTransport {
                             buffer.drain(..index + separator_len);
                             for line in event.lines() {
                                 if let Some(data) = line.strip_prefix("event:") {
-                                    *event_name = data.trim().to_string();
+                                    event_name = data.trim().to_string();
                                 } else if let Some(data) = line.strip_prefix("data:") {
                                     if !event_data.is_empty() {
                                         event_data.push('\n');
@@ -439,7 +441,7 @@ impl SseMcpClient {
         let env_lookup = options.env_lookup.unwrap_or_else(|| {
             Arc::new(|name| std::env::var(name).ok())
         });
-        let headers = build_mcp_remote_headers(&config, env_lookup)?;
+        let headers = build_mcp_remote_headers(&config, env_lookup.as_ref())?;
         let transport = Arc::new(SseTransport {
             fetch: options.fetch.unwrap_or_else(|| Arc::new(ReqwestFetch::new())),
             url: config.url.clone().unwrap(),
@@ -518,12 +520,13 @@ impl SseMcpClient {
 
     fn install_transport_hooks(&self) {
         let weak = Arc::downgrade(&self.state);
+        let client = self.client.clone();
         self.transport.set_on_close(Arc::new(move || {
             let Some(state) = weak.upgrade() else {
                 return;
             };
             let this = SseClientStateHandle {
-                client: self.client.clone(),
+                client: client.clone(),
                 state,
             };
             if this.client_closed() || !this.client_ready() {
@@ -538,10 +541,11 @@ impl SseMcpClient {
             });
         }));
         let weak = Arc::downgrade(&self.state);
+        let client = self.client.clone();
         self.transport.set_on_error(Arc::new(move |error| {
             if let Some(state) = weak.upgrade() {
                 let this = SseClientStateHandle {
-                client: self.client.clone(),
+                client: client.clone(),
                 state,
             };
                 this.record_error(&error);

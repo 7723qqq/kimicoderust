@@ -398,9 +398,13 @@ impl ConvertedBlock {
         } else {
             self.media = Some(match strip_mime_params(mime_type).as_str() {
                 m if m.starts_with("image/") => ContentPart::ImageUrl {
-                    url,
-                    id: None,
-                    name: None,
+                    image_url: crate::human::llm::message::ImageUrl {
+                        url,
+                        id: None,
+                        name: None,
+                        dimensions: None,
+                        detail: None,
+                    },
                 },
                 m if m.starts_with("audio/") => ContentPart::Text {
                     text: "[audio attachment delivered as a reference]".to_string(),

@@ -3,14 +3,12 @@
 //!
 //! A backend runs a fresh session in another CLI (`claude`, `codex`, an ACP
 //! agent). v2 looks the backends up in a session-scoped DI service; the engine
-//! has no scope, so the registry is an owned value the caller constructs and the
-//! sandbox gate reads the engine's own `[sandbox]` config.
+//! has no scope, so the registry is an owned value the caller constructs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::rpc::types::BoxFuture;
-use crate::tools::sandbox::{SandboxExecutionPolicy, SandboxMode};
 use tokio_util::sync::CancellationToken;
 
 use super::process::BackendProcess;
@@ -124,14 +122,6 @@ pub trait SubagentBackend: Send + Sync {
     ) -> BoxFuture<'a, Result<SubagentBackendRun, String>>;
 }
 
-/// v2 `resolveSandboxPolicy`: the `[sandbox]` mode for the cwd, defaulting off.
-pub fn resolve_sandbox_policy(
-    config: &crate::config::KimiConfig,
-    cwd: &str,
-) -> SandboxExecutionPolicy {
-    SandboxExecutionPolicy::new(config.resolve_sandbox_mode().unwrap_or_default(), cwd)
-}
-
 /// v2 `SubagentBackendService`.
 pub struct SubagentBackendService {
     backends: HashMap<&'static str, Arc<dyn SubagentBackend>>,
@@ -161,26 +151,18 @@ impl SubagentBackendService {
         self.backends.values().cloned().collect()
     }
 
-    /// v2 `start(name, request)`: an unknown name is refused, and so is any
-    /// non-off sandbox policy.
+    /// v2 `start(name, request)`: an unknown name is refused.
     pub async fn start(
         &self,
         name: &str,
         request: SubagentBackendStartRequest,
-    ) -> Result<SubagentBackendRun, String> {        let backend = self.backends.get(name).ok_or_else(|| {
+    ) -> Result<SubagentBackendRun, String> {
+        let backend = self.backends.get(name).ok_or_else(|| {
             format!(
                 "Unknown subagent backend \"{name}\". Available backends: {}.",
                 SUBAGENT_BACKEND_NAMES.join(", ")
             )
         })?;
-        let policy = resolve_sandbox_policy(&self.config, &request.cwd);
-        if policy.mode != SandboxMode::Off {
-            return Err(format!(
-                "the {} subagent backend is blocked while the sandbox mode is {}",
-                name,
-                policy.mode.as_str()
-            ));
-        }
         backend.start(request).await
     }
 }
@@ -212,9 +194,8 @@ mod tests {
         }
     }
 
-    fn service(mode: Option<&str>) -> SubagentBackendService {
-        let mut config = crate::config::KimiConfig::default();
-        config.sandbox.mode = mode.map(str::to_string);
+    fn service() -> SubagentBackendService {
+        let config = crate::config::KimiConfig::default();
         let mut service = SubagentBackendService::new(Arc::new(config));
         service.register(Arc::new(DummyBackend));
         service
@@ -222,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_backend_lists_the_available_names() {
-        let error = match service(None).start("nope", request()).await {
+        let error = match service().start("nope", request()).await {
             Ok(_) => panic!("an unknown backend must be refused"),
             Err(error) => error,
         };
@@ -233,21 +214,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_non_off_sandbox_blocks_the_backend() {
-        let error = match service(Some("read-only")).start("codex", request()).await {
-            Ok(_) => panic!("a sandboxed backend must be refused"),
-            Err(error) => error,
-        };
-        assert!(error.contains("read-only"), "{error}");
-        assert!(error.contains("codex"), "{error}");
-    }
-
-    #[tokio::test]
-    async fn an_off_sandbox_reaches_the_backend() {
-        assert!(service(None).get_backend("codex").is_some());
-        assert_eq!(service(None).list().len(), 1);
-        assert!(service(None).get_backend("acp").is_none());
+    #[test]
+    fn the_registry_exposes_only_registered_backends() {
+        assert!(service().get_backend("codex").is_some());
+        assert_eq!(service().list().len(), 1);
+        assert!(service().get_backend("acp").is_none());
     }
 
     #[test]

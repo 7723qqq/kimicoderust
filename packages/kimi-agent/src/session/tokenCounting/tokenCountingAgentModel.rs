@@ -18,7 +18,7 @@ use crate::llm_adapter::contract::message::Message;
 use crate::llm_adapter::contract::tokens::estimate_tokens_for_messages;
 use crate::state::agent_model::{
     AgentModel, AgentModelContext, AgentModelDefinition, AgentModelDefinitionInput,
-    AgentModelStateSpec, define_agent_model,
+    AgentModelInstance, AgentModelStateSpec, define_agent_model,
 };
 use crate::state::errors::StateError;
 use crate::wire::record::WireAsyncError;
@@ -36,6 +36,20 @@ pub struct TokenCountingAgentModel {
     state: Arc<Mutex<TokenCountingState>>,
 }
 
+impl AgentModelInstance for TokenCountingAgentModel {
+    fn base(&self) -> &AgentModel {
+        &self.base
+    }
+
+    fn base_mut(&mut self) -> &mut AgentModel {
+        &mut self.base
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 impl TokenCountingAgentModel {
     pub fn new(context: AgentModelContext) -> Self {
         let state = Arc::new(Mutex::new(
@@ -46,10 +60,6 @@ impl TokenCountingAgentModel {
         let mut base = AgentModel::new(context);
         register_appliers(&mut base, state.clone(), bridge);
         Self { base, state }
-    }
-
-    pub fn into_base(self) -> AgentModel {
-        self.base
     }
 
     pub fn get(&self, start: Option<isize>, end: Option<isize>) -> ContextSize {
@@ -79,7 +89,7 @@ impl TokenCountingAgentModel {
     }
 
     pub async fn measured(
-        &mut self,
+        &self,
         input: &[Message],
         _output: &[Message],
         usage: &TokenUsage,
@@ -122,7 +132,7 @@ impl TokenCountingAgentModel {
         }
     }
 
-    pub async fn record_truncation(&mut self, cut_index: usize) -> Result<(), WireAsyncError> {
+    pub async fn record_truncation(&self, cut_index: usize) -> Result<(), WireAsyncError> {
         if !self
             .state
             .lock()
@@ -145,7 +155,7 @@ impl TokenCountingAgentModel {
             .await
     }
 
-    pub async fn rebase(&mut self, input: TokenCountingRebaseInput) -> Result<(), WireAsyncError> {
+    pub async fn rebase(&self, input: TokenCountingRebaseInput) -> Result<(), WireAsyncError> {
         self.base
             .emit(
                 TokenCountingRebased::new(json!({
@@ -160,7 +170,7 @@ impl TokenCountingAgentModel {
     }
 
     pub async fn record_turn(
-        &mut self,
+        &self,
         turn_id: u64,
         strategy: TokenCountingStrategy,
     ) -> Result<(), WireAsyncError> {
@@ -342,7 +352,9 @@ pub static TOKEN_COUNTING_AGENT_MODEL_DEFINITION: LazyLock<Arc<AgentModelDefinit
     LazyLock::new(|| {
         define_agent_model(AgentModelDefinitionInput {
             id: "tokenCounting".to_string(),
-            model: Arc::new(|context| TokenCountingAgentModel::new(context).into_base()),
+            model: Arc::new(|context| {
+                Box::new(TokenCountingAgentModel::new(context)) as Box<dyn AgentModelInstance>
+            }),
             state: AgentModelStateSpec {
                 initial: Arc::new(|| json!({ "anchors": [], "tokens": 0 })),
                 schema: json!({"type": "object"}),

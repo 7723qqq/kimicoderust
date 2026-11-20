@@ -31,7 +31,7 @@ pub async fn run_command(
     let proc = runner
         .spawn(command, &args[1..], options.cwd.as_deref(), options.env.as_ref())
         .await?;
-    let on_abort = {
+    let on_abort: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new({
         let proc = proc.clone();
         move || {
             let proc = proc.clone();
@@ -39,7 +39,7 @@ pub async fn run_command(
                 let _ = proc.kill("SIGKILL").await;
             });
         }
-    };
+    });
     if let Some(signal) = &options.signal {
         if signal.aborted() {
             on_abort();

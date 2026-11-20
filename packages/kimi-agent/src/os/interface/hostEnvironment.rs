@@ -32,6 +32,42 @@ pub struct HostEnvironmentInfo {
     pub js_runtimes: Option<Vec<JsRuntimeInfo>>,
 }
 
+impl From<crate::_base::exec_env::environment_probe::HostEnvironmentInfo> for HostEnvironmentInfo {
+    fn from(value: crate::_base::exec_env::environment_probe::HostEnvironmentInfo) -> Self {
+        use crate::_base::exec_env::environment_probe as probe;
+        Self {
+            os_kind: value.os_kind,
+            os_arch: value.os_arch,
+            os_version: value.os_version,
+            shell_name: match value.shell_name {
+                probe::ShellName::Bash => "bash".to_string(),
+                probe::ShellName::Sh => "sh".to_string(),
+            },
+            shell_path: value.shell_path,
+            path_class: match value.path_class {
+                probe::PathClass::Posix => "posix".to_string(),
+                probe::PathClass::Win32 => "win32".to_string(),
+            },
+            home_dir: value.home_dir,
+            cwd: value.cwd,
+            temp_dir: value.temp_dir,
+            js_runtimes: value.js_runtimes.map(|runtimes| {
+                runtimes
+                    .into_iter()
+                    .map(|runtime| JsRuntimeInfo {
+                        name: match runtime.name {
+                            probe::JsRuntimeName::Bun => "bun".to_string(),
+                            probe::JsRuntimeName::Node => "node".to_string(),
+                        },
+                        version: runtime.version,
+                        path: runtime.path,
+                    })
+                    .collect()
+            }),
+        }
+    }
+}
+
 pub trait IHostEnvironment: Send + Sync {
     fn os_kind(&self) -> OsKind;
     fn os_arch(&self) -> String;

@@ -79,7 +79,7 @@ impl PluginManager {
     pub fn new(options: PluginManagerOptions) -> Self {
         let discover_skills = options.discover_skills.unwrap_or_else(|| {
             Arc::new(|roots| {
-                Box::pin(async move { discover_file_skills(roots).await })
+                Box::pin(async move { Ok(discover_file_skills(&roots, None).await) })
                     as BoxFuture<'static, Result<SkillDiscoveryResult, WireAsyncError>>
             })
         });
@@ -543,7 +543,7 @@ impl PluginManager {
                 output.insert(
                     plugin_mcp_runtime_name(&record.id, name),
                     with_plugin_mcp_runtime(
-                        with_mcp_server_enabled(config, true),
+                        &with_mcp_server_enabled(&config, true),
                         &record.root,
                         &self.kimi_home_dir,
                         self.plugin_node_runner.as_ref(),
@@ -571,7 +571,7 @@ impl PluginManager {
                 output.push(PluginMcpServerEntry {
                     name: plugin_mcp_runtime_name(&record.id, name),
                     config: with_plugin_mcp_runtime(
-                        with_mcp_server_enabled(config, enabled),
+                        &with_mcp_server_enabled(&config, enabled),
                         &record.root,
                         &self.kimi_home_dir,
                         self.plugin_node_runner.as_ref(),

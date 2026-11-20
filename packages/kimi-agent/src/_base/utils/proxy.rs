@@ -182,13 +182,15 @@ pub fn create_proxy_dispatcher(
                 http_proxy: Some(urls.http_proxy.unwrap_or_default()),
                 https_proxy: Some(urls.https_proxy.unwrap_or_default()),
                 no_proxy: resolve_no_proxy(env),
-            });
+            })
+            .map(Some);
         }
         if let Some(proxy) = resolve_socks_proxy(env) {
             return (factories.make_socks_agent)(SocksAgentOptions {
                 proxy,
                 no_proxy: resolve_no_proxy(env),
-            });
+            })
+            .map(Some);
         }
         Ok(None)
     })();

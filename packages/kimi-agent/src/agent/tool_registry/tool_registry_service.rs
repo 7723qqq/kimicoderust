@@ -248,6 +248,18 @@ impl IAgentToolRegistryService for AgentToolRegistryService {
         AgentToolRegistryService::resolve(self, name)
     }
 
+    fn register(
+        &self,
+        tool: Arc<dyn ExecutableTool>,
+        options: ToolRegistrationOptions,
+    ) -> ToolRegistration {
+        AgentToolRegistryService::register(self, tool, options)
+    }
+
+    fn unregister(&self, name: &str) -> bool {
+        AgentToolRegistryService::unregister(self, name)
+    }
+
     fn list(&self) -> Vec<ToolInfo> {
         AgentToolRegistryService::list(self)
     }

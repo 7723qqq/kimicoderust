@@ -40,10 +40,13 @@ impl RemoteEnvironmentProbe {
             os_kind: self.os_kind.clone(),
             os_arch: self.os_arch.clone(),
             os_version: self.os_version.clone(),
-            shell_name: self.shell_name,
+            shell_name: self.shell_name.clone(),
             shell_path: self.shell_path.clone(),
-            path_class: self.path_class,
+            path_class: self.path_class.clone(),
             home_dir: self.home_dir.clone(),
+            cwd: None,
+            temp_dir: None,
+            js_runtimes: None,
         }
     }
 }
@@ -220,11 +223,11 @@ impl RemoteSession {
         let executor_version = connection.executor_version();
         Ok(Arc::new(Self {
             fs: Arc::new(RemoteFileSystem::new(connection.clone())),
-            process: Arc::new(RemoteProcessService::new(
+            process: RemoteProcessService::new(
                 connection.clone(),
                 environment.cwd,
                 environment.shell_path,
-            )),
+            ),
             host,
             executor_version,
             connection,

@@ -7,7 +7,7 @@ use crate::wire::record::WireAsyncError;
 use super::paths::{is_directory_path, path_exists, resolve_agent_path};
 use super::types::{AgentFileRoot, AgentFileSource};
 
-pub type AgentRootWarn<'a> = &'a dyn Fn(&str, Option<&WireAsyncError>);
+pub type AgentRootWarn<'a> = &'a (dyn Fn(&str, Option<&WireAsyncError>) + Send + Sync);
 
 const USER_BRAND_DIRS: &[&str] = &["agents"];
 const USER_GENERIC_DIRS: &[&str] = &[".agents/agents"];
@@ -91,7 +91,7 @@ async fn find_project_root(
     let start = resolve(work_dir, ".");
     let mut current = start.clone();
     loop {
-        let marker = join(&current, ".git");
+        let marker = join(&current, &[".git"]);
         match path_exists(fs, &marker).await {
             Ok(true) => return Ok(normalize_slashes(&current)),
             Ok(false) => {}

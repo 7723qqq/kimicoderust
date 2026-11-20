@@ -116,8 +116,8 @@ fn non_blank_env(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-pub type GetEnv = dyn Fn(&str) -> Option<String>;
-pub type ValidateConfig = dyn Fn(&str, Value) -> Value;
+pub type GetEnv<'a> = dyn Fn(&str) -> Option<String> + 'a;
+pub type ValidateConfig<'a> = dyn Fn(&str, Value) -> Value + 'a;
 
 pub fn apply_services_credential_env_overlay(
     effective: &mut Value,

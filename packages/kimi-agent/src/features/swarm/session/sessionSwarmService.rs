@@ -12,9 +12,11 @@ use crate::_base::di::instantiation::ServicesAccessorExt;
 use crate::_base::di::scope::IAgentScopeHandle;
 use crate::_base::utils::abort::{AbortController, AbortError, AbortSignal, link_abort_signal};
 use crate::_base::utils::error_message::error_message;
-use crate::agent::r#loop::r#loop::{IAgentLoopService, LoopState};
-use crate::agent::permission_mode::permission_mode::IAgentPermissionModeService;
-use crate::agent::profile::profile::IAgentProfileService;
+use crate::agent::r#loop::r#loop::{I_AGENT_LOOP_SERVICE, IAgentLoopService, LoopState};
+use crate::agent::permission_mode::permission_mode::{
+    I_AGENT_PERMISSION_MODE_SERVICE, IAgentPermissionModeService,
+};
+use crate::agent::profile::profile::{I_AGENT_PROFILE_SERVICE, IAgentProfileService};
 use crate::agent::scope_context::scope_context::agent_context_of;
 use crate::app::event::event2::{Event2, Event2Class};
 use crate::features::tower::tower::has_pinned_permission_mode;
@@ -41,7 +43,7 @@ use crate::session::subagent::spawn::SpawnSubagentOptions;
 use crate::session::subagent::subagent::{
     AgentRunCompletion, AgentRunRequest, ISessionSubagentService, RunAgentOptions,
 };
-use crate::state::event_dispatcher::IEventDispatcher;
+use crate::state::event_dispatcher::{I_EVENT_DISPATCHER, IEventDispatcher};
 use crate::wire::record::WireAsyncError;
 
 pub use super::agentRunBatch::{
@@ -338,7 +340,7 @@ impl SwarmLauncher {
         };
         self.require_idle_subagent(&agent_id, &child)?;
 
-        let profile = child.accessor().get::<Arc<dyn IAgentProfileService>>();
+        let profile = child.accessor().get(&I_AGENT_PROFILE_SERVICE);
         let data = profile.data();
         let profile_name = data
             .base
@@ -450,7 +452,7 @@ impl SwarmLauncher {
         agent_id: &str,
         child: &Arc<IAgentScopeHandle>,
     ) -> Result<(), WireAsyncError> {
-        if child.accessor().get::<Arc<dyn IAgentLoopService>>().snapshot().state == LoopState::Running {
+        if child.accessor().get(&I_AGENT_LOOP_SERVICE).snapshot().state == LoopState::Running {
             return Err(coded_error(
                 AGENT_ALREADY_RUNNING,
                 format!("Agent instance \"{agent_id}\" is already running and cannot run concurrently"),
@@ -489,15 +491,15 @@ impl SwarmLauncher {
 
         let profile_name = rebuilt
             .accessor()
-            .get::<Arc<dyn IAgentProfileService>>()
+            .get(&I_AGENT_PROFILE_SERVICE)
             .data()
             .base
             .profile_name;
         if !has_pinned_permission_mode(profile_name.as_deref()) {
-            let mode = caller.accessor().get::<Arc<dyn IAgentPermissionModeService>>().mode();
+            let mode = caller.accessor().get(&I_AGENT_PERMISSION_MODE_SERVICE).mode();
             rebuilt
                 .accessor()
-                .get::<Arc<dyn IAgentPermissionModeService>>()
+                .get(&I_AGENT_PERMISSION_MODE_SERVICE)
                 .set_mode(mode);
         }
 
@@ -604,7 +606,7 @@ fn dispatch_subagent_event(
     let Some(caller) = agent_lifecycle.handle_of(caller_agent_id) else {
         return;
     };
-    let dispatcher = caller.accessor().get::<Arc<dyn IEventDispatcher>>();
+    let dispatcher = caller.accessor().get(&I_EVENT_DISPATCHER);
     tokio::spawn(async move {
         let _ = dispatcher.dispatch(event).await;
     });

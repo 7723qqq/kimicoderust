@@ -126,8 +126,6 @@ fn spec() -> PipelineSpec {
         tower_enabled: false,
         notify_user_enabled: true,
         tool_select: false,
-        sandbox_mode: None,
-        sandbox_policy: None,
         caller_agent_id: None,
         session_id: None,
         secondary_model: None,

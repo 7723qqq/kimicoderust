@@ -32,10 +32,6 @@ impl RunCodeTool {
         RUN_CODE_TOOL_NAME
     }
 
-    pub fn side_effect(&self) -> ToolSideEffect {
-        ToolSideEffect::Execute
-    }
-
     pub fn description(&self) -> &'static str {
         RUN_CODE_DESCRIPTION
     }
@@ -124,6 +120,10 @@ fn render(outcome: CodeRunOutcome) -> ExecutableToolResult {
 }
 
 impl ExecutableTool for RunCodeTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Execute)
+    }
+
     fn name(&self) -> &str {
         RunCodeTool::name(self)
     }

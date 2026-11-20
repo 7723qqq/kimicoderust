@@ -149,15 +149,14 @@ impl BashTool {
         "Bash"
     }
 
-    pub fn side_effect(&self) -> &'static str {
-        "shell"
-    }
-
     pub fn parameters(&self) -> Map<String, Value> {
         PARAMETERS
             .as_object()
             .cloned()
             .expect("Bash input schema is an object")
+    }
+    pub fn side_effect(&self) -> &'static str {
+        "shell"
     }
 
     pub fn description(&self) -> String {

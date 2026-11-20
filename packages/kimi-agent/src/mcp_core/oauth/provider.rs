@@ -324,12 +324,15 @@ impl McpOAuthClientProvider {
         let client_cache_for_load = client_cache.clone();
         let discovery_cache_for_load = discovery_cache.clone();
         let ready = async move {
+            let client_key = format!("{store_key_for_load}{CLIENT_SUFFIX}");
+            let discovery_key = format!("{store_key_for_load}{DISCOVERY_SUFFIX}");
             let (client, discovery) = tokio::join!(
-                store.read(&format!("{store_key_for_load}{CLIENT_SUFFIX}")),
-                store.read(&format!("{store_key_for_load}{DISCOVERY_SUFFIX}"))
+                store.read(&client_key),
+                store.read(&discovery_key)
             );
-            let client = client?;
-            let discovery = discovery?;
+            let client = client.map_err(|error| SharedProviderError(Arc::new(error.to_string())))?;
+            let discovery =
+                discovery.map_err(|error| SharedProviderError(Arc::new(error.to_string())))?;
             *client_cache_for_load.lock() = client;
             *discovery_cache_for_load.lock() = discovery;
             Ok(())

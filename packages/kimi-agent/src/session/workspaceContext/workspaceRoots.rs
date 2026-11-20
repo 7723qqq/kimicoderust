@@ -57,7 +57,7 @@ pub fn resolve_effective_workspace_roots_data(
     let work_dir_key = workspace_root_key(&work_dir);
     let mut seen = HashSet::from([work_dir_key]);
     let mut additional_dirs = Vec::new();
-    for dir in std::iter::once(primary_dir.as_deref()).chain(additional_dirs.iter().map(String::as_str)) {
+    for dir in std::iter::once(primary_dir.as_deref()).chain(additional_dirs.iter().map(|dir| Some(dir.as_str()))) {
         let Some(dir) = dir else {
             continue;
         };

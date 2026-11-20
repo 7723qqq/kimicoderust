@@ -35,7 +35,7 @@ pub struct JsRunTurnParams {
     /// parallel and accepts the first successful response. Wins over
     /// `native_llm` only when set.
     pub providers: Option<Vec<JsLlmProviderDef>>,
-    /// Workspace root used to sandbox native tool execution.
+    /// Workspace root for native tool execution.
     pub workspace_root: Option<String>,
     /// When true (with `workspace_root`), the in-process toolset
     /// (Read/Grep/Glob/Write/Edit/Bash, each gated on a host permission
@@ -131,7 +131,6 @@ pub struct JsRunTurnParams {
     /// Host-resolved progressive tool disclosure (`[experimental].
     /// tool_select`). `None`/`false` keeps every tool advertised inline.
     pub tool_select: Option<bool>,
-    pub sandbox_mode: Option<String>,
     pub caller_agent_id: Option<String>,
     pub session_id: Option<String>,
     pub data_dir: Option<String>,

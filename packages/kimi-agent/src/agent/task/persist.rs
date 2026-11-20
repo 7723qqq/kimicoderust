@@ -303,7 +303,8 @@ impl AgentTaskPersistence {
         self.serialize_output(&task_id, async {
             let root = self.primary_root();
             let scope = self.task_output_scope(&task_id, &root)?;
-            let previous_size = match self.output_sizes.lock().get(&task_id).copied() {
+            let cached_size = self.output_sizes.lock().get(&task_id).copied();
+            let previous_size = match cached_size {
                 Some(size) => size,
                 None => self.bytes.size(&scope, OUTPUT_LOG_KEY).await?.unwrap_or(0),
             };

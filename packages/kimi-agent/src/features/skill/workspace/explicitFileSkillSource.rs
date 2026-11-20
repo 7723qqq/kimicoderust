@@ -59,6 +59,7 @@ pub trait IExplicitFileSkillSource: ISkillSource {}
 
 impl IExplicitFileSkillSource for ExplicitFileSkillSource {}
 
+#[async_trait]
 impl ISkillSource for ExplicitFileSkillSource {
     fn id(&self) -> &str {
         "explicit"

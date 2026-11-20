@@ -191,9 +191,7 @@ async fn main() -> anyhow::Result<()> {
                 secondary_model: config
                     .extract_secondary_model_pool(cli.model.as_deref())
                     .map_err(|error| anyhow::anyhow!("{error}"))?,
-                sandbox_mode: config.resolve_sandbox_mode(),
-                sandbox_policy: None,
-                todo_tool_veto: None,
+                    todo_tool_veto: None,
                 tower_worktree_root: None,
                 tool_select: false,
                 notify_user_enabled: !kimi_agent::env::env_switch_default_off(
@@ -1170,8 +1168,6 @@ async fn build_engine_pipeline(
                 None,
             )
         }),
-        sandbox_mode: params.sandbox_mode,
-        sandbox_policy: None,
         caller_agent_id: params.caller_agent_id.clone(),
         session_id: params.session_id.clone(),
         secondary_model: params.secondary_model.clone(),
@@ -1478,8 +1474,6 @@ async fn run_serve(cli: &Cli) -> anyhow::Result<()> {
             kimi_agent::tools::tower::paths::tower_env_switch(),
             kimi_agent::tools::tower::paths::tower_config_flag(&config),
         ),
-        sandbox_mode: config.resolve_sandbox_mode(),
-        sandbox_policy: None,
         caller_agent_id: None,
         session_id: None,
         secondary_model: config

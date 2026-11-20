@@ -72,7 +72,7 @@ pub fn is_dynamic_tool_schema_message(message: &ContextMessage) -> bool {
 
 /// The text parts of a message joined the way v2 reads them
 /// (`agent-core-v2/src/agent/toolSelect/dynamicTools.ts:142`).
-fn message_text(message: &ContextMessage) -> String {
+pub fn message_text(message: &ContextMessage) -> String {
     message
         .content
         .iter()
@@ -82,6 +82,66 @@ fn message_text(message: &ContextMessage) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// Adapts the wire history the turn loop still carries onto the context
+/// vocabulary the selection state is written against (v2 keeps a single message
+/// type; the Rust loop still carries `LLMMessage`).
+pub fn context_messages(messages: &[kimi_core::types::LLMMessage]) -> Vec<ContextMessage> {
+    messages
+        .iter()
+        .map(|message| {
+            let content = if !message.blocks.is_empty() {
+                message.blocks.clone()
+            } else if message.content.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentPart::Text {
+                    text: message.content.clone(),
+                    meta: None,
+                }]
+            };
+            let mut context = ContextMessage::new(message.role, content);
+            context.id = message.prompt_id.clone();
+            context.tool_calls = message.tool_calls.clone();
+            context.tool_call_id = message.tool_call_id.clone();
+            context.tools = if message.tools.is_empty() {
+                None
+            } else {
+                Some(message.tools.clone())
+            };
+            context.origin = message
+                .origin
+                .clone()
+                .and_then(|origin| serde_json::from_value(origin).ok());
+            context
+        })
+        .collect()
+}
+
+/// The inverse of [`context_messages`], used after the history has been shaped.
+///
+/// Shaping rewrites announcements and clears dynamic tool schemas, so the result
+/// has to be carried back instead of filtering the original wire messages.
+pub fn llm_messages(messages: Vec<ContextMessage>) -> Vec<kimi_core::types::LLMMessage> {
+    messages
+        .into_iter()
+        .map(|message| {
+            let text = message_text(&message);
+            kimi_core::types::LLMMessage {
+                role: message.role,
+                content: text,
+                blocks: message.content,
+                tool_calls: message.tool_calls,
+                tool_call_id: message.tool_call_id,
+                prompt_id: message.id,
+                origin: message
+                    .origin
+                    .and_then(|origin| serde_json::to_value(origin).ok()),
+                tools: message.tools.unwrap_or_default(),
+            }
+        })
+        .collect()
 }
 
 pub fn collect_loaded_dynamic_tools(

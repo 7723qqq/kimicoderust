@@ -7,6 +7,7 @@ use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::features::tower::protocol::store::TowerSendInput;
 use crate::features::tower::tools::delivery::{TowerDeliveryHost, deliver_tower_message};
 use crate::features::tower::tools::support::{new_tower_store, run_tower_tool};
@@ -39,14 +40,6 @@ impl TowerSendTool {
 
     pub fn name(&self) -> &'static str {
         TOWER_SEND_TOOL_NAME
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -133,6 +126,14 @@ impl TowerSendTool {
 }
 
 impl ExecutableTool for TowerSendTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         TowerSendTool::name(self)
     }

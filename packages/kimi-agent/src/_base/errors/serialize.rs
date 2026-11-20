@@ -74,7 +74,7 @@ pub fn coded_error_shape(error: &UnknownError) -> Option<CodedErrorShape> {
                         .map(|cause| Box::new(UnknownError::Error(cause))),
                 });
             }
-            let error = error.clone().downcast::<Error2>().ok()?;
+            let error = error.downcast_ref::<Error2>().cloned()?;
             if !is_error_code(&error.code) {
                 return None;
             }

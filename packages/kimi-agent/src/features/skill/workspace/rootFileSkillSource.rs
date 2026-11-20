@@ -174,6 +174,7 @@ impl WorkspaceRootSkillSource {
 }
 
 #[async_trait]
+#[async_trait]
 impl ISkillSource for WorkspaceRootSkillSource {
     fn id(&self) -> &str {
         WORKSPACE_ROOT_SKILL_SOURCE_ID

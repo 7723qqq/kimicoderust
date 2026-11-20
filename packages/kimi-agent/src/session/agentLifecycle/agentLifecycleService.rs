@@ -289,7 +289,8 @@ impl AgentLifecycleService {
     ) -> Result<Arc<AgentContext>, WireAsyncError> {
         let opts = opts.unwrap_or_default();
         if let Some(agent_id) = opts.agent_id.as_deref() {
-            if let Some(inflight) = self.creating.lock().get(agent_id).cloned() {
+            let inflight = self.creating.lock().get(agent_id).cloned();
+            if let Some(inflight) = inflight {
                 return inflight.await.map_err(SharedAgentError::boxed);
             }
             if let Some(existing) = self.roster.lock().get(agent_id)
@@ -515,6 +516,8 @@ impl AgentLifecycleService {
                             }),
                             "wire-view-dispose",
                         );
+                        let event_dispose = event_dispose.clone();
+                        let agent_dispose = agent_dispose.clone();
                         container.anchor_kernel_finalizer(Arc::new(move |_reason| {
                             event_dispose.deactivate_agent(agent_dispose.clone());
                             None

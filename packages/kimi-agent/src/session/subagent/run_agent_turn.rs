@@ -31,7 +31,8 @@ use crate::agent::r#loop::r#loop::{
 use crate::agent::r#loop::turn_events::{AssistantDelta, TurnStepRetrying, TurnStepStarted};
 use crate::agent::scope_context::scope_context::agent_context_of;
 use crate::app::event::event_bus::IEventBus;
-use crate::errors::{KimiErrorPayload, to_kimi_error_payload};
+use crate::_base::errors::serialize::to_kimi_error_payload;
+type KimiErrorPayload = crate::_base::errors::serialize::ErrorPayload;
 use crate::human::agent::origin::PromptOrigin;
 use crate::human::agent::turn::{UserMeta, create_user_entry};
 use crate::human::llm::message::{ContentPart, UserMessage};
@@ -264,7 +265,7 @@ pub fn classify_turn_result(result: TurnResult) -> Result<CompletedTurnResult, W
                 return Err(crate::_base::errors::errors::shared_to_wire(error));
             }
             let payload = to_kimi_error_payload(&crate::_base::errors::serialize::UnknownError::Error(error.clone()));
-            if payload.code == PROVIDER_RATE_LIMIT {
+            if payload.code.as_str() == PROVIDER_RATE_LIMIT {
                 return Err(Box::new(provider_rate_limit_error_from_payload(&payload)));
             }
             if is_max_steps_exceeded_error(error.as_ref()) {

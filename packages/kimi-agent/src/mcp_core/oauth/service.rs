@@ -760,6 +760,8 @@ impl McpOAuthService {
                 let settle = settle.clone();
                 let server_name = server_name.clone();
                 let server_url = server_url.clone();
+                let this_for_auth = this.clone();
+                let completion_controller = completion_controller.clone();
                 let future = async move {
                     let result = async {
                         let callback_result = callback_server.wait_for_code(Some(completion_controller.signal()), None).await;
@@ -781,7 +783,7 @@ impl McpOAuthService {
                             OAuthAuthorizeOptions {
                                 scope: None,
                                 authorization_code: Some(code),
-                                fetch: this.auth_fetch(provider.clone(), vec![completion_controller.signal()]),
+                                fetch: this_for_auth.auth_fetch(provider.clone(), vec![completion_controller.signal()]),
                             },
                         )
                         .await?;
@@ -927,7 +929,7 @@ impl McpOAuthService {
                                         None => waiter.signal(),
                                     };
                                     let future = async move {
-                                        let completion = (start_completion.clone())();
+                                        let completion = start_completion();
                                         let completion_signal = match &deadline {
                                             Some(deadline) => AbortSignal::any(&[wait_signal.clone(), deadline.signal.clone()]),
                                             None => wait_signal,

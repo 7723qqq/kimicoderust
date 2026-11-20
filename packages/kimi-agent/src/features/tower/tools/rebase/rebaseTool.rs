@@ -9,6 +9,7 @@ use crate::agent::task::task::{AgentTaskInfo, IAgentTaskService};
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::features::tower::protocol::paths::TOWER_NAME;
 use crate::features::tower::protocol::store::{
     TowerActiveAgentIds, TowerMissionRuntimeOptions, TowerRebaseMissionStatus,
@@ -49,14 +50,6 @@ impl TowerRebaseTool {
 
     pub fn name(&self) -> &'static str {
         TOWER_REBASE_TOOL_NAME
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "write"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -199,6 +192,14 @@ impl TowerRebaseTool {
 }
 
 impl ExecutableTool for TowerRebaseTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Write)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         TowerRebaseTool::name(self)
     }

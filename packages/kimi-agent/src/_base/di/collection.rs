@@ -116,6 +116,16 @@ impl<T> Default for CollectionOptions<T> {
     }
 }
 
+impl<T> CollectionOptions<T> {
+    pub fn validating(
+        validate: impl Fn(&T, &[T]) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            validate: Some(Arc::new(validate)),
+        }
+    }
+}
+
 pub fn collection<T>(
     name: impl Into<String>,
     options: CollectionOptions<T>,
@@ -312,6 +322,7 @@ impl CollectionStore {
         self.fire(token, provider, true, &[record.clone()]);
         let store = self.clone();
         let token_name = token.name.clone();
+        let erased = token.erased();
         let id = record.id;
         Ok(Box::new(move || {
             let removed = store
@@ -320,7 +331,7 @@ impl CollectionStore {
                 .get_mut(&token_name)
                 .and_then(|records| records.shift_remove(&id));
             if let Some(record) = removed {
-                store.fire(&token.erased(), provider, false, &[record]);
+                store.fire(&erased, provider, false, &[record]);
             }
         }))
     }

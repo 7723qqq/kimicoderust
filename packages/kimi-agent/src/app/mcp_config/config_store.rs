@@ -230,7 +230,7 @@ impl IMcpConfigStore for McpConfigStore {
             let mut raw_servers = file.raw_servers.clone();
             raw_servers.insert(normalized.name.clone(), persisted_entry(&normalized)?);
             self.write(&file, raw_servers).await?;
-            self.list().await
+            IMcpConfigStore::list(self).await
         })
         .await
     }
@@ -245,7 +245,7 @@ impl IMcpConfigStore for McpConfigStore {
             let mut raw_servers = file.raw_servers.clone();
             raw_servers.insert(normalized.name.clone(), persisted_entry(&normalized)?);
             self.write(&file, raw_servers).await?;
-            self.list().await
+            IMcpConfigStore::list(self).await
         })
         .await
     }
@@ -264,7 +264,7 @@ impl IMcpConfigStore for McpConfigStore {
                 .map(|(entry_name, value)| (entry_name.clone(), value.clone()))
                 .collect();
             self.write(&file, raw_servers).await?;
-            self.list().await
+            IMcpConfigStore::list(self).await
         })
         .await
     }

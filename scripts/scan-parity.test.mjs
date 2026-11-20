@@ -137,6 +137,34 @@ describe('shell order agreement', () => {
   });
 });
 
+describe('tool contract against the implementation sources', () => {
+  const repo = join(import.meta.dirname, '..');
+  const toolContract = JSON.parse(
+    readFileSync(join(repo, 'packages/kimi-agent/tool-name-contract.json'), 'utf8'),
+  );
+  const rustTools = [
+    readFileSync(join(repo, 'packages/kimi-agent/src/tools/dispatch.rs'), 'utf8'),
+    readFileSync(join(repo, 'packages/kimi-agent/src/agent/tools/github/github_tools.rs'), 'utf8'),
+  ].join('\n');
+
+  it('keeps every contracted GitHub spec in its actual implementation owner', () => {
+    const missing = toolContract.v2Github.filter((name) => !rustTools.includes(`"${name}"`));
+    expect(missing).toEqual([]);
+  });
+
+  it('includes the newly implemented read-only GitHub specs', () => {
+    for (const name of [
+      'GitHubGetRepoTree',
+      'GitHubListPRCommits',
+      'GitHubGetCheckRuns',
+      'GitHubListWorkflowRunJobs',
+    ]) {
+      expect(toolContract.v2Github).toContain(name);
+      expect(rustTools).toContain(`"${name}"`);
+    }
+  });
+});
+
 describe('shell order against the real tree', () => {
   const repo = join(import.meta.dirname, '..');
   const rust = readFileSync(join(repo, 'packages/kimi-agent/src/native/shell.rs'), 'utf8');

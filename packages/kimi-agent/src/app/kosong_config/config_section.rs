@@ -308,6 +308,7 @@ pub struct ModelsSectionSchema;
 pub struct ModelOverridesSchema;
 pub struct ThinkingConfigSchema;
 pub struct ModelCatalogConfigSchema;
+pub struct SandboxConfigSchema;
 
 pub static PROVIDER_TYPE_SCHEMA: ProviderTypeSchema = ProviderTypeSchema;
 pub static OAUTH_REF_SCHEMA: OAuthRefSchema = OAuthRefSchema;
@@ -320,6 +321,7 @@ pub static MODELS_SECTION_SCHEMA: ModelsSectionSchema = ModelsSectionSchema;
 pub static MODEL_OVERRIDES_SCHEMA: ModelOverridesSchema = ModelOverridesSchema;
 pub static THINKING_CONFIG_SCHEMA: ThinkingConfigSchema = ThinkingConfigSchema;
 pub static MODEL_CATALOG_CONFIG_SCHEMA: ModelCatalogConfigSchema = ModelCatalogConfigSchema;
+pub static SANDBOX_CONFIG_SCHEMA_TYPED: SandboxConfigSchema = SandboxConfigSchema;
 
 impl ConfigSchema for ProviderTypeSchema {
     fn parse(&self, value: Value) -> Result<Value, Error2> {
@@ -400,6 +402,21 @@ impl ConfigSchema for ThinkingConfigSchema {
     fn parse(&self, value: Value) -> Result<Value, Error2> {
         let decoded: ThinkingConfig = decode(value, THINKING_SECTION)?;
         encode(&decoded, THINKING_SECTION)
+    }
+}
+
+impl ConfigSchema for SandboxConfigSchema {
+    fn parse(&self, value: Value) -> Result<Value, Error2> {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct SandboxConfig {
+            #[serde(default)]
+            mode: Option<String>,
+        }
+        let decoded: SandboxConfig = decode(value, crate::workspace::sandbox::sandbox::SANDBOX_SECTION)?;
+        if let Some(mode) = decoded.mode.as_deref() {
+            crate::workspace::sandbox::sandbox::SandboxMode::validate(mode).map_err(schema_error)?;
+        }
+        encode(&decoded, crate::workspace::sandbox::sandbox::SANDBOX_SECTION)
     }
 }
 
@@ -761,7 +778,15 @@ pub fn config_section_contributions() -> Vec<ConfigSectionContribution> {
     thinking.strip_env = Some(strip_thinking_env);
 
     let catalog = ConfigSectionContribution::new(MODEL_CATALOG_SECTION, &MODEL_CATALOG_CONFIG_SCHEMA);
-    vec![providers, models, overrides, thinking, catalog]
+
+    // v2 `registerConfigSection(SANDBOX_SECTION, SandboxConfigSchema, { defaultValue: { mode: 'off' } })`
+    let mut sandbox = ConfigSectionContribution::new(
+        crate::workspace::sandbox::sandbox::SANDBOX_SECTION,
+        &SANDBOX_CONFIG_SCHEMA_TYPED,
+    );
+    sandbox.default_value = Some(json!({"mode": "off"}));
+
+    vec![providers, models, overrides, thinking, catalog, sandbox]
 }
 
 pub fn register_config_sections(mut register: impl FnMut(ConfigSectionContribution)) {

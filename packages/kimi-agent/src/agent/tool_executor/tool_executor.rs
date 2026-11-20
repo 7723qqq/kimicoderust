@@ -165,6 +165,17 @@ pub trait ExecutableTool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> Map<String, Value>;
 
+    /// v2 `ExecutableTool.sideEffect`: absent means the tool has not declared one,
+    /// which the sandbox veto treats as "undeclared" rather than "read".
+    fn side_effect(&self) -> Option<crate::tool::tool_contract::ToolSideEffect> {
+        None
+    }
+
+    /// v2 `ExecutableTool.repoMutation`.
+    fn repo_mutation(&self) -> Option<crate::tool::tool_contract::RepoMutation> {
+        None
+    }
+
     fn resolve_execution(
         &self,
         input: Value,
@@ -190,6 +201,12 @@ pub struct ToolInfo {
 
 pub trait IAgentToolRegistryService: Send + Sync {
     fn resolve(&self, name: &str) -> Option<Arc<dyn ExecutableTool>>;
+    fn register(
+        &self,
+        tool: Arc<dyn ExecutableTool>,
+        options: crate::agent::tool_registry::tool_registry_service::ToolRegistrationOptions,
+    ) -> crate::agent::tool_registry::tool_registry_service::ToolRegistration;
+    fn unregister(&self, name: &str) -> bool;
     fn list(&self) -> Vec<ToolInfo>;
     fn list_live(&self) -> Option<Vec<ToolInfo>> {
         None

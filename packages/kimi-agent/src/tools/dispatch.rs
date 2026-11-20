@@ -47,7 +47,13 @@ impl NativeToolset {
     pub fn execute(&self, tool_name: &str, args: &Value) -> Option<ExecutableToolResult> {
         let sandbox = self.sandbox();
         match tool_name.to_ascii_lowercase().as_str() {
-            "read" => self.read_media(args).or_else(|| {
+            "read" => Self::read_media(
+                &sandbox,
+                &self.shell_bridge,
+                args,
+                &self.read_media_limits(),
+            )
+            .or_else(|| {
                 let event_log = self.wire_journal_read(args);
                 Self::read(&sandbox, &self.shell_bridge, args, event_log)
             }),
@@ -271,9 +277,10 @@ impl NativeToolset {
         if matches!(
             tool_name.to_ascii_lowercase().as_str(),
             "cronlist" | "cron_list" | "croncreate" | "cron_create" | "crondelete" | "cron_delete"
-        ) && let Some(refusal) =
-            crate::tools::goal_tools::main_agent_only_refusal(caller.as_str())
-        {
+        ) && let Some(refusal) = crate::agent::tools::main_agent_only::main_agent_only_execution(
+            caller.as_str(),
+            crate::agent::tools::main_agent_only::CRON_MAIN_AGENT_ONLY,
+        ) {
             return Some(refusal);
         }
 
@@ -395,13 +402,10 @@ impl NativeToolset {
             }
             "askuserquestion" | "ask_user_question" => {
                 let callbacks = self.callbacks.as_ref()?.clone();
-                let background_allowed = self.tools_filter.as_ref().is_none_or(|filter| {
-                    ["TaskList", "TaskOutput", "TaskStop"]
-                        .iter()
-                        .all(|name| filter.allows(name))
-                });
+                let background_allowed = self.background_tasks_available();
                 let caller = self.effective_caller_agent_id();
                 let llm_trace_id = self.llm_trace_id();
+                let cancel = self.effective_parent_cancel();
                 Some(
                     crate::agent::tools::ask_user_question::ask_user_question_tool::execute_ask_user_question(
                         callbacks,
@@ -413,6 +417,7 @@ impl NativeToolset {
                         tool_call_id,
                         self.non_interactive,
                         background_allowed,
+                        cancel.as_ref(),
                         args,
                     )
                     .await,
@@ -488,21 +493,27 @@ impl NativeToolset {
                 } else {
                     "TaskWait"
                 };
-                let mut telemetry_holder: Option<Box<dyn Fn(Value) + '_>> = None;
-                if let Some(callbacks) = self.callbacks.as_ref() {
-                    telemetry_holder = Some(Box::new(|event: Value| callbacks.telemetry(event)));
-                }
+                let telemetry = |event: Value| callbacks.telemetry(event);
+                let parent_cancel = self.effective_parent_cancel();
                 let wait = task_tools::WaitContext {
                     tally: &self.wait_tally,
                     turn_id: self.effective_turn_id(),
                     caller_agent_id: caller.as_str(),
                     display_name,
-                    on_update: on_update.map(|emit| emit as &(dyn Fn(&crate::tools::ToolUpdate<'_>))),
-                    telemetry: telemetry_holder.as_deref(),
+                    parent_cancel: parent_cancel.as_ref(),
+                    on_update,
+                    telemetry: Some(&telemetry),
                 };
                 Some(
-                    task_tools::execute_task_wait(callbacks, runner, steer.as_ref(), &wait, args)
-                        .await,
+                    match task_tools::execute_task_wait(callbacks, runner, steer.as_ref(), &wait, args)
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            use crate::agent::tool_executor::tool_executor_service::aborted_tool_output;
+                            err_result(aborted_tool_output(display_name, Some(Arc::from(error))))
+                        }
+                    },
                 )
             }
             "exitplanmode" | "exit_plan_mode" => {
@@ -1157,29 +1168,44 @@ impl NativeToolset {
         }
     }
 
-    pub(super) fn read_media(&self, args: &Value) -> Option<ExecutableToolResult> {
-        let request = match read_media::ReadMediaRequest::from_args(args) {
-            Ok(request) => request,
-            Err(message) => return Some(err_result(message)),
-        };
-        let path = args.get("path")?.as_str()?;
-        let resolved = Self::resolve(&self.sandbox(), &self.shell_bridge, path)?;
-        read_media::read_image_media(&resolved, &request, &self.read_media_limits())
-    }
-
-    pub(super) async fn read_media_on_blocking_pool(
-        &self,
+    fn read_media(
+        sandbox: &Sandbox,
+        bridge: &ShellPathBridge,
         args: &Value,
+        limits: &read_media::ReadMediaLimits,
     ) -> Option<ExecutableToolResult> {
         let request = match read_media::ReadMediaRequest::from_args(args) {
             Ok(request) => request,
             Err(message) => return Some(err_result(message)),
         };
         let path = args.get("path")?.as_str()?;
-        let resolved = Self::resolve(&self.sandbox(), &self.shell_bridge, path)?;
+        let resolved = if crate::agent::media::media_ref::is_daemon_file_url(path) {
+            crate::server::files::resolve_attachment_reference(
+                &crate::server::files::FileStore::new(),
+                path,
+            )?
+        } else {
+            if let Some(refusal) = Self::file_access_refusal(
+                sandbox,
+                bridge,
+                path,
+                crate::native::path_access::PathAccessOperation::Read,
+                &crate::native::path_access::WorkspaceAccessPolicy::default(),
+            ) {
+                return Some(err_result(refusal));
+            }
+            Self::resolve(sandbox, bridge, path)?
+        };
+        read_media::read_image_media(&resolved, &request, limits)
+    }
+
+    async fn read_media_on_blocking_pool(&self, args: &Value) -> Option<ExecutableToolResult> {
+        let sandbox = self.sandbox();
+        let bridge = self.shell_bridge.clone();
+        let args = args.clone();
         let limits = self.read_media_limits();
         match tokio::task::spawn_blocking(move || {
-            read_media::read_image_media(&resolved, &request, &limits)
+            Self::read_media(&sandbox, &bridge, &args, &limits)
         })
         .await
         {

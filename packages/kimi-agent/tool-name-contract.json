@@ -62,8 +62,12 @@
   "unloadedInV2": [],
   "v2Github": [
     "GitHubGetRepo",
+    "GitHubGetRepoTree",
     "GitHubListBranches",
     "GitHubListCommits",
+    "GitHubListPRCommits",
+    "GitHubGetCheckRuns",
+    "GitHubListWorkflowRunJobs",
     "GitHubGetCommit",
     "GitHubGetFileContents",
     "GitHubCreateOrUpdateFile",

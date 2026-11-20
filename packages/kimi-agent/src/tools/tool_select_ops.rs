@@ -144,7 +144,8 @@ pub fn tool_select_tool_from_definition(
             crate::tools::registry::ToolSource::Builtin => ToolSelectSource::Builtin,
             crate::tools::registry::ToolSource::Mcp => ToolSelectSource::Mcp,
             crate::tools::registry::ToolSource::Host
-            | crate::tools::registry::ToolSource::Plugin => ToolSelectSource::User,
+            | crate::tools::registry::ToolSource::Plugin
+            | crate::tools::registry::ToolSource::User => ToolSelectSource::User,
         },
         disclosure: Some(definition.disclosure),
         origin: ToolSelectOrigin::Initial,

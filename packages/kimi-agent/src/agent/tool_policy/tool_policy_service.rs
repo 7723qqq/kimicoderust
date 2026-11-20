@@ -256,7 +256,7 @@ fn config_value<T: serde::de::DeserializeOwned>(config: &dyn IConfigService) -> 
 fn evaluation_source(source: ToolSource) -> EvaluationToolSource {
     match source {
         ToolSource::Mcp => EvaluationToolSource::Mcp,
-        ToolSource::Host => EvaluationToolSource::User,
+        ToolSource::Host | ToolSource::User => EvaluationToolSource::User,
         ToolSource::Builtin | ToolSource::Plugin => EvaluationToolSource::Builtin,
     }
 }

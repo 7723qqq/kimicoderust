@@ -154,13 +154,13 @@ pub fn register_mirror_agent_run_events() {
         SubagentFailed::TYPE,
         SubagentCancelled::TYPE,
     ] {
-        register_event2_class(Event2Class {
+        register_event2_class(&Arc::new(Event2Class {
             type_: type_.to_string(),
             durable: true,
             observable: true,
             agent_domain: false,
             schema: None,
-        });
+        }));
     }
 }
 
@@ -222,16 +222,21 @@ pub fn emit_agent_run_spawned(
     }
     requester.accessor().get(&I_TELEMETRY_SERVICE).track2(
         "subagent_created",
-        json!({
-            "subagent_name": meta.profile_name,
-            "run_in_background": meta.run_in_background.unwrap_or(false),
-            "fork": meta.fork.unwrap_or(false),
-            "agent_id": target_agent_id,
-            "parent_agent_id": requester.id(),
-            "parent_tool_call_id": meta.parent_tool_call_id.unwrap_or_default(),
-            "model": meta.model,
-            "model_source": model_source_name(meta.model_source.as_ref()),
-        }),
+        Some(
+            json!({
+                "subagent_name": meta.profile_name,
+                "run_in_background": meta.run_in_background.unwrap_or(false),
+                "fork": meta.fork.unwrap_or(false),
+                "agent_id": target_agent_id,
+                "parent_agent_id": requester.id(),
+                "parent_tool_call_id": meta.parent_tool_call_id.unwrap_or_default(),
+                "model": meta.model,
+                "model_source": model_source_name(meta.model_source.as_ref()),
+            })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        ),
     );
 }
 
@@ -253,7 +258,7 @@ pub async fn mirror_agent_run(
         });
     }
     if let Some(prompt) = options.prompt.clone() {
-        let hook_result = subagents
+        subagents
             .hooks()
             .on_will_start_agent_task
             .run(super::subagent::AgentTaskStartHookContext {
@@ -262,13 +267,14 @@ pub async fn mirror_agent_run(
                 signal: options.signal.clone(),
             })
             .await;
-        if let Err(error) = hook_result {
-            let error = SharedAgentRunError::new(error);
-            return Err(cancel_and_rethrow(&dispatcher, &run, &options, error));
-        }
         if options.signal.aborted() {
-            let reason = options.signal.reason();
-            let error = SharedAgentRunError::new(reason);
+            let error = SharedAgentRunError::new(
+                options
+                    .signal
+                    .throw_if_aborted()
+                    .err()
+                    .unwrap_or_else(|| Box::new(crate::_base::utils::abort::abort_error())),
+            );
             return Err(cancel_and_rethrow(&dispatcher, &run, &options, error));
         }
     }
@@ -352,10 +358,11 @@ pub fn classify_run_termination(error: &WireAsyncError, signal: &AbortSignal) ->
         };
     }
     let reason = signal.reason();
-    if is_user_cancellation(reason.as_ref()) {
+    let reason = reason.as_deref();
+    if reason.is_some_and(|error| is_user_cancellation(error)) {
         return RunTermination::Cancelled;
     }
-    if !is_abort_error(reason.as_ref()) {
+    if !reason.is_some_and(|error| is_abort_error(error)) {
         RunTermination::Failed
     } else {
         RunTermination::Cancelled

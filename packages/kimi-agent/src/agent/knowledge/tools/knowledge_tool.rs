@@ -130,16 +130,14 @@ impl KnowledgeTool {
         "Knowledge"
     }
 
+    pub fn description(&self) -> &'static str {
+        DESCRIPTION
+    }
     pub fn side_effect(&self) -> &'static str {
         "write"
     }
-
     pub fn repo_mutation(&self) -> &'static str {
         "none"
-    }
-
-    pub fn description(&self) -> &'static str {
-        DESCRIPTION
     }
 
     pub fn parameters(&self) -> Map<String, Value> {

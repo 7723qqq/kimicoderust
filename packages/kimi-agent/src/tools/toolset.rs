@@ -379,6 +379,7 @@ impl NativeToolset {
     }
 
     pub fn seed_loaded_tools_from_history(&self, history: &[crate::turn_loop::types::LLMMessage]) {
+        let history = crate::tools::tool_select_state::context_messages(history);
         let state = self
             .tool_select_state
             .lock()
@@ -390,7 +391,7 @@ impl NativeToolset {
             Vec::new()
         };
         let mut loaded: std::collections::HashSet<String> =
-            crate::tools::tool_select_state::collect_loaded_dynamic_tools(history, &current)
+            crate::tools::tool_select_state::collect_loaded_dynamic_tools(&history, &current)
                 .into_keys()
                 .collect();
         loaded.extend(
@@ -489,6 +490,7 @@ impl NativeToolset {
         &self,
         history: &[crate::turn_loop::types::LLMMessage],
     ) -> Option<String> {
+        let history = crate::tools::tool_select_state::context_messages(history);
         self.take_last_announcement_disclosure();
         if !self.tool_select_enabled {
             return None;
@@ -526,7 +528,7 @@ impl NativeToolset {
                 return None;
             }
             let query =
-                crate::tools::tool_select_state::latest_user_query(history).unwrap_or_default();
+                crate::tools::tool_select_state::latest_user_query(&history).unwrap_or_default();
             let search_entries = candidates
                 .iter()
                 .map(|tool| crate::tools::tool_retriever::ToolSearchEntry {
@@ -569,7 +571,8 @@ impl NativeToolset {
                 &selected,
                 candidates.len(),
             );
-            if crate::tools::tool_select_state::last_retrieved_announcement_text(history).as_deref()
+            if crate::tools::tool_select_state::last_retrieved_announcement_text(&history)
+                .as_deref()
                 == Some(content.as_str())
             {
                 return None;
@@ -593,10 +596,10 @@ impl NativeToolset {
                 },
             ))
         } else {
-            let last = crate::tools::tool_select_state::last_announcement_disclosure(history);
+            let last = crate::tools::tool_select_state::last_announcement_disclosure(&history);
             let last_revision = last.as_ref().map(|disclosure| disclosure.revision());
             if last_revision.is_none_or(|last| last > revision) {
-                self.legacy_disclosure_announcement(&state, history, revision)
+                self.legacy_disclosure_announcement(&state, &history, revision)
                     .or_else(|| {
                         let tools = state
                             .current
@@ -649,7 +652,7 @@ impl NativeToolset {
                     ));
                     break;
                 }
-                delta.or_else(|| self.legacy_disclosure_announcement(&state, history, revision))
+                delta.or_else(|| self.legacy_disclosure_announcement(&state, &history, revision))
             }
         };
         let (content, disclosure) = result?;
@@ -828,7 +831,7 @@ impl NativeToolset {
     fn legacy_disclosure_announcement(
         &self,
         state: &crate::tools::tool_select_ops::ToolSelectModelState,
-        history: &[crate::turn_loop::types::LLMMessage],
+        history: &[crate::agent::context_memory::types::ContextMessage],
         revision: usize,
     ) -> Option<(
         String,
@@ -886,8 +889,7 @@ impl NativeToolset {
             crate::tools::tool_select_state::is_loadable_tools_announcement(message)
         });
         if last.is_some_and(|message| {
-            message
-                .content
+            crate::tools::tool_select_state::message_text(message)
                 .contains(crate::tools::select_tools::NO_LOADABLE_TOOLS_MESSAGE)
         }) {
             return None;
@@ -941,23 +943,17 @@ impl NativeToolset {
         self
     }
 
-    pub(super) fn background_bash_timeout(&self, args: &Value) -> Option<Duration> {
-        if args
-            .get("disable_timeout")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return None;
-        }
-        let seconds = args
-            .get("timeout")
-            .and_then(Value::as_u64)
-            .or(self.bash_task_timeout_s)
-            .unwrap_or(BASH_TASK_DEFAULT_TIMEOUT_S);
-        if seconds == 0 {
-            return None;
-        }
-        Some(Duration::from_secs(seconds.min(BASH_TASK_MAX_SECONDS)))
+    pub(super) fn shell_detach_timeout(&self) -> Option<Duration> {
+        use crate::agent::task::print_defaults::MAX_TIMER_DELAY_MS;
+        use crate::agent::tools::os::bash::bash::BASH_TASK_TIMEOUT_S_DEFAULT;
+        use crate::agent::tools::os::shell::shell_tool_results::MS_PER_SECOND;
+
+        let seconds = self
+            .bash_task_timeout_s
+            .unwrap_or(BASH_TASK_TIMEOUT_S_DEFAULT);
+        (seconds > 0).then(|| {
+            Duration::from_millis(seconds.saturating_mul(MS_PER_SECOND).min(MAX_TIMER_DELAY_MS))
+        })
     }
 
     pub(super) fn read_media_limits(&self) -> read_media::ReadMediaLimits {
@@ -1321,7 +1317,7 @@ impl NativeToolset {
         }
         names.extend(
             crate::tools::tool_policy::native_tool_defs(
-                self.github_credentials().is_some(),
+                self.github_tools_available(),
                 false,
                 None,
                 self.secondary_model.as_deref(),
@@ -1417,6 +1413,24 @@ impl NativeToolset {
         &self,
     ) -> Option<&crate::agent::tools::github::github_legacy::GitHubCredentials> {
         self.github_credentials.as_ref()
+    }
+
+    pub(crate) fn github_tools_available(&self) -> bool {
+        crate::agent::tools::github::github_legacy::has_token(self.github_credentials())
+    }
+
+    pub(crate) fn background_tasks_available(&self) -> bool {
+        CALLER_BACKGROUND_TASKS_ALLOWED
+            .try_with(|allowed| *allowed)
+            .unwrap_or(true)
+            && self
+                .tools_filter
+                .as_ref()
+                .is_none_or(tool_policy::ToolsFilter::allows_background_tasks)
+    }
+
+    pub(crate) fn shell_background_available(&self) -> bool {
+        !operationService::operation_log_enabled() && self.background_tasks_available()
     }
 
     pub fn with_secondary_model(

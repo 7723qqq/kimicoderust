@@ -7,7 +7,9 @@ use once_cell::sync::Lazy;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
-use crate::_base::exec_env::decode_text::{decode_text_with_errors, read_utf8_lines};
+use crate::_base::exec_env::decode_text::{
+    ByteStream, TextDecodeErrors, decode_text_with_errors, read_utf8_lines,
+};
 use crate::os::interface::host_file_system::{
     HostDirEntry, HostFileHead, HostFileStat, HostLineStream, HostReadLinesOptions,
     HostReadTextOptions, HostWalkEntry, HostWalkResult, HostWalkVisitor,
@@ -195,9 +197,10 @@ impl IHostFileSystem for RemoteFileSystem {
         decode_text_with_errors(
             &bytes,
             &options.encoding.unwrap_or_else(|| "utf-8".to_string()),
-            options.errors.unwrap_or_default(),
+            options.errors.unwrap_or(TextDecodeErrors::Strict),
             options.preserve_bom.unwrap_or(false),
         )
+        .map_err(|error| to_remote_fs_error(Box::new(error) as WireAsyncError))
     }
 
     async fn write_text(&self, path: &str, data: &str) -> Result<(), WireAsyncError> {
@@ -267,7 +270,7 @@ impl IHostFileSystem for RemoteFileSystem {
     ) -> HostLineStream {
         let options = options.unwrap_or_default();
         let encoding = options.encoding.unwrap_or_else(|| "utf-8".to_string());
-        let errors = options.errors.unwrap_or_default();
+        let errors = options.errors.unwrap_or(TextDecodeErrors::Strict);
         if encoding != "utf-8" && encoding != "utf8" {
             let this = Self {
                 connection: self.connection.clone(),
@@ -292,7 +295,12 @@ impl IHostFileSystem for RemoteFileSystem {
                 }
             }));
         }
-        read_utf8_lines(self.read_chunks(path, 0), errors)
+        let source = self
+            .read_chunks(path, 0)
+            .map(|item| item.map_err(|error| std::io::Error::other(error.to_string())));
+        let source: ByteStream = Box::pin(source);
+        let lines = read_utf8_lines(source, errors);
+        Box::pin(lines.map(|line| line.map_err(|error| to_remote_fs_error(Box::new(error) as WireAsyncError))))
     }
 
     async fn create_exclusive(&self, path: &str, data: &[u8]) -> Result<bool, WireAsyncError> {

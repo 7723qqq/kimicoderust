@@ -5,7 +5,7 @@
 //! agent may narrow its cwd, but it may not switch environments or leave the
 //! parent workspace. The fork had no child-level cwd at all, so a subagent
 //! either ran in the parent's directory or in whatever the process cwd
-//! happened to be — the second is an unnoticed sandbox escape.
+//! happened to be — the second is an unnoticed escape from the workspace.
 //!
 //! [`AgentEnvironment::resolve`] is the only constructor. It always inherits
 //! the parent's environment id, resolves the child cwd through

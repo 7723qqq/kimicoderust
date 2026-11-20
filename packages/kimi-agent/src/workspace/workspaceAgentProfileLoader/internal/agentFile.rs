@@ -73,11 +73,13 @@ pub fn parse_agent_file_text(
 ) -> Result<AgentFileDefinition, WireAsyncError> {
     let parsed = match parse_frontmatter(&options.text) {
         Ok(parsed) => parsed,
-        Err(error) if error.downcast_ref::<FrontmatterError>().is_some() => {
+        Err(error) => {
             let message = format!("Invalid frontmatter in {}: {error}", options.path);
-            return Err(Box::new(AgentFileParseError::new(message, Some(error))));
+            return Err(Box::new(AgentFileParseError::new(
+                message,
+                Some(Box::new(error)),
+            )));
         }
-        Err(error) => return Err(error),
     };
     let frontmatter = parsed.data;
     if frontmatter.is_null() {

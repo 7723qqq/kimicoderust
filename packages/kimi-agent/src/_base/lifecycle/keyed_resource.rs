@@ -288,7 +288,8 @@ where
             if drain_entry.disposed.swap(true, Ordering::SeqCst) {
                 return;
             }
-            if let Some(resource) = drain_entry.resource.lock().clone() {
+            let resource = drain_entry.resource.lock().clone();
+            if let Some(resource) = resource {
                 resource.dispose().await;
             }
         });

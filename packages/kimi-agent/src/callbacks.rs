@@ -565,8 +565,8 @@ fn checkpoint_write_paths(accesses: &crate::turn_loop::types::ToolAccesses) -> V
 }
 
 /// A [`HostCallbacks`] decorator that executes tools natively (inside the
-/// Rust process, sandboxed to the workspace) and forwards everything the
-/// sandbox cannot handle to the wrapped callbacks.
+/// Rust process, confined to the workspace root) and forwards everything the
+/// native toolset cannot handle to the wrapped callbacks.
 ///
 /// **Every** natively-executed call — read-only or mutating — is gated on a
 /// host permission grant first: the host policy chain can require interactive
@@ -622,7 +622,7 @@ pub struct NativeToolCallbacks {
     pub hook_guard: Option<Arc<crate::tools::external_hooks::HookGuard>>,
     /// Optional general `beforeExecute` listener gate (v2
     /// `onBeforeExecuteTool`). Runs in registration order after the built-in
-    /// veto/sandbox gates and before the permission gate; the first veto wins,
+    /// veto gates and before the permission gate; the first veto wins,
     /// `Allow` stops the remaining listeners, `Pass` forwards metadata. Unlike
     /// the fixed `*_veto` strings above, listeners can inspect the parsed
     /// arguments and await an asynchronous decision.
@@ -657,7 +657,6 @@ pub struct NativeToolCallbacks {
     /// `notifyUserAvailable` two-input gate; #4153's nudge service keys off
     /// the same answer). Gates the advertised NotifyUser tool.
     pub notify_user_enabled: bool,
-    pub sandbox_policy: Option<crate::tools::sandbox::SandboxExecutionPolicy>,
 }
 
 /// A plan-mode tool guard: `(tool_name, args) -> denial reason or None`,
@@ -700,7 +699,6 @@ impl NativeToolCallbacks {
             tower_worktree_root: None,
             tower_enabled: true,
             notify_user_enabled: true,
-            sandbox_policy: None,
         }
     }
 }
@@ -761,13 +759,12 @@ impl HostCallbacks for NativeToolCallbacks {
             tower_worktree_root: self.tower_worktree_root.clone(),
             tower_enabled: self.tower_enabled,
             notify_user_enabled: self.notify_user_enabled,
-            sandbox_policy: self.sandbox_policy.clone(),
         };
         Box::pin(async move {
             // G-6 #7: a CreateGoal that must be reviewed (permission mode is
             // not `auto`) runs on the host, whose full veto chain — goal-start
             // review included — then applies. Treated exactly like a tool the
-            // sandbox cannot handle: host executes, observations still apply.
+            // native toolset cannot handle: host executes, observations still apply.
             if !this.toolset.handles(&request.tool_name)
                 || this
                     .goal_guard
@@ -894,38 +891,8 @@ impl HostCallbacks for NativeToolCallbacks {
                     note: None,
                 });
             }
-            let sandbox_denial = this.sandbox_policy.as_ref().and_then(|policy| {
-                policy.sandbox_tool_veto(
-                    &request.tool_name,
-                    crate::tools::sandbox::tool_side_effect(&request.tool_name),
-                    &resolution.accesses,
-                )
-            });
-            if let Some(reason) = sandbox_denial {
-                this.inner.emit_event(serde_json::json!({
-                    "type": "tool.native",
-                    "agent_id": request.agent_id,
-                    "turn_id": request.turn_id,
-                    "tool_call_id": request.tool_call_id,
-                    "tool_name": request.tool_name,
-                    "arguments": request.arguments,
-                    "content": reason,
-                    "is_error": true,
-                    "note": null,
-                    // v2 `ToolResultEvent.synthetic`: this result was produced
-                    // by a gate, not by running the tool.
-                    "synthetic": true,
-                }));
-                return Ok(ToolExecuteResponse {
-                    delivery: None,
-                    stop_turn: false,
-                    content: reason,
-                    is_error: true,
-                    note: None,
-                });
-            }
             // v2 `fireBeforeExecute`: registered listeners run after the fixed
-            // veto/sandbox gates and before the permission gate, so a hard
+            // veto gates and before the permission gate, so a hard
             // refusal never triggers an approval prompt. The first veto wins;
             // `Pass` metadata is carried on the outcome (no native tool reads
             // execution metadata today — see `tools/before_execute.rs`).
@@ -1289,7 +1256,7 @@ impl HostCallbacks for NativeToolCallbacks {
             // A host that virtualizes the filesystem (ACP clients advertising
             // `fs.*`) owns Read/Write: after the veto/plan/permission/stale
             // gates, run the tool through the host instead of the native
-            // sandbox. The completed host execution is observed so a later
+            // runtime. The completed host execution is observed so a later
             // native Write does not trip the stale guard.
             if this.inner.owns_tool(&request.tool_name) {
                 let response = this.inner.execute_tool(request.clone()).await?;
@@ -1487,7 +1454,7 @@ impl HostCallbacks for NativeToolCallbacks {
                     );
                     Ok(finalized)
                 }
-                // Sandbox escape or unrecognized argument shape — the host
+                // Unsupported natively or unrecognized argument shape — the host
                 // already allowed the call, so run it there. The completed
                 // host execution is observed like any other, so a later
                 // native Write to this file doesn't trip on it.
@@ -1558,6 +1525,10 @@ impl HostCallbacks for NativeToolCallbacks {
         self.inner.ask_question(request)
     }
 
+    fn cancel_question(&self, question_id: &str, reason: &str) {
+        self.inner.cancel_question(question_id, reason);
+    }
+
     fn state_read(
         &self,
         request: StateReadRequest,
@@ -1590,7 +1561,7 @@ impl HostCallbacks for NativeToolCallbacks {
         Box::pin(async move {
             let filter = toolset.tools_filter().cloned();
             let mut tools = crate::tools::tool_policy::native_tool_defs_with_notify(
-                toolset.github_credentials().is_some(),
+                toolset.github_tools_available(),
                 tower_enabled,
                 notify_user_enabled,
                 filter.as_ref(),
@@ -1885,6 +1856,10 @@ impl HostCallbacks for CountingCallbacks {
         self.inner.ask_question(request)
     }
 
+    fn cancel_question(&self, question_id: &str, reason: &str) {
+        self.inner.cancel_question(question_id, reason);
+    }
+
     fn state_read(
         &self,
         request: StateReadRequest,
@@ -2018,6 +1993,10 @@ impl HostCallbacks for StateStoreCallbacks {
         request: AskQuestionRequest,
     ) -> BoxFuture<'static, Result<AskQuestionResponse, String>> {
         self.inner.ask_question(request)
+    }
+
+    fn cancel_question(&self, question_id: &str, reason: &str) {
+        self.inner.cancel_question(question_id, reason);
     }
 
     fn state_read(

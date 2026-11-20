@@ -29,7 +29,10 @@ impl<Outcome> TimeoutOutcomePromise<Outcome> {
     }
 }
 
-impl<Outcome> Future for TimeoutOutcomePromise<Outcome> {
+impl<Outcome> Future for TimeoutOutcomePromise<Outcome>
+where
+    Outcome: Clone,
+{
     type Output = Outcome;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {

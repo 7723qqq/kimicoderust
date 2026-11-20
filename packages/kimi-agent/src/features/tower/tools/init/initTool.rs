@@ -7,6 +7,7 @@ use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::app::session_manager::session_manager::ISessionManager;
 use crate::features::tower::protocol::store::{TowerReanchorMissionDigest, TowerReanchorRelation};
 use crate::features::tower::tools::plan::planTool::IAgentTowerService;
@@ -46,14 +47,6 @@ impl TowerInitTool {
 
     pub fn name(&self) -> &'static str {
         TOWER_INIT_TOOL_NAME
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -178,6 +171,14 @@ impl TowerInitTool {
 }
 
 impl ExecutableTool for TowerInitTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         TowerInitTool::name(self)
     }

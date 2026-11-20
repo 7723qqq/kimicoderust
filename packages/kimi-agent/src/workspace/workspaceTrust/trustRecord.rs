@@ -127,13 +127,13 @@ async fn find_legacy_trust_records(
     let canonical_key = trust_key(root);
     let legacy_key = encode_workdir_key(root);
     let mut result = Vec::new();
-    for key in docs.list(TRUST_SCOPE).await? {
+    for key in docs.list(TRUST_SCOPE, None).await? {
         if key == canonical_key || key == legacy_key || TEMP_KEY.is_match(&key) {
             continue;
         }
         let record = match docs.get(TRUST_SCOPE, &key).await {
             Ok(record) => record,
-            Err(error) if is_storage_error(error.as_ref(), STORAGE_DECODE_FAILED) => continue,
+            Err(error) if is_storage_error(&error, STORAGE_DECODE_FAILED) => continue,
             Err(error) => return Err(error),
         };
         let Some(record) = record else {

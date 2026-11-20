@@ -810,8 +810,11 @@ fn run_turn_inner<'a>(
             .toolset
             .as_ref()
             .is_some_and(|toolset| toolset.supports_dynamic_tool_loading());
-        messages =
-            crate::tools::tool_select_state::shape_history(messages, supports_dynamic_loading);
+        let shaped = crate::tools::tool_select_state::shape_history(
+            crate::tools::tool_select_state::context_messages(&messages),
+            supports_dynamic_loading,
+        );
+        messages = crate::tools::tool_select_state::llm_messages(shaped);
 
         if supports_dynamic_loading && let Some(toolset) = &input.toolset {
             toolset.seed_loaded_tools_from_history(&messages);

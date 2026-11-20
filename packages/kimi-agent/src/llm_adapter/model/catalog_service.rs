@@ -411,7 +411,15 @@ impl LlmCredentialProvider for EnvCredentialProvider {
 
 fn provider_config_from_catalog(provider: &CatalogProviderInfo) -> ProviderConfig {
     ProviderConfig {
-        model_source: provider.model_source,
+        model_source: provider.model_source.as_deref().and_then(|source| {
+            use crate::app::kosong_config::config_section::ModelSource;
+            match source {
+                "static" => Some(ModelSource::Static),
+                "discover" => Some(ModelSource::Discover),
+                "oauth-catalog" => Some(ModelSource::OauthCatalog),
+                _ => None,
+            }
+        }),
         base_url: provider.base_url.clone(),
         custom_headers: provider.custom_headers.as_ref().map(|headers| {
             headers

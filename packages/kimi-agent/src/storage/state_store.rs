@@ -929,6 +929,61 @@ impl StateStore {
     /// v2 #4568 `editGoalObjective`: change only the objective of the current
     /// goal. A no-op still returns the live snapshot so the route answers with
     /// the same shape as a real edit.
+    /// v2 `goal.create` (`goalCreateSchema` in `features/goal/goalOps.ts`):
+    /// `agentId`, `goalId`, `objective`, plus optional `completionCriterion`,
+    /// `status`, `budgetLimits` and timestamps.
+    fn goal_create(&self, value: &Value) -> Result<StateWriteOutcome, String> {
+        let invalid = || {
+            "State write error: [-32003] invalid goal create value: expected { action: \"create\", agentId: string, goalId: string, objective: string, completionCriterion?: string, status?: string, budgetLimits?: {...} }".to_string()
+        };
+        let Some(goal_id) = value.get("goalId").and_then(|v| v.as_str()) else {
+            return Err(invalid());
+        };
+        let Some(objective) = value.get("objective").and_then(|v| v.as_str()) else {
+            return Err(invalid());
+        };
+        let status = match value.get("status").and_then(|v| v.as_str()) {
+            None | Some("active") => GoalStatus::Active,
+            Some("paused") => GoalStatus::Paused,
+            Some("blocked") => GoalStatus::Blocked,
+            Some("complete") => GoalStatus::Complete,
+            Some(_) => return Err(invalid()),
+        };
+        let now = now_ms();
+        let budget_limits = value.get("budgetLimits").map(|budget| GoalBudgetLimits {
+            token_budget: budget.get("tokenBudget").and_then(|v| v.as_u64()),
+            turn_budget: budget.get("turnBudget").and_then(|v| v.as_u64()),
+            wall_clock_budget_ms: budget.get("wallClockBudgetMs").and_then(|v| v.as_u64()),
+        }).unwrap_or_default();
+        let state = GoalState {
+            goal_id: goal_id.to_string(),
+            objective: objective.to_string(),
+            completion_criterion: value
+                .get("completionCriterion")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            status,
+            turns_used: 0,
+            tokens_used: 0,
+            input_tokens_used: 0,
+            output_tokens_used: 0,
+            wall_clock_ms: 0,
+            wall_clock_resumed_at: (status == GoalStatus::Active).then_some(now),
+            budget_limits,
+            terminal_reason: None,
+            host_owned: false,
+            created_at: value
+                .get("createdAt")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(now),
+            updated_at: value
+                .get("updatedAt")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(now),
+        };
+        Ok(goal_outcome(&state, now))
+    }
+
     fn goal_edit_objective(&self, value: &Value) -> Result<StateWriteOutcome, String> {
         let Some(objective) = value.get("objective").and_then(|o| o.as_str()) else {
             return Err(
@@ -1124,6 +1179,39 @@ impl StateStore {
         Ok(StateWriteOutcome {
             stored: Value::Array(entries),
             response: entry,
+        })
+    }
+
+    /// v2 `cron.delete` (`cronDeleteSchema`): `{ ids: string[] }`.
+    fn cron_delete(&self, value: &Value) -> Result<StateWriteOutcome, String> {
+        let Some(ids) = value.get("ids").and_then(|v| v.as_array()) else {
+            return Err(
+                "State write error: [-32003] invalid cron delete value: expected { action: \"delete\", ids: string[] }".into(),
+            );
+        };
+        let ids = ids
+            .iter()
+            .filter_map(|id| id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        if ids.is_empty() {
+            return Err(
+                "State write error: [-32003] invalid cron delete value: expected { action: \"delete\", ids: string[] }".into(),
+            );
+        }
+        let entries = self.read_domain_list("cron")?;
+        let kept = entries
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .is_none_or(|id| !ids.contains(id))
+            })
+            .collect::<Vec<_>>();
+        let removed = ids.len() as u64;
+        Ok(StateWriteOutcome {
+            stored: Value::Array(kept),
+            response: json!({ "removed": removed }),
         })
     }
 

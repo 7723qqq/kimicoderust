@@ -25,7 +25,7 @@ use super::workspace_trust_store::{IWorkspaceTrustEntry, IWorkspaceTrustStore};
 pub use super::trust_env::{TRUST_WORKSPACE_ENV, trust_workspace_env_trusted};
 
 pub static WORKSPACE_TRUST_TRUSTED_KEY: LazyLock<StateDefinition<bool>> =
-    LazyLock::new(|| define_state("workspaceTrust.trusted", || false));
+    LazyLock::new(|| define_state("workspaceTrust.trusted", std::sync::Arc::new(|| false)));
 
 #[derive(Debug, Clone)]
 struct ServiceSharedError(Arc<String>);
@@ -103,11 +103,11 @@ impl WorkspaceTrustService {
         };
         this.bind_trust(None);
         let weak = Arc::downgrade(&this.inner);
-        let subscription = this.inner.dirs.on_did_change(move || {
+        let subscription = this.inner.dirs.on_did_change(std::sync::Arc::new(move || {
             if let Some(inner) = weak.upgrade() {
                 WorkspaceTrustService { inner }.rebind_trust();
             }
-        });
+        }));
         *this.inner._dirs_subscription.lock() = Some(subscription);
         this
     }
@@ -121,7 +121,7 @@ impl WorkspaceTrustService {
         roots.extend(self.inner.dirs.additional_dirs());
         let inner = self.inner.trust_store.for_roots(&roots);
         let weak = Arc::downgrade(&self.inner);
-        let subscription = inner.on_did_change(move |change| {
+        let subscription = inner.on_did_change(std::sync::Arc::new(move |change: WorkspaceTrustChange| {
             if let Some(notified) = &notified {
                 notified.store(true, Ordering::SeqCst);
             }
@@ -130,7 +130,7 @@ impl WorkspaceTrustService {
                 this.set_trusted(change.trusted);
                 this.fire(change);
             }
-        });
+        }));
         let mut state = self.inner.state.lock();
         state.inner = Some(inner);
         state.inner_subscription = Some(subscription);

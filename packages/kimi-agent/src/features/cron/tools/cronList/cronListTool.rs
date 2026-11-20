@@ -8,6 +8,7 @@ use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::agent::tools::main_agent_only::{CRON_MAIN_AGENT_ONLY, main_agent_only_execution};
 use crate::features::cron::cron_service::AgentCronService;
 use crate::features::cron::cron_task::CronTask;
@@ -32,14 +33,6 @@ impl CronListTool {
 
     pub fn name(&self) -> &'static str {
         "CronList"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -153,6 +146,14 @@ pub fn preview_prompt(prompt: &str) -> String {
 }
 
 impl ExecutableTool for CronListTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         CronListTool::name(self)
     }

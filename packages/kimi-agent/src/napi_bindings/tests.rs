@@ -191,6 +191,20 @@ fn payload_registry_prunes_oldest_first() {
     );
 }
 
+#[tokio::test]
+async fn a_dropped_host_callback_releases_its_sender_and_payload() {
+    let id = NEXT_CALLBACK_ID.fetch_add(1, Ordering::SeqCst);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let pending = PendingHostCallback::register(id, tx, "payload".into());
+    assert!(CALLBACK_REGISTRY.lock().unwrap().contains_key(&id));
+    assert_eq!(PAYLOAD_REGISTRY.lock().unwrap().get(&id).map(String::as_str), Some("payload"));
+
+    drop(pending);
+    assert!(!CALLBACK_REGISTRY.lock().unwrap().contains_key(&id));
+    assert!(!PAYLOAD_REGISTRY.lock().unwrap().contains_key(&id));
+    assert!(rx.await.is_err());
+}
+
 static TEST_GUARD_MAP: LazyLock<Mutex<HashMap<String, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 

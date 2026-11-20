@@ -123,7 +123,7 @@ pub struct PipelineSpec {
     /// Workspace root used to sandbox native tool execution. Absent → every
     /// tool round-trips to the host.
     pub workspace_root: Option<String>,
-    /// When true (and `workspace_root` is set), sandboxable tools run in the
+    /// When true (and `workspace_root` is set), native-capable tools run in the
     /// Rust process, each still gated on a host permission grant.
     pub native_tools: bool,
     /// Host-authorized directories outside `workspace_root` that native tools
@@ -166,12 +166,6 @@ pub struct PipelineSpec {
     /// `dynamically_loaded_tools` capability it gates the `select_tools`
     /// advertisement and the per-server `deferred` MCP disclosure.
     pub tool_select: bool,
-    /// Host-resolved `[sandbox] mode`, already validated at whichever boundary
-    /// produced it (`RunTurnParams` rejects an unknown spelling during
-    /// deserialization). Carrying the enum rather than a `String` means the
-    /// pipeline cannot be handed a mode it would have to guess at.
-    pub sandbox_mode: Option<crate::tools::sandbox::SandboxMode>,
-    pub sandbox_policy: Option<crate::tools::sandbox::SandboxExecutionPolicy>,
     pub caller_agent_id: Option<String>,
     pub session_id: Option<String>,
     /// The host-resolved `[secondary_model]` subagent model pool, when the
@@ -600,20 +594,6 @@ pub async fn build_engine_pipeline(
                     let toolset = Arc::new(toolset);
                     pipeline_toolset = Some(toolset.clone());
                     let toolset = toolset;
-                    let sandbox_policy = if let Some(ref policy) = spec.sandbox_policy {
-                        Some(policy.clone())
-                    } else if let Some(mode) = spec.sandbox_mode {
-                        let root = spec.workspace_root.clone().unwrap_or_default();
-                        // Host-authorized `additionalDirs` are part of the
-                        // boundary: without them the guard rejects writes into
-                        // a directory the host explicitly handed over.
-                        Some(
-                            crate::tools::sandbox::SandboxExecutionPolicy::new(mode, root)
-                                .with_extra_roots(spec.extra_roots.clone()),
-                        )
-                    } else {
-                        None
-                    };
                     Arc::new(NativeToolCallbacks {
                         inner: base_callbacks.clone(),
                         toolset,
@@ -699,7 +679,6 @@ pub async fn build_engine_pipeline(
                         tower_worktree_root: spec.tower_worktree_root.clone(),
                         tower_enabled: spec.tower_enabled,
                         notify_user_enabled: spec.notify_user_enabled,
-                        sandbox_policy,
                     })
                 }
                 None => base_callbacks.clone(),
@@ -1045,8 +1024,6 @@ mod tests {
             tower_enabled: false,
             notify_user_enabled: true,
             tool_select: false,
-            sandbox_mode: None,
-            sandbox_policy: None,
             caller_agent_id: None,
             session_id: None,
             secondary_model: None,

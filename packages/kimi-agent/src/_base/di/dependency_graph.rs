@@ -257,11 +257,8 @@ impl DependencyGraph {
     pub fn topo_order(&self, tokens: impl IntoIterator<Item = ScopedToken>) -> Vec<ScopedToken> {
         let mut subset = PairIndex::<ScopedToken>::new();
         for reference in tokens {
-            subset.set(
-                reference.scope,
-                &reference.token,
-                reference,
-            );
+            let token = reference.token.clone();
+            subset.set(reference.scope, &token, reference);
         }
         let mut ordered = Vec::new();
         let mut done = PairIndex::<bool>::new();
@@ -383,7 +380,7 @@ impl DependencyGraph {
         out.entries()
             .into_iter()
             .filter(|(dependency, kind)| {
-                *kind == DependencyEdgeKind::Instance
+                **kind == DependencyEdgeKind::Instance
                     && subset.is_none_or(|subset| {
                         subset
                             .get(dependency.scope, &dependency.token)

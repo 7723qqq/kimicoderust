@@ -49,8 +49,8 @@ impl HostEnvironmentService {
                     apply_login_shell_path_from_node(),
                 );
                 let info = info?;
-                login?;
-                Ok::<HostEnvironmentInfo, WireAsyncError>(info)
+                let _ = login;
+                Ok::<HostEnvironmentInfo, WireAsyncError>(info.into())
             }
             .await;
             match result {
@@ -92,7 +92,7 @@ impl IHostEnvironment for HostEnvironmentService {
         async move {
             loop {
                 if let Some(error) = inner.probe_error.lock().as_ref() {
-                    return Err(Box::new(SharedProbeError(error.clone())));
+                    return Err(Box::new(SharedProbeError(error.clone())) as WireAsyncError);
                 }
                 if inner.info.lock().is_some() {
                     return Ok(());

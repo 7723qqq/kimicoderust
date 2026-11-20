@@ -1,6 +1,8 @@
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use indexmap::IndexMap;
 use serde_json::Value;
 
 use crate::subagent::types::ParentCancel;
@@ -11,13 +13,68 @@ pub const GITHUB_USER_AGENT: &str = "kimi-code";
 pub const GITHUB_DEFAULT_ACCEPT: &str = "application/vnd.github+json";
 pub const GITHUB_REQUEST_TIMEOUT_MS: u64 = 30_000;
 pub const GITHUB_MAX_RESPONSE_BODY_BYTES: usize = 5 * 1024 * 1024;
-pub const GITHUB_DIFF_MAX_RESPONSE_BODY_BYTES: usize = 200 * 1024;
+pub const GITHUB_DIFF_MAX_RESPONSE_BODY_BYTES: usize = 200_000;
 pub const GITHUB_NO_TOKEN_ERROR: &str = "No GitHub token configured. Set token in the [github] section of config.toml, or set the GITHUB_TOKEN (or GH_TOKEN) environment variable.";
+
+#[derive(Clone)]
+struct CachedResponse {
+    etag: String,
+    body: String,
+    next_page: bool,
+}
+
+static ETAG_CACHE: LazyLock<Mutex<IndexMap<String, CachedResponse>>> = LazyLock::new(|| Mutex::new(IndexMap::new()));
+
+fn cache_key_for(token: &str, url: &str, accept: &str) -> String {
+    let mut hash = 2_166_136_261_u32;
+    let units = token.encode_utf16().collect::<Vec<_>>();
+    for index in 0..units.len() {
+        let unit = units[index];
+        let point = if (0xd800..=0xdbff).contains(&unit) && units.get(index + 1).is_some_and(|next| (0xdc00..=0xdfff).contains(next)) {
+            0x10000 + ((u32::from(unit) - 0xd800) << 10) + (u32::from(units[index + 1]) - 0xdc00)
+        } else {
+            u32::from(unit)
+        };
+        hash = (hash ^ point).wrapping_mul(16_777_619);
+    }
+    let mut value = (hash as i32).unsigned_abs();
+    let mut digits = Vec::new();
+    loop {
+        digits.push(char::from_digit(value % 36, 36).unwrap());
+        value /= 36;
+        if value == 0 { break; }
+    }
+    let token_hash = digits.into_iter().rev().collect::<String>();
+    format!("{token_hash}\0{accept}\0{url}")
+}
+
+fn remember_etag(key: String, cached: CachedResponse) {
+    let mut cache = ETAG_CACHE.lock().unwrap();
+    cache.shift_remove(&key);
+    cache.insert(key, cached);
+    while cache.len() > 64 {
+        cache.shift_remove_index(0);
+    }
+}
+
+fn retry_delay_ms(headers: &reqwest::header::HeaderMap, now: i64) -> Option<u64> {
+    if let Some(raw) = headers.get("retry-after").and_then(|value| value.to_str().ok()) {
+        if let Some(seconds) = parse_js_number(raw).filter(|value| value.is_finite() && *value >= 0.0) {
+            let delay = (seconds * 1000.0 + 0.5).floor();
+            return (delay <= 30_000.0).then_some(delay as u64);
+        }
+        if let Ok(at) = chrono::DateTime::parse_from_rfc2822(raw) {
+            let delay = at.timestamp_millis().saturating_sub(now).max(0);
+            return (delay <= 30_000).then_some(delay as u64);
+        }
+    }
+    Some(1000)
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct GitHubRequestOptions {
     pub query: Option<Vec<(String, Value)>>,
-    pub body: Option<Value>,
+    pub body: Option<Vec<(String, Value)>>,
     pub accept: Option<String>,
     pub token: Option<String>,
     pub base_url: Option<String>,
@@ -100,6 +157,8 @@ pub async fn github_request(
         Ok(method) => method,
         Err(error) => return Ok(network_error(error)),
     };
+    let cache_key = (method.as_str() == "GET").then(|| cache_key_for(token, &url, options.accept.as_deref().unwrap_or(GITHUB_DEFAULT_ACCEPT)));
+    let cached = cache_key.as_ref().and_then(|key| ETAG_CACHE.lock().unwrap().get(key).cloned());
     let mut request = client
         .request(method, &url)
         .header("Authorization", format!("Bearer {token}"))
@@ -112,19 +171,42 @@ pub async fn github_request(
     if let Some(body) = options.body {
         request = request
             .header("Content-Type", "application/json")
-            .body(js_json_stringify(&body));
+            .body(js_json_stringify_pairs(&body));
+    }
+    if let Some(cached) = &cached {
+        request = request.header("If-None-Match", &cached.etag);
     }
     let operation = async move {
-        let response = match request.send().await {
+        let retry_request = request.try_clone();
+        let mut response = match request.send().await {
             Ok(response) => response,
             Err(error) => return network_error(error),
         };
+        let retry = matches!(response.status().as_u16(), 429 | 502 | 503 | 504)
+            || (response.status().as_u16() == 403 && response.headers().contains_key("retry-after"));
+        if retry {
+            if let (Some(delay), Some(request)) = (retry_delay_ms(response.headers(), chrono::Utc::now().timestamp_millis()), retry_request) {
+                drop(response);
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                response = match request.send().await {
+                    Ok(response) => response,
+                    Err(error) => return network_error(error),
+                };
+            }
+        }
         let status = response.status().as_u16();
         let rate_remaining = response
             .headers()
             .get("x-ratelimit-remaining")
             .and_then(|value| value.to_str().ok())
             .and_then(parse_rate_limit_remaining);
+        if status == 304 {
+            if let (Some(key), Some(cached)) = (&cache_key, &cached) {
+                remember_etag(key.clone(), cached.clone());
+                return GitHubRequestResult { status:200, ok:true, body:cached.body.clone(), error:None, rate_remaining, next_page:cached.next_page, truncated_bytes:0 };
+            }
+        }
+        let etag = response.headers().get("etag").and_then(|value| value.to_str().ok()).map(str::to_string);
         let next_page = response
             .headers()
             .get(reqwest::header::LINK)
@@ -155,6 +237,11 @@ pub async fn github_request(
                 next_page,
                 truncated_bytes,
             };
+        }
+        if let (Some(key), Some(etag)) = (cache_key, etag) {
+            if body.encode_utf16().count() <= 200_000 {
+                remember_etag(key, CachedResponse { etag, body:body.clone(), next_page });
+            }
         }
         GitHubRequestResult {
             status,
@@ -258,6 +345,171 @@ mod tests {
     }
 
     #[test]
+    fn etag_identity_matches_v2_utf16_code_point_iteration() {
+        for (token, expected) in [
+            ("YOUR_API_KEY", "u92egl"),
+            ("token-a", "lbbjyc"),
+            ("😀", "4cn9hp"),
+            ("x😀y", "e40rvy"),
+        ] {
+            assert_eq!(cache_key_for(token, "url", "accept"), format!("{expected}\0accept\0url"));
+        }
+    }
+
+    #[test]
+    fn retry_after_obeys_v2_rounding_and_thirty_second_cap() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-19T00:00:00Z").unwrap().timestamp_millis();
+        for (raw, expected) in [
+            ("0", Some(0)),
+            ("0.0005", Some(1)),
+            ("30", Some(30_000)),
+            ("30.0005", None),
+            ("not-a-date", Some(1000)),
+            ("Thu, 19 Nov 2026 00:00:25 GMT", Some(25_000)),
+            ("Thu, 19 Nov 2026 00:01:00 GMT", None),
+            ("Wed, 18 Nov 2026 23:59:00 GMT", Some(0)),
+        ] {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("retry-after", raw.parse().unwrap());
+            assert_eq!(retry_delay_ms(&headers, now), expected, "{raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_once_then_revalidates_the_cached_get_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let replies = [
+                "HTTP/1.1 503 Test\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nLink: <https://example.test/next>; rel=\"next\"\r\nContent-Length: 6\r\nConnection: close\r\n\r\ncached",
+                "HTTP/1.1 304 Not Modified\r\nX-RateLimit-Remaining: 98\r\nConnection: close\r\n\r\n",
+            ];
+            for (index, reply) in replies.into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                assert_eq!(String::from_utf8_lossy(&request).to_ascii_lowercase().contains("if-none-match: \"v1\""), index == 2);
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let options = GitHubRequestOptions { token: Some("YOUR_API_KEY".into()), base_url: Some(base_url), ..Default::default() };
+        let deps = GitHubRequestDeps { client:Some(reqwest::Client::builder().no_proxy().build().unwrap()), signal:None };
+        let first = tokio::time::timeout(Duration::from_secs(3), github_request("GET", "/user", options.clone(), deps.clone())).await.unwrap().unwrap();
+        assert_eq!((first.status, first.body.as_str(), first.next_page), (200, "cached", true));
+        let second = tokio::time::timeout(Duration::from_secs(3), github_request("GET", "/user", options, deps)).await.unwrap().unwrap();
+        assert_eq!((second.status, second.body.as_str(), second.next_page, second.rate_remaining), (200, "cached", true, Some(98)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn etag_cache_is_partitioned_by_token_and_accept_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (index, response) in [
+                "HTTP/1.1 200 OK\r\nETag: \"one\"\r\nContent-Length: 3\r\nConnection: close\r\n\r\none",
+                "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nETag: \"two\"\r\nContent-Length: 3\r\nConnection: close\r\n\r\ntwo",
+                "HTTP/1.1 200 OK\r\nETag: \"three\"\r\nContent-Length: 5\r\nConnection: close\r\n\r\nthree",
+            ].into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let mut chunk = [0; 1024];
+                    let read = socket.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                assert_eq!(request.contains("if-none-match:"), index == 1);
+                if index == 1 { assert!(request.contains("if-none-match: \"one\"")); }
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let call = |token:&str, accept:&str| GitHubRequestOptions { token:Some(token.into()),base_url:Some(base_url.clone()),accept:Some(accept.into()),..Default::default() };
+        for (token, accept, body) in [("token-a","application/vnd.github+json","one"),("token-a","application/vnd.github+json","one"),("token-b","application/vnd.github+json","two"),("token-a","application/vnd.github.diff","three")] {
+            let result = github_request("GET","/cache",call(token,accept),GitHubRequestDeps{client:Some(client.clone()),signal:None}).await.unwrap();
+            assert_eq!(result.body,body);
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn etag_cache_uses_the_decoded_body_utf16_length_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (units, cache_expected) in [(200_001, false), (200_000, true)] {
+            let body = "é".repeat(units);
+            let served_body = body.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let body = served_body;
+                for index in 0..2 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let mut chunk = [0; 1024];
+                        let count = socket.read(&mut chunk).await.unwrap();
+                        assert!(count > 0);
+                        request.extend_from_slice(&chunk[..count]);
+                    }
+                    let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                    assert_eq!(request.contains("if-none-match:"), cache_expected && index == 1);
+                    if index == 0 {
+                        socket.write_all(format!("HTTP/1.1 200 OK\r\nETag: \"limit\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    } else if cache_expected {
+                        socket.write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n").await.unwrap();
+                    } else {
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nnew").await.unwrap();
+                    }
+                }
+            });
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let options = GitHubRequestOptions { token:Some("YOUR_API_KEY".into()),base_url:Some(base_url),..Default::default() };
+            let first = github_request("GET","/bounded",options.clone(),GitHubRequestDeps{client:Some(client.clone()),signal:None}).await.unwrap();
+            assert!(first.ok);
+            let second = github_request("GET","/bounded",options,GitHubRequestDeps{client:Some(client),signal:None}).await.unwrap();
+            if cache_expected { assert_eq!(second.body, body); } else { assert_eq!(second.body, "new"); }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn overflow_closes_a_stream_without_waiting_for_the_remainder() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            socket.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nabcdef\r\n").await.unwrap();
+            let mut byte = [0];
+            match tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte)).await.unwrap() {
+                Ok(0) | Err(_) => {},
+                other => panic!("overflow must close the reader: {other:?}"),
+            }
+        });
+        let result = tokio::time::timeout(Duration::from_secs(2), github_request("GET", "/stream", GitHubRequestOptions { token:Some("YOUR_API_KEY".into()), base_url:Some(base_url), max_bytes:Some(3), ..Default::default() }, GitHubRequestDeps { client:Some(reqwest::Client::builder().no_proxy().build().unwrap()), signal:None })).await.unwrap().unwrap();
+        assert_eq!(result.body, "abc\n[...truncated 3+ bytes]");
+        server.await.unwrap();
+    }
+
+    #[test]
     fn pagination_detects_next_relation_across_link_parameters() {
         assert!(has_next_page(
             "<https://example.test/?page=2>; rel=\"next\""
@@ -274,11 +526,30 @@ mod tests {
     }
 
     #[test]
+    fn pagination_uses_the_v2_literal_next_relation() {
+        assert!(!has_next_page("<https://example.test/page/2>; rel='next'"));
+        assert!(!has_next_page("<https://example.test/page/2>; rel=next"));
+        assert!(has_next_page("<https://example.test/page/2>; rel=\"next\"; type=\"application/json\""));
+    }
+
+    #[tokio::test]
+    async fn a_preaborted_request_does_not_connect() {
+        let cancel = ParentCancel::new();
+        cancel.trigger();
+        let result = github_request("GET", "/user", GitHubRequestOptions {
+            token: Some("YOUR_API_KEY".into()),
+            base_url: Some("http://127.0.0.1:1".into()),
+            ..Default::default()
+        }, GitHubRequestDeps { client: Some(reqwest::Client::builder().no_proxy().build().unwrap()), signal: Some(cancel) }).await;
+        assert_eq!(result, Err(GitHubRequestAborted));
+    }
+
+    #[test]
     fn requested_body_limit_never_exceeds_the_global_limit() {
         assert_eq!(GITHUB_DIFF_MAX_RESPONSE_BODY_BYTES, 200_000);
         assert_eq!(
-            response_body_limit(Some(GITHUB_DIFF_MAX_RESPONSE_BODY_BYTES)), 
-            200 * 1024
+            response_body_limit(Some(GITHUB_DIFF_MAX_RESPONSE_BODY_BYTES)),
+            200_000
         );
         assert_eq!(
             response_body_limit(Some(GITHUB_MAX_RESPONSE_BODY_BYTES * 2)),
@@ -330,14 +601,7 @@ fn render_response_body(bytes: &[u8], truncated_bytes: usize) -> String {
 }
 
 fn has_next_page(link: &str) -> bool {
-    link.split(',').any(|entry| {
-        entry.split(';').any(|parameter| {
-            parameter
-                .trim()
-                .strip_prefix("rel=")
-                .is_some_and(|relation| relation.trim_matches(['"', '\'']) == "next")
-        })
-    })
+    link.contains("rel=\"next\"")
 }
 
 fn first_non_empty<const N: usize>(values: [Option<&str>; N]) -> Option<&str> {
@@ -398,6 +662,28 @@ fn parse_js_number(raw: &str) -> Option<f64> {
     raw.parse::<f64>().ok()
 }
 
+pub(super) fn js_json_stringify_pairs(values: &[(String, Value)]) -> String {
+    let fields = values.iter().map(|(key, value)| {
+        let value = if key == "tree" {
+            if let Some(entries) = value.as_array() {
+                let entries = entries.iter().map(|entry| {
+                    let fields = ["path", "mode", "type", "content", "sha"].into_iter()
+                        .filter_map(|name| entry.get(name).map(|value| (name.to_string(), value.clone())))
+                        .collect::<Vec<_>>();
+                    js_json_stringify_pairs(&fields)
+                }).collect::<Vec<_>>();
+                format!("[{}]", entries.join(","))
+            } else {
+                js_json_stringify(value)
+            }
+        } else {
+            js_json_stringify(value)
+        };
+        format!("{}:{value}", serde_json::to_string(key).unwrap())
+    }).collect::<Vec<_>>();
+    format!("{{{}}}", fields.join(","))
+}
+
 fn build_github_url(base: &str, path: &str) -> String {
     if path.starts_with("http://") || path.starts_with("https://") {
         return path.to_string();
@@ -448,7 +734,7 @@ fn js_string(value: &Value) -> String {
     }
 }
 
-fn js_json_stringify(value: &Value) -> String {
+pub(super) fn js_json_stringify(value: &Value) -> String {
     match value {
         Value::Number(value) => js_number_to_string(value),
         Value::Array(values) => format!(

@@ -3,6 +3,8 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::remote::protocol::channel::ExecChannel;
+
 use async_trait::async_trait;
 use futures_util::future::{BoxFuture, Shared};
 use futures_util::{FutureExt, Stream, StreamExt};
@@ -194,7 +196,7 @@ impl DeclaredRemoteEnvironment {
     fn shell_path_bridge(&self) -> Option<crate::environment::environment::ShellPathBridge> {
         let state = self.inner.state.lock();
         let host = state.session.as_ref()?.host.host_environment_info();
-        (host.os_kind == "Windows" && host.shell_name == "bash").then_some(Arc::new(REMOTE_SHELL_PATH_BRIDGE.clone()))
+        (host.os_kind == "Windows" && host.shell_name == "bash").then(|| REMOTE_SHELL_PATH_BRIDGE.clone())
     }
 
     fn connected(&self) -> Result<Arc<RemoteSession>, WireAsyncError> {
@@ -230,7 +232,7 @@ impl DeclaredRemoteEnvironment {
         self.set_status(EnvironmentStatus::Connecting);
         let this = self.clone();
         let run = async move {
-            let result = async {
+            let result: Result<(), crate::wire::record::WireAsyncError> = async {
                 let session = (this.inner.open)(launcher.clone()).await?;
                 if epoch != this.inner.state.lock().epoch || this.status() == EnvironmentStatus::Disposed {
                     session.dispose().await;
@@ -308,7 +310,9 @@ impl DeclaredRemoteEnvironment {
             state.session.replace(session.clone())
         };
         let weak = Arc::downgrade(&self.inner);
-        session.connection.on_did_close(Arc::new(move |info| {
+        let connection = session.connection.clone();
+        let session_for_close = session.clone();
+        connection.on_did_close(Arc::new(move |info| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
@@ -319,7 +323,7 @@ impl DeclaredRemoteEnvironment {
                 .lock()
                 .session
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &session))
+                .is_some_and(|current| Arc::ptr_eq(current, &session_for_close))
             {
                 return;
             }
@@ -333,8 +337,9 @@ impl DeclaredRemoteEnvironment {
             this.inner.state.lock().last_connect_error = Some(info.reason);
             this.inner.state.lock().session = None;
             this.set_status(EnvironmentStatus::Disconnected);
+            let dispose_session = session_for_close.clone();
             tokio::spawn(async move {
-                session.dispose().await;
+                dispose_session.dispose().await;
             });
         }));
         if let Some(previous) = previous {
@@ -600,7 +605,7 @@ impl RemoteEnvironmentProviderFactory {
         "remote-exec"
     }
 
-    pub async fn attach(&self, host: &dyn EnvironmentProviderHost) -> Result<EnvironmentProviderAttachment, WireAsyncError> {
+    pub async fn attach(&self, host: std::sync::Arc<dyn EnvironmentProviderHost>) -> Result<EnvironmentProviderAttachment, WireAsyncError> {
         let log = host.get::<dyn ILogService>();
         let declarations = host.get::<dyn IEnvironmentDeclarationService>();
         let initial = match declarations.declarations().await {
@@ -612,7 +617,7 @@ impl RemoteEnvironmentProviderFactory {
         };
         let records = Arc::new(Mutex::new(IndexMap::<String, DeclaredEnvironmentRecord>::new()));
         for declaration in initial.map(|initial| initial.entries).unwrap_or_default() {
-            match self.register_declared_environment(host, &declaration) {
+            match self.register_declared_environment(&host, &declaration) {
                 Ok(record) => {
                     records.lock().insert(declaration.id.clone(), record);
                     declarations.report_registration(&declaration.id, None);
@@ -625,18 +630,25 @@ impl RemoteEnvironmentProviderFactory {
         }
         let disposed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let tail = Arc::new(Mutex::new(None::<Shared<BoxFuture<'static, Result<(), SharedRemoteError>>>>));
-        let reconcile = {
+        let reconcile: std::sync::Arc<
+            dyn Fn(crate::app::environment_declaration::environment_declaration::EnvironmentDeclarationChange)
+                -> futures_util::future::Shared<
+                    futures_util::future::BoxFuture<'static, Result<(), SharedRemoteError>>,
+                > + Send
+                + Sync,
+        > = std::sync::Arc::new({
             let records = records.clone();
             let declarations = declarations.clone();
             let disposed = disposed.clone();
             let tail = tail.clone();
             let this = self.clone_factory();
-            move |resolved: EnvironmentDeclarationSet| {
+            move |resolved: crate::app::environment_declaration::environment_declaration::EnvironmentDeclarationChange| {
                 let previous = tail.lock().clone();
                 let records = records.clone();
                 let declarations = declarations.clone();
                 let disposed = disposed.clone();
                 let this = this.clone();
+                let host = host.clone();
                 let next_tail = async move {
                     if let Some(previous) = previous {
                         previous.await;
@@ -669,7 +681,7 @@ impl RemoteEnvironmentProviderFactory {
                         let fingerprint = declaration_fingerprint(&declaration.entry);
                         let existing = records.lock().contains_key(&declaration.id);
                         if !existing {
-                            match this.register_declared_environment(host, &declaration) {
+                            match this.register_declared_environment(&host, &declaration) {
                                 Ok(record) => {
                                     records.lock().insert(declaration.id.clone(), record);
                                     declarations.report_registration(&declaration.id, None);
@@ -698,15 +710,16 @@ impl RemoteEnvironmentProviderFactory {
                 }
                 .boxed()
                 .shared();
-                *tail.lock() = Some(next_tail.clone());
-                tokio::spawn(next_tail.clone());
-                next_tail
+                let typed: futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<(), SharedRemoteError>>> = next_tail;
+                *tail.lock() = Some(typed.clone());
+                tokio::spawn(typed.clone());
+                typed
             }
-        };
-        let listener = declarations.on_did_change({
+        });
+        let listener = declarations.on_did_change(Arc::new({
             let reconcile = reconcile.clone();
             let log = log.clone();
-            move |event| {
+            move |event: crate::app::environment_declaration::environment_declaration::EnvironmentDeclarationChange| {
                 let future = reconcile(event.clone());
                 let log = log.clone();
                 event.wait_until(Box::pin(async move {
@@ -719,12 +732,13 @@ impl RemoteEnvironmentProviderFactory {
                     Ok(())
                 }));
             }
-        });
+        }));
+        let ssh_passwords_for_dispose = self.ssh_passwords.clone();
         Ok(EnvironmentProviderAttachment {
             dispose: Box::new(move || {
                 let disposed = disposed.clone();
                 let tail = tail.lock().clone();
-                let ssh_passwords = self.ssh_passwords.clone();
+                let ssh_passwords = ssh_passwords_for_dispose.clone();
                 let records = records.clone();
                 async move {
                     disposed.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -746,7 +760,7 @@ impl RemoteEnvironmentProviderFactory {
 
     fn register_declared_environment(
         &self,
-        host: &dyn EnvironmentProviderHost,
+        host: &std::sync::Arc<dyn EnvironmentProviderHost>,
         declaration: &RemoteEnvironmentDeclaration,
     ) -> Result<DeclaredEnvironmentRecord, WireAsyncError> {
         let launcher = to_launcher_spec(&declaration.entry);
@@ -880,7 +894,7 @@ impl EnvironmentProviderFactory for RemoteEnvironmentProviderFactory {
         RemoteEnvironmentProviderFactory::id(self)
     }
 
-    async fn attach(&self, host: &dyn EnvironmentProviderHost) -> Result<EnvironmentProviderAttachment, WireAsyncError> {
+    async fn attach(&self, host: std::sync::Arc<dyn EnvironmentProviderHost>) -> Result<EnvironmentProviderAttachment, WireAsyncError> {
         RemoteEnvironmentProviderFactory::attach(self, host).await
     }
 }

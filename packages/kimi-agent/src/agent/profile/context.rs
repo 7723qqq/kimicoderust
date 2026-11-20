@@ -239,11 +239,14 @@ pub async fn load_agents_md_for_roots<'a>(
     .await;
 
     let generic_dirs = [join(&[real_home, ".agents"])];
-    let generic_files = generic_dirs.iter().flat_map(|dir| {
-        AGENTS_MD_PLAIN_NAMES
-            .iter()
-            .map(move |name: &&str| join(&[dir, name]))
-    });
+    let generic_files = generic_dirs
+        .iter()
+        .flat_map(|dir| {
+            AGENTS_MD_PLAIN_NAMES
+                .iter()
+                .map(move |name| join(&[dir, name]))
+        })
+        .collect::<Vec<_>>();
     for file in generic_files {
         if collect_agent_file(
             personal_fs,

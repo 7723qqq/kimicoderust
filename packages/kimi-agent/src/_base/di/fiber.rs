@@ -162,7 +162,7 @@ pub trait FiberHandle: Send + Sync {
 
     fn settled(self: Arc<Self>) -> SettledHandleView
     where
-        Self: Sized,
+        Self: Sized + 'static,
     {
         SettledHandleView { handle: self }
     }
@@ -634,7 +634,8 @@ impl FiberRuntime {
                 let failure = update_failure.clone();
                 let entry = update_entry.clone();
                 async move {
-                    if let Some(current) = entry.lock().take()
+                    let current = entry.lock().take();
+                    if let Some(current) = current
                         && let Some(future) = current.dispose("scope-close")
                     {
                         future.await;
@@ -661,7 +662,8 @@ impl FiberRuntime {
             dispose: Arc::new(move || {
                 let entry = entry.clone();
                 async move {
-                    if let Some(entry) = entry.lock().take()
+                    let taken = entry.lock().take();
+                    if let Some(entry) = taken
                         && let Some(future) = entry.dispose("scope-close")
                     {
                         future.await;

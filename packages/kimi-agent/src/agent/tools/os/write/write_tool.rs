@@ -9,6 +9,7 @@ use crate::agent::environment_binding::agent_environment::{
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{ToolSideEffect};
 use crate::agent::tools::file_memory::{FileMemoryProvider, with_file_memory};
 use crate::environment::environment::{EnvironmentPath, EnvironmentWorkspaceRoots};
 use crate::environment::environment_workspace_view::EnvironmentWorkspaceView;
@@ -71,10 +72,6 @@ impl WriteTool {
 
     pub fn name(&self) -> &'static str {
         "Write"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "write"
     }
 
     pub fn description(&self) -> &'static str {
@@ -380,6 +377,10 @@ impl WriteTool {
 }
 
 impl ExecutableTool for WriteTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Write)
+    }
+
     fn name(&self) -> &str {
         WriteTool::name(self)
     }

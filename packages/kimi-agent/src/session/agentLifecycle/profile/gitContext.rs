@@ -240,7 +240,7 @@ async fn run_git(
             };
         }
     };
-    let _ = proc.stdin_end().await;
+    let _ = proc.close_stdin().await;
     let work_proc = proc.clone();
     let mut work = tokio::spawn(async move { collect_process_output(work_proc).await });
     let clear_timers = timers.clone();

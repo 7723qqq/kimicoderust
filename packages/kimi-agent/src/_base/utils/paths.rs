@@ -72,7 +72,7 @@ fn normalize_posix(path: &str) -> String {
         match segment {
             "" | "." => {}
             ".." => {
-                if segments.last().is_some_and(|segment| segment != "..") {
+                if segments.last().is_some_and(|segment| *segment != "..") {
                     segments.pop();
                 } else if !absolute {
                     segments.push("..");

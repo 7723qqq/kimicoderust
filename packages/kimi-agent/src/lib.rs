@@ -497,7 +497,6 @@ impl KimiEngine {
                         crate::tools::tower::paths::tower_env_switch(),
                         None,
                     ),
-                    sandbox_policy: None,
                 }) as Arc<dyn crate::callbacks::HostCallbacks>
             } else {
                 base_callbacks
@@ -761,7 +760,6 @@ mod engine_tests {
                 crate::tools::tower::paths::tower_env_switch(),
                 None,
             ),
-            sandbox_policy: None,
         };
         let tools = callbacks
             .list_tools()

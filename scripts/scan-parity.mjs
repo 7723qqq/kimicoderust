@@ -508,15 +508,14 @@ function main() {
   }
 
   // ── Tools ───────────────────────────────────────────────────────────────
-  const rustTools = readTree(join(AGENT, 'src/tools'), '.rs');
-  // `v2Github` is a misnomer kept for the contract's key name: the GitHub tool
-  // family is fork-original (commit 5868b181cf, from the retired v1
-  // `agent-core`), never a v2 port. The group still means "advertised as a
-  // native tool", which is what this gate checks.
+  const rustTools = [
+    readTree(join(AGENT, 'src/tools'), '.rs'),
+    readTree(join(AGENT, 'src/agent/tools/github'), '.rs'),
+  ].join('\n');
   const nativeGroups = ['v2Native', 'replOnlyNative', 'v2Github'];
   for (const group of nativeGroups) {
     for (const name of ToolNameContract[group] ?? []) {
-      if (!rustTools.includes('"' + name + '"')) failures.push(`TOOL  ${group}: ${name} has no string in src/tools/**`);
+      if (!rustTools.includes('"' + name + '"')) failures.push(`TOOL  ${group}: ${name} has no string in its implementation source`);
     }
   }
 

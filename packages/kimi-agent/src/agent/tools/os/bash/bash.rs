@@ -4,6 +4,7 @@ pub const DEFAULT_TIMEOUT_S: u64 = 60;
 pub const MAX_TIMEOUT_S: u64 = 5 * 60;
 pub const DEFAULT_BACKGROUND_TIMEOUT_S: u64 = 10 * 60;
 pub const MAX_BACKGROUND_TIMEOUT_S: u64 = 24 * 60 * 60;
+pub const BASH_TASK_TIMEOUT_S_DEFAULT: u64 = DEFAULT_BACKGROUND_TIMEOUT_S;
 
 pub fn timeout_cap_s(is_background: bool) -> u64 {
     if is_background {

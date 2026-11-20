@@ -10,6 +10,7 @@ use crate::agent::mode_mutex::mode_mutex::{AgentModeMutexService, ExclusiveRevie
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::tool::input_schema::to_input_json_schema;
 use crate::wire::record::WireAsyncError;
 
@@ -39,14 +40,6 @@ impl EnterSpecModeTool {
 
     pub fn name(&self) -> &'static str {
         "EnterSpecMode"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -153,6 +146,14 @@ fn wire_error(message: String) -> WireAsyncError {
 }
 
 impl ExecutableTool for EnterSpecModeTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         EnterSpecModeTool::name(self)
     }

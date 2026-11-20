@@ -11,7 +11,7 @@ use crate::agent::usage::usage_ops::{UsageModelState, UsageRecord, UsageRecordPa
 use crate::human::llm::usage::{TokenUsage, add_usage};
 use crate::state::agent_model::{
     AgentModel, AgentModelContext, AgentModelDefinition, AgentModelDefinitionInput,
-    AgentModelStateSpec, define_agent_model,
+    AgentModelInstance, AgentModelStateSpec, define_agent_model,
 };
 use crate::wire::record::WireAsyncError;
 
@@ -22,11 +22,30 @@ pub struct UsageRecordInput {
     pub source: Option<AgentLLMRequestSource>,
 }
 
+#[derive(Default)]
+struct CurrentTurn {
+    turn_id: Option<u64>,
+    usage: Option<TokenUsage>,
+}
+
 pub struct UsageAgentModel {
     base: AgentModel,
     state: Arc<Mutex<UsageModelState>>,
-    current_turn_id: Option<u64>,
-    current_turn: Option<TokenUsage>,
+    current_turn: Mutex<CurrentTurn>,
+}
+
+impl AgentModelInstance for UsageAgentModel {
+    fn base(&self) -> &AgentModel {
+        &self.base
+    }
+
+    fn base_mut(&mut self) -> &mut AgentModel {
+        &mut self.base
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl UsageAgentModel {
@@ -63,16 +82,11 @@ impl UsageAgentModel {
         Self {
             base,
             state,
-            current_turn_id: None,
-            current_turn: None,
+            current_turn: Mutex::new(CurrentTurn::default()),
         }
     }
 
-    pub fn into_base(self) -> AgentModel {
-        self.base
-    }
-
-    pub async fn record(&mut self, input: UsageRecordInput) -> Result<bool, WireAsyncError> {
+    pub async fn record(&self, input: UsageRecordInput) -> Result<bool, WireAsyncError> {
         let first_record = self.state.lock().by_model.is_empty();
         let source = input
             .source
@@ -95,15 +109,17 @@ impl UsageAgentModel {
             )
             .await?;
         if let Some(turn_id) = turn_id {
-            if self.current_turn_id != Some(turn_id) {
-                self.current_turn_id = Some(turn_id);
-                self.current_turn = Some(copy_usage(&input.usage));
+            let mut current = self.current_turn.lock();
+            if current.turn_id != Some(turn_id) {
+                current.turn_id = Some(turn_id);
+                current.usage = Some(copy_usage(&input.usage));
             } else {
-                self.current_turn = Some(match self.current_turn.take() {
-                    Some(current) => add_usage(&current, &input.usage),
+                current.usage = Some(match current.usage.take() {
+                    Some(existing) => add_usage(&existing, &input.usage),
                     None => copy_usage(&input.usage),
                 });
             }
+            drop(current);
         }
         let status = self.status();
         self.base
@@ -142,7 +158,7 @@ impl UsageAgentModel {
         UsageStatus {
             by_model: has_by_model.then_some(by_model),
             total,
-            current_turn: self.current_turn.as_ref().map(copy_usage),
+            current_turn: self.current_turn.lock().usage.as_ref().map(copy_usage),
         }
     }
 }
@@ -150,7 +166,9 @@ impl UsageAgentModel {
 pub static USAGE_AGENT_MODEL_DEFINITION: LazyLock<Arc<AgentModelDefinition>> = LazyLock::new(|| {
     define_agent_model(AgentModelDefinitionInput {
         id: "usage".to_string(),
-        model: Arc::new(|context| UsageAgentModel::new(context).into_base()),
+        model: Arc::new(|context| {
+            Box::new(UsageAgentModel::new(context)) as Box<dyn AgentModelInstance>
+        }),
         state: AgentModelStateSpec {
             initial: Arc::new(|| json!({ "byModel": {} })),
             schema: json!({"type": "object"}),

@@ -419,10 +419,9 @@ fn build_core_tool_defs() -> Vec<ToolInfo> {
                     "timeout": {
                         "default": 60,
                         "description": "Optional timeout in seconds for the command to execute. Foreground default 60s, max 300s. Background default 600s, max 86400s. Ignored for background commands when disable_timeout=true.",
-                        "anyOf": [
-                            { "type": "integer", "exclusiveMinimum": 0, "maximum": 300 },
-                            { "type": "integer", "exclusiveMinimum": 0, "maximum": 86400 }
-                        ]
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991i64
                     },
                     "description": {
                         "description": "A short description for the background task. Required when run_in_background is true.",
@@ -800,13 +799,12 @@ mod tests {
             "Optional timeout in seconds for the command to execute. Foreground default 60s, max 300s. Background default 600s, max 86400s. Ignored for background commands when disable_timeout=true."
         );
         let bash_schema = get("Bash");
-        let branches = bash_schema["properties"]["timeout"]["anyOf"]
-            .as_array()
-            .expect("timeout anyOf");
-        assert_eq!(branches[0]["maximum"], 300);
-        assert_eq!(branches[1]["maximum"], 86400);
-        assert_eq!(branches[0]["exclusiveMinimum"], 0);
-        assert_eq!(branches[1]["exclusiveMinimum"], 0);
+        let timeout = &bash_schema["properties"]["timeout"];
+        assert_eq!(timeout["type"], "integer");
+        assert_eq!(timeout["default"], 60);
+        assert_eq!(timeout["maximum"], 9007199254740991i64);
+        assert_eq!(timeout["exclusiveMinimum"], 0);
+        assert!(timeout.get("anyOf").is_none());
 
         let read_schema = get("Read");
         let any_of = read_schema["properties"]["line_offset"]["anyOf"]
@@ -825,6 +823,28 @@ mod tests {
         assert_eq!(region["type"], "object");
         assert_eq!(region["required"], json!(["x", "y", "width", "height"]));
         assert_eq!(region["additionalProperties"], false);
+    }
+
+    #[test]
+    fn shell_schema_accepts_uncapped_positive_integers_before_runtime_normalization() {
+        let mut defs = core_tool_defs();
+        if !defs.iter().any(|tool| tool.name == "PowerShell") {
+            defs.push(crate::tools::powershell::tool_def());
+        }
+        for tool in defs.iter().filter(|tool| matches!(tool.name.as_str(), "Bash" | "PowerShell")) {
+            for timeout in [json!(30.0), json!(301), json!(86_401), json!(9_007_199_254_740_991u64)] {
+                assert!(crate::tool::args_validator::validate(
+                    &tool.input_schema,
+                    &json!({ "command": "printf aligned", "timeout": timeout }),
+                ).is_ok(), "{}: {timeout}", tool.name);
+            }
+            for timeout in [json!(0), json!(-1), json!(1.5), json!("30"), json!(null), json!(9_007_199_254_740_992u64)] {
+                assert!(crate::tool::args_validator::validate(
+                    &tool.input_schema,
+                    &json!({ "command": "printf aligned", "timeout": timeout }),
+                ).is_err(), "{}: {timeout}", tool.name);
+            }
+        }
     }
 
     #[test]

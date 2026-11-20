@@ -52,6 +52,7 @@ pub fn todo_actor_logic() -> Machine {
                     }],
                 )]),
                 invoke: None,
+                ..Default::default()
             },
         ),
         (
@@ -76,6 +77,7 @@ pub fn todo_actor_logic() -> Machine {
                     on_done: Vec::new(),
                     on_error: Vec::new(),
                 }),
+                ..Default::default()
             },
         ),
     ]);
@@ -336,6 +338,8 @@ fn todo_commit(
         rev.1 = true;
         rev.0 += 1;
         let rev = rev.0;
+        let dispatch = dispatch.clone();
+        let agent_id = agent_id.clone();
         tokio::spawn(async move {
             let _ = dispatch(json!({
                 "type": "todo.updated",

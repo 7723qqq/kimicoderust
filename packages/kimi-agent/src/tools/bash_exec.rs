@@ -1,6 +1,5 @@
 use super::*;
-
-use crate::features::operationLog::operationService;
+use crate::agent::tools::os::shell::shell_tool_results::normalize_timeout_ms;
 
 fn shell_git_terminal_prompt() -> std::ffi::OsString {
     std::env::var_os("GIT_TERMINAL_PROMPT").unwrap_or_else(|| "0".into())
@@ -38,16 +37,17 @@ impl NativeToolset {
             .get("run_in_background")
             .and_then(|value| value.as_bool())
             == Some(true);
-        if starts_in_background && operationService::operation_log_enabled() {
-            return Some(err_result(
-                "Background execution is not available for this agent because TaskOutput and TaskStop are not enabled."
-                    .to_string(),
-            ));
-        }
-
-        if let Some(refusal) =
-            crate::tools::shell_results::validate_run_request(command, false, None)
-        {
+        let requested_timeout = match shell_results::parse_timeout(args) {
+            Ok(timeout) => timeout,
+            Err(message) => return Some(err_result(message.into())),
+        };
+        let description = args.get("description").and_then(Value::as_str);
+        if let Some(refusal) = shell_results::validate_run_request(
+            command,
+            starts_in_background,
+            description,
+            self.shell_background_available(),
+        ) {
             return Some(err_result(refusal));
         }
 
@@ -71,14 +71,6 @@ impl NativeToolset {
 
         if args.get("run_in_background").and_then(|v| v.as_bool()) == Some(true) {
             if let Some(runner) = &self.task_runner {
-                let description = args.get("description").and_then(|value| value.as_str());
-                if let Some(refusal) = crate::tools::shell_results::validate_run_request(
-                    command,
-                    starts_in_background,
-                    description,
-                ) {
-                    return Some(err_result(refusal));
-                }
                 let task_id = crate::storage::generate_task_id("bash");
                 let desc = args
                     .get("description")
@@ -91,7 +83,10 @@ impl NativeToolset {
                 let cmd_str = command.to_string();
                 let work_dir = working_dir.clone();
 
-                let bg_timeout = self.background_bash_timeout(args);
+                let bg_timeout = shell_results::background_timeout(
+                    requested_timeout,
+                    args.get("disable_timeout").and_then(Value::as_bool) == Some(true),
+                );
                 let progress_runner = runner.clone();
                 let progress_task_id = task_id.clone();
 
@@ -266,7 +261,7 @@ impl NativeToolset {
                     ));
                 }
                 let next_steps = crate::tools::shell_results::next_step_lines(
-                    true,
+                    self.shell_background_available(),
                     crate::tools::shell_results::BackgroundStart::Started,
                 );
                 return Some(ok_result(format!(
@@ -276,19 +271,8 @@ impl NativeToolset {
             return None;
         }
 
-        let timeout_s = match args.get("timeout") {
-            None | Some(Value::Null) => 60,
-            Some(value) => match value.as_u64() {
-                Some(seconds) if (1..=BASH_MAX_SECONDS).contains(&seconds) => seconds,
-                Some(seconds) if seconds > BASH_MAX_SECONDS => {
-                    return Some(err_result(format!(
-                        "timeout must be ≤ {BASH_MAX_SECONDS}s (foreground)"
-                    )));
-                }
-                _ => return Some(err_result("timeout must be a positive integer".into())),
-            },
-        };
-        let timeout = Duration::from_secs(timeout_s);
+        let timeout = Duration::from_millis(normalize_timeout_ms(requested_timeout, false));
+        let timeout_s = timeout.as_secs();
 
         let shell = self.shell.as_ref()?;
 
@@ -409,7 +393,7 @@ impl NativeToolset {
             }
             Err(_) => {
                 if self.bash_auto_background
-                    && !operationService::operation_log_enabled()
+                    && self.shell_background_available()
                     && let Some(runner) = &self.task_runner
                 {
                     let task_id = crate::storage::generate_task_id("bash");
@@ -419,7 +403,7 @@ impl NativeToolset {
                     )
                     .render();
 
-                    let bg_timeout = self.background_bash_timeout(args);
+                    let bg_timeout = self.shell_detach_timeout();
 
                     let detached_pid = child.id();
                     let seed = promoted_output_seed(

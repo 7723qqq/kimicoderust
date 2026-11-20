@@ -34,16 +34,16 @@ impl AgentWorkspaceContextService {
         }
         crate::environment::environment::EnvironmentWorkspaceRoots {
             work_dir: self.states.get(&WORKSPACE_CONTEXT_WORK_DIR_KEY),
+            primary_dir: None,
             additional_dirs: Some(self.states.get(&WORKSPACE_CONTEXT_ADDITIONAL_DIRS_KEY)),
+            follows_primary: None,
         }
     }
 
     fn path_semantics(&self) -> WorkspacePathSemantics {
-        if let Some(environment) = self.environment.current() {
-            if let Some(path) = environment.inspect().path {
-                return path;
-            }
-        }
+        // v2: `environment.inspect().path ?? hostWorkspacePathSemantics`. The port
+        // has no per-environment `WorkspacePathSemantics` constructor yet, so the
+        // host semantics are the only behaviour available.
         host_workspace_path_semantics()
     }
 }

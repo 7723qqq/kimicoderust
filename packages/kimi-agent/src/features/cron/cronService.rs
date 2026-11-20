@@ -510,6 +510,7 @@ pub fn cron_actor_logic() -> Machine {
                                 target: None,
                                 actions: vec![Action::Custom(Arc::new(|_, event| {
                                     if let Some(completion) = event
+                                        .event
                                         .data
                                         .as_ref()
                                         .and_then(|data| data.downcast_ref::<TickCompletion>())
@@ -524,6 +525,7 @@ pub fn cron_actor_logic() -> Machine {
                         ),
                     ]),
                     invoke: None,
+                    ..Default::default()
                 },
             ),
             (
@@ -555,6 +557,7 @@ pub fn cron_actor_logic() -> Machine {
                         on_done: Vec::new(),
                         on_error: Vec::new(),
                     }),
+                    ..Default::default()
                 },
             ),
         ]),

@@ -2532,42 +2532,6 @@ fn llm_request_byte_budget_prefers_env_then_file_then_default() {
 }
 
 #[test]
-fn sandbox_mode_resolves_and_reports_unknown_spellings() {
-    assert_eq!(
-        KimiConfig::from_str("").unwrap().resolve_sandbox_mode(),
-        None,
-        "unset keeps the sandbox off"
-    );
-    for (value, expected) in [
-        ("off", crate::tools::sandbox::SandboxMode::Off),
-        ("read-only", crate::tools::sandbox::SandboxMode::ReadOnly),
-        (
-            "workspace-write",
-            crate::tools::sandbox::SandboxMode::WorkspaceWrite,
-        ),
-    ] {
-        let config = KimiConfig::from_str(&format!("[sandbox]\nmode = \"{value}\"\n")).unwrap();
-        assert_eq!(config.resolve_sandbox_mode(), Some(expected), "{value}");
-    }
-
-    let typo = KimiConfig::from_str("[sandbox]\nmode = \"readonlyy\"\n").unwrap();
-    assert_eq!(typo.resolve_sandbox_mode(), None);
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, "[sandbox]\nmode = \"readonlyy\"\n").unwrap();
-    let loaded = KimiConfig::from_file(&path).unwrap();
-    assert!(
-        loaded
-            .config_warnings
-            .iter()
-            .any(|warning| warning.contains("[sandbox].mode")),
-        "{:?}",
-        loaded.config_warnings
-    );
-}
-
-#[test]
 fn builtin_product_skills_env_overrides_file() {
     let _env = crate::test_support::EnvScope::unset(&["KIMI_CODE_BUILTIN_PRODUCT_SKILLS"]);
 

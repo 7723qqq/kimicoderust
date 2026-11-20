@@ -117,10 +117,10 @@ impl ParentCancel {
     /// the pre-check covers an already-stored flag, and `trigger` wakes
     /// every waiter parked at that moment.
     pub async fn wait(&self) {
-        if self.triggered() {
-            return;
+        let notified = self.notify.notified();
+        if !self.triggered() {
+            notified.await;
         }
-        self.notify.notified().await;
     }
 }
 

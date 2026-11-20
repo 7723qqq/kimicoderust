@@ -14,7 +14,7 @@ use crate::wire::record::WireAsyncError;
 
 pub use super::environment_registry::EnvironmentError;
 
-pub type ShellPathBridge = Arc<crate::_base::exec_env::shell_path_bridge::ShellPathBridge>;
+pub type ShellPathBridge = Arc<dyn crate::_base::exec_env::shell_path_bridge::ShellPathBridge>;
 pub type StatusListener = Arc<dyn Fn(EnvironmentStatus) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

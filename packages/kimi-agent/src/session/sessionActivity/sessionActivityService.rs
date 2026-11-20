@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use futures_util::future::BoxFuture;
+use crate::hooks::BoxHookFuture;
 use parking_lot::Mutex;
 
 use crate::_base::di::lifecycle::{DisposableRef, IDisposable, to_disposable};
@@ -240,23 +241,29 @@ impl SessionActivityView {
         let dispatcher = handle.accessor().get(&I_EVENT_DISPATCHER);
         let weak = Arc::downgrade(self);
         let restore_handle = handle.clone();
-        subscriptions.push(dispatcher.hooks().on_did_restore.register(
-            "sessionActivity",
-            Arc::new(move |_ctx, next| {
-                let weak = weak.clone();
-                let handle = restore_handle.clone();
-                Box::pin(async move {
-                    if let Some(this) = weak.upgrade() {
-                        let seed = seed_fold(&handle);
-                        this.update_folds(|folds| {
-                            folds.insert(handle.id().to_string(), seed);
-                        });
-                        this.recompute(SessionActivityCause::AgentLifecycle);
-                    }
-                    next().await
-                }) as BoxFuture<'static, Result<(), crate::wire::record::WireAsyncError>>
-            }),
-        ));
+        let registration = dispatcher
+            .hooks()
+            .on_did_restore
+            .register(
+                "sessionActivity",
+                Arc::new(move |_ctx, next| {
+                    let weak = weak.clone();
+                    let handle = restore_handle.clone();
+                    Box::pin(async move {
+                        if let Some(this) = weak.upgrade() {
+                            let seed = seed_fold(&handle);
+                            this.update_folds(|folds| {
+                                folds.insert(handle.id().to_string(), seed);
+                            });
+                            this.recompute(SessionActivityCause::AgentLifecycle);
+                        }
+                        next.proceed(None).await;
+                    }) as BoxHookFuture
+                }),
+                Default::default(),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+        subscriptions.push(to_disposable(move || registration.dispose()));
         self.agent_subscriptions
             .lock()
             .insert(agent_id, subscriptions);

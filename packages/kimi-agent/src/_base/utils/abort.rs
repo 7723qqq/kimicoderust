@@ -135,20 +135,24 @@ impl AbortSignal {
 
     /// Resolves once this signal aborts (v2 `addEventListener('abort', …)`).
     pub fn cancelled(&self) -> BoxFuture<'static, ()> {
-        if self.aborted() {
-            return async {}.boxed();
-        }
-        let (sender, receiver) = oneshot::channel();
-        let sender = Arc::new(Mutex::new(Some(sender)));
         let signal = self.clone();
-        let listener_id = self.listen(Arc::new(move || {
-            if let Some(sender) = sender.lock().take() {
-                let _ = sender.send(());
-            }
-        }));
         async move {
+            if signal.aborted() {
+                return;
+            }
+            let (sender, receiver) = oneshot::channel();
+            let sender = Arc::new(Mutex::new(Some(sender)));
+            let listener_sender = sender.clone();
+            let listener_id = signal.listen(Arc::new(move || {
+                if let Some(sender) = listener_sender.lock().take() {
+                    let _ = sender.send(());
+                }
+            }));
+            let _listener = AbortListenerGuard { signal: signal.clone(), listener_id };
+            if signal.aborted() {
+                return;
+            }
             let _ = receiver.await;
-            signal.remove_listener(listener_id);
         }
         .boxed()
     }
@@ -224,6 +228,17 @@ impl AbortSignal {
     }
 }
 
+struct AbortListenerGuard {
+    signal: AbortSignal,
+    listener_id: u64,
+}
+
+impl Drop for AbortListenerGuard {
+    fn drop(&mut self) {
+        self.signal.remove_listener(self.listener_id);
+    }
+}
+
 #[derive(Clone)]
 pub struct AbortController {
     signal: AbortSignal,
@@ -249,10 +264,14 @@ impl AbortController {
     }
 
     pub fn abort(&self, reason: Option<SharedError>) {
-        if self.signal.inner.aborted.swap(true, Ordering::SeqCst) {
-            return;
+        {
+            let mut stored_reason = self.signal.inner.reason.lock();
+            if self.signal.aborted() {
+                return;
+            }
+            *stored_reason = reason;
+            self.signal.inner.aborted.store(true, Ordering::SeqCst);
         }
-        *self.signal.inner.reason.lock() = reason;
         // Break derived-signal cycles once this signal is terminal.
         self.signal.inner.keepers.lock().clear();
         let listeners = self
@@ -400,6 +419,28 @@ pub fn create_deadline_abort_signal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_a_cancelled_wait_removes_its_listener() {
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let mut waiting = signal.cancelled();
+        assert!(signal.inner.listeners.lock().is_empty());
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(signal.inner.listeners.lock().len(), 1);
+        drop(waiting);
+        assert!(signal.inner.listeners.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_the_first_poll_does_not_register_a_listener() {
+        let controller = AbortController::new();
+        let signal = controller.signal();
+        let waiting = signal.cancelled();
+        controller.abort(None);
+        waiting.await;
+        assert!(signal.inner.listeners.lock().is_empty());
+    }
 
     #[tokio::test]
     async fn cancelled_resolves_when_the_signal_aborts() {

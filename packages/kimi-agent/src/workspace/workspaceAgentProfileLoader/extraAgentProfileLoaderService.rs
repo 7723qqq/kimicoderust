@@ -99,13 +99,13 @@ impl ExtraAgentProfileLoaderService {
                         let discovery = discover_agent_files(
                             fs.as_ref(),
                             &roots,
-                            Some(&|message| log.warn(message, None)),
+                            Some(&|message, _error| log.warn(message, None)),
                         )
                         .await?;
                         Ok(profiles_from_discovery(
                             discovery,
                             Arc::new(move |context| {
-                                user.get_default_profile().render_system_prompt(context)
+                                (user.get_default_profile().render_system_prompt)(context)
                             }),
                         ))
                     }
@@ -116,7 +116,7 @@ impl ExtraAgentProfileLoaderService {
         let mut subscriptions = Vec::new();
         let reload_base = base.clone();
         let reload_log = log.clone();
-        subscriptions.push(config_service.on_did_section_change(move |event| {
+        subscriptions.push(config_service.on_did_section_change(Box::new(move |event| {
             if event.domain != EXTRA_AGENT_DIRS_SECTION {
                 return;
             }
@@ -130,9 +130,9 @@ impl ExtraAgentProfileLoaderService {
                     );
                 }
             });
-        }));
+        })));
         let reload_base = base.clone();
-        subscriptions.push(dirs.on_did_change(move || {
+        subscriptions.push(dirs.on_did_change(Arc::new(move || {
             let base = reload_base.clone();
             let log = log.clone();
             tokio::spawn(async move {
@@ -143,7 +143,7 @@ impl ExtraAgentProfileLoaderService {
                     );
                 }
             });
-        }));
+        })));
         base.start();
         Self {
             base,
@@ -167,6 +167,7 @@ impl IExtraAgentProfileLoader for ExtraAgentProfileLoaderService {
     }
 
     fn reload(&self) -> BoxFuture<'static, Result<(), WireAsyncError>> {
-        self.base.reload().boxed()
+        let base = self.base.clone();
+        Box::pin(async move { base.reload().await })
     }
 }

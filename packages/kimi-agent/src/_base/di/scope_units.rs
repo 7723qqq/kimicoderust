@@ -12,6 +12,7 @@ use super::fiber::{FiberRuntime, ServiceRecipe, scope_units};
 use super::instantiation_service::InstantiationService;
 use super::scope::ScopeKind;
 use crate::_base::errors::unexpected_error::on_unexpected_error;
+use crate::_base::lifecycle::disposer::IntoDisposerOutput;
 use crate::_base::lifecycle::ledger::{Ledger, LedgerEntry};
 
 type Retract = Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>;
@@ -30,7 +31,7 @@ pub fn watch_scope_units(container: Arc<InstantiationService>, kind: ScopeKind) 
     let fold_ledger = Ledger::new(&format!("scope-units:{kind}"));
     let anchor_ledger = fold_ledger.clone();
     container.anchor_kernel_entry(
-        Arc::new(move |reason| anchor_ledger.teardown(reason)),
+        Arc::new(move |reason| anchor_ledger.teardown(reason).into_disposer_output()),
         &format!("scope-units:{kind}"),
     );
     let materialized = Arc::new(Mutex::new(IndexMap::<u64, Retract>::new()));
@@ -52,7 +53,7 @@ pub fn watch_scope_units(container: Arc<InstantiationService>, kind: ScopeKind) 
                         let instance = host.construct_service(recipe, None)?;
                         unit_ledger.register(
                             move |_| {
-                                if let Some(disposable) = instance.disposable {
+                                if let Some(disposable) = instance.disposable.clone() {
                                     disposable.dispose();
                                 }
                             },

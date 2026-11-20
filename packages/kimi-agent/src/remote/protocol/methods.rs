@@ -276,8 +276,8 @@ pub fn compare_versions(a: &str, b: &str) -> i32 {
     let pb = b.split('.').map(parse_int_prefix).collect::<Vec<_>>();
     for index in 0..pa.len().max(pb.len()) {
         let diff = pa.get(index).copied().unwrap_or(0.0) - pb.get(index).copied().unwrap_or(0.0);
-        if diff != 0 {
-            return if diff < 0 { -1 } else { 1 };
+        if diff != 0.0 {
+            return if diff < 0.0 { -1 } else { 1 };
         }
     }
     0

@@ -27,7 +27,7 @@ pub struct LocalEnvironment {
     host: crate::os::interface::host_environment::HostEnvironmentInfo,
     path: EnvironmentPath,
     workspace: EnvironmentWorkspace,
-    shell_path_bridge: Option<Arc<ShellPathBridge>>,
+    shell_path_bridge: Option<Arc<dyn ShellPathBridge>>,
     fs: Option<Arc<dyn IHostFileSystem>>,
     process: Option<Arc<dyn IHostProcessService>>,
     current_status: Mutex<EnvironmentStatus>,
@@ -101,7 +101,16 @@ impl LocalEnvironment {
             }
         });
         let shell_path_bridge = if host.path_class == "win32" {
-            Some(get_shell_path_bridge(environment.as_ref()))
+            Some(get_shell_path_bridge(
+                crate::_base::exec_env::shell_path_bridge::ShellPathBridgeEnv {
+                    os_kind: host.os_kind.clone(),
+                    shell_name: match host.shell_name.as_str() {
+                        "sh" => crate::_base::exec_env::environment_probe::ShellName::Sh,
+                        _ => crate::_base::exec_env::environment_probe::ShellName::Bash,
+                    },
+                    shell_path: host.shell_path.clone(),
+                },
+            ))
         } else {
             None
         };
@@ -154,7 +163,7 @@ impl Environment for LocalEnvironment {
         Some(self.workspace.clone())
     }
 
-    fn shell_path_bridge(&self) -> Option<Arc<ShellPathBridge>> {
+    fn shell_path_bridge(&self) -> Option<Arc<dyn ShellPathBridge>> {
         self.shell_path_bridge.clone()
     }
 

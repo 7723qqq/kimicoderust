@@ -82,6 +82,10 @@ impl HostCallbacks for ImagePreviewCallbacks {
         self.inner.ask_question(request)
     }
 
+    fn cancel_question(&self, question_id: &str, reason: &str) {
+        self.inner.cancel_question(question_id, reason);
+    }
+
     fn state_read(
         &self,
         request: StateReadRequest,

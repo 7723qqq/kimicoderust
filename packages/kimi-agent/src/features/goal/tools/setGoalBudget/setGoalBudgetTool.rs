@@ -7,8 +7,9 @@ use serde_json::{Map, Value};
 use super::setGoalBudget::{SetGoalBudgetToolInput, set_goal_budget_input_schema};
 use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
-    ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
+    ExecutableTool, ExecutableToolOutput, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::agent::tools::main_agent_only::{GOAL_MAIN_AGENT_ONLY, main_agent_only_execution};
 use crate::features::goal::goal_service::AgentGoalService;
 use crate::features::goal::types::{GoalActor, GoalBudgetLimits, GoalSnapshot};
@@ -33,14 +34,6 @@ impl SetGoalBudgetTool {
 
     pub fn name(&self) -> &'static str {
         "SetGoalBudget"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -137,7 +130,7 @@ impl SetGoalBudgetTool {
     }
 }
 
-fn output_result(output: impl Into<String>) -> ExecutableToolResult {
+fn output_result(output: impl Into<ExecutableToolOutput>) -> ExecutableToolResult {
     ExecutableToolResult {
         output: output.into(),
         ..Default::default()
@@ -228,6 +221,14 @@ fn wire_error(message: String) -> WireAsyncError {
 }
 
 impl ExecutableTool for SetGoalBudgetTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         SetGoalBudgetTool::name(self)
     }

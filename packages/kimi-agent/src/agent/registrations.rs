@@ -13,5 +13,6 @@ pub fn ensure_agent_services_registered() -> Result<(), String> {
     crate::agent::tool_result_truncation::tool_result_truncation_service::ensure_agent_tool_result_truncation_service_registered()?;
     crate::agent::context_memory::conversation_undo_participants::ensure_agent_conversation_undo_participant_registry_registered()?;
     crate::agent::tool_registry::tool_registry_service::ensure_agent_tool_registry_service_registered()?;
+    crate::workspace::sandbox::sandbox_policy_service::ensure_sandbox_policy_service_registered()?;
     Ok(())
 }

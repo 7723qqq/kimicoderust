@@ -66,6 +66,7 @@ pub trait IExtraFileSkillSource: ISkillSource {}
 
 impl IExtraFileSkillSource for ExtraFileSkillSource {}
 
+#[async_trait]
 impl ISkillSource for ExtraFileSkillSource {
     fn id(&self) -> &str {
         "extra"

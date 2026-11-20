@@ -160,9 +160,7 @@ pub fn register_profiles() {
         })),
         prompt_prefix: Some(Arc::new(|context: AgentProfilePromptPrefixContext| {
             Box::pin(async move {
-                collect_git_context(context.process, &context.cwd, context.log)
-                    .await
-                    .unwrap_or_default()
+                collect_git_context(context.process, &context.cwd, context.log, None).await
             }) as BoxFuture<'static, String>
         })),
     });

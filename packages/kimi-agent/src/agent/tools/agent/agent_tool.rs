@@ -270,14 +270,6 @@ impl SubagentTool {
         "Agent"
     }
 
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
-    }
-
     pub fn parameters(&self) -> Map<String, Value> {
         let mut parameters = if exposes_subagent_model_choice(self.config.as_ref()) {
             SUBAGENT_TOOL_PARAMETERS.clone()
@@ -291,6 +283,12 @@ impl SubagentTool {
             parameters = strip_subagent_backend_parameter(&parameters);
         }
         parameters
+    }
+    pub fn side_effect(&self) -> &'static str {
+        "read"
+    }
+    pub fn repo_mutation(&self) -> &'static str {
+        "none"
     }
 
     pub fn description(&self) -> String {
@@ -1199,13 +1197,16 @@ struct BackendCheck {
 }
 
 fn is_user_reference_source(source: ToolSource) -> bool {
-    matches!(source, ToolSource::Host | ToolSource::Plugin)
+    matches!(
+        source,
+        ToolSource::Host | ToolSource::Plugin | ToolSource::User
+    )
 }
 
 fn policy_source(source: ToolSource) -> PolicyToolSource {
     match source {
         ToolSource::Mcp => PolicyToolSource::Mcp,
-        ToolSource::Host => PolicyToolSource::User,
+        ToolSource::Host | ToolSource::User => PolicyToolSource::User,
         ToolSource::Builtin | ToolSource::Plugin => PolicyToolSource::Builtin,
     }
 }

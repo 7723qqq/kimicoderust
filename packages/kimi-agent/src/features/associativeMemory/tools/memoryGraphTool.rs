@@ -143,16 +143,14 @@ impl MemoryGraphTool {
         MEMORY_GRAPH_TOOL_NAME
     }
 
+    pub fn description(&self) -> &'static str {
+        MEMORY_GRAPH_DESCRIPTION
+    }
     pub fn side_effect(&self) -> &'static str {
         "write"
     }
-
     pub fn repo_mutation(&self) -> &'static str {
         "none"
-    }
-
-    pub fn description(&self) -> &'static str {
-        MEMORY_GRAPH_DESCRIPTION
     }
 
     pub fn parameters(&self) -> Value {

@@ -119,7 +119,7 @@ pub static MICRO_COMPACTION_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::n
     );
     key.on(
         &MICRO_COMPACTION_APPLIED_CLASS,
-        Arc::new(|state, event, _context| {
+        Arc::new(|mut state, event, _context| {
             let cutoff = event_number(&event, "cutoff")?;
             state
                 .as_object_mut()?
@@ -130,7 +130,7 @@ pub static MICRO_COMPACTION_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::n
     .expect("micro compaction apply fold registration is valid");
     key.on(
         &MICRO_COMPACTION_CLAMPED_CLASS,
-        Arc::new(|state, event, _context| {
+        Arc::new(|mut state, event, _context| {
             let max_cutoff = event_number(&event, "maxCutoff")?.as_f64()?;
             let current = state.get("cutoff")?.as_f64()?;
             state
@@ -141,7 +141,7 @@ pub static MICRO_COMPACTION_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::n
     )
     .expect("micro compaction clamp fold registration is valid");
     for class in [&CONTEXT_CLEAR_CLASS, &CONTEXT_APPLY_COMPACTION_CLASS] {
-        key.on(class, Arc::new(|state, _event, _context| {
+        key.on(class, Arc::new(|mut state, _event, _context| {
             state
                 .as_object_mut()?
                 .insert("cutoff".to_string(), json!(0));

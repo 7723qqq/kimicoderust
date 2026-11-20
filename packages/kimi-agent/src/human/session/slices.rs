@@ -5,7 +5,8 @@ use serde_json::{Map, Value, json};
 
 use crate::human::eventStore::eventStore::SliceMap;
 use crate::human::eventStore::events::{EventDefinition, EventSchema, define_event};
-use crate::human::eventStore::slice::Slice;
+use crate::human::eventStore::events::InternalEvent;
+use crate::human::eventStore::slice::{FoldContext, Reducer, Slice};
 use crate::human::session::events::{
     AGENT_CLOSED_TYPE, AGENT_OPENED_TYPE, AGENT_SWITCHED_TYPE, COMPACTION_CANCELLED_TYPE,
     COMPACTION_COMPLETED_TYPE, COMPACTION_STARTED_TYPE, SESSION_META_UPDATED_TYPE,
@@ -94,10 +95,10 @@ fn ensure_event_schemas() {
 }
 
 pub fn roster_slice() -> Slice<Value> {
-    let mut reducers = HashMap::new();
+    let mut reducers: HashMap<String, Reducer<Value>> = HashMap::new();
     reducers.insert(
         AGENT_OPENED_TYPE.to_string(),
-        Arc::new(|draft, event, _| {
+        Arc::new(|draft: &mut Value, event: &InternalEvent, _: &mut FoldContext| {
             let agents = draft
                 .as_object_mut()
                 .unwrap()
@@ -110,11 +111,11 @@ pub fn roster_slice() -> Slice<Value> {
                 event.get("branch").cloned().unwrap(),
             );
             None
-        }),
+        }) as Reducer<Value>,
     );
     reducers.insert(
         AGENT_CLOSED_TYPE.to_string(),
-        Arc::new(|draft, event, _| {
+        Arc::new(|draft: &mut Value, event: &InternalEvent, _: &mut FoldContext| {
             if let Some(agents) = draft
                 .as_object_mut()
                 .and_then(|draft| draft.get_mut("agents"))
@@ -123,11 +124,11 @@ pub fn roster_slice() -> Slice<Value> {
                 agents.remove(event.get("agentId").and_then(Value::as_str).unwrap());
             }
             None
-        }),
+        }) as Reducer<Value>,
     );
     reducers.insert(
         AGENT_SWITCHED_TYPE.to_string(),
-        Arc::new(|draft, event, _| {
+        Arc::new(|draft: &mut Value, event: &InternalEvent, _: &mut FoldContext| {
             let agents = draft
                 .as_object_mut()
                 .unwrap()
@@ -140,7 +141,7 @@ pub fn roster_slice() -> Slice<Value> {
                 event.get("branch").cloned().unwrap(),
             );
             None
-        }),
+        }) as Reducer<Value>,
     );
     Slice {
         name: "roster".to_string(),
@@ -150,16 +151,16 @@ pub fn roster_slice() -> Slice<Value> {
 }
 
 pub fn session_meta_slice() -> Slice<Value> {
-    let mut reducers = HashMap::new();
+    let mut reducers: HashMap<String, Reducer<Value>> = HashMap::new();
     reducers.insert(
         SESSION_META_UPDATED_TYPE.to_string(),
-        Arc::new(|draft, event, _| {
+        Arc::new(|draft: &mut Value, event: &InternalEvent, _: &mut FoldContext| {
             draft.as_object_mut().unwrap().insert(
                 "value".to_string(),
                 event.get("meta").cloned().unwrap_or(Value::Null),
             );
             None
-        }),
+        }) as Reducer<Value>,
     );
     Slice {
         name: "sessionMeta".to_string(),

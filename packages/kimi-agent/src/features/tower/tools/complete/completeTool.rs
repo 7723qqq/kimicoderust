@@ -7,6 +7,7 @@ use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::features::tower::tools::delivery::{TowerDeliveryHost, deliver_tower_message};
 use crate::features::tower::tools::support::{new_tower_store, run_tower_tool};
 use crate::session::sessionContext::sessionContext::ISessionContext;
@@ -38,14 +39,6 @@ impl TowerCompleteTool {
 
     pub fn name(&self) -> &'static str {
         TOWER_COMPLETE_TOOL_NAME
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "write"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -166,6 +159,14 @@ impl TowerCompleteTool {
 }
 
 impl ExecutableTool for TowerCompleteTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Write)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         TowerCompleteTool::name(self)
     }

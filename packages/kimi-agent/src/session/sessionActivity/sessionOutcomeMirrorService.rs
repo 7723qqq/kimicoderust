@@ -125,20 +125,27 @@ impl SessionOutcomeMirror {
         let mut subscriptions = Vec::new();
         let weak = Arc::downgrade(self);
         let restore_states = agent_states.clone();
-        subscriptions.push(dispatcher.hooks.on_did_restore.register(
-            "session-outcome-mirror",
-            Arc::new(move |_ctx, next| {
-                let weak = weak.clone();
-                let states = restore_states.clone();
-                Box::pin(async move {
-                    next().await?;
-                    if let Some(this) = weak.upgrade() {
-                        this.reconcile_after_restore(&states).await;
-                    }
-                    Ok(())
-                }) as BoxFuture<'static, Result<(), WireAsyncError>>
-            }),
-        ));
+        let restore_registration = dispatcher
+            .hooks()
+            .on_did_restore
+            .register(
+                "session-outcome-mirror",
+                Arc::new(move |_ctx, next| {
+                    let weak = weak.clone();
+                    let states = restore_states.clone();
+                    Box::pin(async move {
+                        next.proceed(None).await;
+                        if let Some(this) = weak.upgrade() {
+                            this.reconcile_after_restore(&states).await;
+                        }
+                    }) as crate::hooks::BoxHookFuture
+                }),
+                Default::default(),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+        subscriptions.push(crate::_base::di::lifecycle::to_disposable(move || {
+            restore_registration.dispose()
+        }));
         let weak = Arc::downgrade(self);
         subscriptions.push(bus.subscribe_turn_ended(Arc::new(move |event: TurnEnded| {
             if let Some(this) = weak.upgrade() {
@@ -163,7 +170,7 @@ impl SessionOutcomeMirror {
                         );
                     }
                     crate::agent::r#loop::turn_events::TurnEndReason::Cancelled
-                        if event.interrupt_reason.as_deref() == Some("user_cancelled") =>
+                        if event.interrupt_reason == Some(crate::agent::r#loop::turn_events::TurnInterruptReason::UserCancelled) =>
                     {
                         this.write(
                             Some(SessionTurnOutcome::Cancelled),

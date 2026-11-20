@@ -27,6 +27,7 @@ pub trait IPluginSkillSource: ISkillSource {}
 
 impl IPluginSkillSource for PluginSkillSource {}
 
+#[async_trait]
 impl ISkillSource for PluginSkillSource {
     fn id(&self) -> &str {
         PLUGIN_SKILL_SOURCE_ID

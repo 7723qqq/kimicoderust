@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::_base::utils::paths::join;
 use crate::app::agent_profile_catalog::agent_profile_catalog::{
-    AgentProfile, AgentProfileInput, DEFAULT_AGENT_PROFILE_NAME, normalize_agent_profile,
+    AgentProfile, AgentProfileContext, AgentProfileRenderSystemPrompt, AgentProfileInput, DEFAULT_AGENT_PROFILE_NAME, normalize_agent_profile,
 };
 use crate::app::agent_profile_catalog::profile_shared::{
     render_prompt_template_result, skill_active_for,
@@ -21,15 +21,15 @@ pub async fn load_system_md_profile(
     builtin_default: AgentProfile,
     warn: &dyn Fn(&str),
 ) -> Result<Option<AgentProfile>, WireAsyncError> {
-    let path = join(brand_home, SYSTEM_MD_FILENAME);
-    let text = match async {
+    let path = join(brand_home, &[SYSTEM_MD_FILENAME]);
+    let loaded: Result<Option<String>, WireAsyncError> = async {
         if !is_file_path(fs, &path).await? {
             return Ok(None);
         }
-        Ok(Some(fs.read_text(&path).await?))
+        Ok(Some(fs.read_text(&path, None).await?))
     }
-    .await
-    {
+    .await;
+    let text = match loaded {
         Ok(text) => text,
         Err(error) => {
             if error
@@ -72,7 +72,10 @@ pub async fn load_system_md_profile(
                 &text,
                 context,
                 skill_active,
-                Arc::new(move |context| render_default(context)),
+                Arc::new({
+                    let render_default = render_default.clone();
+                    move |context: &AgentProfileContext| (render_default.as_ref())(context)
+                }) as AgentProfileRenderSystemPrompt,
             )
         })),
         prompt_prefix: None,

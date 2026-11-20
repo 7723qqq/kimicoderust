@@ -22,6 +22,7 @@ use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::i18n::LocalizedText;
 use crate::session::sessionContext::sessionContext::ISessionContext;
 use crate::tool::input_schema::to_input_json_schema;
@@ -53,14 +54,6 @@ impl SessionQueryTool {
 
     pub fn name(&self) -> &'static str {
         SESSION_QUERY_TOOL_NAME
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -223,6 +216,14 @@ fn operation_name(operation: SessionQueryOperation) -> &'static str {
 }
 
 impl ExecutableTool for SessionQueryTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         SessionQueryTool::name(self)
     }

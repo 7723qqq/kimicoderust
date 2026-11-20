@@ -107,8 +107,9 @@ impl RestGateway {
         let loop_ = self.agent(session_id, agent_id)?.accessor().get(&I_AGENT_LOOP_SERVICE);
         loop_.cancel(
             None,
-            reason.map(|reason| -> WireAsyncError {
-                Box::new(std::io::Error::new(std::io::ErrorKind::Interrupted, reason))
+            reason.map(|reason| {
+                Arc::new(std::io::Error::new(std::io::ErrorKind::Interrupted, reason))
+                    as Arc<dyn std::error::Error + Send + Sync>
             }),
         );
         Ok(())
@@ -122,11 +123,13 @@ impl RestGateway {
         let Some(session) = self.sessions.get(session_id) else {
             return Ok(());
         };
-        session.accessor().get(&I_LOG_SERVICE).flush().await
+        session.accessor().get(&I_LOG_SERVICE).flush().await;
+        Ok(())
     }
 
     pub async fn flush_global_logs(&self) -> Result<(), WireAsyncError> {
-        self.log.flush().await
+        self.log.flush().await;
+        Ok(())
     }
 }
 

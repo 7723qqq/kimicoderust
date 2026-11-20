@@ -26,10 +26,10 @@ use tokio::sync::oneshot;
 // ── Global callback registry ───────────────────────────────────────────────
 
 /// Result channel for a pending callback awaiting resolution from JS.
-type PendingCallback = oneshot::Sender<Result<String, String>>;
+pub(crate) type PendingCallback = oneshot::Sender<Result<String, String>>;
 
 /// Pending callbacks awaiting resolution from the JS side.
-static CALLBACK_REGISTRY: LazyLock<Mutex<HashMap<u32, PendingCallback>>> =
+pub(crate) static CALLBACK_REGISTRY: LazyLock<Mutex<HashMap<u32, PendingCallback>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Payload registry — stores the JSON request payloads by callback ID.
@@ -77,6 +77,27 @@ pub(crate) fn store_payload(id: u32, payload: String) {
     }
     for candidate in doomed {
         registry.remove(&candidate);
+    }
+}
+
+pub(crate) struct PendingHostCallback(u32);
+
+impl PendingHostCallback {
+    pub(crate) fn register(id: u32, tx: PendingCallback, input: String) -> Self {
+        CALLBACK_REGISTRY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, tx);
+        let pending = Self(id);
+        store_payload(id, input);
+        pending
+    }
+}
+
+impl Drop for PendingHostCallback {
+    fn drop(&mut self) {
+        PAYLOAD_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        CALLBACK_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
     }
 }
 
@@ -627,28 +648,12 @@ pub(crate) async fn invoke_via_registry(
     let id = NEXT_CALLBACK_ID.fetch_add(1, Ordering::SeqCst);
     let (tx, rx) = oneshot::channel();
 
-    // Store the payload so JS can fetch it via getCallbackPayload(id).
-    store_payload(id, input);
-
-    // Register the sender so resolve_callback can find it.
-    CALLBACK_REGISTRY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id, tx);
+    let _pending = PendingHostCallback::register(id, tx, input);
 
     // Fire the JS function with just the callback ID (a number).
     // ErrorStrategy::Fatal: no error-first null prepended, JS receives the id directly.
     let status = tsfn.call(id, ThreadsafeFunctionCallMode::NonBlocking);
     if status != napi::Status::Ok {
-        // Clean up on failure.
-        PAYLOAD_REGISTRY
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
-        CALLBACK_REGISTRY
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
         return Err(format!("{label} call: {status:?}"));
     }
 
@@ -657,35 +662,19 @@ pub(crate) async fn invoke_via_registry(
         Some(limit) => Deadline::new(label, limit),
         None => Deadline::unbounded(label),
     };
-    let pending = match deadline
+    match deadline
         .wait(
             "waiting for the host to answer",
             wait_for_callback(rx, cancel, label),
         )
         .await
     {
-        Ok(outcome) => outcome,
+        Ok(outcome) => outcome?,
         Err(_) => Err(format!(
             "{label} timed out after {}s",
             deadline.remaining().as_secs()
         )),
-    };
-
-    // Whatever ended the wait (resolution, timeout, cancellation, dropped
-    // host), leave nothing behind: a late resolve_callback would find no
-    // sender, and the payload would sit in the registry until pruned.
-    PAYLOAD_REGISTRY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&id);
-    if pending.is_err() {
-        CALLBACK_REGISTRY
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
     }
-
-    pending.and_then(|inner| inner)
 }
 
 /// Await a host-callback oneshot, optionally observing the turn's

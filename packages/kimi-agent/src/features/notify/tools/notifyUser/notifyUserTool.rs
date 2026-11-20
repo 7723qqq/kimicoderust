@@ -12,6 +12,7 @@ use crate::agent::context_memory::context_memory::IAgentContextMemoryService;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::tool::input_schema::to_input_json_schema;
 use crate::tool::tool_contract::ToolAccesses;
 use crate::tools::notify_user::NotifyUserInput;
@@ -48,14 +49,6 @@ impl NotifyUserTool {
 
     pub fn name(&self) -> &'static str {
         NOTIFY_USER_TOOL_NAME
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -194,6 +187,14 @@ fn is_js_whitespace(character: char) -> bool {
 }
 
 impl ExecutableTool for NotifyUserTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         NotifyUserTool::name(self)
     }

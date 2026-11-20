@@ -421,12 +421,6 @@ pub struct LlmRequesterConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SandboxConfig {
-    #[serde(default)]
-    pub mode: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelOverridesConfig {
     #[serde(default)]
     pub temperature: Option<f64>,
@@ -719,9 +713,6 @@ pub struct KimiConfig {
     #[serde(rename = "llm_requester", alias = "llmRequester", default)]
     pub llm_requester: LlmRequesterConfig,
 
-    #[serde(default)]
-    pub sandbox: SandboxConfig,
-
     #[serde(rename = "model_overrides", alias = "modelOverrides", default)]
     pub model_overrides: ModelOverridesConfig,
 
@@ -940,13 +931,6 @@ impl KimiConfig {
                 "[llmRequester].requestByteBudget must be a positive integer; the value is ignored and the 32 MiB default applies."
                     .to_string(),
             );
-        }
-        if let Some(mode) = self.sandbox.mode.as_deref() {
-            if let Err(error) = crate::tools::sandbox::SandboxMode::validate(mode) {
-                warnings.push(format!(
-                    "[sandbox].mode is invalid: {error}. The sandbox stays off."
-                ));
-            }
         }
         if let Some(iterations) = self.loop_control.max_ralph_iterations {
             if iterations < -1 {
@@ -1869,13 +1853,6 @@ impl KimiConfig {
                 .request_byte_budget
                 .filter(|value| *value > 0))
             .unwrap_or(DEFAULT_LLM_REQUEST_BYTE_BUDGET)
-    }
-
-    pub fn resolve_sandbox_mode(&self) -> Option<crate::tools::sandbox::SandboxMode> {
-        self.sandbox
-            .mode
-            .as_deref()
-            .and_then(|mode| crate::tools::sandbox::SandboxMode::validate(mode).ok())
     }
 
     pub fn resolve_model_overrides(&self) -> ResolvedModelOverrides {

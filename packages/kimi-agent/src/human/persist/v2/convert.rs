@@ -144,17 +144,17 @@ pub async fn convert_v2_message(
                 content,
                 tools: None,
             },
-            meta: SystemMeta::default(),
+            meta: Some(SystemMeta::default()),
         }))),
         "user" => Ok(Some(HistoryMessage::User(UserEntry {
             message: UserMessage {
                 role: Role::User,
                 content,
             },
-            meta: UserMeta {
+            meta: Some(UserMeta {
                 source: Some(map_origin_to_source(message.origin.as_ref())),
                 ..UserMeta::default()
-            },
+            }),
         }))),
         "assistant" => Ok(Some(HistoryMessage::Assistant(AssistantEntry {
             message: AssistantMessage {
@@ -163,7 +163,7 @@ pub async fn convert_v2_message(
                 tool_calls: message.tool_calls.clone().unwrap_or_default(),
                 ..AssistantMessage::default()
             },
-            meta: build_assistant_meta(extra),
+            meta: Some(build_assistant_meta(extra)),
         }))),
         "tool" => Ok(Some(HistoryMessage::Tool(ToolEntry {
             message: ToolMessage {
@@ -171,10 +171,10 @@ pub async fn convert_v2_message(
                 content,
                 tool_call_id: message.tool_call_id.clone().unwrap_or_default(),
             },
-            meta: ToolMeta {
+            meta: Some(ToolMeta {
                 source: Some("tool".to_string()),
                 ..ToolMeta::default()
-            },
+            }),
         }))),
         _ => Ok(None),
     }

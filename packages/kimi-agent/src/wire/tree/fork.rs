@@ -8,11 +8,10 @@ use serde_json::{Map, Value, json};
 use crate::agent::context_memory::conversation_time::{
     is_prompt_owned_injection, is_undo_anchor, is_valid_undo_count,
 };
+use crate::agent::context_memory::types::ContextMessage;
 use crate::wire::record::WireRecord;
 
 use super::tree::{AGENT_SWITCHED_TYPE, WireLine, WireTree, active_chain, parse_tree};
-
-type ContextMessage = Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForkLineFailure {
@@ -50,12 +49,13 @@ impl fmt::Display for ForkLineError {
 impl Error for ForkLineError {}
 
 static COMPACTION_SUMMARY_MARKER: LazyLock<ContextMessage> = LazyLock::new(|| {
-    json!({
+    serde_json::from_value(json!({
         "role": "user",
         "content": [],
         "toolCalls": [],
         "origin": { "kind": "compaction_summary" }
-    })
+    }))
+    .expect("compaction summary marker must deserialize")
 });
 
 fn is_context_message(value: &Value) -> bool {
@@ -63,6 +63,13 @@ fn is_context_message(value: &Value) -> bool {
         message.get("role").is_some_and(Value::is_string)
             && message.get("content").is_some_and(Value::is_array)
     })
+}
+
+fn context_message_of(value: &Value) -> Option<ContextMessage> {
+    if !is_context_message(value) {
+        return None;
+    }
+    serde_json::from_value(value.clone()).ok()
 }
 
 #[derive(Clone)]
@@ -124,9 +131,9 @@ pub fn compute_fork_line(
                 let Some(message) = record.get("message") else {
                     continue;
                 };
-                if is_context_message(message) {
+                if let Some(parsed) = context_message_of(message) {
                     messages.push(NumberedMessage {
-                        message: message.clone(),
+                        message: parsed,
                         line: *line,
                     });
                 }
@@ -203,14 +210,14 @@ pub fn restorable_chain(
         let Some(message) = record.get("message") else {
             continue;
         };
-        if !is_context_message(message) {
-            continue;
-        }
-        let Some(id) = message.get("id") else {
+        let Some(message) = context_message_of(message) else {
             continue;
         };
-        if is_undo_anchor(message) {
-            surviving_prompt_ids.push(id.clone());
+        let Some(id) = message.id.clone() else {
+            continue;
+        };
+        if is_undo_anchor(&message) {
+            surviving_prompt_ids.push(Value::String(id));
         }
     }
     let mut re_included = Vec::new();

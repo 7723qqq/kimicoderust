@@ -3,6 +3,10 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::turn_loop::types::ToolInfo;
 
+pub(crate) fn allows_background_tasks(is_active: impl Fn(&str) -> bool) -> bool {
+    ["TaskList", "TaskOutput", "TaskStop"].into_iter().all(is_active)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolsFilter {
     #[serde(default)]
@@ -25,6 +29,10 @@ impl ToolsFilter {
             name,
             ToolSource::of_name(name),
         )
+    }
+
+    pub fn allows_background_tasks(&self) -> bool {
+        allows_background_tasks(|name| self.allows(name))
     }
 
     pub fn apply(&self, defs: Vec<ToolInfo>) -> Vec<ToolInfo> {

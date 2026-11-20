@@ -9,6 +9,7 @@ use crate::_base::utils::proxy::is_proxy_configured;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolContext, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::app::web::web::IWebFetchService;
 use crate::app::web::tools::fetch_url_types::UrlFetchOptions;
 use crate::app::web::web::{HttpFetchError, UrlFetchKind};
@@ -54,14 +55,6 @@ impl FetchURLTool {
 
     pub fn name(&self) -> &'static str {
         "FetchURL"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -178,6 +171,14 @@ impl FetchURLTool {
 }
 
 impl ExecutableTool for FetchURLTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         FetchURLTool::name(self)
     }

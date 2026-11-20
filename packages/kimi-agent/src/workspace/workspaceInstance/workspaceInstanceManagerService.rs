@@ -163,7 +163,9 @@ impl WorkspaceInstanceManager {
             }),
         };
         let weak = Arc::downgrade(&this.inner);
-        let subscription = this.inner.dependencies.workspace_store.on_did_change(move || {
+        let subscription = <dyn crate::app::workspace::workspace_persistence::IWorkspacePersistence as crate::app::workspace::workspace_persistence::IWorkspacePersistence>::on_did_change(
+            this.inner.dependencies.workspace_store.as_ref(),
+            std::sync::Arc::new(move || {
             let instances = weak
                 .upgrade()
                 .map(|inner| inner.state.lock().instances.values().cloned().collect::<Vec<_>>())
@@ -201,7 +203,8 @@ impl WorkspaceInstanceManager {
                     }
                 });
             }
-        });
+            }),
+        );
         *this.inner._workspace_store_subscription.lock() = Some(subscription);
         this
     }
@@ -340,6 +343,7 @@ impl WorkspaceInstanceManager {
                     let this = self.clone();
                     let workspace = workspace.clone();
                     let id = workspace.id.clone();
+                    let inflight_id = id.clone();
                     let materialization = async move {
                         let result = this.materialize(workspace).await;
                         this.inner.state.lock().inflight.remove(&id);
@@ -347,7 +351,7 @@ impl WorkspaceInstanceManager {
                     }
                     .boxed()
                     .shared();
-                    self.inner.state.lock().inflight.insert(workspace.id.clone(), materialization.clone());
+                    self.inner.state.lock().inflight.insert(inflight_id, materialization.clone());
                     tokio::spawn(materialization.clone());
                     materialization
                 }
@@ -361,11 +365,12 @@ impl WorkspaceInstanceManager {
         let id = instance.id();
         *self.inner.state.lock().references.entry(id).or_insert(0) += 1;
         let weak = Arc::downgrade(&self.inner);
+        let release_instance = instance.clone();
         WorkspaceInstanceLease {
             instance,
             dispose: Box::new(move || {
                 if let Some(inner) = weak.upgrade() {
-                    Self { inner }.release(instance);
+                    Self { inner }.release(release_instance);
                 }
             }),
         }
@@ -414,9 +419,10 @@ impl WorkspaceInstanceManager {
         self.inner.state.lock().instances.shift_remove(&id);
         self.inner.state.lock().references.remove(&id);
         let this = self.clone();
+        let closing_id = id.clone();
         let pending = async move {
             this.dispose_instance(instance.clone()).await;
-            this.inner.state.lock().closing.remove(&id);
+            this.inner.state.lock().closing.remove(&closing_id);
             this.fire(WorkspaceInstanceChange {
                 workspace_id: instance.id(),
                 instance: None,

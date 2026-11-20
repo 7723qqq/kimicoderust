@@ -346,8 +346,8 @@ where
     T: IWaitUntil,
 {
     emitter: Emitter<T>,
-    async_delivery_queue: Mutex<LinkedList<AsyncDeliveryEntry<T>>>,
-    async_delivery_seq: AtomicU64,
+    async_delivery_queue: Arc<Mutex<LinkedList<AsyncDeliveryEntry<T>>>>,
+    async_delivery_seq: Arc<AtomicU64>,
 }
 
 impl<T> AsyncEmitter<T>
@@ -357,8 +357,8 @@ where
     pub fn new() -> Self {
         Self {
             emitter: Emitter::new(),
-            async_delivery_queue: Mutex::new(LinkedList::new()),
-            async_delivery_seq: AtomicU64::new(0),
+            async_delivery_queue: Arc::new(Mutex::new(LinkedList::new())),
+            async_delivery_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -428,11 +428,13 @@ where
                 });
             }
         }
+        let queue_handle = self.async_delivery_queue.clone();
+        let seq_handle = self.async_delivery_seq.clone();
         async move {
             let mut watermark = u64::MAX;
             loop {
                 let head = {
-                    let mut queue = self.async_delivery_queue.lock();
+                    let mut queue = queue_handle.lock();
                     let Some(head) = queue.peek() else {
                         break;
                     };
@@ -441,7 +443,7 @@ where
                     }
                     queue.shift().unwrap()
                 };
-                watermark = self.async_delivery_seq.load(Ordering::SeqCst);
+                watermark = seq_handle.load(Ordering::SeqCst);
                 deliver_async(head.deliver, head.data, signal.clone()).await;
             }
         }

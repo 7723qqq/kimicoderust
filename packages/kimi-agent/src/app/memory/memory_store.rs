@@ -155,10 +155,12 @@ impl MemoryStore {
 
     async fn open_db(&self) -> Result<Arc<MiniDb>, WireAsyncError> {
         let dir = self.dir.clone();
-        let future = self.db_promise.get_or_init(|| {
-            async move { MiniDb::open(dir).await }.boxed().shared()
-        }).await;
-        future.clone().await.map_err(SharedMemoryError::boxed)
+        let future = self
+            .db_promise
+            .get_or_init(|| async { async move { MiniDb::open(dir).await }.boxed().shared() })
+            .await
+            .clone();
+        future.await.map_err(|error| Box::new(error) as WireAsyncError)
     }
 
     async fn ensure_fresh(&self) -> Result<(), WireAsyncError> {

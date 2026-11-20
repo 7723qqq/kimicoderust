@@ -1,0 +1,2544 @@
+{
+  "source": "agent/tools/github/github-tools.ts",
+  "sourceSha256": "a09c1ed67faf23887412a4016de944f9bf613fdfd814ca33dc3127268efbfe80",
+  "rows": [
+    {
+      "name": "GitHubGetRepo",
+      "args": {
+        "owner": "example",
+        "repo": "project"
+      },
+      "description": "Get metadata for a repository (description, default branch, stars, visibility).",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListBranches",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List branches in a repository.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/branches",
+      "query": {
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListCommits",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "sha": "abc",
+        "path": "src/a.txt",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List commits on a repository, optionally filtered by branch/sha or path.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "sha": {
+            "description": "Branch name or commit SHA to start from.",
+            "type": "string"
+          },
+          "path": {
+            "description": "Only commits touching this file path.",
+            "type": "string"
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/commits",
+      "query": {
+        "sha": "abc",
+        "path": "src/a.txt",
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "sha",
+          "abc"
+        ],
+        [
+          "path",
+          "src/a.txt"
+        ],
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetCommit",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "ref": "heads/main"
+      },
+      "description": "Get a single commit, including its diff stats and changed files.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Commit SHA, branch, or tag."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "ref"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/commits/heads/main",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetFileContents",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "path": "src/a.txt",
+        "ref": "heads/main"
+      },
+      "description": "Get a file or directory listing. File content is returned base64-encoded in the `content` field.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the file or directory in the repo."
+          },
+          "ref": {
+            "description": "Branch, tag, or commit SHA (defaults to the default branch).",
+            "type": "string"
+          },
+          "maxChars": {
+            "description": "Maximum characters of decoded text to return (default 40000).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 40000
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/contents/src/a.txt",
+      "query": {
+        "ref": "heads/main"
+      },
+      "queryPairs": [
+        [
+          "ref",
+          "heads/main"
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubCreateOrUpdateFile",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "path": "src/a.txt",
+        "message": "message",
+        "content": "hello",
+        "branch": "topic",
+        "sha": "abc"
+      },
+      "description": "Create or update a file. Provide plain-text `content` (encoded to base64 automatically). Pass `sha` when updating an existing file.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the file in the repo."
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Commit message."
+          },
+          "content": {
+            "type": "string",
+            "description": "Plain (UTF-8) file content."
+          },
+          "branch": {
+            "description": "Target branch (defaults to the default branch).",
+            "type": "string"
+          },
+          "sha": {
+            "description": "Blob SHA of the file being replaced (required when updating).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "path",
+          "message",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "method": "PUT",
+      "path": "/repos/example/project/contents/src/a.txt",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "message": "message",
+        "content": "aGVsbG8=",
+        "branch": "topic",
+        "sha": "abc"
+      },
+      "bodyText": "{\"message\":\"message\",\"content\":\"aGVsbG8=\",\"branch\":\"topic\",\"sha\":\"abc\"}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetRef",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "ref": "heads/main"
+      },
+      "description": "Get a Git reference (branch or tag head). Returns the current SHA for ref names like `heads/main`.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Ref name relative to `refs/`, e.g. `heads/main` or `tags/v1`."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "ref"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/git/ref/heads/main",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubCreateTree",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "baseTree": "tree",
+        "tree": [
+          {
+            "path": "x",
+            "content": "hi"
+          }
+        ]
+      },
+      "description": "Create a Git tree from file entries. Pair with GitHubCreateCommit and GitHubUpdateRef to push commits via the API without a local clone.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "baseTree": {
+            "description": "SHA of an existing tree to apply the entries on top of.",
+            "type": "string"
+          },
+          "tree": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Path relative to the repository root."
+                },
+                "mode": {
+                  "description": "Entry mode; defaults to 100644 (regular file).",
+                  "type": "string",
+                  "enum": [
+                    "100644",
+                    "100755",
+                    "120000",
+                    "160000",
+                    "040000"
+                  ]
+                },
+                "type": {
+                  "description": "Entry type; defaults to blob.",
+                  "type": "string",
+                  "enum": [
+                    "blob",
+                    "tree",
+                    "commit"
+                  ]
+                },
+                "content": {
+                  "description": "Plain UTF-8 file content (creates a new blob).",
+                  "type": "string"
+                },
+                "sha": {
+                  "description": "SHA of an existing blob/tree to point the entry at.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Tree entries to write."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "tree"
+        ],
+        "additionalProperties": false
+      },
+      "method": "POST",
+      "path": "/repos/example/project/git/trees",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "base_tree": "tree",
+        "tree": [
+          {
+            "path": "x",
+            "content": "hi"
+          }
+        ]
+      },
+      "bodyText": "{\"base_tree\":\"tree\",\"tree\":[{\"path\":\"x\",\"content\":\"hi\"}]}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubCreateCommit",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "message": "message",
+        "tree": "tree",
+        "parents": [
+          "abc"
+        ]
+      },
+      "description": "Create a commit object for a tree SHA with parent commit SHAs.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Commit message."
+          },
+          "tree": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Git tree SHA the commit points to."
+          },
+          "parents": {
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Parent commit SHAs (one for a normal commit)."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "message",
+          "tree",
+          "parents"
+        ],
+        "additionalProperties": false
+      },
+      "method": "POST",
+      "path": "/repos/example/project/git/commits",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "message": "message",
+        "tree": "tree",
+        "parents": [
+          "abc"
+        ]
+      },
+      "bodyText": "{\"message\":\"message\",\"tree\":\"tree\",\"parents\":[\"abc\"]}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubUpdateRef",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "ref": "heads/main",
+        "sha": "abc",
+        "force": false
+      },
+      "description": "Point a Git reference at a new commit SHA — the final step of pushing commits via the API.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Ref name relative to `refs/`, e.g. `heads/main`."
+          },
+          "sha": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Commit SHA the ref should point to."
+          },
+          "force": {
+            "description": "Overwrite the ref even when not a fast-forward.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "ref",
+          "sha"
+        ],
+        "additionalProperties": false
+      },
+      "method": "PATCH",
+      "path": "/repos/example/project/git/refs/heads/main",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "sha": "abc",
+        "force": false
+      },
+      "bodyText": "{\"sha\":\"abc\",\"force\":false}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubCreateBranch",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "branch": "topic",
+        "sha": "abc"
+      },
+      "description": "Create a new branch pointing at an existing commit SHA.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "New branch name."
+          },
+          "sha": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Commit SHA the new branch points to."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "branch",
+          "sha"
+        ],
+        "additionalProperties": false
+      },
+      "method": "POST",
+      "path": "/repos/example/project/git/refs",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "ref": "refs/heads/topic",
+        "sha": "abc"
+      },
+      "bodyText": "{\"ref\":\"refs/heads/topic\",\"sha\":\"abc\"}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListIssues",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "state": "open",
+        "labels": "bug",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List issues in a repository (excludes pull requests unless combined with search).",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "state": {
+            "description": "Issue state filter.",
+            "type": "string",
+            "enum": [
+              "open",
+              "closed",
+              "all"
+            ]
+          },
+          "labels": {
+            "description": "Comma-separated label names.",
+            "type": "string"
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/issues",
+      "query": {
+        "state": "open",
+        "labels": "bug",
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "state",
+          "open"
+        ],
+        [
+          "labels",
+          "bug"
+        ],
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetIssue",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "issueNumber": 7
+      },
+      "description": "Get a single issue by number.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "issueNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Issue number."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "issueNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/issues/7",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubCreateIssue",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "title": "title",
+        "body": "body",
+        "labels": [
+          "bug"
+        ],
+        "assignees": [
+          "example"
+        ]
+      },
+      "description": "Create a new issue.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Issue title."
+          },
+          "body": {
+            "description": "Issue body (Markdown).",
+            "type": "string"
+          },
+          "labels": {
+            "description": "Label names to apply.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "assignees": {
+            "description": "User logins to assign.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "method": "POST",
+      "path": "/repos/example/project/issues",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "title": "title",
+        "body": "body",
+        "labels": [
+          "bug"
+        ],
+        "assignees": [
+          "example"
+        ]
+      },
+      "bodyText": "{\"title\":\"title\",\"body\":\"body\",\"labels\":[\"bug\"],\"assignees\":[\"example\"]}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubUpdateIssue",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "issueNumber": 7,
+        "title": "title",
+        "body": "body",
+        "state": "open",
+        "labels": [
+          "bug"
+        ],
+        "assignees": [
+          "example"
+        ]
+      },
+      "description": "Update an issue (title, body, state, labels, assignees).",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "issueNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Issue number."
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed"
+            ]
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "assignees": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "issueNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "PATCH",
+      "path": "/repos/example/project/issues/7",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "title": "title",
+        "body": "body",
+        "state": "open",
+        "labels": [
+          "bug"
+        ],
+        "assignees": [
+          "example"
+        ]
+      },
+      "bodyText": "{\"title\":\"title\",\"body\":\"body\",\"state\":\"open\",\"labels\":[\"bug\"],\"assignees\":[\"example\"]}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubAddIssueComment",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "issueNumber": 7,
+        "body": "body"
+      },
+      "description": "Add a comment to an issue or pull request.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "issueNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Issue or PR number."
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Comment body (Markdown)."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "issueNumber",
+          "body"
+        ],
+        "additionalProperties": false
+      },
+      "method": "POST",
+      "path": "/repos/example/project/issues/7/comments",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "body": "body"
+      },
+      "bodyText": "{\"body\":\"body\"}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListIssueComments",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "issueNumber": 7,
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List comments on an issue or pull request.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "issueNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Issue or PR number."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "issueNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/issues/7/comments",
+      "query": {
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListPRs",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "state": "open",
+        "head": "topic",
+        "base": "main",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List pull requests in a repository.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed",
+              "all"
+            ]
+          },
+          "head": {
+            "description": "Filter by head branch (user:ref).",
+            "type": "string"
+          },
+          "base": {
+            "description": "Filter by base branch name.",
+            "type": "string"
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/pulls",
+      "query": {
+        "state": "open",
+        "head": "topic",
+        "base": "main",
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "state",
+          "open"
+        ],
+        [
+          "head",
+          "topic"
+        ],
+        [
+          "base",
+          "main"
+        ],
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetPR",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "pullNumber": 3
+      },
+      "description": "Get a single pull request by number.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "pullNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Pull request number."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "pullNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/pulls/3",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetPRDiff",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "pullNumber": 3
+      },
+      "description": "Get the unified diff for a pull request.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "pullNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Pull request number."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "pullNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/pulls/3",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": "application/vnd.github.diff",
+      "maxBytes": 200000,
+      "mutating": false,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetPRFiles",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "pullNumber": 3,
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List the files changed in a pull request.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "pullNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Pull request number."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "pullNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/pulls/3/files",
+      "query": {
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubCreatePR",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "title": "title",
+        "head": "topic",
+        "base": "main",
+        "body": "body",
+        "draft": false
+      },
+      "description": "Open a new pull request.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "PR title."
+          },
+          "head": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Source branch (or user:branch for cross-repo)."
+          },
+          "base": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Target branch to merge into."
+          },
+          "body": {
+            "description": "PR description (Markdown).",
+            "type": "string"
+          },
+          "draft": {
+            "description": "Open as a draft PR.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "title",
+          "head",
+          "base"
+        ],
+        "additionalProperties": false
+      },
+      "method": "POST",
+      "path": "/repos/example/project/pulls",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "title": "title",
+        "head": "topic",
+        "base": "main",
+        "body": "body",
+        "draft": false
+      },
+      "bodyText": "{\"title\":\"title\",\"head\":\"topic\",\"base\":\"main\",\"body\":\"body\",\"draft\":false}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubUpdatePR",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "pullNumber": 3,
+        "title": "title",
+        "body": "body",
+        "state": "open",
+        "base": "main"
+      },
+      "description": "Update a pull request (title, body, state, base branch).",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "pullNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Pull request number."
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed"
+            ]
+          },
+          "base": {
+            "description": "New base branch.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "pullNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "PATCH",
+      "path": "/repos/example/project/pulls/3",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "title": "title",
+        "body": "body",
+        "state": "open",
+        "base": "main"
+      },
+      "bodyText": "{\"title\":\"title\",\"body\":\"body\",\"state\":\"open\",\"base\":\"main\"}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubMergePR",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "pullNumber": 3,
+        "commitTitle": "merge",
+        "mergeMethod": "squash"
+      },
+      "description": "Merge a pull request.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "pullNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Pull request number."
+          },
+          "commitTitle": {
+            "description": "Title for the merge commit.",
+            "type": "string"
+          },
+          "mergeMethod": {
+            "description": "Merge strategy.",
+            "type": "string",
+            "enum": [
+              "merge",
+              "squash",
+              "rebase"
+            ]
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "pullNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "PUT",
+      "path": "/repos/example/project/pulls/3/merge",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "commit_title": "merge",
+        "merge_method": "squash"
+      },
+      "bodyText": "{\"commit_title\":\"merge\",\"merge_method\":\"squash\"}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubCreatePRReview",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "pullNumber": 3,
+        "event": "COMMENT",
+        "body": "body"
+      },
+      "description": "Submit a review on a pull request (APPROVE, REQUEST_CHANGES, or COMMENT).",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "pullNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Pull request number."
+          },
+          "event": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "REQUEST_CHANGES",
+              "COMMENT"
+            ],
+            "description": "Review action."
+          },
+          "body": {
+            "description": "Review summary comment.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "pullNumber",
+          "event"
+        ],
+        "additionalProperties": false
+      },
+      "method": "POST",
+      "path": "/repos/example/project/pulls/3/reviews",
+      "query": null,
+      "queryPairs": null,
+      "body": {
+        "event": "COMMENT",
+        "body": "body"
+      },
+      "bodyText": "{\"event\":\"COMMENT\",\"body\":\"body\"}",
+      "accept": null,
+      "maxBytes": null,
+      "mutating": true,
+      "hasShape": false,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListPRReviewComments",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "pullNumber": 3,
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List review comments (inline code comments) on a pull request.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "pullNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Pull request number."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "pullNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/pulls/3/comments",
+      "query": {
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubSearchCode",
+      "args": {
+        "q": "repo:example/project",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "Search code across GitHub. Use qualifiers like `repo:owner/name`, `path:`, `language:`.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Search query."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/search/code",
+      "query": {
+        "q": "repo:example/project",
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "q",
+          "repo:example/project"
+        ],
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "repo:example/project"
+    },
+    {
+      "name": "GitHubSearchRepos",
+      "args": {
+        "q": "repo:example/project",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "Search repositories. Supports qualifiers like `language:`, `stars:>100`, `user:`.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Search query."
+          },
+          "sort": {
+            "type": "string",
+            "enum": [
+              "stars",
+              "forks",
+              "updated"
+            ]
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/search/repositories",
+      "query": {
+        "q": "repo:example/project",
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "q",
+          "repo:example/project"
+        ],
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "repo:example/project"
+    },
+    {
+      "name": "GitHubSearchIssues",
+      "args": {
+        "q": "repo:example/project",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "Search issues and pull requests. Supports qualifiers like `repo:`, `is:pr`, `author:`, `state:`.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Search query."
+          },
+          "sort": {
+            "type": "string",
+            "enum": [
+              "comments",
+              "created",
+              "updated"
+            ]
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "q"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/search/issues",
+      "query": {
+        "q": "repo:example/project",
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "q",
+          "repo:example/project"
+        ],
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "repo:example/project"
+    },
+    {
+      "name": "GitHubListWorkflowRuns",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "branch": "topic",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List GitHub Actions workflow runs for a repository.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "branch": {
+            "description": "Filter by branch.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Filter by status/conclusion (e.g. success, failure, in_progress).",
+            "type": "string"
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/actions/runs",
+      "query": {
+        "branch": "topic",
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "branch",
+          "topic"
+        ],
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetRepoTree",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "treeSha": "main"
+      },
+      "description": "List a repository tree recursively (paths, types, sizes, SHAs) without cloning it.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "treeSha": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Tree SHA, branch name, or tag to list. Use GitHubGetRef to resolve a branch."
+          },
+          "recursive": {
+            "description": "Descend into subdirectories (default true).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "treeSha"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/git/trees/main",
+      "query": {
+        "recursive": "1"
+      },
+      "queryPairs": [
+        [
+          "recursive",
+          "1"
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListPRCommits",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "pullNumber": 3,
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List the commits in a pull request.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "pullNumber": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Pull request number."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "pullNumber"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/pulls/3/commits",
+      "query": {
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetCheckRuns",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "ref": "heads/main",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List CI check runs for a commit ref (status and conclusion per check).",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Commit SHA, branch, or tag."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "ref"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/commits/heads/main/check-runs",
+      "query": {
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListWorkflowRunJobs",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "runId": 2,
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List the jobs of a GitHub Actions workflow run.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "runId": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Workflow run id."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "runId"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/actions/runs/2/jobs",
+      "query": {
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetWorkflowRun",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "runId": 2
+      },
+      "description": "Get a single GitHub Actions workflow run.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "runId": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991,
+            "description": "Workflow run id."
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "runId"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/actions/runs/2",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubListReleases",
+      "args": {
+        "owner": "example",
+        "repo": "project",
+        "perPage": 10,
+        "page": 2
+      },
+      "description": "List releases for a repository.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          },
+          "perPage": {
+            "description": "Results per page (1–100).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "page": {
+            "description": "Page number (1-based).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/releases",
+      "query": {
+        "per_page": 10,
+        "page": 2
+      },
+      "queryPairs": [
+        [
+          "per_page",
+          10
+        ],
+        [
+          "page",
+          2
+        ]
+      ],
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetLatestRelease",
+      "args": {
+        "owner": "example",
+        "repo": "project"
+      },
+      "description": "Get the latest published release for a repository.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository owner (user or organization login)."
+          },
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Repository name."
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/repos/example/project/releases/latest",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": true,
+      "subject": "example/project"
+    },
+    {
+      "name": "GitHubGetMe",
+      "args": {},
+      "description": "Get the authenticated user (verifies the configured token).",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "method": "GET",
+      "path": "/user",
+      "query": null,
+      "queryPairs": null,
+      "body": null,
+      "bodyText": null,
+      "accept": null,
+      "maxBytes": null,
+      "mutating": false,
+      "hasShape": false,
+      "subject": "me"
+    }
+  ]
+}

@@ -27,6 +27,7 @@ impl AgentToolSelectAnnouncementsService {
                         return Ok(None);
                     }
                     tool_select
+                        .clone()
                         .prepare_for_request(context.signal)
                         .await
                         .map_err(|error| error.to_string())?;

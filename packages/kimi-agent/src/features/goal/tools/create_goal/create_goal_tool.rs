@@ -10,6 +10,7 @@ use crate::agent::scope_context::scopeContext::IAgentScopeContext;
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::agent::tools::main_agent_only::{GOAL_MAIN_AGENT_ONLY, main_agent_only_execution};
 use crate::features::goal::goal_service::AgentGoalService;
 use crate::features::goal::tools::serialize::goal_for_model;
@@ -42,14 +43,6 @@ impl CreateGoalTool {
 
     pub fn name(&self) -> &'static str {
         "CreateGoal"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -153,6 +146,14 @@ fn wire_error(message: String) -> WireAsyncError {
 }
 
 impl ExecutableTool for CreateGoalTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         CreateGoalTool::name(self)
     }

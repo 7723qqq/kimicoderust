@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::_base::di::collection::{CollectionDescriptor, collection};
+use crate::_base::di::collection::{CollectionDescriptor, CollectionOptions, collection};
 use crate::agent::agent_context::agent_context::AgentContext;
 
 use super::agent_model::DomainResourceRuntime;
@@ -20,12 +20,18 @@ pub fn define_agent_effect(definition: AgentEffectDefinition) -> AgentEffectDefi
 }
 
 pub fn agent_effect_contribution() -> CollectionDescriptor<AgentEffectDefinition> {
-    collection::<AgentEffectDefinition>("agent-effect", |value, existing| {
-        if existing.iter().any(|definition| definition.id == value.id) {
-            return Err(format!("Agent effect '{}' already has an active provider", value.id));
-        }
-        Ok(())
-    })
+    collection::<AgentEffectDefinition>(
+        "agent-effect",
+        CollectionOptions::validating(|value: &AgentEffectDefinition, existing: &[AgentEffectDefinition]| {
+            if existing.iter().any(|definition| definition.id == value.id) {
+                return Err(format!(
+                    "Agent effect '{}' already has an active provider",
+                    value.id
+                ));
+            }
+            Ok(())
+        }),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,10 +46,16 @@ pub struct SessionEffectDefinition {
 }
 
 pub fn session_effect_contribution() -> CollectionDescriptor<SessionEffectDefinition> {
-    collection::<SessionEffectDefinition>("session-effect", |value, existing| {
-        if existing.iter().any(|definition| definition.id == value.id) {
-            return Err(format!("Session effect '{}' already has an active provider", value.id));
-        }
-        Ok(())
-    })
+    collection::<SessionEffectDefinition>(
+        "session-effect",
+        CollectionOptions::validating(|value: &SessionEffectDefinition, existing: &[SessionEffectDefinition]| {
+            if existing.iter().any(|definition| definition.id == value.id) {
+                return Err(format!(
+                    "Session effect '{}' already has an active provider",
+                    value.id
+                ));
+            }
+            Ok(())
+        }),
+    )
 }

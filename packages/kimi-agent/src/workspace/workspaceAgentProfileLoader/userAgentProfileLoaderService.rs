@@ -89,14 +89,14 @@ impl UserAgentProfileLoaderService {
                         let discovery = discover_agent_files(
                             fs.as_ref(),
                             &roots,
-                            Some(&|message| log.warn(message, None)),
+                            Some(&|message, _error| log.warn(message, None)),
                         )
                         .await?;
                         let prompt_profile = default_profile.clone();
                         let mut contribution = profiles_from_discovery(
                             discovery,
                             Arc::new(move |context| {
-                                prompt_profile.lock().render_system_prompt(context)
+                                (prompt_profile.lock().render_system_prompt)(context)
                             }),
                         );
                         if let Some(system_md) = system_md {
@@ -136,6 +136,7 @@ impl IUserAgentProfileLoader for UserAgentProfileLoaderService {
     }
 
     fn reload(&self) -> BoxFuture<'static, Result<(), WireAsyncError>> {
-        self.base.reload().boxed()
+        let base = self.base.clone();
+        Box::pin(async move { base.reload().await })
     }
 }

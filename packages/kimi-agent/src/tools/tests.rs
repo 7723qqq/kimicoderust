@@ -144,6 +144,21 @@ fn tool_info(name: &str) -> crate::turn_loop::types::ToolInfo {
     }
 }
 
+#[test]
+fn github_catalogue_contains_new_readonly_specs_when_enabled() {
+    let defs = crate::tools::tool_policy::native_tool_defs(true, false, None, None);
+    for name in [
+        "GitHubGetRepoTree",
+        "GitHubListPRCommits",
+        "GitHubGetCheckRuns",
+        "GitHubListWorkflowRunJobs",
+    ] {
+        assert!(defs.iter().any(|tool| tool.name == name), "{name}");
+    }
+    assert!(defs.iter().any(|tool| tool.name == "GitHubGetRepoTree"
+        && tool.input_schema["properties"]["recursive"]["type"] == "boolean"));
+}
+
 #[tokio::test]
 async fn select_tools_remembers_loaded_names() {
     let (_dir, ts) = setup();
@@ -864,6 +879,79 @@ fn read_region_on_a_text_file_is_refused() {
     assert!(result.content.contains("is a text file"));
 }
 
+#[tokio::test]
+async fn image_reads_refuse_sensitive_targets_before_media_decoding() {
+    let (dir, ts) = setup();
+    let image = image::RgbaImage::new(8, 8);
+    let mut png = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encode png");
+    std::fs::write(dir.path().join(".env.png"), png.into_inner()).unwrap();
+
+    let args = json!({
+        "path": ".env.png",
+        "region": { "x": 0, "y": 0, "width": 2, "height": 2 }
+    });
+    let result = ts
+        .execute("Read", &args)
+        .expect("read is a registered tool call");
+    assert!(
+        result.is_error,
+        "sensitive images must be refused: {result:?}"
+    );
+    let async_result = ts
+        .execute_tool("Read", &args)
+        .await
+        .expect("read is a dispatched tool call");
+    assert!(
+        async_result.is_error,
+        "the asynchronous production entry must refuse sensitive images: {async_result:?}"
+    );
+    assert!(async_result.content.contains("sensitive"));
+    assert!(async_result.parts.is_empty());
+
+    assert!(result.content.contains("sensitive"), "{}", result.content);
+    assert!(
+        result.parts.is_empty(),
+        "no image bytes may leave the workspace"
+    );
+}
+
+#[tokio::test]
+async fn read_media_refuses_line_paging_before_decoding() {
+    let (dir, ts) = setup();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::new(8, 8)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    std::fs::write(dir.path().join("shot.png"), png.into_inner()).unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"\0\0\0\x18ftypisom").unwrap();
+    std::fs::write(dir.path().join("document.pdf"), b"%PDF-1.4\ntext\n").unwrap();
+
+    for path in ["shot.png", "clip.mp4", "document.pdf"] {
+        for field in ["line_offset", "n_lines"] {
+            let mut args = json!({ "path": path });
+            args[field] = json!(1);
+            let sync_result = ts.execute("Read", &args).expect("registered Read");
+            let result = ts.execute_tool("Read", &args).await.expect("dispatched Read");
+            for refusal in [sync_result, result] {
+                assert!(refusal.is_error, "accepted {field} for {path}");
+                assert_eq!(refusal.content, "line_offset and n_lines apply only to text files.");
+                assert!(refusal.parts.is_empty());
+            }
+        }
+    }
+
+    let text = ts
+        .execute_tool("Read", &json!({ "path": "a.txt", "line_offset": 2, "n_lines": 1 }))
+        .await
+        .expect("dispatched Read");
+    assert!(!text.is_error, "{}", text.content);
+    assert!(text.content.contains("2\tbeta"));
+    assert!(!text.content.contains("alpha") && !text.content.contains("gamma"));
+}
+
 #[test]
 fn read_crops_an_image_region() {
     let (dir, ts) = setup();
@@ -1139,50 +1227,36 @@ async fn write_without_recorder_records_nothing() {
 }
 
 #[test]
-fn background_bash_timeout_follows_call_then_config() {
+fn shell_detach_timeout_uses_config_and_host_timer_clamping() {
     let (_dir, ts) = setup();
-
     assert_eq!(
-        ts.background_bash_timeout(&json!({})),
-        Some(Duration::from_secs(BASH_TASK_DEFAULT_TIMEOUT_S))
+        ts.shell_detach_timeout(),
+        Some(Duration::from_secs(crate::agent::tools::os::bash::bash::BASH_TASK_TIMEOUT_S_DEFAULT))
     );
 
-    let configured = ts.with_bash_task_timeout(Some(1200));
+    let ts = ts.with_bash_task_timeout(Some(1200));
+    assert_eq!(ts.shell_detach_timeout(), Some(Duration::from_secs(1200)));
+    let ts = ts.with_bash_task_timeout(Some(0));
+    assert_eq!(ts.shell_detach_timeout(), None);
     assert_eq!(
-        configured.background_bash_timeout(&json!({})),
-        Some(Duration::from_secs(1200))
+        ts.with_bash_task_timeout(Some(u64::MAX)).shell_detach_timeout(),
+        Some(Duration::from_millis(crate::agent::task::print_defaults::MAX_TIMER_DELAY_MS))
     );
+}
 
+#[test]
+fn explicit_background_timeout_uses_the_tool_timeout_and_disable_flag() {
     assert_eq!(
-        configured.background_bash_timeout(&json!({ "timeout": 30 })),
+        crate::tools::shell_results::background_timeout(Some(30), false),
         Some(Duration::from_secs(30))
     );
-
     assert_eq!(
-        configured.background_bash_timeout(&json!({ "timeout": 0 })),
+        crate::tools::shell_results::background_timeout(Some(u64::MAX), false),
+        Some(Duration::from_secs(crate::agent::tools::os::bash::bash::MAX_BACKGROUND_TIMEOUT_S))
+    );
+    assert_eq!(
+        crate::tools::shell_results::background_timeout(Some(30), true),
         None
-    );
-    let (_dir2, unset) = setup();
-    assert_eq!(
-        unset
-            .with_bash_task_timeout(Some(0))
-            .background_bash_timeout(&json!({})),
-        None
-    );
-
-    assert_eq!(
-        configured.background_bash_timeout(&json!({ "timeout": 30, "disable_timeout": true })),
-        None
-    );
-
-    assert_eq!(
-        configured.background_bash_timeout(&json!({ "timeout": BASH_TASK_MAX_SECONDS + 1 })),
-        Some(Duration::from_secs(BASH_TASK_MAX_SECONDS))
-    );
-    let clamped = configured.with_bash_task_timeout(Some(BASH_TASK_MAX_SECONDS + 1));
-    assert_eq!(
-        clamped.background_bash_timeout(&json!({})),
-        Some(Duration::from_secs(BASH_TASK_MAX_SECONDS))
     );
 }
 
@@ -3234,6 +3308,101 @@ async fn memory_tool_is_refused_for_subagents() {
 }
 
 #[tokio::test]
+async fn parent_cancel_dismisses_pending_question_and_cleans_the_host_interaction() {
+    let (_dir, ts) = setup();
+    let interactions = std::sync::Arc::new(crate::server::interaction::InteractionManager::new());
+    let callbacks = std::sync::Arc::new(crate::callbacks::CountingCallbacks::new(
+        Arc::new(crate::server::engine::ServerHost::with_interaction(
+            interactions.clone(),
+            "session-1".to_string(),
+        )),
+        Arc::new(std::sync::atomic::AtomicU32::new(0)),
+    ));
+    let cancel = crate::subagent::types::ParentCancel::new();
+    let ts = ts
+        .with_callbacks(callbacks)
+        .with_session_id("session-1")
+        .with_agent_context(None, Some(cancel.clone()));
+    let args = json!({
+        "questions": [{
+            "question": "Which option?",
+            "options": [{ "label": "First" }, { "label": "Second" }]
+        }]
+    });
+    let executing = ts.execute_tool_ext(Some("call-1"), "AskUserQuestion", &args);
+    tokio::pin!(executing);
+    assert!(futures_util::poll!(&mut executing).is_pending());
+    let pending = interactions.list_questions("session-1");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["tool_call_id"], "call-1");
+    assert_eq!(interactions.pending_interaction_kind("session-1"), Some("question"));
+
+    cancel.trigger();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), executing)
+        .await
+        .expect("turn cancellation must release the tool")
+        .expect("AskUserQuestion is dispatched");
+    assert!(!result.is_error, "{}", result.content);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result.content).unwrap(),
+        json!({ "answers": {}, "note": "User dismissed the question without answering." })
+    );
+    assert!(interactions.list_questions("session-1").is_empty());
+    assert_eq!(interactions.pending_interaction_kind("session-1"), None);
+}
+
+#[test]
+fn background_task_availability_matches_the_three_task_tools() {
+    let filter = crate::tools::tool_policy::ToolsFilter::default();
+    assert!(filter.allows_background_tasks());
+    for disabled in ["TaskList", "TaskOutput", "TaskStop"] {
+        let filter = crate::tools::tool_policy::ToolsFilter {
+            enabled: Vec::new(),
+            disabled: vec![disabled.to_string()],
+        };
+        assert!(
+            !filter.allows_background_tasks(),
+            "background availability must require {disabled}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn shell_background_call_is_refused_when_a_task_tool_is_filtered_out() {
+    let (_dir, ts) = setup();
+    let runner = std::sync::Arc::new(crate::storage::TaskRunner::new(None));
+    let ts = ts.with_task_runner(runner).with_tools_filter(Some(
+        crate::tools::tool_policy::ToolsFilter {
+            enabled: Vec::new(),
+            disabled: vec!["TaskList".to_string()],
+        },
+    ));
+    let mut tools = vec!["Bash"];
+    if cfg!(windows) {
+        tools.push("PowerShell");
+    }
+    for tool in tools {
+        let result = ts
+            .execute_tool(
+                tool,
+                &json!({
+                    "command": "should-not-run",
+                    "run_in_background": true,
+                    "description": "run a command"
+                }),
+            )
+            .await
+            .expect("shell tool is dispatched");
+        assert!(result.is_error, "{tool}");
+        assert_eq!(
+            result.content,
+            crate::tools::shell_results::BACKGROUND_UNAVAILABLE,
+            "{tool}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn cron_tools_are_refused_for_subagents() {
     let (_dir, ts) = setup();
     let ts = ts.with_caller_agent_id("researcher");
@@ -3248,10 +3417,9 @@ async fn cron_tools_are_refused_for_subagents() {
             .await
             .unwrap_or_else(|| panic!("{name} is not handled by the toolset"));
         assert!(result.is_error, "{name}: {}", result.content);
-        assert!(
-            result.content.contains("main agent"),
-            "{name}: {}",
-            result.content
+        assert_eq!(
+            result.content, "Cron tools are only supported by the main agent.",
+            "{name}"
         );
     }
 }

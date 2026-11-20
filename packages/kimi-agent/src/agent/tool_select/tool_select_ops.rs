@@ -96,19 +96,19 @@ pub static TOOL_SELECT_KEY: LazyLock<Arc<ReplayableStateKey>> = LazyLock::new(||
         blobs: None,
         mutable_replay: None,
     });
-    key.on(&TOOL_SELECT_INITIALIZED_CLASS, Arc::new(|state, event, _ctx| {
+    Arc::get_mut(&mut key).expect("fresh state key").on(&TOOL_SELECT_INITIALIZED_CLASS, Arc::new(|state, event, _ctx| {
         let mut model = serde_json::from_value::<ToolSelectModelState>(state).ok()?;
         if model.initial.is_some() {
             return None;
         }
-        let event = serde_json::from_value::<ToolSelectInitialized>(event.payload).ok()?;
+        let event = serde_json::from_value::<ToolSelectInitialized>(event.payload.clone()).ok()?;
         model.initialize(event.tools);
         serde_json::to_value(model).ok()
     }))
     .expect("tool select initialization fold can be registered");
-    key.on(&TOOL_SELECT_TOOLS_CHANGED_CLASS, Arc::new(|state, event, _ctx| {
+    Arc::get_mut(&mut key).expect("fresh state key").on(&TOOL_SELECT_TOOLS_CHANGED_CLASS, Arc::new(|state, event, _ctx| {
         let mut model = serde_json::from_value::<ToolSelectModelState>(state).ok()?;
-        let event = serde_json::from_value::<ToolSelectToolsChanged>(event.payload).ok()?;
+        let event = serde_json::from_value::<ToolSelectToolsChanged>(event.payload.clone()).ok()?;
         model.change(event.added, event.removed);
         serde_json::to_value(model).ok()
     }))

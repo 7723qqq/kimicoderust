@@ -526,7 +526,8 @@ impl CascadeEngine {
         async move {
             receiver
                 .await
-                .unwrap_or_else(|_| Err("cascade request was dropped".to_string()))?
+                .unwrap_or_else(|_| Err("cascade request was dropped".to_string()))?;
+            Ok(())
         }
         .boxed()
     }
@@ -553,7 +554,8 @@ impl CascadeEngine {
         async move {
             receiver
                 .await
-                .unwrap_or_else(|_| Err("cascade request was dropped".to_string()))?
+                .unwrap_or_else(|_| Err("cascade request was dropped".to_string()))?;
+            Ok(())
         }
         .boxed()
     }

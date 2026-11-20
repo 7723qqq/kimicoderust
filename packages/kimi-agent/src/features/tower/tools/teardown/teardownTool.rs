@@ -9,6 +9,7 @@ use crate::agent::task::task::{AgentTaskInfo, IAgentTaskService};
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::app::session_manager::session_manager::ISessionManager;
 use crate::features::tower::protocol::store::TowerTeardownOptions;
 use crate::features::tower::tools::support::{TOWER_MAIN_AGENT_ONLY, new_tower_store, run_tower_tool};
@@ -45,14 +46,6 @@ impl TowerTeardownTool {
 
     pub fn name(&self) -> &'static str {
         TOWER_TEARDOWN_TOOL_NAME
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "write"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -154,6 +147,14 @@ impl TowerTeardownTool {
 }
 
 impl ExecutableTool for TowerTeardownTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Write)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         TowerTeardownTool::name(self)
     }

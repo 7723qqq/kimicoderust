@@ -594,7 +594,6 @@ pub async fn start_repl(
         // unconditionally, so the gate is irrelevant on this path.
         tower_enabled: true,
         notify_user_enabled: true,
-        sandbox_policy: None,
     });
     // A picture a tool returns is painted into the scrollback the moment the
     // result lands. The wrapper only reads the response, so the engine still
@@ -1153,7 +1152,7 @@ mod tests {
         };
         let defs = build_repl_tool_defs(&McpManager::new(), Some(&credentials)).await;
         let github = defs.iter().filter(|d| d.name.starts_with("GitHub")).count();
-        assert_eq!(github, 34);
+        assert_eq!(github, 38);
     }
 
     #[tokio::test]

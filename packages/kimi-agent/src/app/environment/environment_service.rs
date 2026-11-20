@@ -248,22 +248,22 @@ impl EnvironmentService {
         registry: EnvironmentRegistry,
     ) -> Result<Arc<AttachedProvider>, SharedEnvironmentError> {
         local_ready.await?;
-        let host = EnvironmentProviderHostImpl {
+        let host = Arc::new(EnvironmentProviderHostImpl {
             instantiation,
             registry: registry.clone(),
             environment_ids: Arc::new(Mutex::new(Vec::new())),
-        };
-        match factory.attach(&host).await {
+        });
+        let environment_ids = host.environment_ids.lock().clone();
+        match factory.attach(host).await {
             Ok(attachment) => Ok(Arc::new(AttachedProvider {
                 registry,
                 state: AsyncMutex::new(AttachedProviderState {
                     attachment: Some(attachment),
-                    environment_ids: host.environment_ids.lock().clone(),
+                    environment_ids,
                     disposed: false,
                 }),
             })),
             Err(error) => {
-                let environment_ids = host.environment_ids.lock().clone();
                 for environment_id in environment_ids.into_iter().rev() {
                     registry
                         .remove(&environment_id)

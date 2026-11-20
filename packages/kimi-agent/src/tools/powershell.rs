@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::features::operationLog::operationService;
 use crate::native::environment_probe::ProbeShellNotFound;
 use crate::native::powershell::{
     POWER_SHELL_ENV, PowerShellExecutable, ResolveDeps, build_args, normalize_output, resolve,
@@ -109,28 +108,6 @@ pub fn tool_def() -> ToolInfo {
     }
 }
 
-fn normalize_timeout_s(timeout: Option<u64>, is_background: bool) -> u64 {
-    let (default, cap) = if is_background {
-        (DEFAULT_BACKGROUND_TIMEOUT_S, MAX_BACKGROUND_TIMEOUT_S)
-    } else {
-        (DEFAULT_TIMEOUT_S, MAX_TIMEOUT_S)
-    };
-    timeout.unwrap_or(default).min(cap)
-}
-
-fn background_timeout(args: &Value) -> Option<Duration> {
-    if args
-        .get("disable_timeout")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    Some(Duration::from_secs(normalize_timeout_s(
-        args.get("timeout").and_then(Value::as_u64),
-        true,
-    )))
-}
 
 pub(super) fn resolve_powershell() -> Result<PowerShellExecutable, ProbeShellNotFound> {
     let pwsh_override = std::env::var("KIMI_PWSH_PATH").ok();
@@ -313,27 +290,18 @@ impl NativeToolset {
         };
         let runs_in_background =
             args.get("run_in_background").and_then(Value::as_bool) == Some(true);
-        if runs_in_background && operationService::operation_log_enabled() {
-            return Some(err_result(
-                "Background execution is not available for this agent because TaskOutput and TaskStop are not enabled."
-                    .to_string(),
-            ));
-        }
-        if let Some(timeout) = args.get("timeout").and_then(Value::as_u64) {
-            let max = if runs_in_background {
-                MAX_BACKGROUND_TIMEOUT_S
-            } else {
-                MAX_TIMEOUT_S
-            };
-            if timeout > max {
-                return Some(err_result(format!("timeout must be ≤ {max}s")));
-            }
-        }
+        let requested_timeout = match shell_results::parse_timeout(args) {
+            Ok(timeout) => timeout,
+            Err(message) => return Some(err_result(message.into())),
+        };
         let description = args.get("description").and_then(Value::as_str);
 
-        if let Some(refusal) =
-            crate::tools::shell_results::validate_run_request(command, false, None)
-        {
+        if let Some(refusal) = crate::tools::shell_results::validate_run_request(
+            command,
+            runs_in_background,
+            description,
+            self.shell_background_available(),
+        ) {
             return Some(err_result(refusal));
         }
 
@@ -360,12 +328,10 @@ impl NativeToolset {
 
         if runs_in_background {
             let runner = self.task_runner.as_ref()?;
-            if let Some(refusal) =
-                crate::tools::shell_results::validate_run_request(command, true, description)
-            {
-                return Some(err_result(refusal));
-            }
-            let timeout = background_timeout(args);
+            let timeout = shell_results::background_timeout(
+                requested_timeout,
+                args.get("disable_timeout").and_then(Value::as_bool) == Some(true),
+            );
             let task_id = crate::storage::generate_task_id("bash");
             let desc = description.map(str::trim).unwrap_or(command).to_string();
             let child = match spawn_powershell(&exe, command, &working_dir, &agent_env) {
@@ -414,7 +380,7 @@ impl NativeToolset {
                 ));
             }
             let next_steps = crate::tools::shell_results::next_step_lines(
-                true,
+                self.shell_background_available(),
                 crate::tools::shell_results::BackgroundStart::Started,
             );
             return Some(ok_result(format!(
@@ -422,8 +388,13 @@ impl NativeToolset {
             )));
         }
 
-        let timeout_s = normalize_timeout_s(args.get("timeout").and_then(Value::as_u64), false);
-        let timeout = Duration::from_secs(timeout_s);
+        let timeout = Duration::from_millis(
+            crate::agent::tools::os::shell::shell_tool_results::normalize_timeout_ms(
+                requested_timeout,
+                false,
+            ),
+        );
+        let timeout_s = timeout.as_secs();
         let mut child = match spawn_powershell(&exe, command, &working_dir, &agent_env) {
             Ok(child) => child,
             Err(error) => {
@@ -497,7 +468,7 @@ impl NativeToolset {
             }
             Err(_) => {
                 if self.bash_auto_background
-                    && !operationService::operation_log_enabled()
+                    && self.shell_background_available()
                     && let Some(runner) = &self.task_runner
                 {
                     let task_id = crate::storage::generate_task_id("bash");
@@ -506,7 +477,7 @@ impl NativeToolset {
                         command,
                         description,
                     );
-                    let detach_timeout = self.background_bash_timeout(args);
+                    let detach_timeout = self.shell_detach_timeout();
                     let detached_pid = child.id();
                     let bg_fut = async move {
                         match detach_timeout {
@@ -567,7 +538,7 @@ impl NativeToolset {
                         ));
                     }
                     let next_steps = crate::tools::shell_results::next_step_lines(
-                        true,
+                        self.shell_background_available(),
                         crate::tools::shell_results::BackgroundStart::DetachedOnTimeout,
                     );
                     return Some(ok_result(format!(
@@ -707,31 +678,32 @@ mod tests {
 
     #[test]
     fn foreground_timeouts_default_to_sixty_and_cap_at_three_hundred() {
-        assert_eq!(normalize_timeout_s(None, false), 60);
-        assert_eq!(normalize_timeout_s(Some(1), false), 1);
-        assert_eq!(normalize_timeout_s(Some(301), false), 300);
-        assert_eq!(normalize_timeout_s(Some(86_400), false), 300);
+        use crate::agent::tools::os::shell::shell_tool_results::normalize_timeout_ms;
+
+        assert_eq!(normalize_timeout_ms(None, false), 60_000);
+        assert_eq!(normalize_timeout_ms(Some(1), false), 1_000);
+        assert_eq!(normalize_timeout_ms(Some(301), false), 300_000);
+        assert_eq!(normalize_timeout_ms(Some(86_400), false), 300_000);
     }
 
     #[test]
     fn background_timeouts_default_to_six_hundred_and_cap_at_a_day() {
-        assert_eq!(normalize_timeout_s(None, true), 600);
-        assert_eq!(normalize_timeout_s(Some(3_600), true), 3_600);
-        assert_eq!(normalize_timeout_s(Some(86_401), true), 86_400);
+        use crate::agent::tools::os::shell::shell_tool_results::normalize_timeout_ms;
+
+        assert_eq!(normalize_timeout_ms(None, true), 600_000);
+        assert_eq!(normalize_timeout_ms(Some(3_600), true), 3_600_000);
+        assert_eq!(normalize_timeout_ms(Some(86_401), true), 86_400_000);
     }
 
     #[test]
     fn disable_timeout_drops_a_background_bound() {
+        assert_eq!(shell_results::background_timeout(None, true), None);
         assert_eq!(
-            background_timeout(&serde_json::json!({ "disable_timeout": true })),
-            None
-        );
-        assert_eq!(
-            background_timeout(&serde_json::json!({ "timeout": 90 })),
+            shell_results::background_timeout(Some(90), false),
             Some(Duration::from_secs(90))
         );
         assert_eq!(
-            background_timeout(&serde_json::json!({})),
+            shell_results::background_timeout(None, false),
             Some(Duration::from_secs(600))
         );
     }

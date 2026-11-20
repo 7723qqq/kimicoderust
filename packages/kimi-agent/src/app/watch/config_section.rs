@@ -25,7 +25,7 @@ pub static WATCH_CONFIG_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 });
 
 fn parse_watch_env(raw: &str) -> Option<Value> {
-    parse_boolean_env(raw).map(Value::Bool)
+    parse_boolean_env(Some(raw)).map(Value::Bool)
 }
 
 pub fn watch_env_bindings() -> EnvBindings {

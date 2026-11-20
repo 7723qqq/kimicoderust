@@ -650,7 +650,15 @@ impl AgentToolSelectService {
             return None;
         }
         if history.iter().rev().find(|message| is_loadable_tools_announcement(message)).is_some_and(
-            |message| message.content.contains(NO_LOADABLE_TOOLS_MESSAGE),
+            |message| {
+                message.content.iter().any(|part| {
+                    matches!(
+                        part,
+                        kimi_core::types::ContentPart::Text { text, .. }
+                            if text.contains(NO_LOADABLE_TOOLS_MESSAGE)
+                    )
+                })
+            },
         ) {
             return None;
         }
@@ -1058,13 +1066,16 @@ fn normalize_tools(infos: Vec<ToolInfo>, origin: ToolSelectOrigin) -> Vec<ToolSe
             description: info.description,
             parameters: if info.parameters.is_empty() {
                 json!({"type": "object", "properties": {}})
+                    .as_object()
+                    .cloned()
+                    .expect("literal object")
             } else {
-                Value::Object(info.parameters)
+                info.parameters
             },
             source: match info.source {
                 ToolSource::Builtin => ToolSelectSource::Builtin,
                 ToolSource::Mcp => ToolSelectSource::Mcp,
-                ToolSource::Host | ToolSource::Plugin => ToolSelectSource::User,
+                ToolSource::Host | ToolSource::Plugin | ToolSource::User => ToolSelectSource::User,
             },
             disclosure: info.disclosure,
             origin,
@@ -1156,8 +1167,8 @@ fn suggest_tool_names(name: &str, pool: &[String]) -> Vec<String> {
     if matches.is_empty() {
         for candidate in pool {
             let last = candidate
-                .split("__")
-                .next_back()
+                .rsplit("__")
+                .next()
                 .unwrap_or(candidate)
                 .to_lowercase();
             if last.encode_utf16().count() >= 3 && lower.contains(&last) {

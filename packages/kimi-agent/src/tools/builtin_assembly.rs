@@ -24,19 +24,16 @@ pub fn builtin_tool_contributions(context: &BuiltinToolContext<'_>) -> Vec<Agent
     let mut records: Vec<(ToolInfo, Option<ToolWhen>)> = Vec::new();
     let operation_log_enabled =
         crate::features::operationLog::operationService::operation_log_enabled();
+    let background_tasks_available = context
+        .filter
+        .is_none_or(ToolsFilter::allows_background_tasks);
+    let background_shell_available = !operation_log_enabled && background_tasks_available;
     records.extend(
         crate::tools::core_tool_defs::core_tool_defs()
             .into_iter()
             .map(|mut info| {
-                if operation_log_enabled && info.name == "Bash" {
-                    info.description =
-                        crate::tools::core_tool_defs::bash_description_without_background(
-                            &info.description,
-                        );
-                }
-                if operation_log_enabled && info.name == "PowerShell" {
-                    info.description =
-                        crate::tools::powershell::without_background_description(&info.description);
+                if !background_shell_available {
+                    disable_shell_background_description(&mut info);
                 }
                 (info, None)
             }),
@@ -50,14 +47,7 @@ pub fn builtin_tool_contributions(context: &BuiltinToolContext<'_>) -> Vec<Agent
         None,
     ));
     records.push((crate::tools::todo_list::todo_list_tool_def(), None));
-    let allow_background_questions = context
-        .filter
-        .map(|filter| {
-            ["TaskList", "TaskOutput", "TaskStop"]
-                .iter()
-                .all(|name| filter.allows(name))
-        })
-        .unwrap_or(true);
+    let allow_background_questions = background_tasks_available;
     records.push((
         crate::agent::tools::ask_user_question::ask_user_question_tool::ask_user_question_tool_def(
             allow_background_questions,
@@ -128,6 +118,28 @@ pub fn builtin_tool_contributions(context: &BuiltinToolContext<'_>) -> Vec<Agent
         .into_iter()
         .map(|(info, when)| contribution(info, when))
         .collect()
+}
+
+pub(crate) fn restrict_to_foreground(tool: &mut ToolInfo) {
+    if tool.name == "AskUserQuestion" {
+        *tool = crate::agent::tools::ask_user_question::ask_user_question_tool::ask_user_question_tool_def(false);
+    } else {
+        disable_shell_background_description(tool);
+    }
+}
+
+fn disable_shell_background_description(tool: &mut ToolInfo) {
+    match tool.name.as_str() {
+        "Bash" => {
+            tool.description =
+                crate::tools::core_tool_defs::bash_description_without_background(&tool.description);
+        }
+        "PowerShell" => {
+            tool.description =
+                crate::tools::powershell::without_background_description(&tool.description);
+        }
+        _ => {}
+    }
 }
 
 fn contribution(info: ToolInfo, when: Option<ToolWhen>) -> AgentToolContribution {
@@ -213,6 +225,53 @@ mod tests {
         assert!(names.contains(&"Memory"));
         assert!(names.contains(&"NotifyUser"));
         assert!(!names.contains(&"GitHubGetRepo"));
+    }
+
+    #[test]
+    fn shell_descriptions_require_every_task_tool() {
+        for disabled in ["TaskList", "TaskOutput", "TaskStop"] {
+            let filter = ToolsFilter {
+                enabled: Vec::new(),
+                disabled: vec![disabled.to_string()],
+            };
+            let records = builtin_tool_contributions(&context(Some(&filter)));
+            for record in records {
+                if matches!(record.options.name.as_str(), "Bash" | "PowerShell") {
+                    let tool = (record.ctor)();
+                    assert!(
+                        tool.description.contains("Background execution is disabled"),
+                        "{disabled}: {}",
+                        tool.description
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn operation_log_only_disables_shell_background_execution() {
+        let _env = crate::test_support::EnvScope::set(vec![(
+            crate::features::operationLog::flag::OPERATION_LOG_FLAG_ENV,
+            Some("1".into()),
+        )]);
+        let records = builtin_tool_contributions(&context(None));
+        let mut saw_bash = false;
+        let mut saw_question = false;
+        for record in records {
+            let tool = (record.ctor)();
+            match tool.name.as_str() {
+                "Bash" => {
+                    saw_bash = true;
+                    assert!(tool.description.contains("Background execution is disabled"));
+                }
+                "AskUserQuestion" => {
+                    saw_question = true;
+                    assert!(tool.input_schema["properties"].get("background").is_some());
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_bash && saw_question);
     }
 
     #[test]

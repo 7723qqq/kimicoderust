@@ -79,7 +79,7 @@ impl<T> Default for ChangeListeners<T> {
     }
 }
 
-impl<T> ChangeListeners<T> {
+impl<T: Send + Sync + 'static> ChangeListeners<T> {
     fn add(self: &Arc<Self>, listener: Arc<dyn Fn(T) + Send + Sync>) -> DisposableRef {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.listeners.lock().insert(id, listener);
@@ -146,7 +146,7 @@ impl PluginService {
             .or_else(|| bootstrap.get_env(KIMI_OAUTH_HOST_ENV));
         let discover_skills: DiscoverSkills = Arc::new(move |roots| {
             let discovery = discovery.clone();
-            Box::pin(async move { discovery.discover(roots).await })
+            Box::pin(async move { discovery.discover(&roots).await.map_err(|error| error.into()) })
         });
         let manager = PluginManager::new(PluginManagerOptions {
             kimi_home_dir: home_dir.clone(),
@@ -397,11 +397,16 @@ impl IPluginService for PluginService {
                 .await?;
             self.telemetry.track2(
                 "plugin_toggle",
-                json!({
-                    "plugin_id": id,
-                    "enabled": input.enabled,
-                    "enabled_plugins": self.enabled_plugin_ids().map(|ids| ids.join(",")),
-                }),
+                Some(
+                    json!({
+                        "plugin_id": id,
+                        "enabled": input.enabled,
+                        "enabled_plugins": self.enabled_plugin_ids().map(|ids| ids.join(",")),
+                    })
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+                ),
             );
             Ok(PluginMutationOutcome {
                 result: (),

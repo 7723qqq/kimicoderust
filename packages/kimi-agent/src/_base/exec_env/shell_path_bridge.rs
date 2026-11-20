@@ -23,8 +23,16 @@ pub struct ShellPathBridgeDeps {
     pub is_file: Arc<dyn Fn(String) -> bool + Send + Sync>,
 }
 
+/// v2 `interface ShellPathBridge`: `toShellPath(nativePath) -> string` and
+/// `fromShellPath(path) -> string`. Both the local cygpath bridge and the
+/// remote MSYS bridge implement it; callers hold `Arc<dyn ShellPathBridge>`.
+pub trait ShellPathBridge: Send + Sync {
+    fn to_shell_path(&self, native_path: &str) -> String;
+    fn from_shell_path(&self, path: &str) -> String;
+}
+
 #[derive(Clone)]
-pub struct ShellPathBridge {
+pub struct LocalShellPathBridge {
     env: ShellPathBridgeEnv,
     deps: ShellPathBridgeDeps,
     enabled: bool,
@@ -63,7 +71,7 @@ pub fn translate_shell_drive_path(path: &str) -> String {
     path.to_string()
 }
 
-impl ShellPathBridge {
+impl LocalShellPathBridge {
     pub fn new(env: ShellPathBridgeEnv, deps: ShellPathBridgeDeps) -> Self {
         let enabled = env.os_kind == "Windows" && env.shell_name == ShellName::Bash;
         Self {
@@ -162,11 +170,21 @@ impl ShellPathBridge {
     }
 }
 
+impl ShellPathBridge for LocalShellPathBridge {
+    fn to_shell_path(&self, native_path: &str) -> String {
+        LocalShellPathBridge::to_shell_path(self, native_path)
+    }
+
+    fn from_shell_path(&self, path: &str) -> String {
+        LocalShellPathBridge::from_shell_path(self, path)
+    }
+}
+
 pub fn create_shell_path_bridge(
     env: ShellPathBridgeEnv,
     deps: ShellPathBridgeDeps,
-) -> ShellPathBridge {
-    ShellPathBridge::new(env, deps)
+) -> Arc<dyn ShellPathBridge> {
+    Arc::new(LocalShellPathBridge::new(env, deps))
 }
 
 fn to_msys_path(native_path: &str) -> String {
@@ -192,27 +210,31 @@ fn to_msys_path(native_path: &str) -> String {
 #[derive(Clone)]
 pub struct RemoteShellPathBridge;
 
-impl RemoteShellPathBridge {
-    pub fn to_shell_path(native_path: &str) -> String {
+impl ShellPathBridge for RemoteShellPathBridge {
+    fn to_shell_path(&self, native_path: &str) -> String {
         to_msys_path(native_path)
     }
 
-    pub fn from_shell_path(path: &str) -> Result<String, String> {
+    /// v2 `REMOTE_SHELL_PATH_BRIDGE.fromShellPath` **throws** when the POSIX path
+    /// cannot be resolved to a drive path on the target; the Rust equivalent is a
+    /// panic carrying the same message.
+    fn from_shell_path(&self, path: &str) -> String {
         if !path.starts_with('/') {
-            return Ok(path.to_string());
+            return path.to_string();
         }
         let normalized = posix_normalize(path);
         let lexical = translate_shell_drive_path(&normalized);
         if lexical != normalized {
-            return Ok(lexical);
+            return lexical;
         }
-        Err(format!(
+        panic!(
             "Windows remote path {normalized} cannot be resolved on the target; use an absolute drive path such as C:\\work instead"
-        ))
+        );
     }
 }
 
-pub static REMOTE_SHELL_PATH_BRIDGE: RemoteShellPathBridge = RemoteShellPathBridge;
+pub static REMOTE_SHELL_PATH_BRIDGE: std::sync::LazyLock<Arc<dyn ShellPathBridge>> =
+    std::sync::LazyLock::new(|| Arc::new(RemoteShellPathBridge));
 
 fn posix_normalize(path: &str) -> String {
     let trailing_separator = path.len() > 1 && path.ends_with('/');
@@ -256,10 +278,10 @@ fn win_join(segments: &[&str]) -> String {
     segments.join("\\").replace('/', "\\")
 }
 
-static BRIDGE_CACHE: Lazy<Mutex<HashMap<String, ShellPathBridge>>> =
+static BRIDGE_CACHE: Lazy<Mutex<HashMap<String, Arc<dyn ShellPathBridge>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-pub fn get_shell_path_bridge(env: ShellPathBridgeEnv) -> ShellPathBridge {
+pub fn get_shell_path_bridge(env: ShellPathBridgeEnv) -> Arc<dyn ShellPathBridge> {
     let key = format!("{} {:?} {}", env.os_kind, env.shell_name, env.shell_path);
     if let Some(bridge) = BRIDGE_CACHE.lock().get(&key) {
         return bridge.clone();

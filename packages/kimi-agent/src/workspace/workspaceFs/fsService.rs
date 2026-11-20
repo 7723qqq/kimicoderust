@@ -401,7 +401,7 @@ impl WorkspaceFsService {
         &self,
         rel_path: &str,
         allow_external: bool,
-        abs_of: &dyn Fn(&str) -> String,
+        abs_of: &(dyn Fn(&str) -> String + Send + Sync),
     ) -> (bool, Option<String>) {
         let result: FsResult<(bool, Option<String>)> = async {
             let target = self.host_fs.stat(&abs_of(rel_path)).await?;

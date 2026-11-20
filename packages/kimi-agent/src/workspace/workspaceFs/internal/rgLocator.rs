@@ -76,7 +76,7 @@ pub fn ensure_rg_path(
         Err(Box::new(Error2::new(
             OS_FS_UNAVAILABLE,
             "ripgrep (rg) is not available on PATH",
-        )))
+        )) as WireAsyncError)
     }
     .boxed()
 }

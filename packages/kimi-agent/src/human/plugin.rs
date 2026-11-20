@@ -64,7 +64,10 @@ pub fn connect_plugins(actor: Arc<dyn AgentPluginSource>, plugins: &[Arc<dyn Plu
             let actor = actor.clone();
             Arc::new(move |message| {
                 actor.send(AgentInputEvent::Notify {
-                    entry: UserEntry { message },
+                    entry: UserEntry {
+                        message,
+                        meta: Default::default(),
+                    },
                 });
             })
         },
@@ -73,9 +76,9 @@ pub fn connect_plugins(actor: Arc<dyn AgentPluginSource>, plugins: &[Arc<dyn Plu
             Arc::new(move |key, message| {
                 let entry = match message {
                     PluginMessage::System(message) => {
-                        PluginEntry::System(create_system_entry(message))
+                        PluginEntry::System(create_system_entry(message, Default::default()))
                     }
-                    PluginMessage::User(message) => PluginEntry::User(create_user_entry(message)),
+                    PluginMessage::User(message) => PluginEntry::User(create_user_entry(message, Default::default())),
                 };
                 actor.send(AgentInputEvent::Remind { key, entry });
             })

@@ -180,7 +180,6 @@ fn gate_setup(
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     (dir, native, permission_calls, executed, native_count)
 }
@@ -272,7 +271,6 @@ fn veto_setup(agent_tool_veto: Option<String>, tools_veto: Option<String>) -> Ve
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     (dir, native, permission_calls, executed, events)
 }
@@ -520,137 +518,6 @@ async fn test_tower_tool_table_follows_the_experiment_flag() {
 }
 
 #[tokio::test]
-async fn test_sandbox_policy_enforcement() {
-    let _lock = reason_lock().await;
-    use crate::tools::sandbox::SandboxExecutionPolicy;
-
-    // 1. ReadOnly 模式阻断 Write 与 Edit
-    let mut callbacks_tuple = veto_setup(None, None);
-    callbacks_tuple.1.sandbox_policy = Some(SandboxExecutionPolicy::read_only("/workspace/root"));
-    let native = callbacks_tuple.1;
-
-    let ro_res = native
-        .execute_tool(ToolExecuteRequest {
-            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
-            turn_id: "t_ro".into(),
-            tool_call_id: "c_ro".into(),
-            tool_name: "Write".into(),
-            arguments: serde_json::json!({
-                "path": "/workspace/root/test.txt",
-                "content": "hello"
-            }),
-        })
-        .await
-        .unwrap();
-
-    assert!(ro_res.is_error);
-    assert!(ro_res.content.contains("blocks writes to the filesystem"));
-
-    // 2. WorkspaceWrite 模式拦截工作区外部写
-    let mut callbacks_tuple = veto_setup(None, None);
-    callbacks_tuple.1.sandbox_policy =
-        Some(SandboxExecutionPolicy::workspace_write("/workspace/root"));
-    let native_ww = callbacks_tuple.1;
-
-    let out_res = native_ww
-        .execute_tool(ToolExecuteRequest {
-            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
-            turn_id: "t_out".into(),
-            tool_call_id: "c_out".into(),
-            tool_name: "Edit".into(),
-            arguments: serde_json::json!({
-                "path": "/etc/shadow",
-                "old_string": "a",
-                "new_string": "b"
-            }),
-        })
-        .await
-        .unwrap();
-
-    assert!(out_res.is_error);
-    assert!(
-        out_res
-            .content
-            .contains("blocks writes outside the workspace root")
-    );
-
-    // 3. WorkspaceWrite 模式放行工作区内部写（进入权限层，不会被沙箱拒否）
-    let in_res = native_ww
-        .execute_tool(ToolExecuteRequest {
-            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
-            turn_id: "t_in".into(),
-            tool_call_id: "c_in".into(),
-            tool_name: "Write".into(),
-            arguments: serde_json::json!({
-                "path": "/workspace/root/sub/file.txt",
-                "content": "ok"
-            }),
-        })
-        .await
-        .unwrap();
-
-    assert!(
-        !in_res
-            .content
-            .contains("blocks writes outside the workspace root")
-    );
-
-    // 4. 只读工具（如 Glob）在只读沙箱模式下不受写沙箱影响
-    let glob_res = native
-        .execute_tool(ToolExecuteRequest {
-            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
-            turn_id: "t_glob".into(),
-            tool_call_id: "c_glob".into(),
-            tool_name: "Glob".into(),
-            arguments: serde_json::json!({ "pattern": "*.txt" }),
-        })
-        .await
-        .unwrap();
-
-    assert!(!glob_res.is_error);
-
-    // 5. ReadOnly 模式必须拦截 Bash：shell 命令无法证明无写入，拒绝必须发生在真实
-    //    shell 派生之前（否则只读沙箱形同虚设）。
-    let bash_ro_res = native
-        .execute_tool(ToolExecuteRequest {
-            agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
-            turn_id: "t_bash_ro".into(),
-            tool_call_id: "c_bash_ro".into(),
-            tool_name: "Bash".into(),
-            arguments: serde_json::json!({ "command": "echo sandbox-escape" }),
-        })
-        .await
-        .unwrap();
-
-    assert!(bash_ro_res.is_error);
-    assert!(bash_ro_res.content.contains("cannot be proven write-free"));
-    assert!(!bash_ro_res.content.contains("sandbox-escape"));
-
-    // 6. WorkspaceWrite 模式没有 OS 级沙箱后端，同样拒绝 shell；Off 模式放行。
-    let ww_policy = SandboxExecutionPolicy::workspace_write("/workspace/root");
-    assert!(
-        ww_policy
-            .sandbox_tool_veto(
-                "Bash",
-                crate::tools::sandbox::tool_side_effect("Bash"),
-                &Vec::new()
-            )
-            .unwrap()
-            .contains("none is available on this host")
-    );
-    let off_policy = SandboxExecutionPolicy::off("/workspace/root");
-    assert!(
-        off_policy
-            .sandbox_tool_veto(
-                "Bash",
-                crate::tools::sandbox::tool_side_effect("Bash"),
-                &Vec::new()
-            )
-            .is_none()
-    );
-}
-
-#[tokio::test]
 async fn test_native_write_checkpoints_prepare_and_record() {
     let (_dir, _native, _permission_calls, _executed, _events) = veto_setup(None, None);
     // Drill into the inner probe: the setup closure hides it, so drive
@@ -683,7 +550,6 @@ async fn test_native_write_checkpoints_prepare_and_record() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     let response = native
         .execute_tool(ToolExecuteRequest {
@@ -756,7 +622,6 @@ async fn a_remembered_session_approval_stops_the_second_ask() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     let request = || ToolExecuteRequest {
         agent_id: crate::callbacks::MAIN_AGENT_ID.to_string(),
@@ -882,7 +747,7 @@ async fn test_read_only_tools_are_gated_too() {
 }
 
 #[tokio::test]
-async fn test_sandbox_escape_is_not_reported_as_native_execution() {
+async fn test_host_executed_tool_is_not_reported_as_native_execution() {
     // A call the engine does not own runs on the host instead, so it must
     // not inflate native_tool_calls — otherwise the turn result would
     // claim a path that never served the call.
@@ -1014,7 +879,6 @@ fn stale_gate_setup(
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     (dir, native, executed, native_count, events, state_reads)
 }
@@ -1280,7 +1144,6 @@ fn goal_gate_setup(
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     (
         dir,
@@ -1493,7 +1356,6 @@ fn hook_gate_setup(
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     (
         dir,
@@ -1660,7 +1522,10 @@ impl HostCallbacks for AskQuestionCallbacks {
         *self.received.lock().unwrap() = Some(request);
         Box::pin(async {
             Ok(AskQuestionResponse {
-                answers: std::collections::HashMap::new(),
+                answers: std::collections::HashMap::from([(
+                    "Pick one".to_string(),
+                    "Option A".to_string(),
+                )]),
                 method: Some("enter".into()),
                 note: None,
                 cancelled: None,
@@ -1749,7 +1614,6 @@ async fn test_native_tool_callbacks_forwards_ask_question() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     let mut request = sample_ask_question_request();
     request.question_id = "question_2".into();
@@ -1956,7 +1820,6 @@ async fn test_native_tool_callbacks_forwards_state_bridge() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     let mut read_request = sample_state_read_request();
     read_request.turn_id = "turn-2".into();
@@ -2322,7 +2185,6 @@ async fn test_native_tool_callbacks_list_tools_merges_mcp_tools() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
 
     let res = callbacks.list_tools().await.unwrap();
@@ -2371,7 +2233,6 @@ async fn test_initial_tool_snapshot_filters_late_mcp_additions_without_disclosur
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
 
     let first = callbacks.list_tools().await.unwrap();
@@ -2422,7 +2283,6 @@ async fn list_tools_persists_initial_and_runtime_registry_origins() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
 
     callbacks.list_tools().await.unwrap();
@@ -2550,7 +2410,6 @@ async fn test_native_tool_callbacks_readvertise_a_loaded_deferred_tool_schema() 
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
 
     // Before loading: the deferred tool is hidden and select_tools stands in.
@@ -2624,7 +2483,6 @@ async fn test_native_tool_callbacks_list_tools_survives_a_missing_host_table() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
 
     let res = callbacks.list_tools().await.unwrap();
@@ -2686,7 +2544,6 @@ async fn test_native_tool_callbacks_list_tools_applies_the_tools_filter() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
 
     let res = callbacks.list_tools().await.unwrap();
@@ -2768,7 +2625,6 @@ fn capturing_setup() -> (
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
     (dir, native, seen)
 }
@@ -2872,7 +2728,6 @@ async fn a_deny_verdict_keeps_its_reason_on_the_returned_decision() {
         tower_enabled: false,
         notify_user_enabled: true,
         before_execute: None,
-        sandbox_policy: None,
     };
 
     let response = callbacks

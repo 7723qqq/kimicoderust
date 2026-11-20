@@ -25,7 +25,7 @@ pub enum DependencyKind {
     Ref,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ServiceDependency {
     pub id: ServiceIdentifier<DynamicValue>,
     pub index: usize,

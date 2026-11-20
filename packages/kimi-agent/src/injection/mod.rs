@@ -588,7 +588,7 @@ fn is_agents_md_name(name: &str) -> bool {
 /// v2 resolves the chain against `findProjectRoot`. This walks from the
 /// workspace root instead: that is the boundary the rest of the fork already
 /// enforces, and it avoids introducing a second notion of "project" that could
-/// disagree with the sandbox.
+/// disagree with the workspace boundary.
 pub struct AgentsMdReminder {
     /// AGENTS.md paths already in the instructions or already suggested.
     known: std::collections::HashSet<String>,

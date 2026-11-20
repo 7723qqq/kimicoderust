@@ -237,6 +237,19 @@ impl ToolPolicyFilter {
         }
     }
 
+    fn allows_background_tasks(&self) -> bool {
+        crate::tools::tool_policy::allows_background_tasks(|name| self.allows(name))
+    }
+
+    fn filter_tool_defs(&self, tools: &mut Vec<crate::turn_loop::types::ToolInfo>) {
+        tools.retain(|tool| self.allows(&tool.name));
+        if !self.allows_background_tasks() {
+            for tool in tools {
+                crate::tools::builtin_assembly::restrict_to_foreground(tool);
+            }
+        }
+    }
+
     /// Whether the profile admits `tool_name` (v2 `isToolActive`): an
     /// explicit allowlist wins, otherwise every tool except the disallowed
     /// names. Tool names are matched with the same source-dependent rule as
@@ -286,15 +299,12 @@ async fn subagent_tool_defs(
     callbacks: &Arc<dyn crate::callbacks::HostCallbacks>,
     filter: &ToolPolicyFilter,
 ) -> Result<Vec<crate::turn_loop::types::ToolInfo>, String> {
-    let response = callbacks
+    let mut response = callbacks
         .list_tools()
         .await
         .map_err(|err| format!("Could not read the tool table for this subagent: {err}"))?;
-    Ok(response
-        .tools
-        .into_iter()
-        .filter(|tool| filter.allows(&tool.name))
-        .collect())
+    filter.filter_tool_defs(&mut response.tools);
+    Ok(response.tools)
 }
 
 /// [`crate::callbacks::HostCallbacks`] decorator that narrows the tool
@@ -357,7 +367,12 @@ impl crate::callbacks::HostCallbacks for ToolFilterCallbacks {
                 })
             });
         }
-        self.inner.execute_tool(request)
+        let inner = self.inner.clone();
+        let background_allowed = self.filter.allows_background_tasks();
+        Box::pin(crate::tools::CALLER_BACKGROUND_TASKS_ALLOWED.scope(
+            background_allowed,
+            async move { inner.execute_tool(request).await },
+        ))
     }
 
     fn check_permission(
@@ -374,6 +389,10 @@ impl crate::callbacks::HostCallbacks for ToolFilterCallbacks {
     ) -> crate::rpc::types::BoxFuture<'static, Result<crate::rpc::types::AskQuestionResponse, String>>
     {
         self.inner.ask_question(request)
+    }
+
+    fn cancel_question(&self, question_id: &str, reason: &str) {
+        self.inner.cancel_question(question_id, reason);
     }
 
     fn state_read(
@@ -400,14 +419,14 @@ impl crate::callbacks::HostCallbacks for ToolFilterCallbacks {
         let filter = self.filter.clone();
         Box::pin(async move {
             let mut response = inner.list_tools().await?;
+            filter.filter_tool_defs(&mut response.tools);
             // v2 registers the unified `Memory` tool for the main agent only
             // (`memoryTool.ts:516-519`); a subagent's advertised table must not
             // contain it even though the shared session table does.
             response.tools.retain(|tool| {
-                filter.allows(&tool.name)
-                    && !tool
-                        .name
-                        .eq_ignore_ascii_case(crate::tools::core_tool_defs::MEMORY_TOOL_NAME)
+                !tool
+                    .name
+                    .eq_ignore_ascii_case(crate::tools::core_tool_defs::MEMORY_TOOL_NAME)
             });
             Ok(response)
         })

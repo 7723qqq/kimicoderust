@@ -13,6 +13,7 @@ use crate::agent::environment_binding::agent_environment::{
 use crate::agent::tool_executor::tool_executor::{
     ExecutableTool, ExecutableToolResult, RunnableToolExecution, ToolExecution,
 };
+use crate::tool::tool_contract::{RepoMutation, ToolSideEffect};
 use crate::app::auth::auth::IOAuthService;
 use crate::app::telemetry::telemetry::ITelemetryService;
 use crate::environment::environment::{Environment, EnvironmentWorkspaceRoots};
@@ -91,14 +92,6 @@ impl GrepTool {
 
     pub fn name(&self) -> &'static str {
         "Grep"
-    }
-
-    pub fn side_effect(&self) -> &'static str {
-        "read"
-    }
-
-    pub fn repo_mutation(&self) -> &'static str {
-        "none"
     }
 
     pub fn description(&self) -> &'static str {
@@ -564,6 +557,14 @@ impl GrepTool {
 impl IGrepTool for GrepTool {}
 
 impl ExecutableTool for GrepTool {
+    fn side_effect(&self) -> Option<ToolSideEffect> {
+        Some(ToolSideEffect::Read)
+    }
+
+    fn repo_mutation(&self) -> Option<RepoMutation> {
+        Some(RepoMutation::None)
+    }
+
     fn name(&self) -> &str {
         GrepTool::name(self)
     }

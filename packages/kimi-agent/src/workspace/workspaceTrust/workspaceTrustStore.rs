@@ -368,7 +368,7 @@ impl WorkspaceTrustGroup {
         for entry in entries.iter() {
             let state = state.clone();
             let entries = Arc::downgrade(&entries);
-            group_subscriptions.push(entry.on_did_change(move |_| {
+            group_subscriptions.push(entry.on_did_change(std::sync::Arc::new(move |_| {
                 let Some(entries) = entries.upgrade() else {
                     return;
                 };
@@ -376,7 +376,7 @@ impl WorkspaceTrustGroup {
                     .iter()
                     .any(|entry| entry.is_persisted_trusted());
                 fire_listeners(&state, WorkspaceTrustChange { trusted });
-            }));
+            })));
         }
         Ok(Self {
             primary,
@@ -549,14 +549,14 @@ impl WorkspaceTrustStore {
             WorkspaceTrustEntry,
         >::new()));
         let listener_entries = entries.clone();
-        let config_subscription = config.on_did_section_change(move |event| {
+        let config_subscription = config.on_did_section_change(std::sync::Arc::new(move |event| {
             if event.domain != WORKSPACE_TRUST_SECTION {
                 return;
             }
             for entry in listener_entries.lock().values() {
                 entry.on_config_change();
             }
-        });
+        }));
         Self {
             inner: Arc::new(StoreInner {
                 docs,
